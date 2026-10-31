@@ -1,0 +1,21 @@
+[package]
+name = "cargo-rustoleum"
+version = "0.1.0"
+edition = "2024"
+description = "Agent-facing Rust style checks using the OpenAI Decisions API"
+repository = "https://github.com/xipkit/rustoleum"
+
+[[bin]]
+name = "cargo-rustoleum"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+ignore = "0.4.33"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+ureq = { version = "3.4.2", default-features = false, features = ["json", "rustls"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
