@@ -1,5 +1,6 @@
 mod api;
 mod report;
+mod resume;
 mod rules;
 mod scan;
 
@@ -46,6 +47,9 @@ struct CheckArgs {
     /// Show the files and rules that would be checked without an API call.
     #[arg(long)]
     dry_run: bool,
+    /// Retry files that failed or were not checked in a previous JSON report.
+    #[arg(long)]
+    retry_from: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = Format::Json)]
     format: Format,
 }
@@ -91,9 +95,16 @@ fn run() -> Result<u8> {
         }
         Command::Check(args) => {
             let questions = rules.select(&args.rules)?;
-            let scan = Scan::discover(&args.path)?;
+            let mut scan = Scan::discover(&args.path)?;
+            if let Some(previous) = &args.retry_from {
+                resume::select_pending(&mut scan, previous, &rules.model, &questions)?;
+            }
             let report = if args.dry_run {
                 Report::planned(&scan, &rules.model, &questions)
+            } else if scan.files.is_empty() {
+                let mut report = Report::planned(&scan, &rules.model, &questions);
+                report.status = "complete";
+                report
             } else {
                 let client = api::HttpDecisions::new(api::api_key()?);
                 Report::check(

@@ -24,6 +24,17 @@ cargo rustoleum rules --format text
 
 The report includes a schema version, model, scan root, selected rules, and one entry per file. A finding contains the rule, its guidance, model confidence, and choice probabilities. Its scope is the **whole file**: Decisions does not supply a trustworthy source location or explanation, so an agent should inspect the file and make its own edit. `insufficient_context` and refusals are recorded separately; a service failure stops further requests and marks remaining files as not checked.
 
+Transient network errors, timeouts, rate limits, and server errors are retried with exponential backoff and jitter, up to four attempts within three minutes per file. Rustoleum respects `Retry-After` and stops if the requested wait exceeds 30 seconds. Authentication errors and known quota or spending-limit errors are not retried. A timed-out attempt may still have been processed and billed by the API.
+
+To continue after an incomplete check, keep its JSON report and write the retry to a separate file:
+
+```sh
+cargo rustoleum check . --retry-from rustoleum-report.json --dry-run
+cargo rustoleum check . --retry-from rustoleum-report.json > rustoleum-retry.json
+```
+
+The retry includes only files previously marked `error`, `not_checked`, or `planned`; it does not resend files that received a response, even if they have unresolved decisions. Newly added files are not included. Use the same scan root, model, selected rules, and project context as the original check. Rustoleum verifies the root, model, and rule names, but reports do not record source hashes or context, so it cannot verify that those are unchanged. Keep both reports: the new one contains only the retried files. If the retry is incomplete, it can itself be used with `--retry-from`. Never redirect output to the report being read; the shell would truncate it before Rustoleum starts.
+
 Exit status is `0` for a completed check with no findings or a dry run, `1` for a completed check with findings, and `2` for an incomplete check or error. Results are model estimates; choose thresholds only after evaluation on representative labeled examples.
 
 Set `OPENAI_API_KEY` to authenticate. On macOS, if it is unset, Rustoleum reads the `openai-api-key` Keychain item. Source files and supplied context are sent to OpenAI; the key is not included in the request body or report.
