@@ -5,7 +5,9 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use anyhow::{Context, Result, bail};
+#[cfg(target_os = "macos")]
+use anyhow::Context;
+use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use crate::rules::Question;
