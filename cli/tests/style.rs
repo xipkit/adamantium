@@ -8,9 +8,10 @@ fn cargo_style_dry_run_is_machine_readable_without_an_api_key() {
     fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
     fs::write(dir.path().join("target/generated/build.rs"), "").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-rustoleum"))
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-adamantium"))
         .args([
-            "rustoleum",
+            "adamantium",
+            "style",
             "check",
             "--dry-run",
             "--rule",
@@ -38,8 +39,8 @@ fn cargo_style_dry_run_is_machine_readable_without_an_api_key() {
 
 #[test]
 fn unknown_rule_is_an_error_without_an_api_call() {
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-rustoleum"))
-        .args(["check", "--dry-run", "--rule", "not_a_rule"])
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-adamantium"))
+        .args(["style", "check", "--dry-run", "--rule", "not_a_rule"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
@@ -74,8 +75,8 @@ fn retry_uses_only_failed_and_unchecked_files_without_a_key() {
     });
     fs::write(&report_path, serde_json::to_vec(&previous).unwrap()).unwrap();
     let invoke = |dry_run: bool| {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cargo-rustoleum"));
-        cmd.arg("check")
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cargo-adamantium"));
+        cmd.args(["style", "check"])
             .arg(dir.path())
             .args(["--rule", "glob_import_context", "--retry-from"])
             .arg(&report_path)

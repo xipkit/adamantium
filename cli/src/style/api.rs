@@ -10,7 +10,7 @@ use anyhow::Context;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
-use crate::rules::Question;
+use crate::style::rules::Question;
 
 const DECISIONS_URL: &str = "https://api.openai.com/v1/decisions";
 pub(crate) const MAX_JSON_INPUT_BYTES: usize = 256 * 1024;
@@ -83,13 +83,13 @@ impl HttpDecisions {
                 bail!("{} (retry budget exhausted)", failure.error);
             }
             eprintln!(
-                "rustoleum: temporary Decisions failure; retrying after {:.2}s (attempt {}/{MAX_ATTEMPTS})",
+                "adamantium: temporary Decisions failure; retrying after {:.2}s (attempt {}/{MAX_ATTEMPTS})",
                 delay.as_secs_f64(),
                 attempt + 1
             );
             sleep(delay);
         }
-        unreachable!("the last attempt returns either a response or an error")
+        bail!("Decisions request failed after {MAX_ATTEMPTS} attempts")
     }
 
     fn request_once(
@@ -147,6 +147,10 @@ impl HttpDecisions {
 }
 
 impl Decisions for HttpDecisions {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the CLI is synchronous and has no runtime to yield to; sleeping is the backoff"
+    )]
     fn evaluate(&self, request: &Value) -> Result<Value> {
         self.evaluate_with(request, RETRY_BUDGET, thread::sleep, || {
             Duration::from_millis(fastrand::u64(0..=250))
@@ -204,6 +208,10 @@ fn is_quota_error(body: &Value) -> bool {
         })
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the CLI is synchronous; polling the Keychain helper is the only wait"
+)]
 pub(crate) fn api_key() -> Result<String> {
     if let Ok(value) = env::var("OPENAI_API_KEY") {
         let value = value.trim();
@@ -282,28 +290,25 @@ pub(crate) fn request(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::VecDeque,
-        io::Read,
-        sync::{Arc, Mutex},
-    };
+    use std::{collections::VecDeque, io::Read};
+
+    use adamantium::Actor;
 
     use super::*;
-    use crate::rules::RuleSet;
+    use crate::style::rules::RuleSet;
 
     type StubResponse = (u16, Option<&'static str>, &'static str);
 
-    fn stub_client(responses: Vec<StubResponse>) -> (HttpDecisions, Arc<Mutex<usize>>) {
-        let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
-        let calls = Arc::new(Mutex::new(0));
-        let captured_calls = Arc::clone(&calls);
+    fn stub_client(responses: Vec<StubResponse>) -> (HttpDecisions, Actor<usize>) {
+        let responses = Actor::new(VecDeque::from(responses));
+        let calls = Actor::new(0);
+        let captured_calls = calls.clone();
         let config = ureq::Agent::config_builder()
             .middleware(
                 move |_request: ureq::http::Request<ureq::SendBody>,
                       _next: ureq::middleware::MiddlewareNext| {
-                    *captured_calls.lock().unwrap() += 1;
-                    let (status, retry_after, body) =
-                        responses.lock().unwrap().pop_front().unwrap();
+                    captured_calls.with(|calls| *calls += 1);
+                    let (status, retry_after, body) = responses.with(VecDeque::pop_front).unwrap();
                     let mut response = ureq::http::Response::builder().status(status);
                     if let Some(retry_after) = retry_after {
                         response = response.header("Retry-After", retry_after);
@@ -345,7 +350,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(response["answers"], json!([]));
-        assert_eq!(*calls.lock().unwrap(), 3);
+        assert_eq!(calls.with(|calls| *calls), 3);
         assert_eq!(
             delays,
             [Duration::from_millis(1125), Duration::from_millis(2125)]
@@ -372,7 +377,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(delays, [Duration::from_millis(3100)]);
-        assert_eq!(*calls.lock().unwrap(), 2);
+        assert_eq!(calls.with(|calls| *calls), 2);
 
         let (client, calls) = stub_client(vec![(503, Some("31"), "")]);
         let error = client
@@ -385,7 +390,7 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("retry deferred"));
         assert!(error.to_string().contains("HTTP 503"));
-        assert_eq!(*calls.lock().unwrap(), 1);
+        assert_eq!(calls.with(|calls| *calls), 1);
 
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
         let date = httpdate::fmt_http_date(now + Duration::from_secs(7));
@@ -410,7 +415,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("HTTP 504"));
-        assert_eq!(*calls.lock().unwrap(), MAX_ATTEMPTS);
+        assert_eq!(calls.with(|calls| *calls), MAX_ATTEMPTS);
         assert_eq!(
             delays,
             [
@@ -441,7 +446,7 @@ mod tests {
                     )
                     .is_err()
             );
-            assert_eq!(*calls.lock().unwrap(), 1);
+            assert_eq!(calls.with(|calls| *calls), 1);
         }
     }
 
@@ -457,7 +462,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("retry budget exhausted"));
-        assert_eq!(*calls.lock().unwrap(), 1);
+        assert_eq!(calls.with(|calls| *calls), 1);
     }
 
     #[test]
@@ -485,15 +490,17 @@ mod tests {
                 Err(ErrorKind::ConnectionReset.into())
             }
         }
-        let calls = Arc::new(Mutex::new(0));
-        let captured_calls = Arc::clone(&calls);
+        let calls = Actor::new(0);
+        let captured_calls = calls.clone();
         let config = ureq::Agent::config_builder()
             .middleware(
                 move |_request: ureq::http::Request<ureq::SendBody>,
                       _next: ureq::middleware::MiddlewareNext| {
-                    let mut calls = captured_calls.lock().unwrap();
-                    *calls += 1;
-                    match *calls {
+                    let call = captured_calls.with(|calls| {
+                        *calls += 1;
+                        *calls
+                    });
+                    match call {
                         1 => Err(ureq::Error::ConnectionFailed),
                         2 => Ok(ureq::http::Response::builder()
                             .status(200)
@@ -521,7 +528,7 @@ mod tests {
                 Duration::default,
             )
             .unwrap();
-        assert_eq!(*calls.lock().unwrap(), 3);
+        assert_eq!(calls.with(|calls| *calls), 3);
         assert_eq!(delays, [Duration::from_secs(1), Duration::from_secs(2)]);
     }
 
@@ -557,8 +564,8 @@ mod tests {
 
     #[test]
     fn http_client_sends_decisions_request_and_keeps_key_out_of_body() {
-        let captured = Arc::new(Mutex::new(None));
-        let destination = Arc::clone(&captured);
+        let captured = Actor::new(None);
+        let destination = captured.clone();
         let config = ureq::Agent::config_builder()
             .https_only(true)
             .max_redirects(0)
@@ -568,7 +575,7 @@ mod tests {
                     let (parts, body) = request.into_parts();
                     let mut data = String::new();
                     body.into_reader().read_to_string(&mut data).unwrap();
-                    *destination.lock().unwrap() = Some((parts, data));
+                    destination.with(|captured| *captured = Some((parts, data)));
                     let body = ureq::Body::builder()
                         .mime_type("application/json")
                         .data(r#"{"answers":[],"model":"gpt-6-luna"}"#);
@@ -586,7 +593,7 @@ mod tests {
         };
         let response = client.evaluate(&json!({ "model": "gpt-6-luna" })).unwrap();
         assert_eq!(response["model"], "gpt-6-luna");
-        let (parts, body) = captured.lock().unwrap().take().unwrap();
+        let (parts, body) = captured.with(Option::take).unwrap();
         assert_eq!(parts.method, "POST");
         assert_eq!(parts.uri.to_string(), DECISIONS_URL);
         assert_eq!(parts.headers["authorization"], "Bearer local-test-key");
@@ -597,7 +604,7 @@ mod tests {
     fn reviews_a_file_through_the_http_client_and_produces_a_finding() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("lib.rs"), "fn example() {}\n").unwrap();
-        let scan = crate::scan::Scan::discover(directory.path()).unwrap();
+        let scan = crate::style::scan::Scan::discover(directory.path()).unwrap();
         let rules = RuleSet::load().unwrap();
         let config = ureq::Agent::config_builder()
             .middleware(
@@ -644,8 +651,13 @@ mod tests {
             key: "local-test-key".into(),
             url: DECISIONS_URL.into(),
         };
-        let report =
-            crate::report::Report::check(&scan, &rules.model, &rules.questions[..1], None, &client);
+        let report = crate::style::report::Report::check(
+            &scan,
+            &rules.model,
+            &rules.questions[..1],
+            None,
+            &client,
+        );
         assert_eq!(report.status, "complete");
         assert_eq!(report.exit_code(), 1);
         assert_eq!(report.files[0].findings[0].rule, rules.questions[0].name);

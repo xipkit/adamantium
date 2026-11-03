@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, fs::File, path::Path};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
-use crate::{rules::Question, scan::Scan};
+use crate::style::{rules::Question, scan::Scan};
 
 #[derive(Deserialize)]
 struct PreviousReport {
@@ -99,7 +99,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::rules::RuleSet;
+    use crate::style::rules::RuleSet;
 
     fn previous_report(root: &Path, model: &str, question: &Question) -> Value {
         json!({

@@ -1,6 +1,7 @@
 mod check;
 mod lints;
 mod manifest;
+mod style;
 
 use std::{ffi::OsString, io::Write, path::PathBuf, process::ExitCode};
 
@@ -48,6 +49,10 @@ enum Command {
         #[arg(long, value_enum, default_value_t = RulesFormat::Text)]
         format: RulesFormat,
     },
+    /// Review Rust files against the judgment-based parts of the Google Rust
+    /// style guide, through the OpenAI Decisions API.
+    #[command(subcommand)]
+    Style(style::Command),
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -111,6 +116,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Command::Style(command) => style::run(command),
         Command::Rules { format } => {
             let mut stdout = std::io::stdout().lock();
             match format {

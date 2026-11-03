@@ -1,3 +1,8 @@
+//! Judgment-based review of Rust files against the Google Rust style guide,
+//! through the OpenAI Decisions API. Formerly the standalone `cargo
+//! rustoleum`; the rules, labeled cases and evaluation scripts live under
+//! `style/` in the repository.
+
 mod api;
 mod report;
 mod resume;
@@ -7,26 +12,17 @@ mod scan;
 use std::{io::Write, path::PathBuf, process::ExitCode};
 
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 
-use crate::{report::Report, rules::RuleSet, scan::Scan};
-
-#[derive(Parser)]
-#[command(
-    name = "cargo rustoleum",
-    version,
-    about = "Review Rust source using the Decisions API"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
+use self::{report::Report, rules::RuleSet, scan::Scan};
 
 #[derive(Subcommand)]
-enum Command {
-    /// Check a Rust file or directory without modifying it.
+pub enum Command {
+    /// Review a Rust file or directory without modifying it. Sends each file
+    /// to the Decisions API, so it needs OPENAI_API_KEY or, on macOS, an
+    /// `openai-api-key` Keychain item.
     Check(CheckArgs),
-    /// List the available rules.
+    /// List the style rules.
     Rules {
         #[arg(long, value_enum, default_value_t = Format::Json)]
         format: Format,
@@ -34,7 +30,7 @@ enum Command {
 }
 
 #[derive(Args)]
-struct CheckArgs {
+pub struct CheckArgs {
     /// Rust source file or directory to review.
     #[arg(default_value = ".")]
     path: PathBuf,
@@ -55,43 +51,31 @@ struct CheckArgs {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-enum Format {
+pub enum Format {
     Json,
     Text,
 }
 
-fn main() -> ExitCode {
-    match run() {
-        Ok(code) => ExitCode::from(code),
-        Err(error) => {
-            eprintln!("rustoleum: {error:#}");
-            ExitCode::from(2)
-        }
-    }
-}
-
-fn run() -> Result<u8> {
-    let mut args: Vec<_> = std::env::args_os().collect();
-    if args.get(1).is_some_and(|argument| argument == "rustoleum") {
-        args.remove(1);
-    }
-    let cli = Cli::parse_from(args);
+/// Runs a `style` subcommand. Exit status is 0 for a clean or planned
+/// review, 1 for findings and 2 for an incomplete review.
+pub fn run(command: Command) -> Result<ExitCode> {
     let rules = RuleSet::load()?;
-    match cli.command {
+    match command {
         Command::Rules { format } => {
             let stdout = std::io::stdout();
             let mut output = stdout.lock();
             match format {
-                Format::Json => serde_json::to_writer_pretty(&mut output, &rules.questions)?,
+                Format::Json => {
+                    serde_json::to_writer_pretty(&mut output, &rules.questions)?;
+                    writeln!(output)?;
+                }
                 Format::Text => {
                     for question in &rules.questions {
                         writeln!(output, "{}: {}", question.name, question.instructions)?;
                     }
-                    return Ok(0);
                 }
             }
-            writeln!(output)?;
-            Ok(0)
+            Ok(ExitCode::SUCCESS)
         }
         Command::Check(args) => {
             let questions = rules.select(&args.rules)?;
@@ -124,7 +108,7 @@ fn run() -> Result<u8> {
                 }
                 Format::Text => render_text(&mut output, &report)?,
             }
-            Ok(report.exit_code())
+            Ok(ExitCode::from(report.exit_code()))
         }
     }
 }

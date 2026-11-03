@@ -26,8 +26,10 @@ pub(crate) struct Choice {
 
 impl RuleSet {
     pub fn load() -> Result<Self> {
-        let rules: Self = serde_json::from_str(include_str!("../rules/google-rust-decisions.json"))
-            .context("invalid embedded rule set")?;
+        let rules: Self = serde_json::from_str(include_str!(
+            "../../../style/rules/google-rust-decisions.json"
+        ))
+        .context("invalid embedded rule set")?;
         if rules.model.is_empty() || rules.questions.is_empty() || rules.questions.len() > 400 {
             bail!("the rule set must contain a model and between 1 and 400 questions");
         }

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{
+use crate::style::{
     api::{self, Decisions},
     rules::Question,
     scan::Scan,
@@ -113,7 +113,10 @@ impl Report {
                     file.findings = outcomes.findings;
                     file.unresolved = outcomes.unresolved;
                     file.no_violation_count = outcomes.no_violation_count;
-                    file.input_tokens = response["usage"]["input_tokens"].as_u64();
+                    file.input_tokens = response
+                        .get("usage")
+                        .and_then(|usage| usage.get("input_tokens"))
+                        .and_then(Value::as_u64);
                 }
                 Err(error) => {
                     file.fail(format!("invalid Decisions response: {error}"));
@@ -265,21 +268,23 @@ fn probability(value: &Value) -> Result<f64> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, fs};
+    use std::fs;
 
+    use adamantium::Actor;
     use serde_json::json;
 
     use super::*;
-    use crate::rules::RuleSet;
+    use crate::style::rules::RuleSet;
 
     struct FakeDecisions {
         response: Option<Value>,
-        requests: RefCell<Vec<Value>>,
+        requests: Actor<Vec<Value>>,
     }
 
     impl Decisions for FakeDecisions {
         fn evaluate(&self, request: &Value) -> Result<Value> {
-            self.requests.borrow_mut().push(request.clone());
+            self.requests
+                .with(|requests| requests.push(request.clone()));
             self.response.clone().context("service unavailable")
         }
     }
@@ -307,7 +312,7 @@ mod tests {
                 choice(&questions[0].name, "violation"),
                 choice(&questions[1].name, "insufficient_context")
             ], "usage": { "input_tokens": 123 } })),
-            requests: RefCell::new(Vec::new()),
+            requests: Actor::default(),
         };
         let report = Report::check(&scan, &rules.model, questions, Some("library"), &fake);
         assert_eq!(report.status, "incomplete");
@@ -317,15 +322,12 @@ mod tests {
         assert_eq!(report.files[0].findings[0].rule, questions[0].name);
         assert_eq!(report.files[0].unresolved[0].reason, "insufficient_context");
         assert_eq!(report.files[0].input_tokens, Some(123));
-        assert_eq!(fake.requests.borrow().len(), 1);
-        assert_eq!(
-            fake.requests.borrow()[0]["input"][1]["content"][0]["data"]["source"],
-            "fn example() {}\n"
-        );
-        assert_eq!(
-            fake.requests.borrow()[0]["input"][1]["content"][0]["data"]["project_context"],
-            "library"
-        );
+        assert_eq!(fake.requests.with(|requests| requests.len()), 1);
+        let data = fake
+            .requests
+            .with(|requests| requests[0]["input"][1]["content"][0]["data"].clone());
+        assert_eq!(data["source"], "fn example() {}\n");
+        assert_eq!(data["project_context"], "library");
     }
 
     #[test]
@@ -355,13 +357,13 @@ mod tests {
         let rules = RuleSet::load().unwrap();
         let fake = FakeDecisions {
             response: None,
-            requests: RefCell::new(Vec::new()),
+            requests: Actor::default(),
         };
         let report = Report::check(&scan, &rules.model, &rules.questions[..1], None, &fake);
         assert_eq!(report.exit_code(), 2);
         assert_eq!(report.files[0].status, "error");
         assert_eq!(report.files[1].status, "not_checked");
-        assert_eq!(fake.requests.borrow().len(), 1);
+        assert_eq!(fake.requests.with(|requests| requests.len()), 1);
     }
 
     #[test]
@@ -374,7 +376,7 @@ mod tests {
         let run = |selected| {
             let fake = FakeDecisions {
                 response: Some(json!({ "answers": [choice(&questions[0].name, selected)] })),
-                requests: RefCell::new(Vec::new()),
+                requests: Actor::default(),
             };
             Report::check(&scan, &rules.model, questions, None, &fake)
         };
@@ -396,7 +398,7 @@ mod tests {
         let rules = RuleSet::load().unwrap();
         let fake = FakeDecisions {
             response: None,
-            requests: RefCell::new(Vec::new()),
+            requests: Actor::default(),
         };
         let report = Report::check(&scan, &rules.model, &rules.questions[..1], None, &fake);
         assert_eq!(report.status, "incomplete");
@@ -408,6 +410,6 @@ mod tests {
                 .unwrap()
                 .contains("input limit")
         );
-        assert!(fake.requests.borrow().is_empty());
+        assert!(fake.requests.with(|requests| requests.is_empty()));
     }
 }
