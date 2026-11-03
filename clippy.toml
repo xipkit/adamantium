@@ -1,0 +1,42 @@
+# Adamantium's Clippy configuration. `cargo adamantium check` applies it to a
+# project together with the lint levels from `cargo adamantium rules`, and
+# `cargo adamantium init` copies it into a project for plain `cargo clippy`.
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+
+disallowed-types = [
+  { path = "std::rc::Rc", reason = "shared identity; use a value, or adamantium::Actor for state that tasks share" },
+  { path = "std::rc::Weak", reason = "a weak reference implies a cycle, and values can't form one" },
+  { path = "std::sync::Weak", reason = "a weak reference implies a cycle, and values can't form one" },
+  { path = "std::cell::RefCell", reason = "borrow checking at runtime panics; use a value" },
+  { path = "std::cell::Cell", reason = "interior mutability without a lock; use a value" },
+  { path = "std::sync::Mutex", reason = "use adamantium::Actor, which never holds its lock across an await or inside another actor" },
+  { path = "std::sync::RwLock", reason = "use adamantium::Actor, which never holds its lock across an await or inside another actor" },
+  { path = "tokio::sync::Mutex", reason = "an async lock can be held across an await; use adamantium::Actor" },
+  { path = "tokio::sync::RwLock", reason = "an async lock can be held across an await; use adamantium::Actor" },
+  { path = "tokio::task::JoinSet", reason = "use adamantium::Tasks so every task has a scope that joins it" },
+  { path = "tokio::task::LocalSet", reason = "every task must be Send" },
+  { path = "parking_lot::Mutex", reason = "use adamantium::Actor", allow-invalid = true },
+  { path = "parking_lot::RwLock", reason = "use adamantium::Actor", allow-invalid = true },
+  { path = "futures::lock::Mutex", reason = "an async lock can be held across an await; use adamantium::Actor", allow-invalid = true },
+]
+
+disallowed-methods = [
+  { path = "tokio::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks" },
+  { path = "tokio::task::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks" },
+  { path = "tokio::task::spawn_local", reason = "every task must be Send; spawn inside adamantium::Tasks" },
+  { path = "tokio::task::spawn_blocking", reason = "use adamantium::blocking, which propagates panics" },
+  { path = "tokio::task::block_in_place", reason = "blocks a worker thread; use adamantium::blocking" },
+  { path = "std::thread::spawn", reason = "an unstructured thread; use adamantium::Tasks or adamantium::blocking" },
+  { path = "std::thread::Builder::spawn", reason = "an unstructured thread; use adamantium::Tasks or adamantium::blocking" },
+  { path = "std::thread::scope", reason = "blocks the async runtime; use adamantium::blocking" },
+  { path = "std::thread::sleep", reason = "blocks a worker thread; use tokio::time::sleep" },
+  { path = "std::mem::forget", reason = "leaks" },
+  { path = "std::boxed::Box::leak", reason = "leaks" },
+  { path = "std::sync::Arc::downgrade", reason = "a weak reference implies a cycle, and values can't form one" },
+  { path = "futures::executor::block_on", reason = "blocks a worker thread", allow-invalid = true },
+]

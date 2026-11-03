@@ -1,0 +1,65 @@
+[workspace]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+repository = "https://github.com/xipkit/adamantium"
+publish = false
+
+# Adamantium's own rules, applied to this repository. `cargo adamantium rules`
+# prints the same table, and a test keeps the two in step.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+await_holding_invalid_type = "deny"
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+dbg_macro = "deny"
+disallowed_methods = "deny"
+disallowed_types = "deny"
+exit = "deny"
+expect_used = "deny"
+future_not_send = "deny"
+indexing_slicing = "deny"
+mem_forget = "deny"
+panic = "deny"
+rc_buffer = "deny"
+rc_mutex = "deny"
+string_slice = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+unwrap_used = "deny"
+
+[package]
+name = "adamantium"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Copy-on-write values, structured concurrency and actors for Rust, with the lint set that keeps a crate inside them"
+repository.workspace = true
+publish.workspace = true
+
+[features]
+serde = ["dep:serde", "indexmap/serde"]
+
+[dependencies]
+async-channel = "2"
+indexmap = "2"
+serde = { version = "1", optional = true }
+tokio = { version = "1", features = ["rt", "sync"] }
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[profile.release]
+overflow-checks = true
+
+[lints]
+workspace = true
