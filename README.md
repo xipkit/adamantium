@@ -2,7 +2,7 @@
 
 Adamantium is a fragment of Rust and the tools that keep a crate inside it. In the fragment every value can cross a task, no lock outlives one synchronous method, no task outlives its scope, and the only panics left are arithmetic and stack exhaustion. Rust lets you write code like that; adamantium makes it the only code you can write.
 
-It has two halves. The `adamantium` library gives the fragment its vocabulary: copy-on-write values, a structured task scope, actors and a bounded channel. The `cargo adamantium` subcommand runs Clippy with the rules that forbid everything else.
+It has two halves. The `adamantium` library gives the fragment its vocabulary: copy-on-write values, a structured task scope, actors and a bounded channel. The `cargo adamantium` subcommand runs Clippy with the rules that forbid everything else, and also carries a judgment-based [style review](#style-review) of the Google Rust style guide through the OpenAI Decisions API, which used to be the separate rustoleum tool.
 
 ## Install and use
 
@@ -26,6 +26,7 @@ cargo adamantium check              # run Clippy with the rules; exit 1 on findi
 cargo adamantium check --format json
 cargo adamantium init               # write the rules into Cargo.toml and clippy.toml
 cargo adamantium rules              # list the rules and why each exists
+cargo adamantium style check        # review the style guide's judgment calls through the Decisions API
 ```
 
 `check` runs `cargo clippy --all-targets` with adamantium's lint levels and its `clippy.toml`, and nothing else: Clippy's default lints are switched off for the run so that only the rules count. It prints Clippy's own diagnostics and a summary on stderr, or with `--format json` a report on stdout with one entry per finding, each carrying the rule, message, file, line and column. Arguments after `--` go to `cargo clippy`. Exit status is `0` when clean, `1` with findings and `2` when the project did not build. The rules also require `overflow-checks = true` in the release profile, so that integer overflow panics in release builds as it does in debug builds.
@@ -91,12 +92,32 @@ Tests are exempt from the panic rules, so `unwrap`, indexing and `panic!` are fi
 
 What the rules can't promise: a receive that nobody sends to still hangs its scope, because no lint sees liveness; a dependency keeps its own unsafe and panics; and a Rust call that blocks without going through `blocking` still blocks a worker, because Clippy cannot tell what a foreign function does. Arithmetic overflow and stack exhaustion remain panics by choice, since checked arithmetic would put a `?` on every plus sign.
 
+## Style review
+
+`cargo adamantium style check` reviews the judgment-based parts of the [Google Rust style guide](https://google.github.io/styleguide/rustguide.html) with the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions). It produces findings for an agent or a person to investigate; it does not edit source, and it does not replace rustfmt, Clippy or code review.
+
+```sh
+cargo adamantium style check                      # every .rs file under the current directory
+cargo adamantium style check src/lib.rs --context "application code"
+cargo adamantium style check . --rule unnecessary_deep_clone --dry-run
+cargo adamantium style rules --format text
+```
+
+It prints JSON by default, or a readable report with `--format text`. It finds Rust files recursively, respects ignore files, and skips hidden directories, `target` and `node_modules`; it does not resolve Cargo workspace membership. Each file goes to the API in one request together with the selected rules and any context. A finding's scope is the whole file, because Decisions gives no trustworthy location: the agent inspects the file and makes its own edit. A file or context over the API's 256 KiB input limit is reported as an error, not truncated. Exit status is `0` for a clean check or a dry run, `1` for findings and `2` for an incomplete check.
+
+Transient failures are retried with exponential backoff and jitter, up to four attempts within three minutes per file, honoring `Retry-After` up to 30 seconds. Authentication, quota and spending-limit errors are not retried. A service failure stops further requests and marks the remaining files as not checked. `--retry-from previous.json` resends only those files, with the same root, rules and context, into a new report; never redirect the output over the report being read.
+
+Set `OPENAI_API_KEY`; on macOS the `openai-api-key` Keychain item is read when it is unset. Source files and context are sent to OpenAI. Results are model estimates, not deterministic lints, so evaluate them on labeled examples before letting them block anything. Source comments and strings are treated as untrusted evidence, and the question instructions say so, but that does not guarantee resistance to adversarial input.
+
+The rules live in `style/rules/google-rust-decisions.json`, 51 questions mapped to the guide in `style/rules/coverage.md`, with 114 labeled examples in `style/fixtures/google-rust-cases.json`. `node style/scripts/evaluate-decisions.mjs` runs the examples against the API, also with `--dry-run` and `--rule`; the full run makes 114 billable requests.
+
 ## Development
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
+node --test style/scripts/evaluate-decisions.test.mjs
 ```
 
 The repository applies its own rules to itself. The handful of places where the library must use what it forbids, such as the `JoinSet` inside `Tasks` and the `Mutex` inside `Actor`, carry an `allow` with a reason. The CLI tests run `cargo adamantium check` against two fixture crates, one that breaks every rule once and one that lives inside the fragment, so they need Clippy and network access the first time.
