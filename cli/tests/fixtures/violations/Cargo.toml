@@ -1,0 +1,12 @@
+# A crate that breaks every rule once. It compiles; only the rules fail.
+# Its own workspace, so Cargo does not look for a parent.
+[workspace]
+
+[package]
+name = "violations"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }

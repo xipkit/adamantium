@@ -1,4 +1,6 @@
 [workspace]
+members = ["cli"]
+exclude = ["cli/tests/fixtures/violations", "cli/tests/fixtures/clean"]
 
 [workspace.package]
 version = "0.1.0"

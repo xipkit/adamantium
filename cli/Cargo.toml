@@ -1,0 +1,23 @@
+[package]
+name = "cargo-adamantium"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Checks that a crate stays inside the adamantium fragment of Rust"
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "cargo-adamantium"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+toml_edit = "0.25"
+
+[lints]
+workspace = true

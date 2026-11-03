@@ -1,0 +1,16 @@
+# A small program inside the fragment. `cargo adamantium check` finds nothing.
+# Its own workspace, so Cargo does not look for a parent.
+[workspace]
+
+[package]
+name = "clean"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+adamantium = { path = "../../../.." }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[profile.release]
+overflow-checks = true
