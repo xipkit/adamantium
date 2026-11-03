@@ -57,6 +57,7 @@ let pages = concurrently(urls, 8, fetch).await?;
 // An actor's methods run one at a time and never hold the lock across an await.
 let tally = Actor::new(Tally::default());
 tally.with(|t| t.record(&profile));
+let total = tally.read(Tally::total);
 
 // A bounded channel any task can send on or receive from.
 let feed = Channel::<Str>::bounded(16);
@@ -66,9 +67,9 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 ```
 
 - **`Str`, `Bytes`, `Array<T>`, `Map<K, V>`** have value semantics. Two names never see each other's writes, and the runtime copies only when a shared value is written. Reads go through `Deref` where a slice or `str` view exists; `Map` has no `Index`, because indexing a missing key would panic. Writes that take a position return `None` or hand the value back rather than panicking. All four are `Send + Sync` when their element types are, and serialize with the `serde` feature.
-- **`Tasks<E>`** is a scope. `spawn` starts a task, `value` waits for one, and `join`, or the end of `Tasks::run`, waits for all of them. A task's error reaches the body through `value`; an error nobody asked for is reported at join, so it is never lost; the first error aborts the rest. A panic in a task is resumed in the scope.
+- **`Tasks<E>`** is a scope. `spawn` starts a task, `value` waits for one, and `join`, or the end of `Tasks::run`, waits for all of them. Name the error type, `Tasks::<E>::run`, when nothing in the body fixes it, which is the case when every error passes through `?`. A task's error reaches the body through `value`; an error nobody asked for is reported at join, so it is never lost; the first error aborts the rest. A panic in a task is resumed in the scope.
 - **`concurrently`** runs a closure over items with a concurrency limit and returns the results in input order. **`blocking`** runs a closure on the blocking pool and resumes its panic if it has one.
-- **`Actor<S>`** wraps state that tasks share. `with` runs a closure with exclusive access. The closure is synchronous, so the lock can't be held across an await, and a `with` inside another `with`, on any actor, panics instead of risking a deadlock.
+- **`Actor<S>`** wraps state that tasks share. `with` runs a closure with exclusive access and `read` with shared access, so a reading method such as `Tally::total` can be passed by name. Both are synchronous, so the lock can't be held across an await, and a `with` or `read` inside another, on any actor, panics instead of risking a deadlock.
 - **`Channel<T>`** is bounded and multi-producer, multi-consumer. Every clone can send and receive; a producer calls `close` when it is done, after which receivers drain what remains and get `None`.
 
 ## The rules
