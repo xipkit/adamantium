@@ -1,0 +1,786 @@
+[
+  {
+    "name": "shared_owner_local_only",
+    "rule": "unnecessary_shared_ownership",
+    "expected": "violation",
+    "source": "fn byte_count(bytes: Vec<u8>) -> usize {\n    let shared = std::sync::Arc::new(bytes);\n    shared.len()\n}"
+  },
+  {
+    "name": "shared_owner_multiple_threads",
+    "rule": "unnecessary_shared_ownership",
+    "expected": "no_violation",
+    "source": "use std::sync::Arc;\nuse std::thread::{self, JoinHandle};\n\nfn workers(data: Arc<[u8]>) -> Vec<JoinHandle<usize>> {\n    (0..2).map(|_| {\n        let data = Arc::clone(&data);\n        thread::spawn(move || data.len())\n    }).collect()\n}"
+  },
+  {
+    "name": "shared_owner_external_uses_unknown",
+    "rule": "unnecessary_shared_ownership",
+    "expected": "insufficient_context",
+    "source": "pub struct Worker {\n    pub cache: std::sync::Arc<Cache>,\n}\n// Callers and other uses of this public field are not provided."
+  },
+  {
+    "name": "deep_clone_for_display",
+    "rule": "unnecessary_deep_clone",
+    "expected": "violation",
+    "source": "fn show_name(name: &String) {\n    println!(\"{}\", name.clone());\n}"
+  },
+  {
+    "name": "deep_clone_for_thread",
+    "rule": "unnecessary_deep_clone",
+    "expected": "no_violation",
+    "source": "fn spawn_name_length(name: &String) -> std::thread::JoinHandle<usize> {\n    let owned = name.clone();\n    std::thread::spawn(move || owned.len())\n}"
+  },
+  {
+    "name": "reference_counted_clone",
+    "rule": "unnecessary_deep_clone",
+    "expected": "no_violation",
+    "source": "fn shared_copy(value: &std::sync::Arc<String>) -> std::sync::Arc<String> {\n    std::sync::Arc::clone(value)\n}"
+  },
+  {
+    "name": "iterator_with_side_effects",
+    "rule": "complex_iterator_chain",
+    "expected": "violation",
+    "source": "fn parse_values(values: &[String]) -> (Vec<u64>, usize) {\n    let mut skipped = 0;\n    let parsed = values.iter()\n        .map(|value| value.parse::<u64>())\n        .map(|result| {\n            if result.is_err() { skipped += 1; }\n            result\n        })\n        .filter_map(Result::ok)\n        .collect();\n    (parsed, skipped)\n}"
+  },
+  {
+    "name": "iterator_any",
+    "rule": "complex_iterator_chain",
+    "expected": "no_violation",
+    "source": "fn has_zero(values: &[i32]) -> bool {\n    values.iter().any(|value| *value == 0)\n}"
+  },
+  {
+    "name": "opaque_price_identifiers",
+    "rule": "opaque_abbreviation",
+    "expected": "violation",
+    "source": "// Returns the sum of the prices.\npub fn calc_prc_ttl(prcs: &[u64]) -> u64 {\n    prcs.iter().sum()\n}"
+  },
+  {
+    "name": "common_network_abbreviation",
+    "rule": "opaque_abbreviation",
+    "expected": "no_violation",
+    "source": "use std::net::IpAddr;\n\npub fn is_loopback(address: IpAddr) -> bool {\n    address.is_loopback()\n}"
+  },
+  {
+    "name": "documentation_repeats_name",
+    "rule": "uninformative_public_docs",
+    "expected": "violation",
+    "source": "/// Sorts the invoices.\npub fn sort_invoices(invoices: &mut [Invoice]) {\n    invoices.sort_by_key(|invoice| invoice.due_date);\n}"
+  },
+  {
+    "name": "documentation_explains_order",
+    "rule": "uninformative_public_docs",
+    "expected": "no_violation",
+    "source": "/// Sorts invoices by due date, preserving the order of invoices with equal due dates.\npub fn sort_invoices(invoices: &mut [Invoice]) {\n    invoices.sort_by_key(|invoice| invoice.due_date);\n}"
+  },
+  {
+    "name": "assertion_message_repeats_condition",
+    "rule": "unhelpful_assertion_message",
+    "expected": "violation",
+    "source": "fn validate_refund(refund: i64) {\n    assert!(refund > 0, \"refund must be positive\");\n}"
+  },
+  {
+    "name": "assertion_message_includes_value",
+    "rule": "unhelpful_assertion_message",
+    "expected": "no_violation",
+    "source": "fn validate_refund(refund: i64) {\n    assert!(refund > 0, \"refund must be positive, got {refund}\");\n}"
+  },
+  {
+    "name": "leaf_module_wrong_name",
+    "expected": "violation",
+    "context": "This complete leaf module is in src/bucket.rs. UserCache is its only and dominant abstraction.",
+    "source": "pub struct UserCache { entries: Vec<String> }\nimpl UserCache { pub fn len(&self) -> usize { self.entries.len() } }",
+    "rule": "leaf_module_name"
+  },
+  {
+    "name": "leaf_module_matching_name",
+    "expected": "no_violation",
+    "context": "This complete leaf module is in src/user_cache.rs. UserCache is its only and dominant abstraction.",
+    "source": "pub struct UserCache { entries: Vec<String> }\nimpl UserCache { pub fn len(&self) -> usize { self.entries.len() } }",
+    "rule": "leaf_module_name"
+  },
+  {
+    "name": "non_leaf_large_implementation",
+    "expected": "violation",
+    "context": "This non-leaf root has real parser and lexer child modules. Its Parser implementation below is business logic, not coordination.",
+    "source": "mod lexer;\nmod parser;\npub struct Parser { count: usize }\nimpl Parser {\n    pub fn advance(&mut self) { self.count += 1; }\n    pub fn reset(&mut self) { self.count = 0; }\n    pub fn count(&self) -> usize { self.count }\n}",
+    "rule": "non_leaf_implementation"
+  },
+  {
+    "name": "non_leaf_reexports_only",
+    "expected": "no_violation",
+    "context": "This is the complete non-leaf crate root.",
+    "source": "mod lexer;\nmod parser;\npub use parser::Parser;",
+    "rule": "non_leaf_implementation"
+  },
+  {
+    "name": "trait_import_single_function",
+    "expected": "violation",
+    "context": "This is the entire file; FromStr is used only by parse_port.",
+    "source": "use std::str::FromStr;\nfn parse_port(text: &str) -> Result<u16, std::num::ParseIntError> { u16::from_str(text) }",
+    "rule": "trait_import_scope"
+  },
+  {
+    "name": "trait_import_used_throughout",
+    "expected": "no_violation",
+    "context": "This is the entire file; the same trait is used extensively across these functions.",
+    "source": "use std::str::FromStr;\nfn a(s: &str) -> u8 { u8::from_str(s).unwrap() }\nfn b(s: &str) -> u16 { u16::from_str(s).unwrap() }\nfn c(s: &str) -> u32 { u32::from_str(s).unwrap() }\nfn d(s: &str) -> u64 { u64::from_str(s).unwrap() }",
+    "rule": "trait_import_scope"
+  },
+  {
+    "name": "qualified_type_simple_file",
+    "expected": "violation",
+    "context": "This small hand-written file has no Regex name conflict, large type group, or large dependency list.",
+    "source": "fn matches(pattern: &regex::Regex, text: &str) -> bool { pattern.is_match(text) }",
+    "rule": "qualified_type_without_clear_reason"
+  },
+  {
+    "name": "qualified_type_avoids_collision",
+    "expected": "no_violation",
+    "context": "The file also uses a different Error type, so the io qualification disambiguates the common name.",
+    "source": "use std::io;\nfn load() -> Result<(), io::Error> { Ok(()) }",
+    "rule": "qualified_type_without_clear_reason"
+  },
+  {
+    "name": "external_function_unqualified",
+    "expected": "violation",
+    "context": "The imported function is external to this module, its generic name is not distinctive, and there are no module-name conflicts.",
+    "source": "use math::compute;\nfn report(value: u64) -> u64 { compute(value) }",
+    "rule": "unqualified_external_function"
+  },
+  {
+    "name": "external_function_qualified",
+    "expected": "no_violation",
+    "context": "compute is a top-level function in the math module.",
+    "source": "use crate::math;\nfn report(value: u64) -> u64 { math::compute(value) }",
+    "rule": "unqualified_external_function"
+  },
+  {
+    "name": "library_stream_needlessly_collected",
+    "expected": "violation",
+    "context": "This reusable library function's callers consume the items as a stream, never need indexing or ownership, and can use an iterator borrowing values. Collection is only for convenience.",
+    "source": "pub fn even_numbers(values: &[u32]) -> Vec<u32> { values.iter().copied().filter(|value| value % 2 == 0).collect() }",
+    "rule": "eager_library_collection"
+  },
+  {
+    "name": "library_vector_needed_for_indexing",
+    "expected": "no_violation",
+    "context": "The public function returns a collection that callers repeatedly index at arbitrary positions.",
+    "source": "pub fn even_numbers(values: &[u32]) -> Vec<u32> { values.iter().copied().filter(|value| value % 2 == 0).collect() }",
+    "rule": "eager_library_collection"
+  },
+  {
+    "name": "library_slice_limits_inputs",
+    "expected": "violation",
+    "context": "This reusable library API only makes one pass; callers have several non-slice collection and iterator types and would benefit from passing them directly.",
+    "source": "pub fn total(values: &[u64]) -> u64 { values.iter().sum() }",
+    "rule": "restrictive_library_iteration"
+  },
+  {
+    "name": "application_slice_is_simple",
+    "expected": "no_violation",
+    "context": "This private application helper receives a slice from its only caller; greater flexibility has no demonstrated benefit.",
+    "source": "fn total(values: &[u64]) -> u64 { values.iter().sum() }",
+    "rule": "restrictive_library_iteration"
+  },
+  {
+    "name": "opaque_boolean_at_call",
+    "expected": "violation",
+    "context": "The second parameter switches between publishing personal data and redacting it; true does not reveal which behavior the caller requested.",
+    "source": "fn render(item: &Item, redact: bool) { /* implementation */ }\nfn publish(item: &Item) { render(item, true); }",
+    "rule": "opaque_boolean_parameter"
+  },
+  {
+    "name": "boolean_callsite_explains_meaning",
+    "expected": "no_violation",
+    "context": "The second parameter controls whether personal data is redacted.",
+    "source": "fn render(item: &Item, redact: bool) { /* implementation */ }\nfn publish(item: &Item) { render(item, /* redact = */ true); }",
+    "rule": "opaque_boolean_parameter"
+  },
+  {
+    "name": "configuration_io_panics",
+    "expected": "violation",
+    "context": "This end-user application's caller must recover when a configuration file is missing or unreadable; it is not a test or developer-only binary.",
+    "source": "fn load_config(path: &std::path::Path) -> String { std::fs::read_to_string(path).expect(\"configuration must exist\") }",
+    "rule": "panic_on_recoverable_error"
+  },
+  {
+    "name": "caller_invariant_panic",
+    "expected": "no_violation",
+    "context": "An out-of-bounds index indicates a programmer error: callers must satisfy this documented precondition.",
+    "source": "fn get_item(items: &[u32], index: usize) -> u32 { assert!(index < items.len()); items[index] }",
+    "rule": "panic_on_recoverable_error"
+  },
+  {
+    "name": "file_error_discarded",
+    "expected": "violation",
+    "context": "The caller must distinguish a missing file from permission denied and report an appropriate recovery action.",
+    "source": "fn load_text(path: &std::path::Path) -> Option<String> { std::fs::read_to_string(path).ok() }",
+    "rule": "lost_recoverable_error_context"
+  },
+  {
+    "name": "obvious_overflow_option",
+    "expected": "no_violation",
+    "context": "Failure can only mean that the sum overflowed; callers do not need more detail.",
+    "source": "fn add_checked(left: u32, right: u32) -> Option<u32> { left.checked_add(right) }",
+    "rule": "lost_recoverable_error_context"
+  },
+  {
+    "name": "aliases_mix_identifiers",
+    "expected": "violation",
+    "context": "UserId and InvoiceId identify different entities; accidentally swapping them is a realistic bug and they need distinct type checking.",
+    "source": "type UserId = u64;\ntype InvoiceId = u64;\nfn charge(user: UserId, invoice: InvoiceId) { let _ = (user, invoice); }",
+    "rule": "alias_for_distinct_domain_types"
+  },
+  {
+    "name": "alias_is_only_shorthand",
+    "expected": "no_violation",
+    "context": "Bytes is a local shorthand for an ordinary Vec and does not represent a separate domain concept or require an independent API.",
+    "source": "type Bytes = Vec<u8>;\nfn length(bytes: &Bytes) -> usize { bytes.len() }",
+    "rule": "alias_for_distinct_domain_types"
+  },
+  {
+    "name": "public_tuple_confuses_fields",
+    "expected": "violation",
+    "context": "This public library API returns a patient's given name, family name, and birth year; callers cannot tell the first two fields apart at the call site.",
+    "source": "pub fn patient_record() -> (String, String, u32) { (String::new(), String::new(), 2000) }",
+    "rule": "unnamed_tuple_components"
+  },
+  {
+    "name": "local_coordinate_tuple",
+    "expected": "no_violation",
+    "context": "This pair is local and its x and y roles are immediately clear.",
+    "source": "fn origin() -> i32 { let (x, y) = (0, 0); x + y }",
+    "rule": "unnamed_tuple_components"
+  },
+  {
+    "name": "trait_only_organizes_methods",
+    "expected": "violation",
+    "context": "This private trait is implemented only for Counter, called only directly on Counter, and never appears in bounds or trait objects.",
+    "source": "struct Counter(u32);\ntrait CountTools { fn double(&self) -> u32; }\nimpl CountTools for Counter { fn double(&self) -> u32 { self.0 * 2 } }",
+    "rule": "trait_without_polymorphic_purpose"
+  },
+  {
+    "name": "trait_supports_generics",
+    "expected": "no_violation",
+    "context": "The trait is used as a generic bound for multiple implementations.",
+    "source": "trait Measure { fn size(&self) -> usize; }\nfn total<T: Measure>(values: &[T]) -> usize { values.iter().map(Measure::size).sum() }",
+    "rule": "trait_without_polymorphic_purpose"
+  },
+  {
+    "name": "library_dyn_without_need",
+    "expected": "violation",
+    "context": "This reusable library API is called only with statically known types; generic dispatch is straightforward and code size is not a concern.",
+    "source": "pub fn bytes(value: &dyn AsRef<[u8]>) -> usize { value.as_ref().len() }",
+    "rule": "library_dynamic_dispatch"
+  },
+  {
+    "name": "library_dyn_for_code_size",
+    "expected": "no_violation",
+    "context": "This library accepts heterogeneous runtime implementations and deliberately uses dynamic dispatch to limit code size.",
+    "source": "pub fn bytes(value: &dyn AsRef<[u8]>) -> usize { value.as_ref().len() }",
+    "rule": "library_dynamic_dispatch"
+  },
+  {
+    "name": "foreign_extension_without_reason",
+    "expected": "violation",
+    "context": "A product team defines this local convenience extension for a type owned by a different team; it is not a foundational, broadly valuable extension and is not used as a generic input trait.",
+    "source": "trait SharedExt { fn extra(&self) -> u32; }\nimpl SharedExt for vendor::Shared { fn extra(&self) -> u32 { 1 } }",
+    "rule": "foreign_extension_trait_ownership"
+  },
+  {
+    "name": "extension_owned_with_type",
+    "expected": "no_violation",
+    "context": "The same team owns both the original Shared type and this extension trait.",
+    "source": "trait SharedExt { fn extra(&self) -> u32; }\nimpl SharedExt for vendor::Shared { fn extra(&self) -> u32 { 1 } }",
+    "rule": "foreign_extension_trait_ownership"
+  },
+  {
+    "name": "value_type_without_clone",
+    "expected": "violation",
+    "context": "Point is a reusable library value and copying it has ordinary value semantics. This is its complete definition and trait implementations.",
+    "source": "pub struct Point { pub x: i32, pub y: i32 }",
+    "rule": "missing_clone_for_value_type"
+  },
+  {
+    "name": "resource_without_clone",
+    "expected": "no_violation",
+    "context": "Session uniquely owns a live external resource and duplication is not a meaningful operation.",
+    "source": "pub struct Session { socket: std::net::TcpStream }",
+    "rule": "missing_clone_for_value_type"
+  },
+  {
+    "name": "fixed_small_value_without_copy",
+    "expected": "violation",
+    "context": "Pixel is a fixed protocol value whose three byte fields will remain its complete representation; ordinary implicit copies are appropriate. No Copy implementation exists.",
+    "source": "pub struct Pixel { pub red: u8, pub green: u8, pub blue: u8 }",
+    "rule": "missing_copy_for_value_type"
+  },
+  {
+    "name": "resource_not_copy",
+    "expected": "no_violation",
+    "context": "This type owns a network resource and its field is not Copy.",
+    "source": "pub struct Session { socket: std::net::TcpStream }",
+    "rule": "missing_copy_for_value_type"
+  },
+  {
+    "name": "known_key_missing_traits",
+    "expected": "violation",
+    "context": "UserId is the intended HashMap cache key, with exact string value equality. This is its complete definition and it has no Hash or Eq implementations.",
+    "source": "pub struct UserId { pub value: String }",
+    "rule": "missing_map_key_traits"
+  },
+  {
+    "name": "non_key_value_no_traits",
+    "expected": "no_violation",
+    "context": "This response owns a stream and is never compared or used as a key; value equality is not meaningful.",
+    "source": "pub struct Response { stream: std::net::TcpStream }",
+    "rule": "missing_map_key_traits"
+  },
+  {
+    "name": "primary_conversion_no_constructor",
+    "expected": "violation",
+    "context": "Converting from text is the primary documented way to construct UserName. This is its complete implementation and it has no inherent constructor.",
+    "source": "pub struct UserName(String);\nimpl From<&str> for UserName { fn from(value: &str) -> Self { Self(value.to_owned()) } }",
+    "rule": "missing_primary_conversion_constructor"
+  },
+  {
+    "name": "primary_conversion_has_constructor",
+    "expected": "no_violation",
+    "context": "Converting from text is the primary construction path.",
+    "source": "pub struct UserName(String);\nimpl UserName { pub fn from_text(value: &str) -> Self { Self(value.to_owned()) } }\nimpl From<&str> for UserName { fn from(value: &str) -> Self { Self::from_text(value) } }",
+    "rule": "missing_primary_conversion_constructor"
+  },
+  {
+    "name": "simple_macro_could_be_function",
+    "expected": "violation",
+    "context": "All invocations pass one u64 expression and require ordinary function evaluation; macro syntax and code generation provide no benefit.",
+    "source": "macro_rules! twice { ($value:expr) => { 2_u64 * $value }; }\nfn example(value: u64) -> u64 { twice!(value) }",
+    "rule": "unnecessary_macro"
+  },
+  {
+    "name": "variadic_macro_syntax_needed",
+    "expected": "no_violation",
+    "context": "This public API requires variable numbers of expressions at the call site; ordinary functions cannot provide the required call syntax.",
+    "source": "macro_rules! values { ($($value:expr),* $(,)?) => { vec![$($value),*] }; }\nfn example() -> Vec<u32> { values![1, 2, 3] }",
+    "rule": "unnecessary_macro"
+  },
+  {
+    "name": "unsafe_comment_only_claims_safety",
+    "expected": "violation",
+    "context": "The only safety explanation is the comment immediately before the dereference.",
+    "source": "fn read(value: &u32) -> u32 {\n    let ptr = value as *const u32;\n    // SAFETY: This is safe.\n    unsafe { *ptr }\n}",
+    "rule": "inadequate_unsafe_safety_comment"
+  },
+  {
+    "name": "unsafe_comment_explains_preconditions",
+    "expected": "no_violation",
+    "context": "The pointer comes directly from the live reference and is not mutated while dereferenced.",
+    "source": "fn read(value: &u32) -> u32 {\n    let ptr = value as *const u32;\n    // SAFETY: ptr comes from a live aligned reference and remains valid for this read.\n    unsafe { *ptr }\n}",
+    "rule": "inadequate_unsafe_safety_comment"
+  },
+  {
+    "name": "unsafe_public_contract_missing",
+    "expected": "violation",
+    "context": "The pointer must be valid and readable for one byte when this public function is called. This is its complete documentation.",
+    "source": "/// Reads one byte.\npub unsafe fn read_byte(ptr: *const u8) -> u8 { unsafe { *ptr } }",
+    "rule": "undocumented_unsafe_contract"
+  },
+  {
+    "name": "unsafe_public_contract_documented",
+    "expected": "no_violation",
+    "context": "The pointer must be valid and readable for one byte when this public function is called.",
+    "source": "/// Reads one byte.\n///\n/// # Safety\n/// The pointer must be valid and readable for one byte for the duration of this call.\npub unsafe fn read_byte(ptr: *const u8) -> u8 { unsafe { *ptr } }",
+    "rule": "undocumented_unsafe_contract"
+  },
+  {
+    "name": "division_panic_not_documented",
+    "expected": "violation",
+    "context": "The denominator is caller-provided input. The shown doc comment is complete and the function panics when it is zero.",
+    "source": "/// Returns the integer quotient.\npub fn quotient(numerator: u32, denominator: u32) -> u32 { numerator / denominator }",
+    "rule": "undocumented_input_panic"
+  },
+  {
+    "name": "division_panic_documented",
+    "expected": "no_violation",
+    "context": "The denominator is caller-provided input.",
+    "source": "/// Returns the integer quotient.\n///\n/// # Panics\n/// Panics if the denominator is zero.\npub fn quotient(numerator: u32, denominator: u32) -> u32 { numerator / denominator }",
+    "rule": "undocumented_input_panic"
+  },
+  {
+    "name": "unsafe_read_of_local_value",
+    "expected": "violation",
+    "context": "This is an ordinary local value, not volatile, shared memory, or an FFI requirement; returning value directly preserves the behavior.",
+    "source": "fn read_value(value: u32) -> u32 { let ptr = &value as *const u32; unsafe { *ptr } }",
+    "rule": "unnecessary_unsafe"
+  },
+  {
+    "name": "volatile_read_requires_unsafe",
+    "expected": "no_violation",
+    "context": "The pointer is a valid memory-mapped device address and a volatile read is required by the hardware protocol.",
+    "source": "unsafe fn read_register(ptr: *const u32) -> u32 { unsafe { std::ptr::read_volatile(ptr) } }",
+    "rule": "unnecessary_unsafe"
+  },
+  {
+    "name": "plus_operator_sends_message",
+    "expected": "violation",
+    "context": "Adding a message to Sender actually sends a network message; there is no mathematical or logical addition.",
+    "source": "impl std::ops::Add<Message> for Sender { type Output = (); fn add(self, message: Message) { self.send(message); } }",
+    "rule": "unrelated_operator_overload"
+  },
+  {
+    "name": "plus_operator_adds_vectors",
+    "expected": "no_violation",
+    "context": "Point addition is ordinary coordinate-wise vector addition.",
+    "source": "struct Point { x: i32, y: i32 }\nimpl std::ops::Add for Point { type Output = Self; fn add(self, other: Self) -> Self { Self { x: self.x + other.x, y: self.y + other.y } } }",
+    "rule": "unrelated_operator_overload"
+  },
+  {
+    "name": "shared_evolving_enum_exhaustive",
+    "expected": "violation",
+    "context": "Multiple other teams consume this public enum; new payment methods are planned and consumers cannot all be updated atomically.",
+    "source": "pub enum PaymentMethod { Card, BankTransfer, Wallet }",
+    "rule": "missing_non_exhaustive_enum"
+  },
+  {
+    "name": "fixed_binary_enum_exhaustive",
+    "expected": "no_violation",
+    "context": "This is a permanently binary visibility state; new variants will never be added.",
+    "source": "pub enum Visibility { Visible, Hidden }",
+    "rule": "missing_non_exhaustive_enum"
+  },
+  {
+    "name": "shared_evolving_struct_exhaustive",
+    "expected": "violation",
+    "context": "Other teams construct this public struct, new fields are planned, downstream callers cannot be updated atomically, and functional record update is not an intended API.",
+    "source": "pub struct Payment { pub amount: u64, pub currency: String }",
+    "rule": "missing_non_exhaustive_struct"
+  },
+  {
+    "name": "configuration_struct_allows_update_syntax",
+    "expected": "no_violation",
+    "context": "A primary purpose of this public options struct is to support construction with functional record update syntax.",
+    "source": "#[derive(Default)]\npub struct Options { pub verbose: bool, pub retries: u32 }",
+    "rule": "missing_non_exhaustive_struct"
+  },
+  {
+    "name": "pure_query_without_must_use",
+    "expected": "violation",
+    "context": "This public pure function has no side effects; ignoring the boolean makes the call useless, and bool is not already must_use.",
+    "source": "pub fn is_even(value: u32) -> bool { value % 2 == 0 }",
+    "rule": "missing_must_use_function"
+  },
+  {
+    "name": "result_already_must_use",
+    "expected": "no_violation",
+    "context": "The return type Result is already marked must_use.",
+    "source": "pub fn parse(value: &str) -> Result<u32, std::num::ParseIntError> { value.parse() }",
+    "rule": "missing_must_use_function"
+  },
+  {
+    "name": "lazy_task_not_must_use",
+    "expected": "violation",
+    "context": "Creating this public type does no work; its intended action occurs only when the caller explicitly calls run, so silently discarding it loses the operation.",
+    "source": "pub struct PendingTask { job: Box<dyn FnOnce()> }\nimpl PendingTask { pub fn run(self) { (self.job)(); } }",
+    "rule": "missing_must_use_type"
+  },
+  {
+    "name": "ordinary_settings_type",
+    "expected": "no_violation",
+    "context": "This is ordinary configuration data, not an error or lazy computation.",
+    "source": "pub struct LogSettings { pub verbose: bool }",
+    "rule": "missing_must_use_type"
+  },
+  {
+    "name": "inferred_collection_obscures_type",
+    "expected": "violation",
+    "context": "process_records is defined in a different file and expects Vec<Event>; a reader cannot infer the parsed type from this local code.",
+    "source": "fn load(input: &[String]) { let records = input.iter().filter_map(|value| value.parse().ok()).collect(); process_records(records); }",
+    "rule": "unclear_inferred_type"
+  },
+  {
+    "name": "collection_type_explicit",
+    "expected": "no_violation",
+    "context": "The relevant result and parsed element types are visible in the annotation.",
+    "source": "fn load(input: &[String]) { let records: Vec<u64> = input.iter().filter_map(|value| value.parse().ok()).collect(); process_records(records); }",
+    "rule": "unclear_inferred_type"
+  },
+  {
+    "name": "known_variant_hidden_without_reason",
+    "expected": "violation",
+    "context": "All known variants are intentionally considered and should be visible to reviewers; the wildcard is needed only for future variants.",
+    "source": "#[non_exhaustive]\nenum Shape { Circle, Square, Triangle }\nfn classify(shape: Shape) -> u32 { match shape { Shape::Circle => 1, _ => 2 } }",
+    "rule": "non_exhaustive_match_hides_variants"
+  },
+  {
+    "name": "single_variant_intentionally_selected",
+    "expected": "no_violation",
+    "context": "This code only cares whether the shape is a Circle and intentionally ignores all other variants.",
+    "source": "#[non_exhaustive]\nenum Shape { Circle, Square, Triangle }\nfn is_circle(shape: Shape) -> bool { if let Shape::Circle = shape { true } else { false } }",
+    "rule": "non_exhaustive_match_hides_variants"
+  },
+  {
+    "name": "catch_unwind_for_bad_input",
+    "expected": "violation",
+    "context": "The application deliberately panics on malformed input and relies on catch_unwind for its normal validation result.",
+    "source": "fn validate(input: &str) -> bool { std::panic::catch_unwind(|| parse_or_panic(input)).is_ok() }",
+    "rule": "catch_unwind_as_control_flow"
+  },
+  {
+    "name": "catch_unwind_defense_in_depth",
+    "expected": "no_violation",
+    "context": "This is a critical entry point in a panic=unwind binary. It otherwise avoids panics, and no correctness guarantee relies on the wrapper.",
+    "source": "fn entry() { let _ = std::panic::catch_unwind(run_checked_service); }",
+    "rule": "catch_unwind_as_control_flow"
+  },
+  {
+    "name": "for_each_for_simple_side_effect",
+    "expected": "violation",
+    "context": "This is a normal side-effecting loop, with no special reason to use for_each.",
+    "source": "fn print_values(values: &[u32]) { values.iter().for_each(|value| println!(\"{value}\")); }",
+    "rule": "unnecessary_for_each"
+  },
+  {
+    "name": "short_any_combinator",
+    "expected": "no_violation",
+    "context": "The any combinator directly expresses the intended short-circuit check.",
+    "source": "fn has_zero(values: &[i32]) -> bool { values.iter().any(|value| *value == 0) }",
+    "rule": "unnecessary_for_each"
+  },
+  {
+    "name": "for_each_with_measured_reason",
+    "expected": "no_violation",
+    "context": "This hot path uses a specialized iterator whose for_each implementation has a measured performance advantage over the direct loop; the team accepts that tradeoff.",
+    "source": "fn process<I: Iterator<Item = Job>>(jobs: I) { jobs.for_each(execute); }",
+    "rule": "unnecessary_for_each"
+  },
+  {
+    "name": "user_facing_assertion_needs_help",
+    "expected": "violation",
+    "context": "An API caller sees this panic when they forgot to call connect first; without an explanation they cannot tell what to fix.",
+    "source": "fn execute(database: &Database) { assert!(database.connected); database.run(); }",
+    "rule": "assertion_missing_context"
+  },
+  {
+    "name": "simple_test_assertion",
+    "expected": "no_violation",
+    "context": "This local test assertion is self-explanatory and its failure is only seen by the test author.",
+    "source": "#[test]\nfn adds() { assert_eq!(2 + 2, 4); }",
+    "rule": "assertion_missing_context"
+  },
+  {
+    "name": "type_lifetimes_obscure_roles",
+    "expected": "violation",
+    "context": "The three independent lifetimes refer respectively to the user record, authorization token, and cache; they represent distinct relationships in this application type.",
+    "source": "struct Session<'a, 'b, 'c> { user: &'a User, token: &'b Token, cache: &'c Cache }",
+    "rule": "opaque_lifetime_name"
+  },
+  {
+    "name": "simple_method_lifetime",
+    "expected": "no_violation",
+    "context": "The single lifetime simply connects the output borrow to the input borrow.",
+    "source": "fn first<'a>(value: &'a str) -> &'a str { value }",
+    "rule": "opaque_lifetime_name"
+  },
+  {
+    "name": "module_name_unknown",
+    "rule": "leaf_module_name",
+    "expected": "insufficient_context",
+    "context": "The file path and containing module name are not provided.",
+    "source": "pub struct UserCache { entries: Vec<String> }"
+  },
+  {
+    "name": "trait_uses_outside_snippet_unknown",
+    "rule": "trait_import_scope",
+    "expected": "insufficient_context",
+    "context": "Only this fragment is available; the trait may be used extensively elsewhere in the file.",
+    "source": "use std::str::FromStr;\nfn parse_port(text: &str) -> Result<u16, std::num::ParseIntError> { u16::from_str(text) }"
+  },
+  {
+    "name": "collection_callers_unknown",
+    "rule": "eager_library_collection",
+    "expected": "insufficient_context",
+    "context": "The crate kind, callers, and need for ownership or indexing are not provided.",
+    "source": "pub fn even_numbers(values: &[u32]) -> Vec<u32> { values.iter().copied().filter(|value| value % 2 == 0).collect() }"
+  },
+  {
+    "name": "enum_evolution_unknown",
+    "rule": "missing_non_exhaustive_enum",
+    "expected": "insufficient_context",
+    "context": "No information about consumers, future variants, or coordinated updates is provided.",
+    "source": "pub enum PaymentMethod { Card, BankTransfer, Wallet }"
+  },
+  {
+    "name": "dynamic_dispatch_context_unknown",
+    "rule": "library_dynamic_dispatch",
+    "expected": "insufficient_context",
+    "context": "No information about crate kind, callers, or code size is provided.",
+    "source": "pub fn bytes(value: &dyn AsRef<[u8]>) -> usize { value.as_ref().len() }"
+  },
+  {
+    "name": "assertion_audience_unknown",
+    "rule": "assertion_missing_context",
+    "expected": "insufficient_context",
+    "context": "No information about what connected means, why it might be false, or who sees failures is provided.",
+    "source": "fn execute(database: &Database) { assert!(database.connected); database.run(); }"
+  },
+  {
+    "name": "unjustified_glob_import",
+    "expected": "violation",
+    "context": "This is an ordinary hand-written module import, not an enum variant import, inline super import, non-leaf reexport, third-party prelude, or C++ namespace merge.",
+    "source": "use crate::widgets::*;\nfn open() { show_widget(); }",
+    "rule": "glob_import_context"
+  },
+  {
+    "name": "inline_module_super_glob",
+    "expected": "no_violation",
+    "context": "This super glob import is inside an inline child module.",
+    "source": "fn value() -> u32 { 3 }\nmod tests { use super::*; fn test_value() -> u32 { value() } }",
+    "rule": "glob_import_context"
+  },
+  {
+    "name": "third_party_prelude_discretion_unknown",
+    "expected": "insufficient_context",
+    "context": "The third-party crate recommends its prelude, but the reviewer has not decided whether this project allows it.",
+    "source": "use vendor::prelude::*;\nfn launch() { vendor_start(); }",
+    "rule": "glob_import_context"
+  },
+  {
+    "name": "rustfmt_skip_personal_style",
+    "expected": "violation",
+    "context": "The sole reason for this skip is the author's preference for their personal brace style; the code is not generated and has no meaningful manual alignment.",
+    "source": "#[rustfmt::skip]\nfn answer() -> u32 { 42 }",
+    "rule": "unjustified_rustfmt_skip"
+  },
+  {
+    "name": "rustfmt_skip_for_matrix_alignment",
+    "expected": "no_violation",
+    "context": "The skip preserves intentionally aligned matrix rows to make the matrix structure readable.",
+    "source": "#[rustfmt::skip]\nfn identity() -> [[i32; 3]; 3] {\n    [\n        [1, 0, 0],\n        [0, 1, 0],\n        [0, 0, 1],\n    ]\n}",
+    "rule": "unjustified_rustfmt_skip"
+  },
+  {
+    "name": "unsafe_justification_missing",
+    "expected": "violation",
+    "context": "All applicable file and crate-level justification has been provided. The only stated reason for this unsafe pointer copy is that it is faster, with no benchmark and no explanation why safe code is unsuitable.",
+    "source": "fn copy(source: &[u8], destination: &mut [u8]) { unsafe { std::ptr::copy_nonoverlapping(source.as_ptr(), destination.as_mut_ptr(), source.len()); } }",
+    "rule": "missing_unsafe_technical_justification"
+  },
+  {
+    "name": "unsafe_justification_present",
+    "expected": "no_violation",
+    "context": "The applicable crate-level rationale explains that this foreign-function interface requires a raw device pointer with no equivalent safe API; safety obligations are documented separately.",
+    "source": "unsafe fn read_device(ptr: *const u32) -> u32 { unsafe { std::ptr::read_volatile(ptr) } }",
+    "rule": "missing_unsafe_technical_justification"
+  },
+  {
+    "name": "generic_letter_obscures_writer_role",
+    "expected": "violation",
+    "context": "The generic parameter is specifically a writer, and the conventional W would identify its main bound; X has no relevant meaning here.",
+    "source": "fn output<X: std::io::Write>(writer: &mut X) { let _ = writer.write_all(b\"ok\"); }",
+    "rule": "opaque_generic_parameter"
+  },
+  {
+    "name": "generic_letter_indicates_writer",
+    "expected": "no_violation",
+    "context": "W is a short name indicating the writer bound.",
+    "source": "fn output<W: std::io::Write>(writer: &mut W) { let _ = writer.write_all(b\"ok\"); }",
+    "rule": "opaque_generic_parameter"
+  },
+  {
+    "name": "comment_explains_basic_for_loop",
+    "expected": "violation",
+    "context": "This comment adds no project-specific reason or invariant.",
+    "source": "fn print_values(values: &[u32]) {\n    // A for loop iterates over each element.\n    for value in values { println!(\"{value}\"); }\n}",
+    "rule": "redundant_language_comment"
+  },
+  {
+    "name": "comment_explains_domain_reason",
+    "expected": "no_violation",
+    "context": "The comment explains why the invoices must be sorted before the downstream billing step.",
+    "source": "fn bill(invoices: &mut [Invoice]) {\n    // Oldest invoices must be billed first to satisfy the settlement contract.\n    invoices.sort_by_key(|invoice| invoice.due_date);\n}",
+    "rule": "redundant_language_comment"
+  },
+  {
+    "name": "unsafe_project_justification_unknown",
+    "expected": "insufficient_context",
+    "context": "Only this function is supplied. File-level and crate-level unsafe justifications are not available.",
+    "source": "unsafe fn read_device(ptr: *const u32) -> u32 { unsafe { std::ptr::read_volatile(ptr) } }",
+    "rule": "missing_unsafe_technical_justification"
+  },
+  {
+    "name": "macro_callsite_requirements_unknown",
+    "expected": "insufficient_context",
+    "context": "No call sites, evaluation requirements, or explanation for using a macro are supplied.",
+    "source": "macro_rules! twice { ($value:expr) => { 2_u64 * $value }; }",
+    "rule": "unnecessary_macro"
+  },
+  {
+    "name": "unsafe_entangled_order_processing",
+    "expected": "violation",
+    "context": "The raw pointer originates at an FFI boundary. A small validated wrapper could expose a safe Order, but the current business logic repeatedly manipulates the pointer directly.",
+    "source": "pub unsafe fn process(order: *mut Order) { unsafe { (*order).total += 1; (*order).mark_paid(); (*order).notify(); } }",
+    "rule": "unsafe_mixed_with_business_logic"
+  },
+  {
+    "name": "unsafe_isolated_from_business_logic",
+    "expected": "no_violation",
+    "context": "The raw pointer operation is isolated in a low-level helper with its documented unsafe caller contract; application logic receives only an ordinary value.",
+    "source": "unsafe fn read(ptr: *const u8) -> u8 { unsafe { *ptr } }\nfn apply(amount: u8) -> u8 { amount.saturating_add(1) }",
+    "rule": "unsafe_mixed_with_business_logic"
+  },
+  {
+    "name": "options_bag_without_default",
+    "expected": "violation",
+    "context": "This public struct is an options bag. Its documented defaults are three retries and verbose false; the complete implementation contains no Default implementation.",
+    "source": "pub struct Options { pub retries: u32, pub verbose: bool }",
+    "rule": "missing_default_for_options"
+  },
+  {
+    "name": "required_credentials_not_options",
+    "expected": "no_violation",
+    "context": "This struct contains a required credential and is not an options bag; there is no meaningful default credential.",
+    "source": "pub struct Credentials { pub token: String }",
+    "rule": "missing_default_for_options"
+  },
+  {
+    "name": "foreign_hidden_item_used",
+    "expected": "violation",
+    "context": "foreign::internal_helper is marked #[doc(hidden)] in a third-party library owned by another team.",
+    "source": "fn run() { foreign::internal_helper(); }",
+    "rule": "foreign_doc_hidden_api"
+  },
+  {
+    "name": "owned_hidden_item_used",
+    "expected": "no_violation",
+    "context": "internal_helper is marked #[doc(hidden)], but it is defined and owned in this same crate.",
+    "source": "#[doc(hidden)]\npub fn internal_helper() {}\nfn run() { internal_helper(); }",
+    "rule": "foreign_doc_hidden_api"
+  },
+  {
+    "name": "const_api_conflicts_with_known_roadmap",
+    "expected": "violation",
+    "context": "The published roadmap requires this constructor to obtain a runtime-generated identifier next release, and the team cannot coordinate migration of external const callers.",
+    "source": "pub const fn new_id() -> u64 { 0 }",
+    "rule": "fragile_public_const_api"
+  },
+  {
+    "name": "const_api_is_stable_contract",
+    "expected": "no_violation",
+    "context": "This pure conversion is an intentionally permanent const contract and the team commits to preserving it.",
+    "source": "pub const fn bytes_to_bits(bytes: u64) -> u64 { bytes * 8 }",
+    "rule": "fragile_public_const_api"
+  },
+  {
+    "name": "application_unneeded_into",
+    "expected": "violation",
+    "context": "This is a private application helper, every caller already has a String, and no external API compatibility requires a generic parameter.",
+    "source": "fn print_message(message: impl Into<String>) { println!(\"{}\", message.into()); }",
+    "rule": "unnecessary_into_in_application"
+  },
+  {
+    "name": "library_into_aids_callers",
+    "expected": "no_violation",
+    "context": "This reusable library function is commonly called with both owned String values and string literals, and the ergonomic benefit is intentional.",
+    "source": "pub fn print_message(message: impl Into<String>) { println!(\"{}\", message.into()); }",
+    "rule": "unnecessary_into_in_application"
+  }
+]
