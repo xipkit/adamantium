@@ -8,8 +8,8 @@ use std::{
 /// An `Actor` wraps a value that several tasks use. [`with`](Self::with)
 /// runs a closure with exclusive access to the value. The closure is
 /// synchronous, so the lock can't be held across an await, and a method
-/// can't call another actor: a nested `with` on any actor, this one or
-/// another, panics instead of risking a deadlock. Those two rules are what
+/// can't call another actor: a nested `with` or `read` on any actor, this
+/// one or another, panics instead of risking a deadlock. Those two rules are what
 /// make a program with actors free of lock deadlocks and of locks held
 /// through a cancellation.
 ///
@@ -26,8 +26,8 @@ use std::{
 /// }
 ///
 /// let tally = Actor::new(Tally::default());
-/// tally.with(|t| t.record());
-/// assert_eq!(tally.with(|t| t.total()), 1);
+/// tally.with(Tally::record);
+/// assert_eq!(tally.read(Tally::total), 1);
 /// ```
 ///
 /// Work that waits, such as a network call, happens in a task; the actor
@@ -95,6 +95,17 @@ impl<S> Actor<S> {
         f(&mut guard)
     }
 
+    /// Runs `f` with shared access to the state and returns its result.
+    ///
+    /// The same rules as [`with`](Self::with) apply. This form takes `&S`,
+    /// so a method that only reads, such as `Tally::total`, can be passed
+    /// by name.
+    pub fn read<R>(&self, f: impl FnOnce(&S) -> R) -> R {
+        let _inside = Inside::enter();
+        let guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        f(&guard)
+    }
+
     /// The state, if this is the only handle to it; otherwise the actor back.
     pub fn into_inner(self) -> Result<S, Self> {
         Arc::try_unwrap(self.state)
@@ -111,7 +122,7 @@ impl<S> Actor<S> {
 impl<S: Clone> Actor<S> {
     /// A copy of the state as it is now.
     pub fn snapshot(&self) -> S {
-        self.with(|state| state.clone())
+        self.read(S::clone)
     }
 }
 

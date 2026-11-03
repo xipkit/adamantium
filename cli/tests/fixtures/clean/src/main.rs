@@ -73,7 +73,7 @@ async fn main() -> Result<(), Str> {
     })
     .await?;
 
-    let digest = blocking(move || format!("{} bytes", tally.with(|tally| tally.total()))).await;
+    let digest = blocking(move || format!("{} bytes", tally.read(Tally::total))).await;
     println!("{digest}");
     Ok(())
 }

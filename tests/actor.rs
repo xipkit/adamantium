@@ -32,7 +32,7 @@ async fn methods_run_one_at_a_time() {
     })
     .await;
     assert_eq!(result, Ok(()));
-    assert_eq!(tally.with(|t| t.total()), 8000);
+    assert_eq!(tally.read(Tally::total), 8000);
     assert_eq!(tally.snapshot(), Tally { hits: 8000 });
 }
 
@@ -42,6 +42,14 @@ fn a_method_cannot_call_another_actor() {
     let a = Actor::new(1);
     let b = Actor::new(2);
     a.with(|_| b.with(|_| ()));
+}
+
+#[test]
+#[should_panic(expected = "inside another actor's method")]
+fn a_read_cannot_nest_either() {
+    let a = Actor::new(1);
+    let b = Actor::new(2);
+    a.read(|_| b.read(|_| ()));
 }
 
 #[test]
@@ -57,7 +65,7 @@ fn a_panic_inside_a_method_does_not_poison_the_actor() {
     let result = std::panic::catch_unwind(|| a.with(|_| panic!("mid-method")));
     assert!(result.is_err());
     a.with(Tally::record);
-    assert_eq!(a.with(|t| t.total()), 1);
+    assert_eq!(a.read(Tally::total), 1);
     let b = Actor::new(3);
     b.with(|n| *n += 1);
     assert_eq!(b.with(|n| *n), 4);
