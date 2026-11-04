@@ -1,0 +1,19 @@
+# A package with a skip list: a skipped directory, an allowed rule and a rule
+# with an exception. Its own workspace, so Cargo does not look for a parent.
+[workspace]
+
+[package]
+name = "skips"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata.adamantium]
+skip = ["tests/"]
+allow = ["indexing_slicing"]
+
+[package.metadata.adamantium.exceptions]
+string_slice = ["src/text/"]
+
+[profile.release]
+overflow-checks = true

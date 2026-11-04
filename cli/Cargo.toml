@@ -15,6 +15,7 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 fastrand = "2"
+globset = "0.4"
 httpdate = "1"
 ignore = "0.4"
 serde = { version = "1", features = ["derive"] }

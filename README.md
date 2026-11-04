@@ -34,7 +34,24 @@ cargo adamantium rules              # list the rules and why each exists
 
 The rules also require `overflow-checks = true` in the release profile. Integer overflow then panics in release builds, as it does in debug builds.
 
-`init` writes the same rules into a project, so plain `cargo clippy` applies them. It writes the `[lints]` tables, or `[workspace.lints]` in a workspace, the release profile's overflow check, and a `clippy.toml`. Running it again changes nothing. It refuses to replace a `clippy.toml` that differs unless you pass `--force`.
+`init` writes the same rules into a project, so plain `cargo clippy` applies them. It writes the `[lints]` tables, or `[workspace.lints]` in a workspace, the release profile's overflow check, and a `clippy.toml`. Rules the [skip list](#skipping-rules-and-paths) allows or excepts are left out. Running it again changes nothing. It refuses to replace a `clippy.toml` that differs unless you pass `--force`.
+
+## Skipping rules and paths
+
+A project adopts the rules one at a time with a skip list in its `Cargo.toml`:
+
+```toml
+[workspace.metadata.adamantium]
+skip = ["tests/", "examples/"]              # nothing is checked here
+allow = ["indexing_slicing", "unwrap_used"] # these rules are off, for now
+
+[workspace.metadata.adamantium.exceptions]
+future_not_send = ["src/syntax/", "src/bytecode.rs"] # this rule is off here
+```
+
+A single package uses `[package.metadata.adamantium]`. Paths are globs relative to the directory holding `Cargo.toml`. A path without wildcards also covers everything under it. Rules go by their bare name or by the qualified name that `cargo adamantium rules` prints. A name that is not a rule is an error, so a typo cannot turn a rule off.
+
+`check` counts what the list left out, by rule, in the summary and in the `skipped` map of the JSON report. Remove a rule from `allow` to see how much work it needs. A project with a skip list runs `cargo adamantium check` in CI rather than plain `cargo clippy`, because a `[lints]` table cannot scope a rule to a path.
 
 An agent that writes code for the project can read the rules the same way. `cargo adamantium rules --format json` gives the full list and the reason behind each rule.
 

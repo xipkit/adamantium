@@ -126,6 +126,7 @@ dependencies = [
  "anyhow",
  "clap",
  "fastrand",
+ "globset",
  "httpdate",
  "ignore",
  "serde",

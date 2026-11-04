@@ -1,7 +1,7 @@
 //! Running Clippy with the rules and turning its output into a report.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     env, fs,
     io::{self, BufRead, BufReader, Write},
     path::{Component, Path, PathBuf},
@@ -12,12 +12,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    lints::{CLIPPY_TOML, LINTS},
+    config::Config,
+    lints::{CLIPPY_TOML, LINTS, OVERFLOW_RULE},
     manifest,
 };
-
-/// The rule name for the release profile check, which is not a Clippy lint.
-const OVERFLOW_RULE: &str = "adamantium::overflow_checks";
 
 /// What a check found.
 #[derive(Serialize)]
@@ -26,6 +24,8 @@ pub struct Report {
     pub root: PathBuf,
     pub status: Status,
     pub findings: Vec<Finding>,
+    /// Findings the project's skip list left out, counted by rule.
+    pub skipped: BTreeMap<String, usize>,
     pub errors: Vec<Problem>,
 }
 
@@ -111,8 +111,14 @@ pub fn run(path: &Path, cargo_args: &[String], json: bool) -> Result<ExitCode> {
         writeln!(stdout)?;
     } else {
         let mut stderr = io::stderr().lock();
+        let skipped: usize = report.skipped.values().sum();
+        let note = if skipped == 0 {
+            String::new()
+        } else {
+            format!(" ({skipped} skipped by the skip list in Cargo.toml)")
+        };
         match report.status {
-            Status::Clean => writeln!(stderr, "adamantium: clean")?,
+            Status::Clean => writeln!(stderr, "adamantium: clean{note}")?,
             Status::Findings => {
                 let mut files: Vec<&str> = report
                     .findings
@@ -123,7 +129,7 @@ pub fn run(path: &Path, cargo_args: &[String], json: bool) -> Result<ExitCode> {
                 files.dedup();
                 writeln!(
                     stderr,
-                    "adamantium: {} finding{} in {}",
+                    "adamantium: {} finding{} in {}{note}",
                     report.findings.len(),
                     if report.findings.len() == 1 { "" } else { "s" },
                     files.join(", ")
@@ -139,6 +145,7 @@ pub fn run(path: &Path, cargo_args: &[String], json: bool) -> Result<ExitCode> {
 }
 
 fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
+    let config = Config::load(root)?;
     let conf = tempfile::tempdir().context("creating a directory for clippy.toml")?;
     fs::write(conf.path().join("clippy.toml"), CLIPPY_TOML)?;
 
@@ -172,6 +179,7 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
 
     let rules: HashSet<String> = LINTS.iter().map(super::lints::Lint::qualified).collect();
     let mut findings = Vec::new();
+    let mut skipped = BTreeMap::new();
     let mut errors = Vec::new();
     let mut seen = HashSet::new();
     let mut built = false;
@@ -185,10 +193,15 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
                 if let Some(diagnostic) = parsed.message {
                     classify(
                         diagnostic,
-                        &rules,
-                        echo,
+                        &Setting {
+                            root,
+                            config: &config,
+                            rules: &rules,
+                            echo,
+                        },
                         &mut seen,
                         &mut findings,
+                        &mut skipped,
                         &mut errors,
                     );
                 }
@@ -199,7 +212,9 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
     }
     let exit = child.wait().context("waiting for cargo clippy")?;
 
-    if !manifest::release_checks_overflow(root)? {
+    if !manifest::release_checks_overflow(root)? && config.skips(OVERFLOW_RULE, "Cargo.toml") {
+        *skipped.entry(OVERFLOW_RULE.to_owned()).or_insert(0) += 1;
+    } else if !manifest::release_checks_overflow(root)? {
         let finding = Finding {
             rule: OVERFLOW_RULE.to_owned(),
             message: "[profile.release] does not set overflow-checks = true, so integer overflow wraps silently in release builds; `cargo adamantium init` adds it".to_owned(),
@@ -228,8 +243,17 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
         root: root.to_path_buf(),
         status,
         findings,
+        skipped,
         errors,
     })
+}
+
+/// What `classify` needs to know about the run.
+struct Setting<'a> {
+    root: &'a Path,
+    config: &'a Config,
+    rules: &'a HashSet<String>,
+    echo: bool,
 }
 
 /// Whether the arguments for `cargo clippy` already choose which packages to
@@ -243,15 +267,15 @@ fn selects_packages(cargo_args: &[String]) -> bool {
     })
 }
 
-/// Sorts one diagnostic into a finding, a build error, or noise, printing it
-/// when `echo` is set. Diagnostics without a primary span, such as the
-/// "aborting due to N errors" summary, are dropped.
+/// Sorts one diagnostic into a finding, a skipped finding, a build error, or
+/// noise, printing findings when `echo` is set. Diagnostics without a primary
+/// span, such as the "aborting due to N errors" summary, are dropped.
 fn classify(
     diagnostic: Diagnostic,
-    rules: &HashSet<String>,
-    echo: bool,
+    setting: &Setting<'_>,
     seen: &mut HashSet<(String, String, u64, u64)>,
     findings: &mut Vec<Finding>,
+    skipped: &mut BTreeMap<String, usize>,
     errors: &mut Vec<Problem>,
 ) {
     let Some(span) = diagnostic.spans.iter().find(|span| span.is_primary) else {
@@ -270,11 +294,20 @@ fn classify(
     if !seen.insert(key) {
         return;
     }
-    if echo && let Some(rendered) = &diagnostic.rendered {
+    if let Some(rule) = &code
+        && setting.rules.contains(rule)
+        && setting.config.skips(rule, relative(setting.root, &file))
+    {
+        *skipped.entry(rule.clone()).or_insert(0) += 1;
+        return;
+    }
+    if setting.echo
+        && let Some(rendered) = &diagnostic.rendered
+    {
         eprint!("{rendered}");
     }
     match code {
-        Some(rule) if rules.contains(&rule) => findings.push(Finding {
+        Some(rule) if setting.rules.contains(&rule) => findings.push(Finding {
             rule,
             message: diagnostic.message,
             file,
@@ -288,6 +321,16 @@ fn classify(
         }),
         _ => {}
     }
+}
+
+/// `file` relative to `root`, for the skip list. Clippy already names
+/// workspace files relative to the directory it runs in.
+fn relative<'a>(root: &Path, file: &'a str) -> &'a str {
+    Path::new(file)
+        .strip_prefix(root)
+        .ok()
+        .and_then(Path::to_str)
+        .unwrap_or(file)
 }
 
 /// Resolves `.` and `..` segments without touching the file system, so a

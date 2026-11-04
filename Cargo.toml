@@ -4,6 +4,7 @@ exclude = [
     "cli/tests/fixtures/violations",
     "cli/tests/fixtures/clean",
     "cli/tests/fixtures/workspace",
+    "cli/tests/fixtures/skips",
 ]
 
 [workspace.package]
