@@ -13,6 +13,11 @@ Add the library to a project:
 adamantium = { git = "https://github.com/xipkit/adamantium.git", rev = "..." }
 ```
 
+The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, and
+`blocking`. Set `default-features = false` to use `Actor`, `Str`, `Bytes`,
+`Array`, `Map`, and `Channel` without Tokio, including on WASI. The `serde`
+feature can be enabled independently.
+
 Install the subcommand:
 
 ```sh
@@ -141,9 +146,12 @@ The rules live in [`style/rules/google-rust-decisions.json`](style/rules/google-
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
+cargo build --locked -p adamantium --no-default-features
+cargo clippy --locked -p adamantium --all-targets --no-default-features -- -D warnings
+cargo test --locked -p adamantium --no-default-features
 node --test style/scripts/evaluate-decisions.test.mjs
 ```
 
-[GitHub Actions](.github/workflows/ci.yml) runs the same four commands on pull requests and pushes to `main`.
+[GitHub Actions](.github/workflows/ci.yml) runs the same commands on pull requests and pushes to `main`.
 
 The repository applies its own rules to itself. The library must use a few things it forbids, such as the `JoinSet` inside `Tasks` and the `Mutex` inside `Actor`. Each carries an `allow` with a reason. The CLI tests run `cargo adamantium check` against two fixture crates. One breaks every rule once, and one lives inside the fragment. They need Clippy, and network access the first time.

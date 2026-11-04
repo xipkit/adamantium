@@ -1,5 +1,8 @@
-use adamantium::{Actor, Channel, Closed, Tasks};
+#[cfg(feature = "tokio")]
+use adamantium::{Actor, Tasks};
+use adamantium::{Channel, Closed};
 
+#[cfg(feature = "tokio")]
 #[tokio::test(flavor = "multi_thread")]
 async fn one_producer_many_consumers_each_message_once() {
     let numbers = Channel::<u64>::bounded(4);
