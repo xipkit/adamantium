@@ -136,15 +136,6 @@ impl Lint {
             Tool::Clippy => format!("clippy::{}", self.name),
         }
     }
-
-    /// The two arguments that set this lint's level on a `cargo clippy` line.
-    pub fn flags(&self) -> [String; 2] {
-        let flag = match self.level {
-            Level::Deny => "-D",
-            Level::Forbid => "-F",
-        };
-        [flag.to_owned(), self.qualified()]
-    }
 }
 
 impl fmt::Display for Level {

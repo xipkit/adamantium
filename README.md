@@ -30,7 +30,7 @@ cargo adamantium init               # write the rules into Cargo.toml and clippy
 cargo adamantium rules              # list the rules and why each exists
 ```
 
-`check` runs `cargo clippy --all-targets` with adamantium's lint levels and its `clippy.toml`, and nothing else. Clippy's default lints are off for the run, so only the rules count. It prints Clippy's diagnostics and a summary on stderr. With `--format json` it prints a report on stdout instead, one entry per finding with the rule, message, file, line, and column. Arguments after `--` go to `cargo clippy`. The exit status is `0` when clean, `1` with findings, and `2` when the project did not build.
+`check` runs `cargo clippy --all-targets` with adamantium's rules and its `clippy.toml`, and nothing else. Clippy's default lints are off for the run, so only the rules count. The rules run as warnings during the check, so a crate with findings still builds and the crates and tests that depend on it are checked too. It prints Clippy's diagnostics and a summary on stderr. With `--format json` it prints a report on stdout instead, one entry per finding with the rule, message, file, line, and column. Arguments after `--` go to `cargo clippy`. The exit status is `0` when clean, `1` with findings, and `2` when the project did not build.
 
 The rules also require `overflow-checks = true` in the release profile. Integer overflow then panics in release builds, as it does in debug builds.
 

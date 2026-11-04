@@ -148,10 +148,14 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
         .env("CLIPPY_CONF_DIR", conf.path())
         .args(["clippy", "--all-targets", "--message-format=json"])
         .args(cargo_args)
-        // Only adamantium's rules count; a project runs plain Clippy for the rest.
-        .args(["--", "-A", "clippy::all"]);
+        // Only adamantium's rules count; a project runs plain Clippy for the
+        // rest. The rules run as warnings and every lint is capped at a
+        // warning, so a crate with findings still builds and the crates and
+        // test targets that depend on it are checked too. A lint the project
+        // itself denies would otherwise stop the build at the first crate.
+        .args(["--", "--cap-lints", "warn", "-A", "clippy::all"]);
     for lint in LINTS {
-        command.args(lint.flags());
+        command.args(["-W", &lint.qualified()]);
     }
     command
         .stdin(Stdio::null())
