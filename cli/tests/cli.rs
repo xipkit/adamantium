@@ -62,6 +62,16 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
     let first = &report["findings"][0];
     assert!(first["file"].as_str().unwrap().ends_with(".rs"));
     assert!(first["line"].as_u64().is_some());
+    // The binary depends on the library. Its finding is only reported when
+    // the library's findings do not fail the build and skip what depends on it.
+    assert!(
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["file"].as_str().unwrap().ends_with("src/main.rs")),
+        "the binary target was not checked: {rules:?}"
+    );
 }
 
 #[test]
