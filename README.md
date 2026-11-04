@@ -19,7 +19,7 @@ Install the subcommand:
 cargo install --locked --git https://github.com/xipkit/adamantium cargo-adamantium
 ```
 
-The crate needs Rust 1.85 or later. Both halves follow their own rules, so the repository is also an example of the fragment.
+The crate needs Rust 1.88 or later. Both halves follow their own rules, so the repository is also an example of the fragment.
 
 ## Check a project
 
