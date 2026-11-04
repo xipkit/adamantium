@@ -4,7 +4,7 @@ use std::{
     collections::HashSet,
     env, fs,
     io::{self, BufRead, BufReader, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Command, ExitCode, Stdio},
 };
 
@@ -257,10 +257,11 @@ fn classify(
     let Some(span) = diagnostic.spans.iter().find(|span| span.is_primary) else {
         return;
     };
+    let file = normalize(&span.file_name);
     let code = diagnostic.code.as_ref().map(|code| code.code.clone());
     let key = (
         code.clone().unwrap_or_default(),
-        span.file_name.clone(),
+        file.clone(),
         span.line_start,
         span.column_start,
     );
@@ -276,15 +277,36 @@ fn classify(
         Some(rule) if rules.contains(&rule) => findings.push(Finding {
             rule,
             message: diagnostic.message,
-            file: span.file_name.clone(),
+            file,
             line: Some(span.line_start),
             column: Some(span.column_start),
         }),
         _ if diagnostic.level == "error" => errors.push(Problem {
             message: diagnostic.message,
-            file: Some(span.file_name.clone()),
+            file: Some(file),
             line: Some(span.line_start),
         }),
         _ => {}
     }
+}
+
+/// Resolves `.` and `..` segments without touching the file system, so a
+/// file that two targets include under different spellings, such as
+/// `tests/../examples/shared.rs`, is reported once under one name.
+fn normalize(path: &str) -> String {
+    let mut parts: Vec<Component<'_>> = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if matches!(parts.last(), Some(Component::Normal(_))) => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts
+        .iter()
+        .collect::<PathBuf>()
+        .to_string_lossy()
+        .into_owned()
 }

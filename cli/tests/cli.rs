@@ -100,6 +100,15 @@ fn check_covers_every_workspace_member() {
         files.iter().any(|file| file.ends_with("member/src/lib.rs")),
         "the member package was not checked: {files:?}"
     );
+    // The root includes shared.rs through `#[path = "../shared.rs"]`.
+    assert!(
+        files.contains(&"shared.rs"),
+        "the included file is not reported under its plain name: {files:?}"
+    );
+    assert!(
+        files.iter().all(|file| !file.contains("..")),
+        "a path still has a parent segment: {files:?}"
+    );
 }
 
 #[test]
