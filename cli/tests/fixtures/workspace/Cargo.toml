@@ -1,0 +1,14 @@
+# A workspace with a root package and one member. Each has one finding, so
+# the check must cover both. Its own workspace, so Cargo does not look for a
+# parent.
+[workspace]
+members = ["member"]
+
+[package]
+name = "root"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[profile.release]
+overflow-checks = true

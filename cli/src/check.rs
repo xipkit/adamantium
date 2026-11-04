@@ -4,7 +4,7 @@ use std::{
     collections::HashSet,
     env, fs,
     io::{self, BufRead, BufReader, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Command, ExitCode, Stdio},
 };
 
@@ -146,7 +146,13 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
     command
         .current_dir(root)
         .env("CLIPPY_CONF_DIR", conf.path())
-        .args(["clippy", "--all-targets", "--message-format=json"])
+        .args(["clippy", "--all-targets", "--message-format=json"]);
+    // Cargo checks only the root package unless told otherwise, which would
+    // skip every other workspace member.
+    if !selects_packages(cargo_args) {
+        command.arg("--workspace");
+    }
+    command
         .args(cargo_args)
         // Only adamantium's rules count; a project runs plain Clippy for the
         // rest. The rules run as warnings and every lint is capped at a
@@ -226,6 +232,17 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
     })
 }
 
+/// Whether the arguments for `cargo clippy` already choose which packages to
+/// check, in which case adding `--workspace` would override that choice.
+fn selects_packages(cargo_args: &[String]) -> bool {
+    cargo_args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-p" | "--package" | "--workspace" | "--all" | "--exclude"
+        ) || arg.starts_with("--package=")
+    })
+}
+
 /// Sorts one diagnostic into a finding, a build error, or noise, printing it
 /// when `echo` is set. Diagnostics without a primary span, such as the
 /// "aborting due to N errors" summary, are dropped.
@@ -240,10 +257,11 @@ fn classify(
     let Some(span) = diagnostic.spans.iter().find(|span| span.is_primary) else {
         return;
     };
+    let file = normalize(&span.file_name);
     let code = diagnostic.code.as_ref().map(|code| code.code.clone());
     let key = (
         code.clone().unwrap_or_default(),
-        span.file_name.clone(),
+        file.clone(),
         span.line_start,
         span.column_start,
     );
@@ -259,15 +277,36 @@ fn classify(
         Some(rule) if rules.contains(&rule) => findings.push(Finding {
             rule,
             message: diagnostic.message,
-            file: span.file_name.clone(),
+            file,
             line: Some(span.line_start),
             column: Some(span.column_start),
         }),
         _ if diagnostic.level == "error" => errors.push(Problem {
             message: diagnostic.message,
-            file: Some(span.file_name.clone()),
+            file: Some(file),
             line: Some(span.line_start),
         }),
         _ => {}
     }
+}
+
+/// Resolves `.` and `..` segments without touching the file system, so a
+/// file that two targets include under different spellings, such as
+/// `tests/../examples/shared.rs`, is reported once under one name.
+fn normalize(path: &str) -> String {
+    let mut parts: Vec<Component<'_>> = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if matches!(parts.last(), Some(Component::Normal(_))) => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts
+        .iter()
+        .collect::<PathBuf>()
+        .to_string_lossy()
+        .into_owned()
 }
