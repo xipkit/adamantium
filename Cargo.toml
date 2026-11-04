@@ -1,6 +1,10 @@
 [workspace]
 members = ["cli"]
-exclude = ["cli/tests/fixtures/violations", "cli/tests/fixtures/clean"]
+exclude = [
+    "cli/tests/fixtures/violations",
+    "cli/tests/fixtures/clean",
+    "cli/tests/fixtures/workspace",
+]
 
 [workspace.package]
 version = "0.1.0"

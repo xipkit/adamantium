@@ -75,6 +75,34 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
 }
 
 #[test]
+fn check_covers_every_workspace_member() {
+    let output = adamantium()
+        .args(["adamantium", "check", "--format", "json"])
+        .arg(fixture("workspace"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let files: Vec<&str> = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|finding| finding["file"].as_str().unwrap())
+        .collect();
+    assert!(
+        files
+            .iter()
+            .any(|file| file.ends_with("src/lib.rs") && !file.contains("member")),
+        "the root package was not checked: {files:?}"
+    );
+    assert!(
+        files.iter().any(|file| file.ends_with("member/src/lib.rs")),
+        "the member package was not checked: {files:?}"
+    );
+}
+
+#[test]
 fn check_passes_the_clean_fixture_and_prints_a_summary() {
     let output = adamantium()
         .args(["check"])

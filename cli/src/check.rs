@@ -146,7 +146,13 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
     command
         .current_dir(root)
         .env("CLIPPY_CONF_DIR", conf.path())
-        .args(["clippy", "--all-targets", "--message-format=json"])
+        .args(["clippy", "--all-targets", "--message-format=json"]);
+    // Cargo checks only the root package unless told otherwise, which would
+    // skip every other workspace member.
+    if !selects_packages(cargo_args) {
+        command.arg("--workspace");
+    }
+    command
         .args(cargo_args)
         // Only adamantium's rules count; a project runs plain Clippy for the
         // rest. The rules run as warnings and every lint is capped at a
@@ -223,6 +229,17 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
         status,
         findings,
         errors,
+    })
+}
+
+/// Whether the arguments for `cargo clippy` already choose which packages to
+/// check, in which case adding `--workspace` would override that choice.
+fn selects_packages(cargo_args: &[String]) -> bool {
+    cargo_args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-p" | "--package" | "--workspace" | "--all" | "--exclude"
+        ) || arg.starts_with("--package=")
     })
 }
 
