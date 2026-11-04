@@ -1,4 +1,6 @@
-use adamantium::{Actor, Tasks};
+use adamantium::Actor;
+#[cfg(feature = "tokio")]
+use adamantium::Tasks;
 
 #[derive(Default, Clone, Debug, PartialEq)]
 struct Tally {
@@ -15,6 +17,7 @@ impl Tally {
     }
 }
 
+#[cfg(feature = "tokio")]
 #[tokio::test(flavor = "multi_thread")]
 async fn methods_run_one_at_a_time() {
     let tally = Actor::new(Tally::default());

@@ -10,7 +10,9 @@ use std::fmt;
 /// what remains and then get `None`.
 ///
 /// ```
+/// # #[cfg(feature = "tokio")]
 /// # use adamantium::{Channel, Tasks};
+/// # #[cfg(feature = "tokio")]
 /// # #[tokio::main] async fn main() -> Result<(), &'static str> {
 /// let numbers = Channel::<u64>::bounded(4);
 /// let total = Tasks::<&str>::run(async |t| {
@@ -35,6 +37,8 @@ use std::fmt;
 /// .await?;
 /// assert_eq!(total, 55);
 /// # Ok(()) }
+/// # #[cfg(not(feature = "tokio"))]
+/// # fn main() {}
 /// ```
 pub struct Channel<T> {
     sender: async_channel::Sender<T>,

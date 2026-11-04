@@ -1,3 +1,5 @@
+#![cfg(feature = "tokio")]
+
 use std::{
     sync::{
         Arc,
@@ -167,14 +169,21 @@ async fn concurrently_keeps_input_order_and_honors_the_limit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrently_stops_at_the_first_error() {
     let dropped = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(AtomicBool::new(false));
     let result = concurrently(0..3, 8, |n| {
         let dropped = Arc::clone(&dropped);
+        let started = Arc::clone(&started);
         async move {
             if n == 1 {
+                // The sibling must own its guard before an error can cancel it.
+                while !started.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
                 return Err("one");
             }
             if n == 2 {
                 let _guard = Dropped(dropped);
+                started.store(true, Ordering::SeqCst);
                 std::future::pending::<()>().await;
             }
             Ok(n)
