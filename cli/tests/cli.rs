@@ -112,6 +112,100 @@ fn check_covers_every_workspace_member() {
 }
 
 #[test]
+fn check_applies_the_skip_list() {
+    let output = adamantium()
+        .args(["adamantium", "check", "--format", "json"])
+        .arg(fixture("skips"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mut found: Vec<(String, String)> = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|finding| {
+            (
+                finding["rule"].as_str().unwrap().to_owned(),
+                finding["file"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            ("clippy::string_slice".to_owned(), "src/lib.rs".to_owned()),
+            ("clippy::unwrap_used".to_owned(), "src/lib.rs".to_owned()),
+        ],
+        "{stderr}"
+    );
+    assert_eq!(
+        report["skipped"],
+        serde_json::json!({
+            "clippy::indexing_slicing": 1,
+            "clippy::string_slice": 1,
+            "clippy::unwrap_used": 1,
+        }),
+        "{stderr}"
+    );
+
+    let output = adamantium()
+        .args(["adamantium", "check"])
+        .arg(fixture("skips"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("2 findings in src/lib.rs (3 skipped by the skip list in Cargo.toml)"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn check_rejects_an_unknown_rule_in_the_skip_list() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[package.metadata.adamantium]\nallow = [\"no_such_rule\"]\n",
+    )
+    .unwrap();
+    let output = adamantium().arg("check").arg(dir.path()).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("unknown rule `no_such_rule`"), "{stderr}");
+}
+
+#[test]
+fn init_leaves_out_rules_the_skip_list_allows() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[package.metadata.adamantium]\nskip = [\"tests/\"]\nallow = [\"indexing_slicing\", \"overflow_checks\"]\n\n[package.metadata.adamantium.exceptions]\nstring_slice = [\"src/text/\"]\n",
+    )
+    .unwrap();
+    let output = adamantium().arg("init").arg(dir.path()).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    let manifest = fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+    assert!(manifest.contains("unwrap_used = \"deny\""), "{manifest}");
+    assert!(manifest.contains("unsafe_code = \"forbid\""), "{manifest}");
+    assert!(
+        !manifest.contains("indexing_slicing = \"deny\""),
+        "{manifest}"
+    );
+    assert!(!manifest.contains("string_slice = \"deny\""), "{manifest}");
+    assert!(!manifest.contains("overflow-checks"), "{manifest}");
+    assert!(
+        stderr.contains("only apply to `cargo adamantium check`"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn check_passes_the_clean_fixture_and_prints_a_summary() {
     let output = adamantium()
         .args(["check"])

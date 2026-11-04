@@ -1,4 +1,5 @@
 mod check;
+mod config;
 mod lints;
 mod manifest;
 mod style;
@@ -102,7 +103,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
         } => check::run(&path, &cargo_args, matches!(format, ReportFormat::Json)),
         Command::Init { path, force } => {
             let root = manifest::root(&path)?;
-            let changes = manifest::init(&root, force)?;
+            let config = config::Config::load(&root)?;
+            let changes = manifest::init(&root, force, &config)?;
             let mut stderr = std::io::stderr().lock();
             if changes.notes.is_empty() {
                 writeln!(

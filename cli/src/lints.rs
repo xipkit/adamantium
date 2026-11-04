@@ -32,6 +32,9 @@ pub struct Lint {
 }
 
 /// The Clippy configuration, as shipped in the repository root.
+/// The rule name for the release profile check, which is not a Clippy lint.
+pub const OVERFLOW_RULE: &str = "adamantium::overflow_checks";
+
 pub const CLIPPY_TOML: &str = include_str!("../../clippy.toml");
 
 const fn rust(name: &'static str, level: Level, why: &'static str) -> Lint {

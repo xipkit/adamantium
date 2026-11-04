@@ -8,7 +8,10 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use toml_edit::{DocumentMut, Item, Table, value};
 
-use crate::lints::{CLIPPY_TOML, LINTS, Tool};
+use crate::{
+    config::Config,
+    lints::{CLIPPY_TOML, LINTS, OVERFLOW_RULE, Tool},
+};
 
 /// The directory holding a project's `Cargo.toml`, from a path to either.
 pub fn root(path: &Path) -> Result<PathBuf> {
@@ -56,8 +59,10 @@ pub struct Changes {
 
 /// Writes the rules into a project: the lint tables and the release
 /// profile's overflow check into `Cargo.toml`, and `clippy.toml` beside it.
-/// Running it again changes nothing.
-pub fn init(root: &Path, force: bool) -> Result<Changes> {
+/// Rules the skip list allows or excepts are left out of the tables, since a
+/// `[lints]` table cannot scope a rule to a path. Running it again changes
+/// nothing.
+pub fn init(root: &Path, force: bool, config: &Config) -> Result<Changes> {
     let mut changes = Changes::default();
     let manifest_path = root.join("Cargo.toml");
     let before = fs::read_to_string(&manifest_path)
@@ -101,9 +106,17 @@ pub fn init(root: &Path, force: bool) -> Result<Changes> {
         );
     }
     for tool in [Tool::Rust, Tool::Clippy] {
-        let table = table_in(lints, &tool.to_string(), false)?;
+        let name = tool.to_string();
+        let table = table_in(lints, &name, false)?;
         for lint in LINTS.iter().filter(|lint| lint.tool == tool) {
-            table.insert(lint.name, value(lint.level.to_string()));
+            if config.adopted(&lint.qualified()) {
+                table.insert(lint.name, value(lint.level.to_string()));
+            } else {
+                table.remove(lint.name);
+            }
+        }
+        if table.is_empty() {
+            lints.remove(&name);
         }
     }
 
@@ -125,9 +138,11 @@ pub fn init(root: &Path, force: bool) -> Result<Changes> {
         ));
     }
 
-    let profile = table_in(document, "profile", true)?;
-    let release = table_in(profile, "release", false)?;
-    release.insert("overflow-checks", value(true));
+    if config.adopted(OVERFLOW_RULE) {
+        let profile = table_in(document, "profile", true)?;
+        let release = table_in(profile, "release", false)?;
+        release.insert("overflow-checks", value(true));
+    }
 
     let after = doc.to_string();
     if after != before {
@@ -136,6 +151,13 @@ pub fn init(root: &Path, force: bool) -> Result<Changes> {
         changes
             .notes
             .push(format!("wrote the rules into {}", manifest_path.display()));
+        if config.skips_paths()
+            && let Some(table) = &config.table
+        {
+            changes.notes.push(format!(
+                "the paths in [{table}].skip only apply to `cargo adamantium check`; plain `cargo clippy` checks them too"
+            ));
+        }
     }
 
     let clippy_path = root.join("clippy.toml");
