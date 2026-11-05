@@ -73,17 +73,45 @@ fn every_mutation_keeps_shared_original_unchanged() {
 }
 
 #[test]
-fn unique_mutations_and_ownership_conversion_do_not_clone_elements() {
+fn writes_and_ownership_conversion_clone_only_when_needed() {
     static CLONES: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Debug, Hash, PartialEq, Eq)]
-    struct Counted(u8);
+    struct Counted(u16);
 
     impl Clone for Counted {
         fn clone(&self) -> Self {
             CLONES.fetch_add(1, Ordering::SeqCst);
             Self(self.0)
         }
+    }
+
+    {
+        let original: Set<_> = (0..1_000).map(Counted).collect();
+        let mut duplicate = original.clone();
+        assert!(!duplicate.insert(Counted(500)));
+        assert_eq!(CLONES.load(Ordering::SeqCst), 0);
+        assert!(duplicate.is_shared());
+        assert!(std::ptr::eq(
+            original.as_index_set(),
+            duplicate.as_index_set()
+        ));
+
+        let mut missing = original.clone();
+        assert!(!missing.remove(&Counted(1_000)));
+        assert_eq!(CLONES.load(Ordering::SeqCst), 0);
+        assert!(missing.is_shared());
+        assert!(std::ptr::eq(
+            original.as_index_set(),
+            missing.as_index_set()
+        ));
+
+        let mut cleared = original.clone();
+        cleared.clear();
+        assert!(cleared.is_empty());
+        assert!(!cleared.is_shared());
+        assert_eq!(original.len(), 1_000);
+        assert_eq!(CLONES.load(Ordering::SeqCst), 0);
     }
 
     let mut original = Set::from([Counted(1), Counted(2)]);

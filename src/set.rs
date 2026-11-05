@@ -153,7 +153,7 @@ impl<T: Hash + Eq> Set<T> {
 
 impl<T: Hash + Eq + Clone> Set<T> {
     /// Mutable access to the underlying `IndexSet`, copying it first if
-    /// another `Set` shares it. Every write below goes through this.
+    /// another `Set` shares it.
     pub fn make_mut(&mut self) -> &mut IndexSet<T> {
         Arc::make_mut(&mut self.0)
     }
@@ -161,6 +161,9 @@ impl<T: Hash + Eq + Clone> Set<T> {
     /// Inserts a value, returning whether it was new. An existing value
     /// keeps its position; a new value goes last.
     pub fn insert(&mut self, value: T) -> bool {
+        if self.is_shared() && self.0.contains(&value) {
+            return false;
+        }
         self.make_mut().insert(value)
     }
 
@@ -171,7 +174,10 @@ impl<T: Hash + Eq + Clone> Set<T> {
         T: Borrow<Q>,
         Q: ?Sized + Hash + Eq,
     {
-        self.make_mut().shift_remove(value)
+        let Some(index) = self.0.get_index_of(value) else {
+            return false;
+        };
+        self.make_mut().shift_remove_index(index).is_some()
     }
 
     /// Keeps only the values for which `keep` returns `true`, in their order.
@@ -181,7 +187,11 @@ impl<T: Hash + Eq + Clone> Set<T> {
 
     /// Removes every value.
     pub fn clear(&mut self) {
-        self.make_mut().clear();
+        if let Some(values) = Arc::get_mut(&mut self.0) {
+            values.clear();
+        } else {
+            *self = Self::new();
+        }
     }
 
     /// The owned `IndexSet`. Free when nothing else shares the storage.
