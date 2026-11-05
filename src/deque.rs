@@ -68,7 +68,7 @@ impl<T> Deque<T> {
 
 impl<T: Clone> Deque<T> {
     /// Mutable access to the underlying `VecDeque`, copying it first if
-    /// another `Deque` shares it. Every write below goes through this.
+    /// another `Deque` shares it.
     pub fn make_mut(&mut self) -> &mut VecDeque<T> {
         Arc::make_mut(&mut self.0)
     }
@@ -151,9 +151,14 @@ impl<T: Clone> Deque<T> {
         self.make_mut().truncate(len);
     }
 
-    /// Removes every element.
+    /// Removes every element, retaining capacity when uniquely owned.
+    /// Shared storage is replaced with empty storage without cloning elements.
     pub fn clear(&mut self) {
-        self.make_mut().clear();
+        if let Some(values) = Arc::get_mut(&mut self.0) {
+            values.clear();
+        } else {
+            *self = Self::new();
+        }
     }
 
     /// The owned `VecDeque`. Free when nothing else shares the storage.

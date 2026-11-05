@@ -14,7 +14,7 @@ cargo bench --locked -p adamantium --bench cow -- --save-baseline before
 cargo bench --locked -p adamantium --bench cow -- --baseline before
 ```
 
-Array and Map inputs contain 1,000 `usize` elements/entries; Str and Bytes
+Array, Map, Deque, and Set inputs contain 1,000 `usize` elements/entries; Str and Bytes
 contain 65,536 bytes. Invalid array indices and missing map keys are 1,000;
 present map keys are 500. Inputs and return values are passed through
 `black_box`. The harness uses 30 samples, a 300 ms warm-up, and a 1 s
@@ -48,3 +48,31 @@ and value clones each fell from 1,000 to zero. Unique clears clone nothing
 and retain capacity. Shared clears start with zero capacity and preserve the
 original value. Invalid or missing updates retain their existing storage in
 both ownership cases, including empty collections.
+
+## ADAM-114 measurements
+
+Local Apple M4, macOS 27.0.1, rustc 1.98.1, release profile with overflow
+checks, using the ADAM-105 harness settings above. Before: library at
+`28579b3`, with the new Deque and Set benchmark cases. After: the ADAM-114
+Deque clear change. Criterion mean point estimates, in nanoseconds per
+operation:
+
+| Operation | Shared before → after (ns) | Unique before → after (ns) |
+| --- | ---: | ---: |
+| Deque clear | 452.14 → 9.71 | 7.72 → 3.02 |
+| Set clear (unchanged implementation) | 23.85 → 10.63 | 173.71 → 200.54 |
+
+Set already used storage replacement when PR #9 landed, so its measurements
+are a control, not an improvement attributable to this change. Small timings
+and unique cases are sensitive to noise and setup's effect on caches.
+Deque's shared clear drops from 1,000 element clones to zero; Set remains
+at zero. Clone-counter tests also verify snapshot order, reuse after clear,
+and retained capacity for unique storage, including empty collections.
+
+To reproduce just these cases, run these before and after changing the
+library, using the same target directory:
+
+```sh
+cargo bench --locked -p adamantium --bench cow -- '(deque|set)/clear' --save-baseline before
+cargo bench --locked -p adamantium --bench cow -- '(deque|set)/clear' --baseline before
+```

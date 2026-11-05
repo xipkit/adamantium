@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use adamantium::{Array, Bytes, Map, Str};
+use adamantium::{Array, Bytes, Deque, Map, Set, Str};
 
 #[derive(Debug)]
 struct Counted {
@@ -274,35 +274,116 @@ fn bytes_unique_clear_retains_allocation() {
 }
 
 #[test]
+fn deque_shared_clear_does_not_clone_discarded_elements() {
+    let clones = Arc::new(AtomicUsize::new(0));
+    let original: Deque<_> = (0..1_000).map(|i| Counted::new(i, &clones)).collect();
+    let mut cleared = original.clone();
+    cleared.clear();
+
+    assert_eq!(clones.load(Ordering::Relaxed), 0);
+    assert!(cleared.is_empty());
+    assert_eq!(cleared.capacity(), 0);
+    assert!(!cleared.is_shared());
+    assert!(!original.is_shared());
+    assert!(original.iter().map(|v| v.value).eq(0..1_000));
+    cleared.push_back(Counted::new(7, &clones));
+    assert_eq!(original.len(), 1_000);
+    assert_eq!(cleared.front().unwrap().value, 7);
+}
+
+#[test]
+fn deque_unique_clear_retains_capacity_without_clones() {
+    let clones = Arc::new(AtomicUsize::new(0));
+    let mut deque = Deque::with_capacity(2_048);
+    deque.extend((0..1_000).map(|i| Counted::new(i, &clones)));
+    let capacity = deque.capacity();
+    deque.clear();
+
+    assert!(deque.is_empty());
+    assert_eq!(deque.capacity(), capacity);
+    assert_eq!(clones.load(Ordering::Relaxed), 0);
+    deque.push_back(Counted::new(7, &clones));
+    assert_eq!(deque.capacity(), capacity);
+}
+
+#[test]
+fn set_shared_clear_does_not_clone_discarded_values() {
+    let clones = Arc::new(AtomicUsize::new(0));
+    let original: Set<_> = (0..1_000).map(|i| Counted::new(i, &clones)).collect();
+    let mut cleared = original.clone();
+    cleared.clear();
+
+    assert_eq!(clones.load(Ordering::Relaxed), 0);
+    assert!(cleared.is_empty());
+    assert_eq!(cleared.as_index_set().capacity(), 0);
+    assert!(!cleared.is_shared());
+    assert!(!original.is_shared());
+    assert!(original.iter().map(|v| v.value).eq(0..1_000));
+    assert!(cleared.insert(Counted::new(7, &clones)));
+    assert_eq!(original.len(), 1_000);
+    assert_eq!(cleared.get(&7).unwrap().value, 7);
+}
+
+#[test]
+fn set_unique_clear_retains_capacity_without_clones() {
+    let clones = Arc::new(AtomicUsize::new(0));
+    let mut set = Set::with_capacity(2_048);
+    set.extend((0..1_000).map(|i| Counted::new(i, &clones)));
+    let capacity = set.as_index_set().capacity();
+    set.clear();
+
+    assert!(set.is_empty());
+    assert_eq!(set.as_index_set().capacity(), capacity);
+    assert_eq!(clones.load(Ordering::Relaxed), 0);
+    assert!(set.insert(Counted::new(7, &clones)));
+    assert_eq!(set.as_index_set().capacity(), capacity);
+}
+
+#[test]
 fn clearing_empty_collections_preserves_unique_capacity_and_shared_originals() {
     let mut array = Array::<u8>::with_capacity(128);
     let mut map = Map::<u8, u8>::with_capacity(128);
     let mut string = Str::from(String::with_capacity(128));
     let mut bytes = Bytes::from(Vec::with_capacity(128));
+    let mut deque = Deque::<u8>::with_capacity(128);
+    let mut set = Set::<u8>::with_capacity(128);
     let map_capacity = map.as_index_map().capacity();
+    let set_capacity = set.as_index_set().capacity();
     array.clear();
     map.clear();
     string.clear();
     bytes.clear();
+    deque.clear();
+    set.clear();
     assert_eq!(array.make_mut().capacity(), 128);
     assert_eq!(map.as_index_map().capacity(), map_capacity);
     assert_eq!(string.make_mut().capacity(), 128);
     assert_eq!(bytes.make_mut().capacity(), 128);
+    assert_eq!(deque.capacity(), 128);
+    assert_eq!(set.as_index_set().capacity(), set_capacity);
 
     let mut array_clone = array.clone();
     let mut map_clone = map.clone();
     let mut string_clone = string.clone();
     let mut bytes_clone = bytes.clone();
+    let mut deque_clone = deque.clone();
+    let mut set_clone = set.clone();
     array_clone.clear();
     map_clone.clear();
     string_clone.clear();
     bytes_clone.clear();
+    deque_clone.clear();
+    set_clone.clear();
     assert_eq!(array.make_mut().capacity(), 128);
     assert_eq!(map.as_index_map().capacity(), map_capacity);
     assert_eq!(string.make_mut().capacity(), 128);
     assert_eq!(bytes.make_mut().capacity(), 128);
+    assert_eq!(deque.capacity(), 128);
+    assert_eq!(set.as_index_set().capacity(), set_capacity);
     assert_eq!(array_clone.make_mut().capacity(), 0);
     assert_eq!(map_clone.as_index_map().capacity(), 0);
     assert_eq!(string_clone.make_mut().capacity(), 0);
     assert_eq!(bytes_clone.make_mut().capacity(), 0);
+    assert_eq!(deque_clone.capacity(), 0);
+    assert_eq!(set_clone.as_index_set().capacity(), 0);
 }

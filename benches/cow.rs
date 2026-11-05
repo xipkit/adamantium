@@ -1,6 +1,6 @@
 use std::{hint::black_box, time::Duration};
 
-use adamantium::{Array, Bytes, Map, Str};
+use adamantium::{Array, Bytes, Deque, Map, Set, Str};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 
 fn bench_value<T>(
@@ -26,6 +26,8 @@ fn bench_value<T>(
 fn cow(c: &mut Criterion) {
     let array: Array<usize> = (0..1_000).collect();
     let map: Map<usize, usize> = (0..1_000).map(|i| (i, i)).collect();
+    let deque: Deque<usize> = (0..1_000).collect();
+    let set: Set<usize> = (0..1_000).collect();
     let string = Str::from("x".repeat(65_536));
     let bytes = Bytes::from(vec![42; 65_536]);
 
@@ -46,6 +48,32 @@ fn cow(c: &mut Criterion) {
         };
         bench_value(c, "array/clear/1000", shared, array_setup, Array::clear);
         bench_value(c, "map/clear/1000", shared, map_setup, Map::clear);
+        bench_value(
+            c,
+            "deque/clear/1000",
+            shared,
+            || {
+                if shared {
+                    deque.clone()
+                } else {
+                    Deque::from(deque.as_vec_deque().clone())
+                }
+            },
+            Deque::clear,
+        );
+        bench_value(
+            c,
+            "set/clear/1000",
+            shared,
+            || {
+                if shared {
+                    set.clone()
+                } else {
+                    Set::from(set.as_index_set().clone())
+                }
+            },
+            Set::clear,
+        );
         bench_value(
             c,
             "str/clear/65536",
