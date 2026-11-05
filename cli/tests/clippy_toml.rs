@@ -6,13 +6,14 @@
 use std::{
     collections::BTreeSet,
     env, fs,
+    ops::Range,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
-use toml_edit::{DocumentMut, InlineTable, Value};
+use toml_edit::{Document, DocumentMut, InlineTable, Item, Value};
 
 /// The arrays of `clippy.toml` whose entries name paths.
 const LISTS: [&str; 2] = ["disallowed-types", "disallowed-methods"];
@@ -79,6 +80,7 @@ fn unresolved(
     let dir = tempfile::tempdir()?;
     let file = dir.path().join("clippy.toml");
     fs::write(&file, &config)?;
+    let entries = entries(&config)?;
     let output = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .current_dir(fixture("paths"))
         .env("CLIPPY_CONF_DIR", dir.path())
@@ -104,19 +106,35 @@ fn unresolved(
         if span.file_name != file {
             continue;
         }
-        let entry = config
-            .get(span.byte_start..span.byte_end)
-            .and_then(|text| text.parse::<Value>().ok())
-            .and_then(|entry| {
-                entry
-                    .as_inline_table()
-                    .and_then(|entry| entry.get("path"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            });
-        reported.insert(entry.unwrap_or(diagnostic.message));
+        let entry = entries
+            .iter()
+            .find(|(range, _)| range.start <= span.byte_start && span.byte_end <= range.end);
+        reported.insert(entry.map_or(diagnostic.message, |(_, path)| path.clone()));
     }
     Ok(reported)
+}
+
+/// Where each entry of `config` is, with its path. Clippy may span a whole
+/// entry or only its path, depending on its version, so a diagnostic belongs
+/// to the entry whose range contains its span.
+fn entries(config: &str) -> Result<Vec<(Range<usize>, String)>> {
+    let document = Document::parse(config)?;
+    let mut entries = Vec::new();
+    for list in LISTS {
+        let array = document
+            .as_item()
+            .get(list)
+            .and_then(Item::as_array)
+            .with_context(|| format!("no {list} array"))?;
+        for value in array {
+            let entry = value
+                .as_inline_table()
+                .with_context(|| format!("an entry that isn't an inline table: {value}"))?;
+            let range = entry.span().context("an entry without a span")?;
+            entries.push((range, path(entry)?.to_owned()));
+        }
+    }
+    Ok(entries)
 }
 
 /// Strips `allow-invalid` from every entry and adds a misspelled copy of each,
