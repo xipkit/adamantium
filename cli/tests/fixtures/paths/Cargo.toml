@@ -1,0 +1,15 @@
+# Uses each crate that Adamantium's `clippy.toml` names, so Clippy resolves the
+# paths in it. The tests choose the crates' features with `--features`. Its own
+# workspace, so Cargo does not look for a parent.
+[workspace]
+
+[package]
+name = "paths"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+futures = { version = "0.3", optional = true }
+parking_lot = { version = "0.12", optional = true }
+tokio = { version = "1", default-features = false, optional = true }

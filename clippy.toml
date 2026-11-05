@@ -8,6 +8,12 @@ allow-indexing-slicing-in-tests = true
 allow-panic-in-tests = true
 allow-dbg-in-tests = true
 
+# Every entry outside std has `allow-invalid`, because Clippy warns about each
+# path it can't resolve in a crate the project uses, and most of these items
+# exist only behind a crate feature the project may leave off. A test resolves
+# every path with all of the crates' features on, so a misspelled path still
+# fails it.
+
 disallowed-types = [
   { path = "std::rc::Rc", reason = "shared identity; use a value, or adamantium::Actor for state that tasks share" },
   { path = "std::rc::Weak", reason = "a weak reference implies a cycle, and values can't form one" },
@@ -16,33 +22,33 @@ disallowed-types = [
   { path = "std::cell::Cell", reason = "interior mutability without a lock; use a value" },
   { path = "std::sync::Mutex", reason = "use adamantium::Actor, which never holds its lock across an await or inside another actor" },
   { path = "std::sync::RwLock", reason = "use adamantium::Actor, which never holds its lock across an await or inside another actor" },
-  { path = "tokio::sync::Mutex", reason = "an async lock can be held across an await; use adamantium::Actor" },
-  { path = "tokio::sync::RwLock", reason = "an async lock can be held across an await; use adamantium::Actor" },
-  { path = "tokio::task::JoinSet", reason = "use adamantium::Tasks so every task has a scope that joins it" },
-  { path = "tokio::task::LocalSet", reason = "every task must be Send" },
+  { path = "tokio::sync::Mutex", reason = "an async lock can be held across an await; use adamantium::Actor", allow-invalid = true },
+  { path = "tokio::sync::RwLock", reason = "an async lock can be held across an await; use adamantium::Actor", allow-invalid = true },
+  { path = "tokio::task::JoinSet", reason = "use adamantium::Tasks so every task has a scope that joins it", allow-invalid = true },
+  { path = "tokio::task::LocalSet", reason = "every task must be Send", allow-invalid = true },
   { path = "parking_lot::Mutex", reason = "use adamantium::Actor", allow-invalid = true },
   { path = "parking_lot::RwLock", reason = "use adamantium::Actor", allow-invalid = true },
   { path = "futures::lock::Mutex", reason = "an async lock can be held across an await; use adamantium::Actor", allow-invalid = true },
 ]
 
 disallowed-methods = [
-  { path = "tokio::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks" },
-  { path = "tokio::task::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks" },
-  { path = "tokio::task::spawn_local", reason = "every task must be Send; spawn inside adamantium::Tasks" },
-  { path = "tokio::task::spawn_blocking", reason = "use adamantium::blocking, which propagates panics" },
-  { path = "tokio::task::block_in_place", reason = "blocks a worker thread; use adamantium::blocking" },
+  { path = "tokio::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "tokio::task::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "tokio::task::spawn_local", reason = "every task must be Send; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "tokio::task::spawn_blocking", reason = "use adamantium::blocking, which propagates panics", allow-invalid = true },
+  { path = "tokio::task::block_in_place", reason = "blocks a worker thread; use adamantium::blocking", allow-invalid = true },
   # A runtime's own entry points start the same tasks as the functions above.
   # `Runtime::block_on` is left out: `#[tokio::main]` and `#[tokio::test]`
   # expand to it, and it is how a program without them enters the runtime.
   # Tokio panics if it is called from inside a runtime.
-  { path = "tokio::runtime::Handle::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks" },
-  { path = "tokio::runtime::Handle::spawn_blocking", reason = "use adamantium::blocking, which propagates panics" },
-  { path = "tokio::runtime::Handle::block_on", reason = "blocks the calling thread; await the future" },
-  { path = "tokio::runtime::Runtime::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks" },
-  { path = "tokio::runtime::Runtime::spawn_blocking", reason = "use adamantium::blocking, which propagates panics" },
-  { path = "tokio::runtime::LocalRuntime::spawn_local", reason = "every task must be Send; spawn inside adamantium::Tasks" },
-  { path = "tokio::runtime::LocalRuntime::spawn_blocking", reason = "use adamantium::blocking, which propagates panics" },
-  { path = "tokio::runtime::LocalRuntime::block_on", reason = "every task must be Send; use #[tokio::main] or Runtime::block_on" },
+  { path = "tokio::runtime::Handle::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "tokio::runtime::Handle::spawn_blocking", reason = "use adamantium::blocking, which propagates panics", allow-invalid = true },
+  { path = "tokio::runtime::Handle::block_on", reason = "blocks the calling thread; await the future", allow-invalid = true },
+  { path = "tokio::runtime::Runtime::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "tokio::runtime::Runtime::spawn_blocking", reason = "use adamantium::blocking, which propagates panics", allow-invalid = true },
+  { path = "tokio::runtime::LocalRuntime::spawn_local", reason = "every task must be Send; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "tokio::runtime::LocalRuntime::spawn_blocking", reason = "use adamantium::blocking, which propagates panics", allow-invalid = true },
+  { path = "tokio::runtime::LocalRuntime::block_on", reason = "every task must be Send; use #[tokio::main] or Runtime::block_on", allow-invalid = true },
   # `task::Builder` exists only with `--cfg tokio_unstable` and Tokio's
   # `tracing` feature.
   { path = "tokio::task::Builder::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks", allow-invalid = true },
