@@ -1,8 +1,8 @@
 # Adamantium
 
-Adamantium is a fragment of Rust and the tools that keep a crate inside it. In the fragment, every value can cross a task. No lock outlives one synchronous method. No task outlives its scope. The only panics left are arithmetic overflow and stack exhaustion. Rust lets you write code like that. Adamantium makes it the only code you can write.
+Adamantium is a Rust library and set of lint rules for writing concurrent code with copy-on-write values, scoped tasks, actors, and bounded channels. The rules restrict features such as detached tasks, locks held across `await`, and common sources of panics.
 
-It has two halves. The `adamantium` library gives the fragment its vocabulary: copy-on-write values, a task scope, actors, and a bounded channel. The `cargo adamantium` subcommand runs Clippy with the rules that forbid everything else. The same subcommand also carries a [style review](#style-review) of the Google Rust style guide, built on the OpenAI Decisions API.
+The `cargo adamantium` subcommand checks projects against these rules. It also offers a [style review](#style-review) based on the Google Rust style guide and the OpenAI Decisions API.
 
 ## Install
 
@@ -24,7 +24,7 @@ Install the subcommand:
 cargo install --locked --git https://github.com/xipkit/adamantium cargo-adamantium
 ```
 
-The crate needs Rust 1.88 or later. Both halves follow their own rules, so the repository is also an example of the fragment.
+Adamantium requires Rust 1.88 or later. This repository uses the library and follows the same rules.
 
 ## Check a project
 
@@ -35,43 +35,45 @@ cargo adamantium init               # write the rules into Cargo.toml and clippy
 cargo adamantium rules              # list the rules and why each exists
 ```
 
-`check` runs `cargo clippy --all-targets` with adamantium's rules and its `clippy.toml`, and nothing else. Clippy's default lints are off for the run, so only the rules count. The rules run as warnings during the check, so a crate with findings still builds and the crates and tests that depend on it are checked too. Every workspace member is checked unless the arguments after `--` pick packages. It prints Clippy's diagnostics and a summary on stderr. With `--format json` it prints a report on stdout instead, one entry per finding with the rule, message, file, line, and column. Arguments after `--` go to `cargo clippy`. The exit status is `0` when clean, `1` with findings, and `2` when the project did not build.
+`check` runs `cargo clippy --all-targets` with Adamantium's rules and `clippy.toml`. It disables Clippy's default lints and runs the rules as warnings, allowing crates with findings and their dependents to be checked. It checks every workspace member unless arguments after `--` select packages; those arguments are passed to `cargo clippy`.
+
+The command prints diagnostics and a summary to stderr. With `--format json`, it prints a report to stdout with the rule, message, file, line, and column for each finding. The exit status is `0` when clean, `1` for findings, and `2` when the project did not build.
 
 The rules also require `overflow-checks = true` in the release profile. Integer overflow then panics in release builds, as it does in debug builds.
 
-`init` writes the same rules into a project, so plain `cargo clippy` applies them. It writes the `[lints]` tables, or `[workspace.lints]` in a workspace, the release profile's overflow check, and a `clippy.toml`. Rules the [skip list](#skipping-rules-and-paths) allows or excepts are left out. Running it again changes nothing. It refuses to replace a `clippy.toml` that differs unless you pass `--force`.
+`init` adds the rules to a project so plain `cargo clippy` applies them. It writes the `[lints]` tables, or `[workspace.lints]` in a workspace, the release profile's overflow check, and a `clippy.toml`. It excludes rules listed under `allow` or `exceptions` in the [skip list](#skipping-rules-and-paths). Running it again makes no changes, and it will not replace a different `clippy.toml` without `--force`.
 
 ## Skipping rules and paths
 
-A project adopts the rules one at a time with a skip list in its `Cargo.toml`:
+To adopt the rules gradually, add a skip list to `Cargo.toml`:
 
 ```toml
 [workspace.metadata.adamantium]
-skip = ["tests/", "examples/"]              # nothing is checked here
-allow = ["indexing_slicing", "unwrap_used"] # these rules are off, for now
+skip = ["tests/", "examples/"]              # skip findings in these paths
+allow = ["indexing_slicing", "unwrap_used"] # skip these rules throughout the project
 
 [workspace.metadata.adamantium.exceptions]
-future_not_send = ["src/syntax/", "src/bytecode.rs"] # this rule is off here
+future_not_send = ["src/syntax/", "src/bytecode.rs"] # skip this rule in these paths
 ```
 
-A single package uses `[package.metadata.adamantium]`. Paths are globs relative to the directory holding `Cargo.toml`. A path without wildcards also covers everything under it. Rules go by their bare name or by the qualified name that `cargo adamantium rules` prints. A name that is not a rule is an error, so a typo cannot turn a rule off.
+For a single package, use `[package.metadata.adamantium]`. Paths are globs relative to the directory containing `Cargo.toml`; paths without wildcards also cover their contents. Use either the bare rule name or the qualified name printed by `cargo adamantium rules`. Unknown rule names produce an error.
 
-`check` counts what the list left out, by rule, in the summary and in the `skipped` map of the JSON report. Remove a rule from `allow` to see how much work it needs. A project with a skip list runs `cargo adamantium check` in CI rather than plain `cargo clippy`, because a `[lints]` table cannot scope a rule to a path.
+`check` summarizes skipped findings and reports counts by rule in the JSON report's `skipped` map. Remove a rule from `allow` to see its findings. Projects with a skip list should run `cargo adamantium check` in CI because a `[lints]` table cannot scope a rule to a path.
 
-An agent that writes code for the project can read the rules the same way. `cargo adamantium rules --format json` gives the full list and the reason behind each rule.
+For a machine-readable list of rules and their reasons, run `cargo adamantium rules --format json`.
 
 ## The library
 
 ```rust
 use adamantium::{Actor, Array, Channel, Map, Str, Tasks, blocking, concurrently};
 
-// Values: a clone shares storage, and the first write copies it.
+// Clones share storage until a write makes a copy.
 let items = Array::from([Str::from("a"), Str::from("b")]);
 let mut more = items.clone();
 more.push("c".into());
 assert_eq!(items.len(), 2);
 
-// A scope owns its tasks. It waits for all of them, and an error in any ends it.
+// A scope owns its tasks and waits for them to finish.
 let (profile, feed) = Tasks::run(async |t| {
     let profile = t.spawn(fetch("/profile"));
     let feed = t.spawn(fetch("/feed"));
@@ -79,51 +81,51 @@ let (profile, feed) = Tasks::run(async |t| {
 })
 .await?;
 
-// Ordered parallel map, at most eight at a time.
+// Map in parallel, with a concurrency limit of eight.
 let pages = concurrently(urls, 8, fetch).await?;
 
-// An actor's methods run one at a time and never hold the lock across an await.
+// Access shared state without holding a lock across an await.
 let tally = Actor::new(Tally::default());
 tally.with(|t| t.record(&profile));
 let total = tally.read(Tally::total);
 
-// A bounded channel any task can send on or receive from.
+// Send and receive through a bounded channel.
 let feed = Channel::<Str>::bounded(16);
 
-// Code that blocks a thread runs on the blocking pool.
+// Run blocking work on the blocking pool.
 let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 ```
 
-- **`Str`, `Bytes`, `Array<T>`, and `Map<K, V>` are values.** Two names never see each other's writes. The runtime copies only when a shared value is written. Reads go through `Deref` where a slice or `str` view exists. `Map` has no `Index`, because indexing a missing key would panic. Writes that take a position return `None` or hand the value back instead of panicking. All four are `Send + Sync` when their element types are, and serialize with the `serde` feature.
-- **`Tasks<E>` is a scope.** `spawn` starts a task and `value` waits for one. `join`, or the end of `Tasks::run`, waits for all of them. A task's error reaches the body through `value`. An error nobody asked for is reported at join, so it is never lost, and the first error aborts the rest. A panic in a task is resumed in the scope. Name the error type, `Tasks::<E>::run`, when nothing in the body fixes it, which is the case when every error passes through `?`.
-- **`concurrently` is an ordered parallel map.** It runs a closure over items with a concurrency limit and returns the results in input order.
-- **`blocking` is the one way to block a thread.** It runs a closure on the blocking pool and resumes its panic if it has one.
-- **`Actor<S>` is state that tasks share.** `with` runs a closure with exclusive access, and `read` with shared access. A reading method such as `Tally::total` can be passed to `read` by name. Both are synchronous, so the lock cannot be held across an await. A `with` or `read` inside another, on any actor, panics instead of risking a deadlock.
-- **`Channel<T>` is a bounded queue.** Every clone can send and receive. A producer calls `close` when it is done. Receivers then drain what remains and get `None`.
+- **`Str`, `Bytes`, `Array<T>`, and `Map<K, V>`** use copy-on-write storage, so changes to a clone do not affect the original. Reads use `Deref` where a slice or `str` view exists. `Map` has no `Index` implementation, and writes that take a position return `None` or return the value instead of panicking. These types are `Send + Sync` when their element types are and support serialization with the `serde` feature.
+- **`Tasks<E>`** manages a scope of tasks. `spawn` starts a task, and `value` waits for its result. `join` and `Tasks::run` wait for remaining tasks. Unobserved task errors are returned at join; if the body or an unobserved task returns an error, the remaining tasks are aborted. Task panics resume in the scope. Specify the error type with `Tasks::<E>::run` when it cannot be inferred, such as when all errors pass through `?`.
+- **`concurrently`** maps items in parallel with a concurrency limit and returns results in input order.
+- **`blocking`** runs a closure on the blocking pool and resumes any panic on the calling task.
+- **`Actor<S>`** shares state between tasks. `with` provides exclusive access and `read` provides read-only access through synchronous closures, so neither holds the lock across an await. A read-only method such as `Tally::total` can be passed to `read`. Calling `with` or `read` from inside either method on any actor panics to prevent deadlocks.
+- **`Channel<T>`** is a bounded queue whose clones can send and receive. After a producer calls `close`, receivers drain the remaining items and then receive `None`.
 
 ## The rules
 
-The lint levels live in this repository's `[workspace.lints]` and the Clippy configuration in `clippy.toml`. `cargo adamantium rules` prints both. Together with the library they give a crate these properties:
+The lint levels are in this repository's `[workspace.lints]`, and the Clippy configuration is in `clippy.toml`. `cargo adamantium rules` prints both. The rules and library provide the following properties for code that follows them:
 
 | Property | Enforced by |
 | --- | --- |
-| No `unsafe`, so every other row rests on safe Rust | `unsafe_code = "forbid"` |
+| No `unsafe` code | `unsafe_code = "forbid"` |
 | Every value can cross a task | `future_not_send`; `Rc`, `RefCell`, `Cell`, and `LocalSet` disallowed |
-| No task outlives its scope | `tokio::spawn`, `spawn_local`, `JoinSet`, `std::thread::spawn`, and `scope` disallowed; `Tasks` is the only way to start one |
+| No task outlives its scope | `tokio::spawn`, `spawn_local`, `JoinSet`, `std::thread::spawn`, and `scope` disallowed; tasks use `Tasks` |
 | No lock is held across an await or inside another lock | `await_holding_lock`; `Mutex` and `RwLock` from std, tokio, parking_lot, and futures disallowed; `Actor::with` is synchronous and rejects nesting |
-| No worker thread is blocked | `std::thread::sleep`, `spawn_blocking`, and `block_in_place` disallowed; `blocking` is the one way to block |
+| No worker thread is blocked | `std::thread::sleep`, `spawn_blocking`, and `block_in_place` disallowed; blocking work uses `blocking` |
 | No panic from indexing, unwrapping, or an explicit `panic!` | `indexing_slicing`, `string_slice`, `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `unreachable` |
 | No silent truncation or wrap | `cast_possible_truncation`, `cast_possible_wrap`, `cast_sign_loss`; `overflow-checks = true` in release |
 | No leaks or cycles | `mem_forget`, `Box::leak`, `Arc::downgrade`, and `Weak` disallowed |
 | No skipped cleanup | `exit` |
 
-Tests are exempt from the panic rules. `unwrap`, indexing, and `panic!` are fine in `#[test]` functions and `#[cfg(test)]` modules. A helper function in an integration test file is not a test to Clippy, so it follows the rules.
+Tests are exempt from the panic rules, so `unwrap`, indexing, and `panic!` are allowed in `#[test]` functions and `#[cfg(test)]` modules. Clippy does not treat helper functions in integration test files as tests, so those functions follow the rules.
 
-The rules cannot promise everything. A receive that nobody sends to still hangs its scope, because no lint sees liveness. A dependency keeps its own unsafe code and panics. A Rust call that blocks without going through `blocking` still blocks a worker, because Clippy cannot tell what a foreign function does. Arithmetic overflow and stack exhaustion stay panics by choice. Checked arithmetic would put a `?` on every plus sign.
+The rules have limits. A receive can wait indefinitely if no message arrives and the channel remains open. Dependencies can still use unsafe code or panic, and Clippy cannot detect every call that blocks a worker thread. Arithmetic overflow and stack exhaustion can still panic.
 
 ## Style review
 
-`cargo adamantium style check` reviews the judgment-based parts of the [Google Rust style guide](https://google.github.io/styleguide/rustguide.html) with the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions). It produces findings for an agent or a person to look into. It does not edit source, and it does not replace rustfmt, Clippy, or code review.
+`cargo adamantium style check` uses the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) to review the judgment-based parts of the [Google Rust style guide](https://google.github.io/styleguide/rustguide.html). It returns findings for review; it does not edit source or replace rustfmt, Clippy, or code review.
 
 ```sh
 cargo adamantium style check                      # every .rs file under the current directory
@@ -132,13 +134,13 @@ cargo adamantium style check . --rule unnecessary_deep_clone --dry-run
 cargo adamantium style rules --format text
 ```
 
-It prints JSON by default, or a readable report with `--format text`. It finds Rust files recursively, respects ignore files, and skips hidden directories, `target`, and `node_modules`. It does not resolve Cargo workspace membership. Each file goes to the API in one request, together with the selected rules and any context. A finding covers the whole file, because Decisions gives no trustworthy location. The agent inspects the file and makes its own edit. A file or context over the API's 256 KiB input limit is reported as an error, not truncated. The exit status is `0` for a clean check or a dry run, `1` for findings, and `2` for an incomplete check.
+The command prints JSON by default, or a readable report with `--format text`. It finds Rust files recursively, respects ignore files, and skips hidden directories, `target`, and `node_modules`. It does not resolve Cargo workspace membership. Each file is sent to the API in a request with the selected rules and any context. Findings apply to the whole file because Decisions does not provide reliable locations. The file, path, and context must fit within the API's 256 KiB JSON input limit. The exit status is `0` for a clean check or dry run, `1` for findings, and `2` for an incomplete check.
 
-Transient failures are retried with exponential backoff and jitter, up to four attempts within three minutes per file. `Retry-After` is honored up to 30 seconds. Authentication, quota, and spending-limit errors are not retried. A service failure stops further requests and marks the remaining files as not checked. `--retry-from previous.json` resends only those files, with the same root, rules, and context, into a new report. Never redirect the output over the report being read.
+Transient failures are retried with exponential backoff and jitter, up to four attempts within three minutes per file. `Retry-After` is honored up to 30 seconds. Authentication, quota, and spending-limit errors are not retried. A service failure stops further requests and marks the remaining files as unchecked. Use `--retry-from previous.json` to retry failed and unchecked files in a new report. Supply the same scan root and `--rule` options, and pass `--context` again if needed. Do not redirect the output over the report being read.
 
-Set `OPENAI_API_KEY`. On macOS the `openai-api-key` Keychain item is read when the variable is unset. Source files and context go to OpenAI. Results are model estimates, not deterministic lints, so evaluate them on labeled examples before letting them block anything. Source comments and strings are treated as untrusted evidence, and the question instructions say so. That does not guarantee resistance to adversarial input.
+Set `OPENAI_API_KEY`. On macOS, the `openai-api-key` Keychain item is used when the variable is unset. Source files and context are sent to OpenAI. Results are model estimates. Evaluate them on labeled examples before using them as a blocking check. The questions instruct the model to treat source comments and strings as untrusted evidence, but this does not guarantee resistance to adversarial input.
 
-The rules live in [`style/rules/google-rust-decisions.json`](style/rules/google-rust-decisions.json): 51 questions, mapped to the guide in [`style/rules/coverage.md`](style/rules/coverage.md), with 114 labeled examples in [`style/fixtures/google-rust-cases.json`](style/fixtures/google-rust-cases.json). `node style/scripts/evaluate-decisions.mjs` runs the examples against the API, also with `--dry-run` and `--rule`. The full run makes 114 billable requests.
+The rules are in [`style/rules/google-rust-decisions.json`](style/rules/google-rust-decisions.json), with their guide coverage in [`style/rules/coverage.md`](style/rules/coverage.md) and labeled examples in [`style/fixtures/google-rust-cases.json`](style/fixtures/google-rust-cases.json). Run `node style/scripts/evaluate-decisions.mjs` to evaluate the examples against the API. It also accepts `--dry-run` and `--rule`. The full run makes 114 billable requests.
 
 ## Development
 
@@ -154,4 +156,4 @@ node --test style/scripts/evaluate-decisions.test.mjs
 
 [GitHub Actions](.github/workflows/ci.yml) runs the same commands on pull requests and pushes to `main`.
 
-The repository applies its own rules to itself. The library must use a few things it forbids, such as the `JoinSet` inside `Tasks` and the `Mutex` inside `Actor`. Each carries an `allow` with a reason. The CLI tests run `cargo adamantium check` against two fixture crates. One breaks every rule once, and one lives inside the fragment. They need Clippy, and network access the first time.
+The repository follows its own rules. Where the library needs restricted features, such as the `JoinSet` inside `Tasks` and the `Mutex` inside `Actor`, the code uses an `allow` with a reason. The CLI tests run `cargo adamantium check` against fixture crates with and without rule violations. They require Clippy and network access on the first run.
