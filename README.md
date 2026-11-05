@@ -128,10 +128,10 @@ The lint levels are in this repository's `[workspace.lints]`, and the Clippy con
 | Property | Enforced by |
 | --- | --- |
 | No `unsafe` code | `unsafe_code = "forbid"` |
-| Every value can cross a task | `future_not_send`; `Rc`, `RefCell`, `Cell`, and `LocalSet` disallowed |
-| No task outlives its scope | `tokio::spawn`, `spawn_local`, `JoinSet`, `std::thread::spawn`, and `scope` disallowed; tasks use `Tasks` |
+| Every value can cross a task | `future_not_send`; `Rc`, `RefCell`, `Cell`, and `LocalSet` disallowed, and so are `LocalRuntime`'s entry points |
+| No task outlives its scope | `tokio::spawn`, `spawn_local`, `JoinSet`, the spawn methods of Tokio's `Handle`, `Runtime`, `LocalRuntime`, and `task::Builder`, `std::thread::spawn`, and `scope` disallowed; tasks use `Tasks` |
 | No lock is held across an await or inside another lock | `await_holding_lock`; `Mutex` and `RwLock` from std, tokio, parking_lot, and futures disallowed; `Actor::with` is synchronous and rejects nesting |
-| No worker thread is blocked | `std::thread::sleep`, `spawn_blocking`, and `block_in_place` disallowed; blocking work uses `blocking` |
+| No worker thread is blocked | `std::thread::sleep`, `block_in_place`, every Tokio `spawn_blocking`, and `block_on` on a `Handle` or `LocalRuntime` disallowed; blocking work uses `blocking` |
 | No panic from indexing, unwrapping, or an explicit `panic!` | `indexing_slicing`, `string_slice`, `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `unreachable` |
 | No silent truncation or wrap | `cast_possible_truncation`, `cast_possible_wrap`, `cast_sign_loss`; `overflow-checks = true` in release |
 | No leaks or cycles | `mem_forget`, `Box::leak`, `Arc::downgrade`, and `Weak` disallowed |
@@ -139,7 +139,7 @@ The lint levels are in this repository's `[workspace.lints]`, and the Clippy con
 
 Tests are exempt from the panic rules, so `unwrap`, indexing, and `panic!` are allowed in `#[test]` functions and `#[cfg(test)]` modules. Clippy does not treat helper functions in integration test files as tests, so those functions follow the rules.
 
-The rules have limits. A receive can wait indefinitely if no message arrives and the channel remains open. Dependencies can still use unsafe code or panic, and Clippy cannot detect every call that blocks a worker thread. Arithmetic overflow and stack exhaustion can still panic.
+The rules have limits. A receive can wait indefinitely if no message arrives and the channel remains open. Dependencies can still use unsafe code or panic, and Clippy cannot detect every call that blocks a worker thread. `Runtime::block_on` is allowed because `#[tokio::main]` and `#[tokio::test]` expand to it; called inside a runtime, it panics at run time instead of blocking. Arithmetic overflow and stack exhaustion can still panic.
 
 ## Style review
 

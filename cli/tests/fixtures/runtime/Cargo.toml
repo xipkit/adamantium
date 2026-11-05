@@ -1,0 +1,17 @@
+# Every Tokio runtime entry point the rules disallow, called once as a method
+# and once by path, beside the ones they allow. Each line that must be reported
+# ends in `// disallowed`. Its own workspace, so Cargo does not look for a
+# parent.
+[workspace]
+
+[package]
+name = "runtime"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[profile.release]
+overflow-checks = true
