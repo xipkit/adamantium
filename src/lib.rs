@@ -2,7 +2,7 @@
 //! no lock outlives one synchronous method, and no task outlives its scope.
 //!
 //! The crate has two halves. The library gives that fragment its vocabulary:
-//! copy-on-write values ([`Str`], [`Bytes`], [`Array`], [`Map`]), a
+//! copy-on-write values ([`Str`], [`Bytes`], [`Array`], [`Map`], [`Set`]), a
 //! structured task scope (`Tasks`), shared state whose methods run one at
 //! a time ([`Actor`]), a bounded channel ([`Channel`]), and `blocking` for
 //! code that must block a thread. The `cargo adamantium` subcommand applies
@@ -22,6 +22,7 @@ mod array;
 mod bytes;
 mod channel;
 mod map;
+mod set;
 mod string;
 #[cfg(feature = "tokio")]
 mod tasks;
@@ -31,6 +32,7 @@ pub use array::Array;
 pub use bytes::Bytes;
 pub use channel::{Channel, Closed};
 pub use map::Map;
+pub use set::Set;
 pub use string::Str;
 #[cfg(feature = "tokio")]
 pub use tasks::{Task, Tasks, blocking, concurrently};
