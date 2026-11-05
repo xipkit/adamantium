@@ -74,6 +74,65 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
     );
 }
 
+/// Each fixture must produce a disallowed method finding on exactly the lines
+/// of its `src` files that end in `// disallowed`, and on no others. `runtime`
+/// covers Tokio's runtime entry points; `unstable` covers `task::Builder`,
+/// which needs `--cfg tokio_unstable`.
+#[test]
+fn check_reports_the_tokio_runtime_entry_points() {
+    for name in ["runtime", "unstable"] {
+        let root = fixture(name);
+        let mut marked = Vec::new();
+        let mut directories = vec![root.join("src")];
+        while let Some(directory) = directories.pop() {
+            for entry in fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    directories.push(path);
+                    continue;
+                }
+                let file = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                for (index, line) in fs::read_to_string(&path).unwrap().lines().enumerate() {
+                    if line.ends_with("// disallowed") {
+                        marked.push((file.clone(), u64::try_from(index + 1).unwrap()));
+                    }
+                }
+            }
+        }
+        marked.sort();
+        assert!(!marked.is_empty(), "{name} marks no lines");
+
+        let output = adamantium()
+            .args(["adamantium", "check", "--format", "json"])
+            .arg(&root)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["errors"], serde_json::json!([]), "{stderr}");
+        let mut reported: Vec<(String, u64)> = report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|finding| finding["rule"] == "clippy::disallowed_methods")
+            .map(|finding| {
+                (
+                    finding["file"].as_str().unwrap().to_owned(),
+                    finding["line"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        reported.sort();
+        assert_eq!(reported, marked, "{name}: {stderr}");
+    }
+}
+
 #[test]
 fn check_covers_every_workspace_member() {
     let output = adamantium()

@@ -1,0 +1,4 @@
+# `tokio::task::Builder` exists only with this cfg and Tokio's `tracing`
+# feature.
+[build]
+rustflags = ["--cfg", "tokio_unstable"]

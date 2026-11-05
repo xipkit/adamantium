@@ -1,0 +1,16 @@
+# Every `tokio::task::Builder` spawn the rules disallow, called once as a
+# method and once by path. Each line that must be reported ends in
+# `// disallowed`. Its own workspace, so Cargo does not look for a parent.
+[workspace]
+
+[package]
+name = "unstable"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "tracing"] }
+
+[profile.release]
+overflow-checks = true
