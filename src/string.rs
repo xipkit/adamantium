@@ -41,9 +41,14 @@ impl Str {
         self.make_mut().push(c);
     }
 
-    /// Removes every character.
+    /// Removes every character, retaining capacity when uniquely owned.
+    /// Shared storage is replaced with empty storage without copying characters.
     pub fn clear(&mut self) {
-        self.make_mut().clear();
+        if let Some(string) = Arc::get_mut(&mut self.0) {
+            string.clear();
+        } else {
+            *self = Self::new();
+        }
     }
 
     /// The owned `String`. Free when nothing else shares the storage.
