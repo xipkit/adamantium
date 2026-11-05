@@ -53,6 +53,12 @@ fn take_oldest<E>(errors: &SharedErrors<E>) -> Option<E> {
     lock(errors).recorded.pop_first().map(|(_, error)| error)
 }
 
+fn no_result() -> ! {
+    panic::resume_unwind(Box::new(
+        "adamantium: a task ended without a result and without a panic",
+    ))
+}
+
 /// A scope that owns the tasks spawned inside it.
 ///
 /// No task outlives its scope: [`join`](Self::join) waits for every task,
@@ -209,9 +215,7 @@ impl<E: Send + 'static> Tasks<E> {
                 self.resume_if_panic(join_error).await;
             }
         }
-        panic::resume_unwind(Box::new(
-            "adamantium: a task ended without a result and without a panic",
-        ))
+        no_result()
     }
 
     /// Resumes a task's panic after aborting and draining the other tasks.
@@ -239,6 +243,17 @@ impl<E> fmt::Debug for Tasks<E> {
     }
 }
 
+impl<T, E> Task<T, E> {
+    /// The value of a task whose scope has joined without an error or a panic.
+    /// The only way such a task has no value is that its runtime shut down.
+    fn into_finished(mut self) -> T {
+        match self.rx.try_recv() {
+            Ok(Ok(value)) => value,
+            _ => no_result(),
+        }
+    }
+}
+
 impl<T, E> fmt::Debug for Task<T, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Task")
@@ -246,9 +261,11 @@ impl<T, E> fmt::Debug for Task<T, E> {
 }
 
 /// Runs `f` on every item, at most `limit` at a time, and returns the
-/// results in input order. The first error ends the whole operation and
-/// aborts the items still running. Each item runs as a task in its own
-/// scope, so this needs a Tokio runtime.
+/// results in input order, whatever order the items finish in. The first
+/// error to happen ends the whole operation, even with earlier items still
+/// pending: the remaining items are aborted and drained, then the error is
+/// returned. A panic does the same and is resumed here. Each item runs as a
+/// task in its own scope, so this needs a Tokio runtime.
 pub fn concurrently<I, F, Fut, T, E>(
     items: I,
     limit: usize,
@@ -280,15 +297,10 @@ where
             .collect()
     };
     async move {
-        let body = async {
-            let mut values = Vec::with_capacity(handles.len());
-            for handle in handles {
-                values.push(tasks.value(handle).await?);
-            }
-            Ok(values)
-        }
-        .await;
-        tasks.join(body).await
+        // Items finish in any order, and join sees each as it ends, so a
+        // failure never waits behind an earlier item.
+        tasks.join(Ok(())).await?;
+        Ok(handles.into_iter().map(Task::into_finished).collect())
     }
 }
 
