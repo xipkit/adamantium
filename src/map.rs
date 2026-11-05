@@ -16,6 +16,128 @@ use indexmap::IndexMap;
 /// because indexing a missing key would panic; use [`get`](Self::get).
 pub struct Map<K, V>(Arc<IndexMap<K, V>>);
 
+/// An occupied or vacant entry returned by [`Map::entry`].
+///
+/// The map's storage is already unique when this view is created. Updating
+/// an occupied entry keeps its position; inserting a vacant entry appends it.
+#[derive(Debug)]
+pub enum Entry<'a, K, V> {
+    /// An entry whose key is already in the map.
+    Occupied(OccupiedEntry<'a, K, V>),
+    /// An entry whose key is absent from the map.
+    Vacant(VacantEntry<'a, K, V>),
+}
+
+/// A view of an existing entry, created by [`Map::entry`].
+#[derive(Debug)]
+pub struct OccupiedEntry<'a, K, V>(indexmap::map::OccupiedEntry<'a, K, V>);
+
+/// A view of an absent entry, created by [`Map::entry`].
+#[derive(Debug)]
+pub struct VacantEntry<'a, K, V>(indexmap::map::VacantEntry<'a, K, V>);
+
+impl<'a, K, V> Entry<'a, K, V> {
+    /// The stored key if occupied, or the supplied key if vacant.
+    pub fn key(&self) -> &K {
+        match self {
+            Self::Occupied(entry) => entry.key(),
+            Self::Vacant(entry) => entry.key(),
+        }
+    }
+
+    /// Mutable access to the value, inserting `default` last if vacant.
+    pub fn or_insert(self, default: V) -> &'a mut V {
+        match self {
+            Self::Occupied(entry) => entry.into_mut(),
+            Self::Vacant(entry) => entry.insert(default),
+        }
+    }
+
+    /// Mutable access to the value, calling `default` only if vacant and
+    /// inserting its result last.
+    pub fn or_insert_with(self, default: impl FnOnce() -> V) -> &'a mut V {
+        match self {
+            Self::Occupied(entry) => entry.into_mut(),
+            Self::Vacant(entry) => entry.insert(default()),
+        }
+    }
+
+    /// Modifies an occupied value in place, returning the entry for chaining.
+    /// The closure is not called for a vacant entry.
+    pub fn and_modify(mut self, modify: impl FnOnce(&mut V)) -> Self {
+        if let Self::Occupied(entry) = &mut self {
+            modify(entry.get_mut());
+        }
+        self
+    }
+
+    /// Mutable access to the value, constructing and inserting a default
+    /// value last only if vacant.
+    pub fn or_default(self) -> &'a mut V
+    where
+        V: Default,
+    {
+        self.or_insert_with(V::default)
+    }
+}
+
+impl<'a, K, V> OccupiedEntry<'a, K, V> {
+    /// The key stored in the map.
+    pub fn key(&self) -> &K {
+        self.0.key()
+    }
+
+    /// The current value.
+    pub fn get(&self) -> &V {
+        self.0.get()
+    }
+
+    /// Mutable access to the current value.
+    pub fn get_mut(&mut self) -> &mut V {
+        self.0.get_mut()
+    }
+
+    /// Mutable access to the value for the lifetime of the map borrow.
+    pub fn into_mut(self) -> &'a mut V {
+        self.0.into_mut()
+    }
+
+    /// Replaces the value, returning the old one and keeping its position.
+    pub fn insert(&mut self, value: V) -> V {
+        self.0.insert(value)
+    }
+
+    /// Removes the entry and returns its value, keeping the other entries
+    /// in order. Takes O(n) time to shift subsequent entries.
+    pub fn remove(self) -> V {
+        self.0.shift_remove()
+    }
+
+    /// Removes and returns the stored key and value, keeping the other
+    /// entries in order. Takes O(n) time to shift subsequent entries.
+    pub fn remove_entry(self) -> (K, V) {
+        self.0.shift_remove_entry()
+    }
+}
+
+impl<'a, K, V> VacantEntry<'a, K, V> {
+    /// The key supplied to [`Map::entry`].
+    pub fn key(&self) -> &K {
+        self.0.key()
+    }
+
+    /// Returns the supplied key without inserting it.
+    pub fn into_key(self) -> K {
+        self.0.into_key()
+    }
+
+    /// Inserts the key and value last, returning mutable access to the value
+    /// for the lifetime of the map borrow.
+    pub fn insert(self, value: V) -> &'a mut V {
+        self.0.insert(value)
+    }
+}
+
 impl<K, V> Map<K, V> {
     /// An empty map.
     pub fn new() -> Self {
@@ -109,6 +231,32 @@ impl<K: Hash + Eq + Clone, V: Clone> Map<K, V> {
     /// existing key keeps its position; a new key goes last.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.make_mut().insert(key, value)
+    }
+
+    /// An occupied or vacant entry for `key`, using a single lookup.
+    ///
+    /// Obtaining an entry immediately detaches shared storage, cloning its
+    /// keys and values even if the entry is only inspected or dropped.
+    /// Unique storage is reused without cloning keys or values. The supplied
+    /// key is moved into the entry without cloning it. Use [`get`](Self::get)
+    /// for read-only access that preserves sharing.
+    ///
+    /// ```
+    /// use adamantium::Map;
+    ///
+    /// let mut counts = Map::from([("red", 1)]);
+    /// let original = counts.clone();
+    /// counts.entry("red").and_modify(|count| *count += 1).or_insert(1);
+    /// counts.entry("blue").or_insert_with(|| 1);
+    /// assert_eq!(counts.get("red"), Some(&2));
+    /// assert_eq!(original.get("red"), Some(&1));
+    /// assert_eq!(counts.keys().copied().collect::<Vec<_>>(), ["red", "blue"]);
+    /// ```
+    pub fn entry(&mut self, key: K) -> Entry<'_, K, V> {
+        match self.make_mut().entry(key) {
+            indexmap::map::Entry::Occupied(entry) => Entry::Occupied(OccupiedEntry(entry)),
+            indexmap::map::Entry::Vacant(entry) => Entry::Vacant(VacantEntry(entry)),
+        }
     }
 
     /// Removes a key, keeping the order of the other entries.
