@@ -83,6 +83,40 @@ fn or_default_returns_mutable_access_for_both_variants() {
 }
 
 #[test]
+fn or_default_constructs_a_value_only_for_vacant_entries() {
+    static DEFAULTS: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Clone)]
+    struct CountedDefault(usize);
+
+    impl Default for CountedDefault {
+        fn default() -> Self {
+            DEFAULTS.fetch_add(1, Ordering::Relaxed);
+            Self(0)
+        }
+    }
+
+    for shared in [false, true] {
+        let mut map = Map::from([("a", CountedDefault(7))]);
+        let original = shared.then(|| map.clone());
+        let before = DEFAULTS.load(Ordering::Relaxed);
+
+        assert_eq!(map.entry("a").or_default().0, 7);
+        assert_eq!(DEFAULTS.load(Ordering::Relaxed), before);
+
+        map.entry("b").or_default().0 += 2;
+        assert_eq!(DEFAULTS.load(Ordering::Relaxed), before + 1);
+        assert_eq!(map.entry("b").or_default().0, 2);
+        assert_eq!(DEFAULTS.load(Ordering::Relaxed), before + 1);
+
+        if let Some(original) = original {
+            assert_eq!(original.get("a").map(|v| v.0), Some(7));
+            assert!(!original.contains_key("b"));
+        }
+    }
+}
+
+#[test]
 fn occupied_handles_expose_and_replace_values_without_moving_keys() {
     for shared in [false, true] {
         let mut map = Map::from([("c", 3), ("a", 1), ("b", 2)]);
