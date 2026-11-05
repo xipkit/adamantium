@@ -80,9 +80,9 @@ fn a_closed_channel_drains_then_ends() {
         poll_once(pin!(ch.receive()), &counter),
         Poll::Ready(Some(1))
     );
-    assert_eq!(ch.try_receive(), Some(2));
+    assert_eq!(ch.try_receive(), Ok(2));
     assert_eq!(poll_once(pin!(ch.receive()), &counter), Poll::Ready(None));
-    assert_eq!(ch.try_receive(), None);
+    assert_eq!(ch.try_receive(), Err(TryReceiveError::Closed));
     assert!(ch.is_empty());
 }
 
@@ -121,9 +121,15 @@ fn nonblocking_operations_distinguish_full_empty_and_closed() {
     assert_eq!(receiver.try_receive(), Err(TryReceiveError::Closed));
 
     let combined = Channel::bounded(1);
-    combined.try_send(1).unwrap();
+    assert_eq!(combined.try_receive(), Err(TryReceiveError::Empty));
+    assert_eq!(combined.try_send(1), Ok(()));
+    assert_eq!(combined.try_receive(), Ok(1));
+    assert_eq!(combined.try_receive(), Err(TryReceiveError::Empty));
+    assert_eq!(combined.try_send(2), Ok(()));
     assert!(combined.close());
-    assert_eq!(combined.try_send(2), Err(TrySendError::Closed(2)));
+    assert_eq!(combined.try_send(3), Err(TrySendError::Closed(3)));
+    assert_eq!(combined.try_receive(), Ok(2));
+    assert_eq!(combined.try_receive(), Err(TryReceiveError::Closed));
 }
 
 #[test]

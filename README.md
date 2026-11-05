@@ -106,9 +106,9 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 - **`Channel<T>`** is a bounded queue whose clones can send and receive. Consume it with `split()` to get separate clonable **`Sender<T>`** and **`Receiver<T>`** handles. Dropping the last sender closes the channel; receivers drain queued messages and then receive `None`. Dropping the last receiver wakes pending sends with `Closed(value)`. Any retained combined `Channel` clones still own both endpoints, so drop or split all of them before relying on endpoint-drop closure. Either endpoint or a combined handle can also call `close()` explicitly.
 
 `Sender::try_send` and `Channel::try_send` return `TrySendError::Full(value)` or
-`TrySendError::Closed(value)` without waiting. `Receiver::try_receive` returns
-`Ok(value)`, `TryReceiveError::Empty`, or `TryReceiveError::Closed` (once drained).
-The existing combined `Channel::try_receive` keeps its `Option<T>` return type.
+`TrySendError::Closed(value)` without waiting. `Receiver::try_receive` and
+`Channel::try_receive` return `Ok(value)`, `Err(TryReceiveError::Empty)` while
+open and empty, or `Err(TryReceiveError::Closed)` once closed and drained.
 These channel operations work with `default-features = false`, without Tokio:
 
 ```rust

@@ -75,7 +75,8 @@ pub enum TrySendError<T> {
     Closed(T),
 }
 
-/// Returned by [`Receiver::try_receive`] when no message can be received.
+/// Returned by [`Receiver::try_receive`] or [`Channel::try_receive`] when no
+/// message can be received.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TryReceiveError {
     /// The channel is empty but still open.
@@ -141,11 +142,11 @@ impl<T> Channel<T> {
         self.receiver.receive().await
     }
 
-    /// Receives a value if one is waiting. Returns `None` when the channel
-    /// is empty, whether or not it is closed. For distinct empty and closed
-    /// outcomes, use [`Receiver::try_receive`] after [`split`](Self::split).
-    pub fn try_receive(&self) -> Option<T> {
-        self.receiver.try_receive().ok()
+    /// Receives without waiting. Returns [`TryReceiveError::Empty`] while
+    /// the channel is open and empty, or [`TryReceiveError::Closed`] once
+    /// it is closed and drained.
+    pub fn try_receive(&self) -> Result<T, TryReceiveError> {
+        self.receiver.try_receive()
     }
 
     /// Closes the channel. Sends fail from now on; receives drain what is
@@ -259,8 +260,9 @@ impl<T> Receiver<T> {
         self.inner.recv().await.ok()
     }
 
-    /// Receives without waiting. Unlike [`Channel::try_receive`], this
-    /// distinguishes an empty open channel from a closed, drained channel.
+    /// Receives without waiting. Returns [`TryReceiveError::Empty`] while
+    /// the channel is open and empty, or [`TryReceiveError::Closed`] once
+    /// it is closed and drained.
     pub fn try_receive(&self) -> Result<T, TryReceiveError> {
         self.inner.try_recv().map_err(|error| match error {
             async_channel::TryRecvError::Empty => TryReceiveError::Empty,
