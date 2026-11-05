@@ -292,7 +292,9 @@ where
     T: Send + 'static,
     E: Send + 'static,
 {
-    let mut items = items.into_iter();
+    // The loop comes back for another item after every join, and an iterator
+    // may resume or panic if it is called again after its first `None`.
+    let mut items = items.into_iter().fuse();
     let limit = limit.max(1);
     async move {
         let mut tasks = Tasks::new();

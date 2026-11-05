@@ -410,6 +410,21 @@ on_both_runtimes! {
         assert_eq!(taken.load(Ordering::SeqCst), 4);
     }
 
+    // This iterator would resume after its `None`, and the window still has an
+    // item to wait for when it returns that `None`.
+    async fn concurrently_takes_nothing_after_the_first_none() {
+        let calls = AtomicUsize::new(0);
+        let items = std::iter::from_fn(|| match calls.fetch_add(1, Ordering::SeqCst) {
+            0 => Some(0),
+            1 => None,
+            2 => Some(2),
+            _ => panic!("called again after the end of the input"),
+        });
+        let work = concurrently(items, 2, |n| async move { Ok::<_, &str>(n) });
+        assert_eq!(timeout(HUNG, work).await.unwrap(), Ok(vec![0]));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
     // The first item waits for the last, which can only start if the window
     // moves past the first item while it is pending.
     async fn concurrently_rolls_past_a_slow_item_and_keeps_input_order() {
