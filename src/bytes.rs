@@ -172,6 +172,10 @@ impl<'de> serde::Deserialize<'de> for Bytes {
             }
         }
 
-        deserializer.deserialize_byte_buf(BytesVisitor)
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_seq(BytesVisitor)
+        } else {
+            deserializer.deserialize_byte_buf(BytesVisitor)
+        }
     }
 }
