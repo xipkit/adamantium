@@ -122,6 +122,16 @@ assert_eq!(receiver.try_receive(), Ok(42));
 assert_eq!(receiver.try_receive(), Err(TryReceiveError::Closed));
 ```
 
+With `serde`, `Bytes` accepts numeric sequences in human-readable formats and
+byte strings in binary formats; JSON strings are rejected. Binary byte strings
+currently fail to deserialize when Serde buffers them for `#[serde(flatten)]`,
+`#[serde(untagged)]`, internally tagged enums (`#[serde(tag = "...")]`), or
+adjacently tagged enums (`#[serde(tag = "...", content = "...")]`) when the
+content comes before the tag. Serde's buffer reports itself as human-readable,
+so `Bytes` requests a sequence instead of a byte string. This hint preserves
+support for text formats such as quick-xml, csv, and envy, whose
+`deserialize_any` does not produce a sequence.
+
 ## The rules
 
 The lint levels are in this repository's `[workspace.lints]`, and the Clippy configuration is in `clippy.toml`. `cargo adamantium rules` prints both. The rules and library provide the following properties for code that follows them:
