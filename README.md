@@ -17,7 +17,7 @@ adamantium = { git = "https://github.com/xipkit/adamantium.git", rev = "..." }
 
 The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, and
 `blocking`. Set `default-features = false` to use `Actor`, `Str`, `Bytes`,
-`Array`, `Deque`, `Map`, and `Channel` without Tokio, including on WASI. The `serde`
+`Array`, `Deque`, `Map`, `Set`, and `Channel` without Tokio, including on WASI. The `serde`
 feature can be enabled independently.
 
 Install the subcommand:
@@ -98,7 +98,8 @@ let feed = Channel::<Str>::bounded(16);
 let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 ```
 
-- **`Str`, `Bytes`, `Array<T>`, `Deque<T>`, and `Map<K, V>`** use copy-on-write storage, so changes to a clone do not affect the original. `Str`, `Bytes`, and `Array` use `Deref` for reads through `str` or slice views; `Deque` uses `Deref` to `VecDeque` and supports pushing and popping at both ends. `Map` has no `Index` implementation, and writes that take a position return `None` or return the value instead of panicking. These types are `Send + Sync` when their element types are and support serialization with the `serde` feature.
+- **`Str`, `Bytes`, `Array<T>`, `Deque<T>`, `Map<K, V>`, and `Set<T>`** use copy-on-write storage, so changes to a clone do not affect the original. `Str`, `Bytes`, and `Array` use `Deref` for reads through `str` or slice views; `Deque` uses `Deref` to `VecDeque` and supports pushing and popping at both ends. `Map` has no `Index` implementation, and writes that take a position return `None` or return the value instead of panicking. These types are `Send + Sync` when their element types are and support serialization with the `serde` feature.
+- **`Set<T>`** stores unique values in insertion order, removes values without reordering the rest, and compares membership regardless of order. Union, intersection, difference, and symmetric difference borrow values in the documented set order; collect an iterator to make an owned set. With `serde`, sets serialize as sequences in insertion order and deserialize duplicate values only once.
 - **`Tasks<E>`** manages a scope of tasks. `spawn` starts a task, and `value` waits for its result. `join` and `Tasks::run` wait for remaining tasks. Unobserved task errors are returned at join; if the body or an unobserved task returns an error, the remaining tasks are aborted. Task panics resume in the scope. Specify the error type with `Tasks::<E>::run` when it cannot be inferred, such as when all errors pass through `?`.
 - **`concurrently`** maps items in parallel with a concurrency limit and returns results in input order.
 - **`blocking`** runs a closure on the blocking pool and resumes any panic on the calling task.

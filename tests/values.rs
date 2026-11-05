@@ -1,4 +1,4 @@
-use adamantium::{Actor, Array, Bytes, Channel, Map, Receiver, Sender, Str};
+use adamantium::{Actor, Array, Bytes, Channel, Map, Receiver, Sender, Set, Str};
 #[cfg(feature = "tokio")]
 use adamantium::{Task, Tasks};
 
@@ -10,6 +10,7 @@ fn everything_crosses_a_task() {
     assert_send_sync::<Bytes>();
     assert_send_sync::<Array<Str>>();
     assert_send_sync::<Map<Str, Array<i64>>>();
+    assert_send_sync::<Set<Str>>();
     assert_send_sync::<Actor<Vec<u8>>>();
     assert_send_sync::<Channel<Str>>();
     assert_send_sync::<Sender<Str>>();
