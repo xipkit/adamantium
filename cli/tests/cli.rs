@@ -1,8 +1,8 @@
 use std::{
     collections::HashSet,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
 };
 
 fn adamantium() -> Command {
@@ -300,29 +300,105 @@ fn init_uses_workspace_tables_in_a_workspace() {
     assert!(stderr.contains("a, b"), "{stderr}");
 }
 
+const BARE_MANIFEST: &str = "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n";
+
+/// A package with a bare `Cargo.toml`, whose `clippy.toml` path `write`
+/// fills in.
+fn package_with_clippy_toml(
+    write: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<tempfile::TempDir> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("Cargo.toml"), BARE_MANIFEST)?;
+    write(&dir.path().join("clippy.toml"))?;
+    Ok(dir)
+}
+
+fn init(dir: &Path, force: bool) -> io::Result<Output> {
+    let mut command = adamantium();
+    command.arg("init");
+    if force {
+        command.arg("--force");
+    }
+    command.arg(dir).output()
+}
+
 #[test]
-fn init_refuses_to_overwrite_a_different_clippy_toml() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(
-        dir.path().join("Cargo.toml"),
-        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
-    )
-    .unwrap();
-    fs::write(dir.path().join("clippy.toml"), "msrv = \"1.85\"\n").unwrap();
-    let output = adamantium().arg("init").arg(dir.path()).output().unwrap();
+fn init_refuses_to_overwrite_a_different_clippy_toml_and_changes_nothing() {
+    let theirs = b"msrv = \"1.88\"\n";
+    let dir = package_with_clippy_toml(|path| fs::write(path, theirs)).unwrap();
+
+    let output = init(dir.path(), false).unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("--force"));
-    let output = adamantium()
-        .args(["init", "--force"])
-        .arg(dir.path())
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(0));
-    assert!(
-        fs::read_to_string(dir.path().join("clippy.toml"))
-            .unwrap()
-            .contains("disallowed-types")
+    assert_eq!(
+        fs::read(dir.path().join("Cargo.toml")).unwrap(),
+        BARE_MANIFEST.as_bytes()
     );
+    assert_eq!(fs::read(dir.path().join("clippy.toml")).unwrap(), theirs);
+
+    let output = init(dir.path(), true).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest = fs::read(dir.path().join("Cargo.toml")).unwrap();
+    assert!(
+        String::from_utf8_lossy(&manifest).contains("[lints.rust]\nunsafe_code = \"forbid\""),
+        "{}",
+        String::from_utf8_lossy(&manifest)
+    );
+    let clippy = fs::read(dir.path().join("clippy.toml")).unwrap();
+    assert_eq!(
+        clippy,
+        fs::read(repository_root().join("clippy.toml")).unwrap()
+    );
+
+    let output = init(dir.path(), false).unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already has the rules"));
+    assert_eq!(fs::read(dir.path().join("Cargo.toml")).unwrap(), manifest);
+    assert_eq!(fs::read(dir.path().join("clippy.toml")).unwrap(), clippy);
+}
+
+#[test]
+fn init_treats_a_non_utf8_clippy_toml_as_a_conflict() {
+    let theirs = b"msrv = \"\xff\"\n";
+    let dir = package_with_clippy_toml(|path| fs::write(path, theirs)).unwrap();
+
+    let output = init(dir.path(), false).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--force"));
+    assert_eq!(
+        fs::read(dir.path().join("Cargo.toml")).unwrap(),
+        BARE_MANIFEST.as_bytes()
+    );
+    assert_eq!(fs::read(dir.path().join("clippy.toml")).unwrap(), theirs);
+
+    let output = init(dir.path(), true).unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        fs::read(dir.path().join("clippy.toml")).unwrap(),
+        fs::read(repository_root().join("clippy.toml")).unwrap()
+    );
+}
+
+#[test]
+fn init_fails_before_writing_when_clippy_toml_cannot_be_read() {
+    let dir = package_with_clippy_toml(|path| fs::create_dir(path)).unwrap();
+
+    for force in [false, true] {
+        let output = init(dir.path(), force).unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("reading"), "{stderr}");
+        assert_eq!(
+            fs::read(dir.path().join("Cargo.toml")).unwrap(),
+            BARE_MANIFEST.as_bytes()
+        );
+        assert!(dir.path().join("clippy.toml").is_dir());
+    }
 }
 
 #[test]

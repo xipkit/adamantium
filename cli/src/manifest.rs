@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
@@ -144,6 +145,9 @@ pub fn init(root: &Path, force: bool, config: &Config) -> Result<Changes> {
         release.insert("overflow-checks", value(true));
     }
 
+    let clippy_path = root.join("clippy.toml");
+    let write_clippy = clippy_toml_needs_writing(&clippy_path, force)?;
+
     let after = doc.to_string();
     if after != before {
         fs::write(&manifest_path, after)
@@ -160,22 +164,31 @@ pub fn init(root: &Path, force: bool, config: &Config) -> Result<Changes> {
         }
     }
 
-    let clippy_path = root.join("clippy.toml");
-    match fs::read_to_string(&clippy_path) {
-        Ok(existing) if existing == CLIPPY_TOML => {}
-        Ok(_) if !force => bail!(
-            "{} exists and differs from adamantium's; pass --force to replace it",
-            clippy_path.display()
-        ),
-        _ => {
-            fs::write(&clippy_path, CLIPPY_TOML)
-                .with_context(|| format!("writing {}", clippy_path.display()))?;
-            changes
-                .notes
-                .push(format!("wrote {}", clippy_path.display()));
-        }
+    if write_clippy {
+        fs::write(&clippy_path, CLIPPY_TOML)
+            .with_context(|| format!("writing {}", clippy_path.display()))?;
+        changes
+            .notes
+            .push(format!("wrote {}", clippy_path.display()));
     }
     Ok(changes)
+}
+
+/// Whether `init` must write adamantium's `clippy.toml` at `path`: when the
+/// file is missing, or when it differs and `force` allows replacing it. It
+/// runs before `init` writes anything, so a refusal leaves the project as it
+/// was. A file that cannot be read is an error rather than a missing file.
+fn clippy_toml_needs_writing(path: &Path, force: bool) -> Result<bool> {
+    match fs::read(path) {
+        Ok(existing) if existing == CLIPPY_TOML.as_bytes() => Ok(false),
+        Ok(_) if force => Ok(true),
+        Ok(_) => bail!(
+            "{} exists and differs from adamantium's; pass --force to replace it",
+            path.display()
+        ),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
 /// The table at `key` in `parent`, created if missing. An implicit table
