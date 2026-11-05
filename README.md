@@ -105,6 +105,14 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 - **`Actor<S>`** shares state between tasks. `with` provides exclusive access and `read` provides read-only access through synchronous closures, so neither holds the lock across an await. A read-only method such as `Tally::total` can be passed to `read`. Calling `with` or `read` from inside either method on any actor panics to prevent deadlocks.
 - **`Channel<T>`** is a bounded queue whose clones can send and receive. Consume it with `split()` to get separate clonable **`Sender<T>`** and **`Receiver<T>`** handles. Dropping the last sender closes the channel; receivers drain queued messages and then receive `None`. Dropping the last receiver wakes pending sends with `Closed(value)`. Any retained combined `Channel` clones still own both endpoints, so drop or split all of them before relying on endpoint-drop closure. Either endpoint or a combined handle can also call `close()` explicitly.
 
+With `serde`, `Bytes` accepts numeric sequences in human-readable formats and
+byte strings in binary formats; JSON strings are rejected. Binary byte strings
+currently fail to deserialize when Serde buffers them for `#[serde(flatten)]`,
+`#[serde(untagged)]`, or internally tagged enums (`#[serde(tag = "...")]`).
+Serde's buffer reports itself as human-readable, so `Bytes` requests a sequence
+instead of a byte string. This hint preserves support for text formats that
+cannot implement `deserialize_any`.
+
 `Sender::try_send` and `Channel::try_send` return `TrySendError::Full(value)` or
 `TrySendError::Closed(value)` without waiting. `Receiver::try_receive` and
 `Channel::try_receive` return `Ok(value)`, `Err(TryReceiveError::Empty)` while

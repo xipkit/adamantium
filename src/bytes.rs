@@ -6,6 +6,19 @@ use crate::Str;
 ///
 /// Cloning shares storage, and the first write to shared storage copies it.
 /// Reads go through [`Deref`] to `[u8]`.
+///
+/// # Serde
+///
+/// With the `serde` feature, serializes as bytes. Deserialization accepts byte
+/// sequences in human-readable formats and byte strings in binary formats.
+/// JSON strings are rejected rather than interpreted as UTF-8 or base64.
+///
+/// Binary byte strings cannot currently be deserialized through Serde's value
+/// buffering, including `#[serde(flatten)]`, `#[serde(untagged)]`, and internally
+/// tagged enums (`#[serde(tag = "...")]`). Serde's buffer reports itself as
+/// human-readable, so `Bytes` requests a sequence, which the buffer cannot
+/// provide for a byte string. Keeping this sequence hint supports text formats
+/// that require a type hint and cannot implement `deserialize_any`.
 #[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Bytes(
     #[allow(

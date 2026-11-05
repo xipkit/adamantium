@@ -3,6 +3,30 @@
 use adamantium::Bytes;
 use serde::{Deserialize, Deserializer, de};
 
+struct HumanReadableSequenceDeserializer(Vec<u8>);
+
+impl<'de> Deserializer<'de> for HumanReadableSequenceDeserializer {
+    type Error = de::value::Error;
+
+    fn deserialize_any<V: de::Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Self::Error> {
+        Err(de::Error::custom("expected deserialize_seq"))
+    }
+
+    fn deserialize_seq<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        visitor.visit_seq(de::value::SeqDeserializer::new(self.0.into_iter()))
+    }
+
+    fn is_human_readable(&self) -> bool {
+        true
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes byte_buf
+        option unit unit_struct newtype_struct tuple tuple_struct map struct
+        enum identifier ignored_any
+    }
+}
+
 struct OwnedBytesDeserializer(Vec<u8>);
 
 impl<'de> Deserializer<'de> for OwnedBytesDeserializer {
@@ -62,6 +86,15 @@ fn bytes_deserialize_sequences() {
     for bytes in [vec![], vec![1, 2, 3], vec![0, 255]] {
         let de = de::value::SeqDeserializer::<_, de::value::Error>::new(bytes.iter().copied());
         assert_eq!(Bytes::deserialize(de), Ok(Bytes::from(bytes)));
+    }
+}
+
+#[test]
+fn bytes_request_sequences_from_human_readable_formats() {
+    for bytes in [vec![], vec![1, 2, 3], vec![0, 255]] {
+        let expected = Bytes::from(bytes.clone());
+        let de = HumanReadableSequenceDeserializer(bytes);
+        assert_eq!(Bytes::deserialize(de), Ok(expected));
     }
 }
 
