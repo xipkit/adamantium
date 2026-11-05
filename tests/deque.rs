@@ -132,6 +132,27 @@ fn every_mutation_preserves_shared_storage() {
 }
 
 #[test]
+fn endpoint_mutations_change_only_the_requested_end() {
+    for shared in [false, true] {
+        let mut front = wrapped();
+        let snapshot = shared.then(|| front.clone());
+        *front.front_mut().unwrap() = 60;
+        assert_eq!(Vec::from(front), [60, 7, 8, 9, 10, 11]);
+        if let Some(snapshot) = snapshot {
+            assert_eq!(Vec::from(snapshot), [6, 7, 8, 9, 10, 11]);
+        }
+
+        let mut back = wrapped();
+        let snapshot = shared.then(|| back.clone());
+        *back.back_mut().unwrap() = 110;
+        assert_eq!(Vec::from(back), [6, 7, 8, 9, 10, 110]);
+        if let Some(snapshot) = snapshot {
+            assert_eq!(Vec::from(snapshot), [6, 7, 8, 9, 10, 11]);
+        }
+    }
+}
+
+#[test]
 fn filtering_truncating_and_clearing_keep_logical_order() {
     let mut deque = wrapped();
     deque.retain(|value| value % 2 == 0);
@@ -227,7 +248,10 @@ fn value_traits_ignore_physical_layout() {
     let contiguous = Deque::from([6, 7, 8, 9, 10, 11]);
     assert_eq!(wrapped, contiguous);
     assert_eq!(wrapped.cmp(&contiguous), std::cmp::Ordering::Equal);
-    assert!(wrapped < Deque::from([6, 7, 9]));
+    let greater = Deque::from([6, 7, 9]);
+    assert!(wrapped < greater);
+    assert_eq!(wrapped.cmp(&greater), std::cmp::Ordering::Less);
+    assert_eq!(greater.cmp(&wrapped), std::cmp::Ordering::Greater);
     assert_eq!(format!("{wrapped:?}"), "[6, 7, 8, 9, 10, 11]");
     let hash = |value: &Deque<i32>| {
         let mut state = DefaultHasher::new();
