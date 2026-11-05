@@ -147,6 +147,35 @@ impl serde::Serialize for Bytes {
 #[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for Bytes {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Vec::<u8>::deserialize(deserializer).map(Self::from)
+        struct BytesVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for BytesVisitor {
+            type Value = Bytes;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a byte string or a sequence of bytes")
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Bytes, E> {
+                Ok(Bytes::from(bytes))
+            }
+
+            fn visit_byte_buf<E: serde::de::Error>(self, bytes: Vec<u8>) -> Result<Bytes, E> {
+                Ok(Bytes::from(bytes))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<Bytes, A::Error> {
+                <Vec<u8> as serde::Deserialize>::deserialize(
+                    serde::de::value::SeqAccessDeserializer::new(seq),
+                )
+                .map(Bytes::from)
+            }
+        }
+
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_seq(BytesVisitor)
+        } else {
+            deserializer.deserialize_byte_buf(BytesVisitor)
+        }
     }
 }
