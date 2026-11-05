@@ -1,3 +1,5 @@
+<img src="assets/adamantium-mark.svg" alt="Adamantium logo" width="128" height="128">
+
 # Adamantium
 
 Adamantium is a Rust library and set of lint rules for writing concurrent code with copy-on-write values, scoped tasks, actors, and bounded channels. The rules restrict features such as detached tasks, locks held across `await`, and common sources of panics.
