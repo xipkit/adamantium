@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fmt,
     future::Future,
     panic,
@@ -10,12 +11,47 @@ use tokio::{
     task::JoinError,
 };
 
-/// The first error from a task whose handle was dropped after it finished.
+/// The errors of failed tasks that nobody has claimed, oldest first. A task
+/// records its error here as it fails, whatever became of its handle, so the
+/// scope can always find it.
+struct Errors<E> {
+    next: u64,
+    recorded: BTreeMap<u64, E>,
+}
+
+/// What a failed task sends its handle: where to claim the error.
+struct Receipt(u64);
+
 #[allow(
     clippy::disallowed_types,
-    reason = "a lock held only inside record and take, both synchronous"
+    reason = "a lock held only inside the synchronous functions below"
 )]
-type Slot<E> = Arc<std::sync::Mutex<Option<E>>>;
+type SharedErrors<E> = Arc<std::sync::Mutex<Errors<E>>>;
+
+#[allow(clippy::disallowed_types, reason = "see SharedErrors")]
+fn lock<E>(errors: &SharedErrors<E>) -> std::sync::MutexGuard<'_, Errors<E>> {
+    errors.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn record<E>(errors: &SharedErrors<E>, error: E) -> Receipt {
+    let mut errors = lock(errors);
+    let place = errors.next;
+    errors.next += 1;
+    errors.recorded.insert(place, error);
+    Receipt(place)
+}
+
+fn claim<E>(errors: &SharedErrors<E>, receipt: Receipt) -> Option<E> {
+    lock(errors).recorded.remove(&receipt.0)
+}
+
+fn any_recorded<E>(errors: &SharedErrors<E>) -> bool {
+    !lock(errors).recorded.is_empty()
+}
+
+fn take_oldest<E>(errors: &SharedErrors<E>) -> Option<E> {
+    lock(errors).recorded.pop_first().map(|(_, error)| error)
+}
 
 /// A scope that owns the tasks spawned inside it.
 ///
@@ -35,37 +71,18 @@ pub struct Tasks<E> {
         clippy::disallowed_types,
         reason = "the scope is what makes a JoinSet structured"
     )]
-    set: tokio::task::JoinSet<Result<(), E>>,
-    unobserved: Slot<E>,
+    set: tokio::task::JoinSet<()>,
+    errors: SharedErrors<E>,
 }
 
 /// The handle to a task spawned in a [`Tasks`] scope.
 ///
-/// Pass it to [`Tasks::value`] to wait for the task's result. Dropping it
-/// is fine: the task still runs, and its error, if any, is reported when
-/// the scope joins.
+/// Pass it to [`Tasks::value`] on the scope that spawned the task to wait for
+/// its result. Dropping it or keeping it is fine: the task still runs, and an
+/// error nobody took with `value` is reported when the scope joins.
 pub struct Task<T, E> {
-    rx: oneshot::Receiver<Result<T, E>>,
-    unobserved: Slot<E>,
-}
-
-impl<T, E> Drop for Task<T, E> {
-    fn drop(&mut self) {
-        if let Ok(Err(error)) = self.rx.try_recv() {
-            record(&self.unobserved, error);
-        }
-    }
-}
-
-fn record<E>(slot: &Slot<E>, error: E) {
-    let mut first = slot.lock().unwrap_or_else(PoisonError::into_inner);
-    if first.is_none() {
-        *first = Some(error);
-    }
-}
-
-fn take<E>(slot: &Slot<E>) -> Option<E> {
-    slot.lock().unwrap_or_else(PoisonError::into_inner).take()
+    rx: oneshot::Receiver<Result<T, Receipt>>,
+    errors: SharedErrors<E>,
 }
 
 impl<E: Send + 'static> Tasks<E> {
@@ -74,7 +91,10 @@ impl<E: Send + 'static> Tasks<E> {
     pub fn new() -> Self {
         Self {
             set: tokio::task::JoinSet::new(),
-            unobserved: Arc::new(std::sync::Mutex::new(None)),
+            errors: Arc::new(std::sync::Mutex::new(Errors {
+                next: 0,
+                recorded: BTreeMap::new(),
+            })),
         }
     }
 
@@ -116,55 +136,57 @@ impl<E: Send + 'static> Tasks<E> {
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
         let (tx, rx) = oneshot::channel();
+        let errors = Arc::clone(&self.errors);
         self.set.spawn(async move {
-            match tx.send(future.await) {
-                // Delivered to the handle, or the handle was dropped and the
-                // task succeeded: nothing for the scope to report.
-                Ok(()) | Err(Ok(_)) => Ok(()),
-                // The handle was dropped before the task failed, so the
-                // scope reports the error at join.
-                Err(Err(error)) => Err(error),
-            }
+            let result = future.await.map_err(|error| record(&errors, error));
+            // Without a handle to take it, a value is dropped and an error
+            // stays recorded for join.
+            let _ = tx.send(result);
         });
         Task {
             rx,
-            unobserved: Arc::clone(&self.unobserved),
+            errors: Arc::clone(&self.errors),
         }
     }
 
     /// Waits for a task and returns its result. If the task panicked, the
     /// panic is resumed here.
-    pub async fn value<T: Send>(&mut self, mut task: Task<T, E>) -> Result<T, E> {
-        match (&mut task.rx).await {
-            Ok(result) => result,
+    pub async fn value<T: Send>(&mut self, task: Task<T, E>) -> Result<T, E> {
+        let error = match task.rx.await {
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(receipt)) => claim(&task.errors, receipt),
+            Err(_) => None,
+        };
+        match error {
+            Some(error) => Err(error),
             // A task that ends without a result has panicked, so its join
-            // result is a panic. Find it.
-            Err(_) => self.resume_first_panic().await,
+            // result is a panic. Find it. A result whose error is gone came
+            // from another scope, whose join has already reported it.
+            None => self.resume_first_panic().await,
         }
     }
 
     /// Waits for every task, then returns `body`'s result unless a task
     /// failed. Tasks are aborted as soon as an error is known, whether
-    /// from `body` or from a task. A task's error is returned over a
-    /// successful body; a failed body's error is returned over a task's.
+    /// from `body` or from a task. The first error from a task, unless
+    /// `body` already took it with [`value`](Self::value), is returned over
+    /// a successful body; a failed body's error is returned over a task's.
     pub async fn join<R: Send>(mut self, body: Result<R, E>) -> Result<R, E> {
-        let mut first_error = take(&self.unobserved);
-        if body.is_err() || first_error.is_some() {
-            self.set.abort_all();
-        }
-        while let Some(next) = self.set.join_next().await {
-            match next {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                        self.set.abort_all();
-                    }
-                }
-                Err(join_error) => self.resume_if_panic(join_error).await,
+        let mut aborted = false;
+        loop {
+            // A task records its error just before it ends, so the end of
+            // any task is the moment to look for a new one.
+            if !aborted && (body.is_err() || any_recorded(&self.errors)) {
+                self.set.abort_all();
+                aborted = true;
+            }
+            match self.set.join_next().await {
+                Some(Ok(())) => {}
+                Some(Err(join_error)) => self.resume_if_panic(join_error).await,
+                None => break,
             }
         }
-        match (body, first_error) {
+        match (body, take_oldest(&self.errors)) {
             (Err(error), _) => Err(error),
             (Ok(_), Some(error)) => Err(error),
             (Ok(value), None) => Ok(value),
@@ -183,10 +205,8 @@ impl<E: Send + 'static> Tasks<E> {
 
     async fn resume_first_panic<T>(&mut self) -> T {
         while let Some(next) = self.set.join_next().await {
-            match next {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => record(&self.unobserved, error),
-                Err(join_error) => self.resume_if_panic(join_error).await,
+            if let Err(join_error) = next {
+                self.resume_if_panic(join_error).await;
             }
         }
         panic::resume_unwind(Box::new(
