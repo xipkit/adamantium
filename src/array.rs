@@ -46,7 +46,7 @@ impl<T> Array<T> {
 
 impl<T: Clone> Array<T> {
     /// Mutable access to the underlying `Vec`, copying it first if another
-    /// `Array` shares it. Every write below goes through this.
+    /// `Array` shares it.
     pub fn make_mut(&mut self) -> &mut Vec<T> {
         Arc::make_mut(&mut self.0)
     }
@@ -82,7 +82,7 @@ impl<T: Clone> Array<T> {
     /// Replaces the element at `index`. Hands the value back if there is no
     /// such element.
     pub fn set(&mut self, index: usize, value: T) -> Result<(), T> {
-        match self.make_mut().get_mut(index) {
+        match self.get_mut(index) {
             Some(slot) => {
                 *slot = value;
                 Ok(())
@@ -93,6 +93,9 @@ impl<T: Clone> Array<T> {
 
     /// Mutable access to the element at `index`, if any.
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        if index >= self.len() {
+            return None;
+        }
         self.make_mut().get_mut(index)
     }
 
@@ -106,9 +109,14 @@ impl<T: Clone> Array<T> {
         self.make_mut().truncate(len);
     }
 
-    /// Removes every element.
+    /// Removes every element, retaining capacity when uniquely owned.
+    /// Shared storage is replaced with empty storage without cloning elements.
     pub fn clear(&mut self) {
-        self.make_mut().clear();
+        if let Some(values) = Arc::get_mut(&mut self.0) {
+            values.clear();
+        } else {
+            *self = Self::new();
+        }
     }
 
     /// Reverses the order of the elements in place.

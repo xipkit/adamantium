@@ -100,7 +100,7 @@ impl<K: Hash + Eq, V> Map<K, V> {
 
 impl<K: Hash + Eq + Clone, V: Clone> Map<K, V> {
     /// Mutable access to the underlying `IndexMap`, copying it first if
-    /// another `Map` shares it. Every write below goes through this.
+    /// another `Map` shares it.
     pub fn make_mut(&mut self) -> &mut IndexMap<K, V> {
         Arc::make_mut(&mut self.0)
     }
@@ -117,7 +117,10 @@ impl<K: Hash + Eq + Clone, V: Clone> Map<K, V> {
         K: Borrow<Q>,
         Q: ?Sized + Hash + Eq,
     {
-        self.make_mut().shift_remove(key)
+        let index = self.0.get_index_of(key)?;
+        self.make_mut()
+            .shift_remove_index(index)
+            .map(|(_, value)| value)
     }
 
     /// Mutable access to the value for `key`, if present.
@@ -126,7 +129,8 @@ impl<K: Hash + Eq + Clone, V: Clone> Map<K, V> {
         K: Borrow<Q>,
         Q: ?Sized + Hash + Eq,
     {
-        self.make_mut().get_mut(key)
+        let index = self.0.get_index_of(key)?;
+        self.make_mut().get_index_mut(index).map(|(_, value)| value)
     }
 
     /// Keeps only the entries for which `keep` returns `true`.
@@ -134,9 +138,14 @@ impl<K: Hash + Eq + Clone, V: Clone> Map<K, V> {
         self.make_mut().retain(keep);
     }
 
-    /// Removes every entry.
+    /// Removes every entry, retaining capacity when uniquely owned.
+    /// Shared storage is replaced with empty storage without cloning entries.
     pub fn clear(&mut self) {
-        self.make_mut().clear();
+        if let Some(entries) = Arc::get_mut(&mut self.0) {
+            entries.clear();
+        } else {
+            *self = Self::new();
+        }
     }
 
     /// The owned `IndexMap`. Free when nothing else shares the storage.
