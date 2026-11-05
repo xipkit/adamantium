@@ -185,7 +185,8 @@ impl<T: Hash + Eq + Clone> Set<T> {
         self.make_mut().retain(keep);
     }
 
-    /// Removes every value.
+    /// Removes every value, retaining capacity when uniquely owned. Shared
+    /// storage is replaced with empty storage without cloning values.
     pub fn clear(&mut self) {
         if let Some(values) = Arc::get_mut(&mut self.0) {
             values.clear();

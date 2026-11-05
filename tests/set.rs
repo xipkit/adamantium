@@ -139,6 +139,16 @@ fn every_mutation_keeps_shared_original_unchanged() {
 }
 
 #[test]
+fn unique_clear_empties_and_retains_capacity() {
+    let mut set: Set<u16> = (0..1_000).collect();
+    let capacity = set.as_index_set().capacity();
+    set.clear();
+    assert!(set.is_empty());
+    assert!(!set.contains(&1));
+    assert_eq!(set.as_index_set().capacity(), capacity);
+}
+
+#[test]
 fn writes_and_ownership_conversion_clone_only_when_needed() {
     static CLONES: AtomicUsize = AtomicUsize::new(0);
 
