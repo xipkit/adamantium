@@ -30,7 +30,7 @@ mod tasks;
 pub use actor::Actor;
 pub use array::Array;
 pub use bytes::Bytes;
-pub use channel::{Channel, Closed};
+pub use channel::{Channel, Closed, Receiver, Sender, TryReceiveError, TrySendError};
 pub use map::Map;
 pub use set::Set;
 pub use string::Str;

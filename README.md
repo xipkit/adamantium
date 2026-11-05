@@ -104,7 +104,23 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 - **`concurrently`** maps items in parallel with a concurrency limit and returns results in input order.
 - **`blocking`** runs a closure on the blocking pool and resumes any panic on the calling task.
 - **`Actor<S>`** shares state between tasks. `with` provides exclusive access and `read` provides read-only access through synchronous closures, so neither holds the lock across an await. A read-only method such as `Tally::total` can be passed to `read`. Calling `with` or `read` from inside either method on any actor panics to prevent deadlocks.
-- **`Channel<T>`** is a bounded queue whose clones can send and receive. After a producer calls `close`, receivers drain the remaining items and then receive `None`.
+- **`Channel<T>`** is a bounded queue whose clones can send and receive. Consume it with `split()` to get separate clonable **`Sender<T>`** and **`Receiver<T>`** handles. Dropping the last sender closes the channel; receivers drain queued messages and then receive `None`. Dropping the last receiver wakes pending sends with `Closed(value)`. Any retained combined `Channel` clones still own both endpoints, so drop or split all of them before relying on endpoint-drop closure. Either endpoint or a combined handle can also call `close()` explicitly.
+
+`Sender::try_send` and `Channel::try_send` return `TrySendError::Full(value)` or
+`TrySendError::Closed(value)` without waiting. `Receiver::try_receive` returns
+`Ok(value)`, `TryReceiveError::Empty`, or `TryReceiveError::Closed` (once drained).
+The existing combined `Channel::try_receive` keeps its `Option<T>` return type.
+These channel operations work with `default-features = false`, without Tokio:
+
+```rust
+use adamantium::{Channel, TryReceiveError};
+
+let (sender, receiver) = Channel::bounded(2).split();
+sender.try_send(42).unwrap();
+drop(sender);
+assert_eq!(receiver.try_receive(), Ok(42));
+assert_eq!(receiver.try_receive(), Err(TryReceiveError::Closed));
+```
 
 ## The rules
 
