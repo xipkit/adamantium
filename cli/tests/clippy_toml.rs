@@ -148,3 +148,34 @@ fn every_path_resolves_with_every_feature_on() {
         "Clippy didn't check these, so the fixture may not use their crate: {unchecked:?}"
     );
 }
+
+/// A project with only some of Tokio's features gets no warnings from the
+/// shipped entries. One misspelled entry shows that Clippy loaded Tokio and
+/// resolved paths in it.
+#[test]
+fn no_tokio_feature_set_warns() {
+    for features in [
+        "tokio",
+        "tokio/rt",
+        "tokio/rt-multi-thread",
+        "tokio/sync",
+        "tokio/rt,tokio/sync",
+        "tokio/full",
+    ] {
+        let mut config = shipped().unwrap();
+        let entries = config["disallowed-methods"].as_array_mut().unwrap();
+        let probe = entries
+            .iter()
+            .filter_map(Value::as_inline_table)
+            .find(|entry| path(entry).unwrap().starts_with("tokio::"))
+            .map(|entry| misspelled(entry).unwrap())
+            .unwrap();
+        let expected = BTreeSet::from([path(&probe).unwrap().to_owned()]);
+        entries.push(probe);
+        assert_eq!(
+            unresolved(&config, features, &[]).unwrap(),
+            expected,
+            "{features}"
+        );
+    }
+}
