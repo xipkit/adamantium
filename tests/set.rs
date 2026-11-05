@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    hash::{Hash, Hasher},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -18,6 +19,7 @@ fn insertion_removal_and_borrowed_lookup_preserve_order() {
     assert!(!set.insert(Str::from("a")));
     assert_eq!(set.len(), 3);
     assert!(set.contains("a"));
+    assert!(!set.contains("missing"));
     assert_eq!(set.get("a").map(Str::as_str), Some("a"));
     assert_eq!(set.get("missing"), None);
     assert_eq!(set.first().map(Str::as_str), Some("c"));
@@ -33,6 +35,70 @@ fn insertion_removal_and_borrowed_lookup_preserve_order() {
         ["c", "b", "a"]
     );
     assert_eq!(format!("{set:?}"), r#"{"c", "b", "a"}"#);
+}
+
+#[test]
+fn removing_the_first_value_preserves_the_remaining_order() {
+    for shared in [false, true] {
+        let mut set = Set::from([1, 2, 3, 4]);
+        let original = shared.then(|| set.clone());
+        assert!(set.remove(&1));
+        assert_eq!(set.iter().copied().collect::<Vec<_>>(), [2, 3, 4]);
+        assert!(!set.contains(&1));
+        if let Some(original) = original {
+            assert_eq!(original.into_iter().collect::<Vec<_>>(), [1, 2, 3, 4]);
+        }
+    }
+}
+
+#[test]
+fn duplicate_insert_keeps_the_original_value_and_position() {
+    #[derive(Clone, Debug)]
+    struct Entry {
+        key: u8,
+        label: &'static str,
+    }
+
+    impl PartialEq for Entry {
+        fn eq(&self, other: &Self) -> bool {
+            self.key == other.key
+        }
+    }
+
+    impl Eq for Entry {}
+
+    impl Hash for Entry {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.key.hash(state);
+        }
+    }
+
+    for shared in [false, true] {
+        let mut set = Set::from([
+            Entry {
+                key: 1,
+                label: "original",
+            },
+            Entry {
+                key: 2,
+                label: "second",
+            },
+        ]);
+        let original = shared.then(|| set.clone());
+        assert!(!set.insert(Entry {
+            key: 1,
+            label: "replacement",
+        }));
+        assert_eq!(set.is_shared(), shared);
+        assert_eq!(set.first().map(|entry| entry.label), Some("original"));
+        assert_eq!(
+            set.iter().map(|entry| entry.key).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        if let Some(original) = original {
+            assert_eq!(original.first().map(|entry| entry.label), Some("original"));
+        }
+    }
 }
 
 #[test]
@@ -141,6 +207,8 @@ fn writes_and_ownership_conversion_clone_only_when_needed() {
 
 #[test]
 fn equality_compares_membership_and_operations_have_predictable_order() {
+    assert_ne!(Set::from([1, 2]), Set::from([3, 4]));
+    assert_ne!(Set::from([1]), Set::from([1, 2]));
     let left = Set::from([3, 1, 2, 1]);
     let right = Set::from([2, 4, 3, 5]);
     assert_eq!(left, Set::from([2, 3, 1]));
