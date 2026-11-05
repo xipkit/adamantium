@@ -42,9 +42,14 @@ impl Bytes {
         self.make_mut().extend_from_slice(bytes);
     }
 
-    /// Removes every byte.
+    /// Removes every byte, retaining capacity when uniquely owned.
+    /// Shared storage is replaced with empty storage without copying bytes.
     pub fn clear(&mut self) {
-        self.make_mut().clear();
+        if let Some(bytes) = Arc::get_mut(&mut self.0) {
+            bytes.clear();
+        } else {
+            *self = Self::new();
+        }
     }
 
     /// The owned `Vec<u8>`. Free when nothing else shares the storage.
