@@ -32,7 +32,7 @@ pub use array::Array;
 pub use bytes::Bytes;
 pub use channel::{Channel, Closed, Receiver, Sender, TryReceiveError, TrySendError};
 pub use deque::Deque;
-pub use map::Map;
+pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
 pub use string::Str;
 #[cfg(feature = "tokio")]
 pub use tasks::{Task, Tasks, blocking, concurrently};
