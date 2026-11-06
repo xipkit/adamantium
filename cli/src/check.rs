@@ -26,6 +26,8 @@ pub struct Report {
     pub findings: Vec<Finding>,
     /// Findings the project's skip list left out, counted by rule.
     pub skipped: BTreeMap<String, usize>,
+    /// Warnings about Adamantium's Clippy configuration.
+    pub warnings: Vec<Problem>,
     pub errors: Vec<Problem>,
 }
 
@@ -51,7 +53,7 @@ pub struct Finding {
     pub column: Option<u64>,
 }
 
-/// A compiler error unrelated to the rules.
+/// A compiler error or configuration warning unrelated to the rules.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Problem {
     pub message: String,
@@ -87,6 +89,16 @@ struct Span {
     line_start: u64,
     column_start: u64,
     is_primary: bool,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct DiagnosticKey {
+    code: Option<String>,
+    level: String,
+    message: String,
+    file: String,
+    line: u64,
+    column: u64,
 }
 
 impl Status {
@@ -147,7 +159,8 @@ pub fn run(path: &Path, cargo_args: &[String], json: bool) -> Result<ExitCode> {
 fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
     let config = Config::load(root)?;
     let conf = tempfile::tempdir().context("creating a directory for clippy.toml")?;
-    fs::write(conf.path().join("clippy.toml"), CLIPPY_TOML)?;
+    let clippy_config = conf.path().join("clippy.toml");
+    fs::write(&clippy_config, CLIPPY_TOML)?;
 
     let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -180,6 +193,7 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
     let rules: HashSet<String> = LINTS.iter().map(super::lints::Lint::qualified).collect();
     let mut findings = Vec::new();
     let mut skipped = BTreeMap::new();
+    let mut warnings = Vec::new();
     let mut errors = Vec::new();
     let mut seen = HashSet::new();
     let mut built = false;
@@ -195,6 +209,7 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
                         diagnostic,
                         &Setting {
                             root,
+                            clippy_config: &clippy_config,
                             config: &config,
                             rules: &rules,
                             echo,
@@ -203,6 +218,7 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
                         &mut findings,
                         &mut skipped,
                         &mut errors,
+                        &mut warnings,
                     );
                 }
             }
@@ -239,11 +255,12 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
         Status::Findings
     };
     Ok(Report {
-        schema_version: 1,
+        schema_version: 2,
         root: root.to_path_buf(),
         status,
         findings,
         skipped,
+        warnings,
         errors,
     })
 }
@@ -251,6 +268,7 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
 /// What `classify` needs to know about the run.
 struct Setting<'a> {
     root: &'a Path,
+    clippy_config: &'a Path,
     config: &'a Config,
     rules: &'a HashSet<String>,
     echo: bool,
@@ -267,28 +285,33 @@ fn selects_packages(cargo_args: &[String]) -> bool {
     })
 }
 
-/// Sorts one diagnostic into a finding, a skipped finding, a build error, or
-/// noise, printing findings when `echo` is set. Diagnostics without a primary
-/// span, such as the "aborting due to N errors" summary, are dropped.
+/// Sorts one diagnostic into a finding, a skipped finding, a build error, a
+/// configuration warning, or noise, echoing diagnostics when `echo` is set.
+/// Diagnostics without a primary span, such as the "aborting due to N errors"
+/// summary, are dropped.
 fn classify(
     diagnostic: Diagnostic,
     setting: &Setting<'_>,
-    seen: &mut HashSet<(String, String, u64, u64)>,
+    seen: &mut HashSet<DiagnosticKey>,
     findings: &mut Vec<Finding>,
     skipped: &mut BTreeMap<String, usize>,
     errors: &mut Vec<Problem>,
+    warnings: &mut Vec<Problem>,
 ) {
     let Some(span) = diagnostic.spans.iter().find(|span| span.is_primary) else {
         return;
     };
+    let about_config = Path::new(&span.file_name) == setting.clippy_config;
     let file = normalize(&span.file_name);
     let code = diagnostic.code.as_ref().map(|code| code.code.clone());
-    let key = (
-        code.clone().unwrap_or_default(),
-        file.clone(),
-        span.line_start,
-        span.column_start,
-    );
+    let key = DiagnosticKey {
+        code: code.clone(),
+        level: diagnostic.level.clone(),
+        message: diagnostic.message.clone(),
+        file: file.clone(),
+        line: span.line_start,
+        column: span.column_start,
+    };
     // Clippy reports a lint once per target, so a library and its tests
     // repeat each other.
     if !seen.insert(key) {
@@ -306,6 +329,11 @@ fn classify(
     {
         eprint!("{rendered}");
     }
+    let file = if about_config {
+        "clippy.toml".to_owned()
+    } else {
+        file
+    };
     match code {
         Some(rule) if setting.rules.contains(&rule) => findings.push(Finding {
             rule,
@@ -315,6 +343,11 @@ fn classify(
             column: Some(span.column_start),
         }),
         _ if diagnostic.level == "error" => errors.push(Problem {
+            message: diagnostic.message,
+            file: Some(file),
+            line: Some(span.line_start),
+        }),
+        _ if about_config && diagnostic.level == "warning" => warnings.push(Problem {
             message: diagnostic.message,
             file: Some(file),
             line: Some(span.line_start),
@@ -352,4 +385,144 @@ fn normalize(path: &str) -> String {
         .collect::<PathBuf>()
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lints::Lint;
+
+    fn diagnostic(file: &str, level: &str, code: Option<&str>, message: &str) -> Diagnostic {
+        Diagnostic {
+            message: message.to_owned(),
+            level: level.to_owned(),
+            code: code.map(|code| Code {
+                code: code.to_owned(),
+            }),
+            rendered: None,
+            spans: vec![Span {
+                file_name: file.to_owned(),
+                line_start: 7,
+                column_start: 3,
+                is_primary: true,
+            }],
+        }
+    }
+
+    fn classify_diagnostics(diagnostics: Vec<Diagnostic>) -> Report {
+        let root = Path::new("project");
+        let config = Config::default();
+        let rules = LINTS.iter().map(Lint::qualified).collect();
+        let setting = Setting {
+            root,
+            clippy_config: Path::new("generated/clippy.toml"),
+            config: &config,
+            rules: &rules,
+            echo: false,
+        };
+        let mut report = Report {
+            schema_version: 2,
+            root: root.to_path_buf(),
+            status: Status::Clean,
+            findings: Vec::new(),
+            skipped: BTreeMap::new(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        };
+        let mut seen = HashSet::new();
+        for diagnostic in diagnostics {
+            classify(
+                diagnostic,
+                &setting,
+                &mut seen,
+                &mut report.findings,
+                &mut report.skipped,
+                &mut report.errors,
+                &mut report.warnings,
+            );
+        }
+        report
+    }
+
+    #[test]
+    fn config_warnings_preserve_distinct_messages_and_deduplicate_targets() {
+        let report = classify_diagnostics(vec![
+            diagnostic("generated/clippy.toml", "warning", None, "unresolved path"),
+            diagnostic("generated/clippy.toml", "warning", None, "unresolved path"),
+            diagnostic("generated/clippy.toml", "warning", None, "unknown key"),
+            diagnostic(
+                "generated/clippy.toml",
+                "warning",
+                Some("future_config_warning"),
+                "a config warning with a code",
+            ),
+        ]);
+        let report = serde_json::to_value(report).unwrap();
+        assert_eq!(
+            report["warnings"],
+            serde_json::json!([
+                { "message": "unresolved path", "file": "clippy.toml", "line": 7 },
+                { "message": "unknown key", "file": "clippy.toml", "line": 7 },
+                { "message": "a config warning with a code", "file": "clippy.toml", "line": 7 },
+            ])
+        );
+        assert_eq!(report["findings"], serde_json::json!([]));
+        assert_eq!(report["errors"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn only_primary_spans_in_the_generated_config_produce_warnings() {
+        let mut without_primary = diagnostic("generated/clippy.toml", "warning", None, "summary");
+        without_primary.spans.clear();
+        let mut secondary = diagnostic("generated/clippy.toml", "warning", None, "secondary");
+        secondary.spans.first_mut().unwrap().is_primary = false;
+        let report = classify_diagnostics(vec![
+            diagnostic(
+                "src/lib.rs",
+                "warning",
+                Some("unused_imports"),
+                "unused import",
+            ),
+            diagnostic("project/clippy.toml", "warning", None, "another config"),
+            diagnostic("generated/clippy.toml", "note", None, "a note"),
+            without_primary,
+            secondary,
+        ]);
+        assert!(report.warnings.is_empty());
+        assert!(report.errors.is_empty());
+        assert!(report.findings.is_empty());
+    }
+
+    #[test]
+    fn config_errors_keep_their_level_and_use_a_stable_file_name() {
+        let report = classify_diagnostics(vec![
+            diagnostic("generated/clippy.toml", "warning", None, "config problem"),
+            diagnostic("generated/clippy.toml", "error", None, "config problem"),
+            diagnostic("src/lib.rs", "error", Some("E0001"), "compile error"),
+            diagnostic(
+                "src/lib.rs",
+                "warning",
+                Some("clippy::unwrap_used"),
+                "unwrap used",
+            ),
+        ]);
+        assert_eq!(report.warnings.len(), 1);
+        assert_eq!(
+            report.errors,
+            vec![
+                Problem {
+                    message: "config problem".to_owned(),
+                    file: Some("clippy.toml".to_owned()),
+                    line: Some(7),
+                },
+                Problem {
+                    message: "compile error".to_owned(),
+                    file: Some("src/lib.rs".to_owned()),
+                    line: Some(7),
+                },
+            ]
+        );
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings.first().unwrap().rule, "clippy::unwrap_used");
+    }
 }

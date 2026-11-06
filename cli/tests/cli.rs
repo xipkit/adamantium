@@ -29,6 +29,8 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema_version"], 2, "{stderr}");
+    assert_eq!(report["warnings"], serde_json::json!([]), "{stderr}");
     assert_eq!(report["status"], "findings", "{stderr}");
     assert_eq!(report["errors"], serde_json::json!([]), "{stderr}");
     let rules: HashSet<&str> = report["findings"]
@@ -115,6 +117,7 @@ fn check_reports_the_tokio_runtime_entry_points() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(1), "{stderr}");
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["warnings"], serde_json::json!([]), "{stderr}");
         assert_eq!(report["errors"], serde_json::json!([]), "{stderr}");
         let mut reported: Vec<(String, u64)> = report["findings"]
             .as_array()
@@ -143,6 +146,7 @@ fn check_covers_every_workspace_member() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["warnings"], serde_json::json!([]), "{stderr}");
     let files: Vec<&str> = report["findings"]
         .as_array()
         .unwrap()
@@ -180,6 +184,7 @@ fn check_applies_the_skip_list() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["warnings"], serde_json::json!([]), "{stderr}");
     let mut found: Vec<(String, String)> = report["findings"]
         .as_array()
         .unwrap()
@@ -275,6 +280,20 @@ fn check_passes_the_clean_fixture_and_prints_a_summary() {
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     assert!(stderr.contains("adamantium: clean"), "{stderr}");
     assert!(output.stdout.is_empty());
+
+    let output = adamantium()
+        .args(["check", "--format", "json"])
+        .arg(fixture("clean"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["status"], "clean");
+    assert_eq!(report["findings"], serde_json::json!([]));
+    assert_eq!(report["warnings"], serde_json::json!([]));
+    assert_eq!(report["errors"], serde_json::json!([]));
 }
 
 #[test]
