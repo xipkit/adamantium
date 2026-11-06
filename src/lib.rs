@@ -37,4 +37,4 @@ pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
 pub use set::Set;
 pub use string::Str;
 #[cfg(feature = "tokio")]
-pub use tasks::{Task, Tasks, blocking, concurrently};
+pub use tasks::{Cancellation, ScopeError, Task, Tasks, blocking, concurrently};

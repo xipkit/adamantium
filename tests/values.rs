@@ -1,6 +1,6 @@
 use adamantium::{Actor, Array, Bytes, Channel, Map, Receiver, Sender, Set, Str};
 #[cfg(feature = "tokio")]
-use adamantium::{Task, Tasks};
+use adamantium::{Cancellation, ScopeError, Task, Tasks};
 
 fn assert_send_sync<T: Send + Sync>() {}
 
@@ -19,6 +19,8 @@ fn everything_crosses_a_task() {
     {
         assert_send_sync::<Tasks<String>>();
         assert_send_sync::<Task<i64, String>>();
+        assert_send_sync::<Cancellation>();
+        assert_send_sync::<ScopeError<String>>();
     }
 }
 
