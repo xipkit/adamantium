@@ -26,7 +26,7 @@ pub struct Report {
     pub findings: Vec<Finding>,
     /// Findings the project's skip list left out, counted by rule.
     pub skipped: BTreeMap<String, usize>,
-    /// Warnings about Adamantium's Clippy configuration.
+    /// Warnings about Clippy configuration or unavailable lints.
     pub warnings: Vec<Problem>,
     pub errors: Vec<Problem>,
 }
@@ -92,13 +92,19 @@ struct Span {
 }
 
 #[derive(PartialEq, Eq, Hash)]
-struct DiagnosticKey {
-    code: Option<String>,
-    level: String,
-    message: String,
-    file: String,
-    line: u64,
-    column: u64,
+enum DiagnosticKey {
+    Spanned {
+        code: Option<String>,
+        level: String,
+        message: String,
+        file: String,
+        line: u64,
+        column: u64,
+    },
+    Spanless {
+        code: String,
+        message: String,
+    },
 }
 
 impl Status {
@@ -286,9 +292,9 @@ fn selects_packages(cargo_args: &[String]) -> bool {
 }
 
 /// Sorts one diagnostic into a finding, a skipped finding, a build error, a
-/// configuration warning, or noise, echoing diagnostics when `echo` is set.
-/// Diagnostics without a primary span, such as the "aborting due to N errors"
-/// summary, are dropped.
+/// configuration or unavailable-lint warning, or noise, echoing diagnostics
+/// when `echo` is set. Without a primary span, only unknown or removed lint
+/// warnings are kept; compiler summaries are dropped.
 fn classify(
     diagnostic: Diagnostic,
     setting: &Setting<'_>,
@@ -299,12 +305,36 @@ fn classify(
     warnings: &mut Vec<Problem>,
 ) {
     let Some(span) = diagnostic.spans.iter().find(|span| span.is_primary) else {
+        let Some(code) = diagnostic.code else {
+            return;
+        };
+        if diagnostic.level != "warning"
+            || !matches!(code.code.as_str(), "E0602" | "renamed_and_removed_lints")
+        {
+            return;
+        }
+        if !seen.insert(DiagnosticKey::Spanless {
+            code: code.code,
+            message: diagnostic.message.clone(),
+        }) {
+            return;
+        }
+        if setting.echo
+            && let Some(rendered) = &diagnostic.rendered
+        {
+            eprint!("{rendered}");
+        }
+        warnings.push(Problem {
+            message: diagnostic.message,
+            file: None,
+            line: None,
+        });
         return;
     };
     let about_config = Path::new(&span.file_name) == setting.clippy_config;
     let file = normalize(&span.file_name);
     let code = diagnostic.code.as_ref().map(|code| code.code.clone());
-    let key = DiagnosticKey {
+    let key = DiagnosticKey::Spanned {
         code: code.clone(),
         level: diagnostic.level.clone(),
         message: diagnostic.message.clone(),
@@ -468,6 +498,59 @@ mod tests {
         );
         assert_eq!(report["findings"], serde_json::json!([]));
         assert_eq!(report["errors"], serde_json::json!([]));
+    }
+
+    fn spanless(level: &str, code: Option<&str>, message: &str) -> Diagnostic {
+        let mut diagnostic = diagnostic("", level, code, message);
+        diagnostic.spans.clear();
+        diagnostic
+    }
+
+    #[test]
+    fn spanless_lint_warnings_deduplicate_by_code_and_message() {
+        let report = classify_diagnostics(vec![
+            spanless("warning", Some("E0602"), "lint unavailable"),
+            spanless("warning", Some("E0602"), "lint unavailable"),
+            spanless("warning", Some("E0602"), "another lint unavailable"),
+            spanless(
+                "warning",
+                Some("renamed_and_removed_lints"),
+                "lint unavailable",
+            ),
+            spanless(
+                "warning",
+                Some("renamed_and_removed_lints"),
+                "lint unavailable",
+            ),
+        ]);
+        let report = serde_json::to_value(report).unwrap();
+        assert_eq!(
+            report["warnings"],
+            serde_json::json!([
+                { "message": "lint unavailable", "file": null, "line": null },
+                { "message": "another lint unavailable", "file": null, "line": null },
+                { "message": "lint unavailable", "file": null, "line": null },
+            ])
+        );
+        assert_eq!(report["findings"], serde_json::json!([]));
+        assert_eq!(report["errors"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn other_spanless_diagnostics_are_dropped() {
+        let report = classify_diagnostics(vec![
+            spanless("warning", None, "2 warnings emitted"),
+            spanless("error", None, "aborting due to 2 previous errors"),
+            spanless("warning", Some("unused_imports"), "unused import"),
+            spanless("warning", Some("clippy::unwrap_used"), "unwrap used"),
+            spanless("error", Some("E0602"), "unknown lint"),
+            spanless("note", Some("E0602"), "unknown lint"),
+            spanless("error", Some("renamed_and_removed_lints"), "removed lint"),
+            spanless("note", Some("renamed_and_removed_lints"), "removed lint"),
+        ]);
+        assert!(report.warnings.is_empty());
+        assert!(report.errors.is_empty());
+        assert!(report.findings.is_empty());
     }
 
     #[test]

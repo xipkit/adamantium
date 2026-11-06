@@ -297,6 +297,64 @@ fn check_passes_the_clean_fixture_and_prints_a_summary() {
 }
 
 #[test]
+fn check_reports_spanless_lint_warnings_once_in_json_and_text() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+    fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[profile.release]\noverflow-checks = true\n",
+    )
+    .unwrap();
+    let messages = [
+        "unknown lint: `clippy::adamantium_missing_lint`",
+        "unknown lint: `clippy::adamantium_other_missing_lint`",
+        "lint `unaligned_references` has been removed",
+    ];
+    for format in ["json", "text"] {
+        let output = adamantium()
+            .args(["check", "--format", format])
+            .arg(dir.path())
+            .env(
+                "CARGO_ENCODED_RUSTFLAGS",
+                "-Wclippy::adamantium_missing_lint\x1f-Wclippy::adamantium_other_missing_lint\x1f-Wunaligned_references",
+            )
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{format}: {stderr}");
+        if format == "json" {
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["schema_version"], 2, "{report}");
+            assert_eq!(report["status"], "clean", "{report}");
+            assert_eq!(report["findings"], serde_json::json!([]), "{report}");
+            assert_eq!(report["errors"], serde_json::json!([]), "{report}");
+            let warnings = report["warnings"].as_array().unwrap();
+            assert_eq!(warnings.len(), messages.len(), "{report}");
+            for message in messages {
+                assert!(
+                    warnings
+                        .iter()
+                        .any(|warning| warning["message"].as_str().unwrap().starts_with(message)),
+                    "{report}"
+                );
+            }
+            for warning in warnings {
+                assert_eq!(warning["file"], serde_json::Value::Null, "{warning}");
+                assert_eq!(warning["line"], serde_json::Value::Null, "{warning}");
+            }
+        } else {
+            assert!(output.stdout.is_empty());
+            assert!(stderr.contains("adamantium: clean"), "{stderr}");
+            for message in messages {
+                assert_eq!(stderr.matches(message).count(), 1, "{stderr}");
+            }
+        }
+    }
+}
+
+#[test]
 fn check_without_a_manifest_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let output = adamantium().arg("check").arg(dir.path()).output().unwrap();
