@@ -41,6 +41,8 @@ cargo adamantium rules              # list the rules and why each exists
 
 The command prints diagnostics and a summary to stderr. With `--format json`, it prints a report to stdout with the rule, message, file, line, and column for each finding. The exit status is `0` when clean, `1` for findings, and `2` when the project did not build.
 
+The JSON check report uses `schema_version: 2`. Its `warnings` array contains warnings about Adamantium's Clippy configuration, each with a message, file, and line. Warnings do not change the status or exit code. Configuration warnings and errors name the file `clippy.toml`; their lines refer to Adamantium's bundled configuration, which `cargo adamantium rules` prints. Other compiler warnings appear only in text output.
+
 The rules also require `overflow-checks = true` in the release profile. Integer overflow then panics in release builds, as it does in debug builds.
 
 `init` adds the rules to a project so plain `cargo clippy` applies them. It writes the `[lints]` tables, or `[workspace.lints]` in a workspace, the release profile's overflow check, and a `clippy.toml`. It excludes rules listed under `allow` or `exceptions` in the [skip list](#skipping-rules-and-paths). Running it again makes no changes, and it will not replace a different `clippy.toml` without `--force`.
