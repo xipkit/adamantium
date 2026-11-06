@@ -1,19 +1,124 @@
 use std::{
+    any::Any,
     collections::BTreeMap,
     fmt,
     future::Future,
     panic,
+    pin::pin,
     sync::{Arc, PoisonError},
+    task::Poll,
 };
 
-use tokio::{sync::oneshot, task::JoinError};
+use tokio::{
+    sync::{oneshot, watch},
+    task::JoinError,
+    time::Instant,
+};
+
+/// A cloneable, one-way shutdown request shared by a caller and its work.
+///
+/// Cancelling any clone wakes all [`cancelled`](Self::cancelled) waiters.
+/// Dropping a clone does not cancel. Use a fresh signal for each scope: a
+/// cancelled signal cannot be reset, and scopes also cancel it on shutdown.
+#[derive(Clone, Debug)]
+pub struct Cancellation {
+    requested: watch::Sender<bool>,
+}
+
+impl Cancellation {
+    /// Creates a signal with no shutdown requested.
+    pub fn new() -> Self {
+        Self {
+            requested: watch::channel(false).0,
+        }
+    }
+
+    /// Requests shutdown. Repeated requests have the same effect as one.
+    pub fn cancel(&self) {
+        self.requested.send_replace(true);
+    }
+
+    /// Whether shutdown has been requested, including from a blocking thread.
+    pub fn is_cancelled(&self) -> bool {
+        *self.requested.borrow()
+    }
+
+    /// Waits for shutdown, returning immediately if already requested.
+    /// Dropping this future does not lose the request.
+    pub async fn cancelled(&self) {
+        let mut requested = self.requested.subscribe();
+        let _ = requested.wait_for(|requested| *requested).await;
+    }
+}
+
+impl Default for Cancellation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Why a cancellable scope did not produce a value.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ScopeError<E> {
+    /// The body or a child returned an error.
+    Failed(E),
+    /// The caller requested shutdown.
+    Cancelled,
+    /// The scope's deadline elapsed.
+    DeadlineExceeded,
+}
+
+impl<E: fmt::Display> fmt::Display for ScopeError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Failed(error) => write!(f, "scope failed: {error}"),
+            Self::Cancelled => f.write_str("scope cancelled"),
+            Self::DeadlineExceeded => f.write_str("scope deadline exceeded"),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for ScopeError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Failed(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+async fn shutdown<E>(cancellation: &Cancellation, deadline: Option<Instant>) -> ScopeError<E> {
+    let mut cancelled = pin!(cancellation.cancelled());
+    let mut elapsed = pin!(async {
+        match deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            None => std::future::pending().await,
+        }
+    });
+    std::future::poll_fn(|cx| {
+        if cancelled.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(ScopeError::Cancelled);
+        }
+        // Tokio timers round up to milliseconds. Check the clock as well so an
+        // expired deadline wins before polling the body on every scope poll.
+        if deadline.is_some_and(|deadline| deadline <= Instant::now())
+            || elapsed.as_mut().poll(cx).is_ready()
+        {
+            return Poll::Ready(ScopeError::DeadlineExceeded);
+        }
+        Poll::Pending
+    })
+    .await
+}
 
 /// The errors of failed tasks that nobody has claimed, oldest first. A task
 /// records its error here as it fails, whatever became of its handle, so the
-/// scope can always find it.
+/// scope can always find it. A panic already observed by the scope also stays
+/// here until draining finishes, even if cancellation interrupts the drain.
 struct Errors<E> {
     next: u64,
     recorded: BTreeMap<u64, E>,
+    panic: Option<Box<dyn Any + Send>>,
 }
 
 /// What a failed task sends its handle: where to claim the error.
@@ -65,13 +170,15 @@ fn no_result() -> ! {
 
 /// A scope that owns the tasks spawned inside it.
 ///
-/// No task outlives its scope: [`join`](Self::join) waits for every task,
+/// [`join`](Self::join) waits for every registered task,
 /// and an error in any of them ends the scope with that error after the
 /// others are aborted. A task's error reaches the body through
 /// [`value`](Self::value); an error nobody asked for is reported when the
 /// scope joins, so it is never lost. A panic in a task is resumed in the
 /// scope, as a thread panic is resumed by a scoped thread. Dropping a scope
-/// without joining aborts its tasks without waiting for them.
+/// without joining aborts its async tasks without waiting for them. Started
+/// blocking closures continue running. See [`run_until`](Self::run_until)
+/// for cancellation, deadlines, and the cleanup contract.
 ///
 /// Spawning needs a Tokio runtime, as every spawn does. Use
 /// [`run`](Self::run) for the common shape, or [`new`](Self::new),
@@ -83,6 +190,7 @@ pub struct Tasks<E> {
     )]
     set: tokio::task::JoinSet<()>,
     errors: SharedErrors<E>,
+    cancellation: Option<Cancellation>,
 }
 
 /// The handle to a task spawned in a [`Tasks`] scope.
@@ -107,7 +215,9 @@ impl<E: Send + 'static> Tasks<E> {
             errors: shared(Errors {
                 next: 0,
                 recorded: BTreeMap::new(),
+                panic: None,
             }),
+            cancellation: None,
         }
     }
 
@@ -142,6 +252,73 @@ impl<E: Send + 'static> Tasks<E> {
         tasks.join(result).await
     }
 
+    /// Runs a scope until completion, cancellation, or an absolute deadline.
+    /// Pass `None` for no deadline. A deadline needs Tokio's time driver.
+    /// The body and children can observe clones of `cancellation` themselves.
+    ///
+    /// A request already present at a poll wins over polling the body, including
+    /// before its first poll. Cancellation wins over an equally ready deadline.
+    /// On shutdown the body is dropped, the signal is cancelled, and async
+    /// children are aborted and drained. Their synchronous destructors finish
+    /// before return; async cleanup is not guaranteed a chance to run. Registered
+    /// [`spawn_blocking`](Self::spawn_blocking) closures that have started are
+    /// waited for, so a deadline bounds work, not cleanup time. Blocking work
+    /// should check the signal and finish promptly.
+    ///
+    /// Precedence is: child panic (resumed after draining), an already returned
+    /// body error, oldest unclaimed child error (even during cleanup), then the
+    /// selected shutdown reason. Once cleanup starts its reason is fixed.
+    /// Failures are collected as in [`run`](Self::run): a child failure alone
+    /// does not interrupt a body that is still running.
+    ///
+    /// Dropping this future after it starts, or panicking in its body, signals
+    /// cancellation and requests aborts, but cannot wait for cleanup. Started
+    /// blocking closures may outlive it. To guarantee cleanup, request
+    /// cancellation and keep awaiting this future instead of dropping it.
+    ///
+    /// ```
+    /// use adamantium::{Cancellation, ScopeError, Tasks};
+    /// use tokio::time::{Duration, Instant};
+    /// # #[tokio::main] async fn main() {
+    /// let cancellation = Cancellation::new();
+    /// let worker = cancellation.clone();
+    /// let result = Tasks::<std::io::Error>::run_until(
+    ///     cancellation,
+    ///     Some(Instant::now() + Duration::from_secs(1)),
+    ///     async |tasks| {
+    ///         let work = tasks.spawn_blocking(move || {
+    ///             // Real blocking work checks this between bounded operations.
+    ///             if worker.is_cancelled() { return Ok(None); }
+    ///             Ok(Some(42))
+    ///         });
+    ///         tasks.value(work).await
+    ///     },
+    /// ).await;
+    /// assert!(matches!(result, Ok(Some(42)) | Err(ScopeError::DeadlineExceeded)));
+    /// # }
+    /// ```
+    #[allow(clippy::future_not_send, reason = "see run")]
+    pub async fn run_until<R, F>(
+        cancellation: Cancellation,
+        deadline: Option<Instant>,
+        body: F,
+    ) -> Result<R, ScopeError<E>>
+    where
+        R: Send,
+        F: AsyncFnOnce(&mut Tasks<E>) -> Result<R, E>,
+    {
+        let mut tasks = Self::new();
+        tasks.cancellation = Some(cancellation.clone());
+        let reason = tokio::select! {
+            biased;
+            reason = shutdown(&cancellation, deadline) => reason,
+            result = body(&mut tasks) => return tasks.join_until(cancellation, deadline, result).await,
+        };
+        tasks.abort();
+        tasks.join(Ok(())).await.map_err(ScopeError::Failed)?;
+        Err(reason)
+    }
+
     /// Starts `future` as a task of this scope and returns its handle.
     pub fn spawn<T, F>(&mut self, future: F) -> Task<T, E>
     where
@@ -154,6 +331,30 @@ impl<E: Send + 'static> Tasks<E> {
             let result = future.await.map_err(|error| record(&errors, error));
             // Without a handle to take it, a value is dropped and an error
             // stays recorded for join.
+            let _ = tx.send(result);
+        });
+        Task {
+            rx,
+            errors: Arc::clone(&self.errors),
+        }
+    }
+
+    /// Registers blocking work directly with this scope.
+    ///
+    /// Joining always waits for started closures, even after an error,
+    /// cancellation, or deadline. Queued closures may be aborted before starting.
+    /// Capture the signal passed to [`run_until`](Self::run_until) or
+    /// [`join_until`](Self::join_until) to let a running closure cooperate.
+    /// Dropping a cancellable scope signals shutdown but cannot wait for it.
+    pub fn spawn_blocking<T, F>(&mut self, f: F) -> Task<T, E>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        let (tx, rx) = oneshot::channel();
+        let errors = Arc::clone(&self.errors);
+        self.set.spawn_blocking(move || {
+            let result = f().map_err(|error| record(&errors, error));
             let _ = tx.send(result);
         });
         Task {
@@ -185,20 +386,58 @@ impl<E: Send + 'static> Tasks<E> {
     /// `body` already took it with [`value`](Self::value), is returned over
     /// a successful body; a failed body's error is returned over a task's.
     pub async fn join<R: Send>(mut self, body: Result<R, E>) -> Result<R, E> {
+        self.settle(body.is_err()).await;
+        self.result(body)
+    }
+
+    /// Joins with cancellation and a deadline, using [`run_until`](Self::run_until)'s
+    /// precedence and cleanup contract. The signal is registered immediately,
+    /// even if the returned future is dropped before its first poll. Work spawned
+    /// earlier may already be running when this method is called.
+    pub fn join_until<R: Send>(
+        mut self,
+        cancellation: Cancellation,
+        deadline: Option<Instant>,
+        body: Result<R, E>,
+    ) -> impl Future<Output = Result<R, ScopeError<E>>> + Send {
+        self.cancellation = Some(cancellation.clone());
+        async move {
+            let reason = tokio::select! {
+                biased;
+                reason = shutdown(&cancellation, deadline) => Some(reason),
+                () = self.settle(body.is_err()) => None,
+            };
+            if reason.is_some() {
+                self.abort();
+                self.drain().await;
+            }
+            let value = self.result(body).map_err(ScopeError::Failed)?;
+            match reason {
+                Some(reason) => Err(reason),
+                None => Ok(value),
+            }
+        }
+    }
+
+    async fn settle(&mut self, body_failed: bool) {
         let mut aborted = false;
         loop {
             // A task records its error just before it ends, so the end of
             // any task is the moment to look for a new one.
-            if !aborted && (body.is_err() || any_recorded(&self.errors)) {
-                self.set.abort_all();
+            if !aborted && (body_failed || any_recorded(&self.errors)) {
+                self.abort();
                 aborted = true;
             }
             match self.set.join_next().await {
                 Some(Ok(())) => {}
-                Some(Err(join_error)) => self.resume_if_panic(join_error).await,
+                Some(Err(join_error)) => self.remember_panic(join_error),
                 None => break,
             }
         }
+        self.propagate_panic();
+    }
+
+    fn result<R>(&self, body: Result<R, E>) -> Result<R, E> {
         match (body, take_oldest(&self.errors)) {
             (Err(error), _) => Err(error),
             (Ok(_), Some(error)) => Err(error),
@@ -219,20 +458,60 @@ impl<E: Send + 'static> Tasks<E> {
     async fn resume_first_panic<T>(&mut self) -> T {
         while let Some(next) = self.set.join_next().await {
             if let Err(join_error) = next {
-                self.resume_if_panic(join_error).await;
+                self.remember_panic(join_error);
+                let panicked = lock(&self.errors).panic.is_some();
+                if panicked {
+                    self.drain().await;
+                }
             }
         }
         no_result()
     }
 
-    /// Resumes a task's panic after aborting and draining the other tasks.
-    /// A cancellation is this scope's own abort and is ignored.
-    async fn resume_if_panic(&mut self, join_error: JoinError) {
+    // Keep the payload in the scope: cancellation can interrupt value or settle
+    // while they drain, and must not discard an already observed panic.
+    fn remember_panic(&mut self, join_error: JoinError) {
         if let Ok(payload) = join_error.try_into_panic() {
-            self.set.abort_all();
-            while self.set.join_next().await.is_some() {}
+            {
+                let mut errors = lock(&self.errors);
+                if errors.panic.is_none() {
+                    errors.panic = Some(payload);
+                }
+            }
+            self.abort();
+        }
+    }
+
+    fn propagate_panic(&mut self) {
+        let payload = lock(&self.errors).panic.take();
+        if let Some(payload) = payload {
             panic::resume_unwind(payload);
         }
+    }
+
+    fn abort(&mut self) {
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel();
+        }
+        self.set.abort_all();
+    }
+
+    async fn drain(&mut self) {
+        while let Some(next) = self.set.join_next().await {
+            if let Err(error) = next {
+                self.remember_panic(error);
+            }
+        }
+        self.propagate_panic();
+    }
+}
+
+impl<E> Drop for Tasks<E> {
+    fn drop(&mut self) {
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel();
+        }
+        // JoinSet's destructor requests aborts, but cannot await their completion.
     }
 }
 
@@ -324,8 +603,8 @@ where
                 Some(Err(join_error)) => {
                     // Nothing here has aborted a task, so a cancellation means
                     // its runtime shut down, and that item will have no result.
-                    tasks.resume_if_panic(join_error).await;
-                    tasks.set.abort_all();
+                    tasks.remember_panic(join_error);
+                    tasks.abort();
                     break;
                 }
                 None => break,
@@ -348,6 +627,10 @@ where
 /// Runs `f` on a thread meant for blocking work and returns its result. Use
 /// it for code that blocks the thread it runs on, such as synchronous file
 /// or network calls. A panic in `f` is resumed here.
+///
+/// Dropping this future detaches a started closure: it cannot be forcibly
+/// aborted, even inside an async task owned by a scope. Use
+/// [`Tasks::spawn_blocking`] when scope shutdown must wait for blocking work.
 pub async fn blocking<T, F>(f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,

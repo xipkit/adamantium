@@ -103,6 +103,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 - **`Tasks<E>`** manages a scope of tasks. `spawn` starts a task, and `value` waits for its result. `join` and `Tasks::run` wait for remaining tasks. Unobserved task errors are returned at join; if the body or an unobserved task returns an error, the remaining tasks are aborted. Task panics resume in the scope. Specify the error type with `Tasks::<E>::run` when it cannot be inferred, such as when all errors pass through `?`.
 - **`concurrently`** maps items in parallel with a concurrency limit and returns results in input order. It starts when first polled and takes each item only when a place opens, so at most `limit` futures exist at once and a failure stops it taking more. The iterator and closure must be `Send`, and they run inside the returned future's poll.
 - **`blocking`** runs a closure on the blocking pool and resumes any panic on the calling task.
+
 - **`Actor<S>`** shares state between tasks. `with` provides exclusive access and `read` provides read-only access through synchronous closures, so neither holds the lock across an await. A read-only method such as `Tally::total` can be passed to `read`. Calling `with` or `read` from inside either method on any actor panics to prevent deadlocks.
 - **`Channel<T>`** is a bounded queue whose clones can send and receive. Consume it with `split()` to get separate clonable **`Sender<T>`** and **`Receiver<T>`** handles. Dropping the last sender closes the channel; receivers drain queued messages and then receive `None`. Dropping the last receiver wakes pending sends with `Closed(value)`. Any retained combined `Channel` clones still own both endpoints, so drop or split all of them before relying on endpoint-drop closure. Either endpoint or a combined handle can also call `close()` explicitly.
 
@@ -121,6 +122,31 @@ drop(sender);
 assert_eq!(receiver.try_receive(), Ok(42));
 assert_eq!(receiver.try_receive(), Err(TryReceiveError::Closed));
 ```
+
+For explicit shutdown, use `Tasks::run_until(cancellation, deadline, body)` or
+`tasks.join_until(cancellation, deadline, body_result)`. `Cancellation::new()`
+creates a cloneable signal: callers request shutdown with `cancel()`, async work
+can await `cancelled()`, and blocking work can check `is_cancelled()`. The deadline
+is an optional `tokio::time::Instant`; `None` needs no timer. Use a fresh signal
+per scope. The scope also signals it on failure, deadline, completion, or drop.
+
+These methods return `ScopeError::Failed(error)`, `Cancelled`, or
+`DeadlineExceeded`. A completed body error wins over an unclaimed child error,
+which wins over shutdown; child panics are resumed after draining. If cancellation
+and the deadline are both ready, cancellation wins. Once shutdown starts, its
+reason stays fixed while cleanup runs. An already cancelled or expired scope
+does not poll its body. As with `run`, child failures are collected when the body
+asks for a value or joins; they do not interrupt an otherwise pending body.
+
+Cancellation drops the body and aborts and drains async children before returning.
+Synchronous destructors finish; asynchronous cleanup is not guaranteed to run.
+Use `tasks.spawn_blocking` for blocking closures the scope must wait for, and let
+them check the shared signal between bounded operations. Started blocking work
+cannot be forcibly stopped, so cleanup can extend beyond the deadline. The free
+`blocking` wrapper detaches its started closure if its future is dropped, including
+when an enclosing async task is aborted. Dropping a scope future or panicking in
+its body signals shutdown and requests aborts but cannot wait for cleanup. For
+that guarantee, request cancellation and continue awaiting the scope.
 
 With `serde`, `Bytes` accepts numeric sequences in human-readable formats and
 byte strings in binary formats; JSON strings are rejected. Binary byte strings
