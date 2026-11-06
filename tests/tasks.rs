@@ -6,13 +6,13 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    task::Poll,
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
 use adamantium::{Tasks, blocking, concurrently};
 use tokio::{
-    sync::{Barrier, oneshot},
+    sync::{Barrier, Semaphore, oneshot},
     time::{sleep, timeout},
 };
 
@@ -59,6 +59,27 @@ impl Drop for CountedSlowly {
     }
 }
 
+/// Counts itself live for as long as it exists, and keeps the highest count.
+struct Live {
+    live: Arc<AtomicUsize>,
+}
+
+impl Live {
+    fn new(live: &Arc<AtomicUsize>, peak: &AtomicUsize) -> Self {
+        let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+        peak.fetch_max(now, Ordering::SeqCst);
+        Self {
+            live: Arc::clone(live),
+        }
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.live.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// A task that never finishes on its own and reports when it is dropped.
 fn forever(
     dropped: &Arc<AtomicBool>,
@@ -82,6 +103,14 @@ async fn begin<F: Future + Send>(mut future: Pin<&mut F>) {
         Poll::Ready(())
     })
     .await;
+}
+
+#[allow(clippy::unwrap_used, reason = "only ever called from tests")]
+fn one_thread_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
 }
 
 /// Writes each test twice, once per runtime flavor.
@@ -308,12 +337,14 @@ on_both_runtimes! {
     }
 
     // Which item does what depends on the order they start in, not on their
-    // input position, so the failure always has a free permit and the last item
-    // is always still queued behind the pending one.
-    async fn concurrently_drains_running_and_queued_items_after_an_error() {
+    // input position. The window is full when the failure happens, so the third
+    // item is never taken.
+    async fn concurrently_drains_running_items_and_starts_no_more_after_an_error() {
+        let called = AtomicUsize::new(0);
         let started = Arc::new(AtomicUsize::new(0));
         let dropped = Arc::new(AtomicUsize::new(0));
         let work = concurrently(0..3, 2, |_| {
+            called.fetch_add(1, Ordering::SeqCst);
             let started = Arc::clone(&started);
             let guard = CountedSlowly(Arc::clone(&dropped));
             async move {
@@ -326,7 +357,113 @@ on_both_runtimes! {
             }
         });
         assert_eq!(timeout(HUNG, work).await.unwrap(), Err("second to start"));
-        assert_eq!(dropped.load(Ordering::SeqCst), 3, "an item was not drained");
+        assert_eq!(called.load(Ordering::SeqCst), 2, "an item started after the error");
+        assert_eq!(dropped.load(Ordering::SeqCst), 2, "an item was not drained");
+    }
+
+    async fn concurrently_keeps_at_most_limit_futures_alive() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = AtomicUsize::new(0);
+        let work = concurrently(0..1000, 2, |n| {
+            let guard = Live::new(&live, &peak);
+            async move {
+                let _guard = guard;
+                tokio::task::yield_now().await;
+                Ok::<_, &str>(n)
+            }
+        });
+        assert_eq!(work.await, Ok((0..1000).collect()));
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+    }
+
+    async fn concurrently_takes_items_only_as_places_open() {
+        let gate = Arc::new(Semaphore::new(0));
+        let taken = AtomicUsize::new(0);
+        let items = (0..5).inspect(|_| {
+            taken.fetch_add(1, Ordering::SeqCst);
+        });
+        let mut work = pin!(concurrently(items, 2, |n| {
+            let gate = Arc::clone(&gate);
+            async move {
+                gate.acquire().await.unwrap().forget();
+                Ok::<_, &str>(n)
+            }
+        }));
+        begin(work.as_mut()).await;
+        assert_eq!(taken.load(Ordering::SeqCst), 2);
+        gate.add_permits(5);
+        assert_eq!(timeout(HUNG, work).await.unwrap(), Ok((0..5).collect()));
+        assert_eq!(taken.load(Ordering::SeqCst), 5);
+    }
+
+    // The input never ends, so only stopping at the error can finish this. With
+    // one place in the window, the failed item is the last one taken.
+    async fn concurrently_takes_no_more_items_after_an_error() {
+        let taken = AtomicUsize::new(0);
+        let items = (0..).inspect(|_| {
+            taken.fetch_add(1, Ordering::SeqCst);
+        });
+        let work = concurrently(items, 1, |n| async move {
+            if n == 3 { Err("three") } else { Ok(n) }
+        });
+        assert_eq!(timeout(HUNG, work).await.unwrap(), Err("three"));
+        assert_eq!(taken.load(Ordering::SeqCst), 4);
+    }
+
+    // This iterator would resume after its `None`, and the window still has an
+    // item to wait for when it returns that `None`.
+    async fn concurrently_takes_nothing_after_the_first_none() {
+        let calls = AtomicUsize::new(0);
+        let items = std::iter::from_fn(|| match calls.fetch_add(1, Ordering::SeqCst) {
+            0 => Some(0),
+            1 => None,
+            2 => Some(2),
+            _ => panic!("called again after the end of the input"),
+        });
+        let work = concurrently(items, 2, |n| async move { Ok::<_, &str>(n) });
+        assert_eq!(timeout(HUNG, work).await.unwrap(), Ok(vec![0]));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    // The first item waits for the last, which can only start if the window
+    // moves past the first item while it is pending.
+    async fn concurrently_rolls_past_a_slow_item_and_keeps_input_order() {
+        let (release, released) = oneshot::channel();
+        let mut release = Some(release);
+        let mut released = Some(released);
+        let work = concurrently(0..100, 2, |n| {
+            let wait = (n == 0).then(|| released.take().unwrap());
+            let release = (n == 99).then(|| release.take().unwrap());
+            async move {
+                if let Some(wait) = wait {
+                    wait.await.unwrap();
+                }
+                if let Some(release) = release {
+                    release.send(()).unwrap();
+                }
+                Ok::<_, &str>(n)
+            }
+        });
+        assert_eq!(timeout(HUNG, work).await.unwrap(), Ok((0..100).collect()));
+    }
+
+    async fn concurrently_aborts_its_items_if_f_panics() {
+        let (held, dropped) = oneshot::channel::<()>();
+        let mut held = Some(held);
+        let work = concurrently(0..2, 2, move |n| {
+            assert!(n == 0, "kaboom in f");
+            let held = held.take();
+            async move {
+                let _held = held;
+                std::future::pending::<()>().await;
+                Ok::<_, &str>(())
+            }
+        });
+        #[allow(clippy::disallowed_methods, reason = "the way to catch the resumed panic")]
+        let joined = tokio::spawn(work);
+        let payload = timeout(HUNG, joined).await.unwrap().unwrap_err().into_panic();
+        assert_eq!(payload.downcast_ref(), Some(&"kaboom in f"));
+        assert!(timeout(HUNG, dropped).await.unwrap().is_err());
     }
 
     async fn concurrently_keeps_input_order_when_items_finish_in_reverse() {
@@ -590,34 +727,132 @@ async fn concurrently_reports_the_first_error_to_happen_not_the_first_input() {
     assert_eq!(timeout(HUNG, work).await.unwrap(), Err("later input"));
 }
 
-// The tasks live on the first runtime, so shutting it down cancels them with
-// nobody having aborted them and no error to report.
+// The future is first polled on the first runtime, so its task lives there and
+// shutting it down cancels the task with nobody having aborted it and no error
+// to report. The second item must not start on the runtime that is left.
 #[test]
 fn concurrently_panics_if_the_runtime_cancels_its_items() {
-    let runtime = || {
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap()
-    };
-    let spawning = runtime();
-    let work = {
-        let _context = spawning.enter();
-        concurrently(0..1, 1, |_| async {
+    let called = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&called);
+    let mut work = Box::pin(concurrently(0..2, 1, move |_| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        async {
             std::future::pending::<()>().await;
             Ok::<_, &str>(())
-        })
-    };
+        }
+    }));
+    let spawning = one_thread_runtime();
+    spawning.block_on(begin(work.as_mut()));
     drop(spawning);
     #[allow(
         clippy::disallowed_methods,
         reason = "the way to catch the resumed panic"
     )]
-    let joined = runtime().block_on(async { tokio::spawn(work).await });
-    let payload = joined.unwrap_err().into_panic();
+    let joined = one_thread_runtime().block_on(async { timeout(HUNG, tokio::spawn(work)).await });
+    let payload = joined.unwrap().unwrap_err().into_panic();
     assert_eq!(
         payload.downcast_ref(),
         Some(&"adamantium: a task ended without a result and without a panic"),
     );
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+}
+
+// The first item is stuck on a runtime that shuts down. The second finishes
+// there, so the third starts on the runtime that is left, and only an abort can
+// end it.
+#[test]
+fn concurrently_aborts_its_other_items_if_the_runtime_cancels_one() {
+    let finished = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&finished);
+    let (held, dropped) = oneshot::channel::<()>();
+    let mut held = Some(held);
+    let mut work = Box::pin(concurrently(0..3, 2, move |n| {
+        let flag = Arc::clone(&flag);
+        let held = (n == 2).then(|| held.take().unwrap());
+        async move {
+            let _held = held;
+            if n == 1 {
+                flag.store(true, Ordering::SeqCst);
+                return Ok::<_, &str>(());
+            }
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    }));
+    let spawning = one_thread_runtime();
+    spawning.block_on(async {
+        begin(work.as_mut()).await;
+        while !finished.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    });
+    drop(spawning);
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the way to catch the resumed panic"
+    )]
+    let joined = one_thread_runtime().block_on(async { timeout(HUNG, tokio::spawn(work)).await });
+    let payload = joined.unwrap().unwrap_err().into_panic();
+    assert_eq!(
+        payload.downcast_ref(),
+        Some(&"adamantium: a task ended without a result and without a panic"),
+    );
+    assert!(
+        dropped.blocking_recv().is_err(),
+        "the third item is still held"
+    );
+}
+
+#[tokio::test]
+async fn concurrently_treats_a_limit_of_zero_as_one() {
+    let work = concurrently(0..3, 0, |n| async move { Ok::<_, &str>(n) });
+    assert_eq!(timeout(HUNG, work).await.unwrap(), Ok(vec![0, 1, 2]));
+}
+
+#[tokio::test]
+async fn concurrently_returns_a_vector_with_no_spare_room() {
+    let values = concurrently(0..1000u64, 8, |n| async move { Ok::<_, &str>(n) })
+        .await
+        .unwrap();
+    assert_eq!(values.capacity(), values.len());
+}
+
+#[test]
+fn concurrently_does_nothing_until_polled() {
+    let taken = AtomicUsize::new(0);
+    let called = AtomicUsize::new(0);
+    let items = (0..2).inspect(|_| {
+        taken.fetch_add(1, Ordering::SeqCst);
+    });
+    let work = concurrently(items, 2, |_| {
+        called.fetch_add(1, Ordering::SeqCst);
+        async { Ok::<_, &str>(()) }
+    });
+    assert_eq!(taken.load(Ordering::SeqCst), 0);
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+    drop(work);
+    assert_eq!(taken.load(Ordering::SeqCst), 0);
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+}
+
+// Calling needs no runtime, so the panic can only come from the poll.
+#[test]
+#[should_panic(expected = "Tokio 1.x runtime")]
+fn concurrently_needs_a_runtime_once_polled() {
+    let work = pin!(concurrently(0..1, 1, |_| async { Ok::<_, &str>(()) }));
+    let _ = work.poll(&mut Context::from_waker(Waker::noop()));
+}
+
+// Each item goes straight into `f`, so only the iterator has to be `Send`.
+#[tokio::test]
+async fn concurrently_takes_items_that_are_not_send() {
+    #[allow(clippy::disallowed_types, reason = "the item type under test")]
+    let items = (0..2).map(std::rc::Rc::new);
+    let work = concurrently(items, 2, |n| {
+        let n = *n;
+        async move { Ok::<_, &str>(n) }
+    });
+    assert_eq!(work.await, Ok(vec![0, 1]));
 }
 
 #[tokio::test(flavor = "multi_thread")]

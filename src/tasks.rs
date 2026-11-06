@@ -10,7 +10,7 @@ use std::{
 };
 
 use tokio::{
-    sync::{Semaphore, oneshot, watch},
+    sync::{oneshot, watch},
     task::JoinError,
     time::Instant,
 };
@@ -126,13 +126,20 @@ struct Receipt(u64);
 
 #[allow(
     clippy::disallowed_types,
-    reason = "a lock held only inside the synchronous functions below"
+    reason = "a lock held only inside synchronous code, never across an await"
 )]
-type SharedErrors<E> = Arc<std::sync::Mutex<Errors<E>>>;
+type Shared<V> = Arc<std::sync::Mutex<V>>;
 
-#[allow(clippy::disallowed_types, reason = "see SharedErrors")]
-fn lock<E>(errors: &SharedErrors<E>) -> std::sync::MutexGuard<'_, Errors<E>> {
-    errors.lock().unwrap_or_else(PoisonError::into_inner)
+type SharedErrors<E> = Shared<Errors<E>>;
+
+#[allow(clippy::disallowed_types, reason = "see Shared")]
+fn shared<V>(value: V) -> Shared<V> {
+    Arc::new(std::sync::Mutex::new(value))
+}
+
+#[allow(clippy::disallowed_types, reason = "see Shared")]
+fn lock<V>(shared: &Shared<V>) -> std::sync::MutexGuard<'_, V> {
+    shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn record<E>(errors: &SharedErrors<E>, error: E) -> Receipt {
@@ -198,15 +205,18 @@ pub struct Task<T, E> {
 
 impl<E: Send + 'static> Tasks<E> {
     /// An empty scope.
-    #[allow(clippy::disallowed_types, reason = "see Slot")]
+    #[allow(
+        clippy::disallowed_types,
+        reason = "the scope is what makes a JoinSet structured"
+    )]
     pub fn new() -> Self {
         Self {
             set: tokio::task::JoinSet::new(),
-            errors: Arc::new(std::sync::Mutex::new(Errors {
+            errors: shared(Errors {
                 next: 0,
                 recorded: BTreeMap::new(),
                 panic: None,
-            })),
+            }),
             cancellation: None,
         }
     }
@@ -519,17 +529,6 @@ impl<E> fmt::Debug for Tasks<E> {
     }
 }
 
-impl<T, E> Task<T, E> {
-    /// The value of a task whose scope has joined without an error or a panic.
-    /// The only way such a task has no value is that its runtime shut down.
-    fn into_finished(mut self) -> T {
-        match self.rx.try_recv() {
-            Ok(Ok(value)) => value,
-            _ => no_result(),
-        }
-    }
-}
-
 impl<T, E> fmt::Debug for Task<T, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Task")
@@ -537,46 +536,91 @@ impl<T, E> fmt::Debug for Task<T, E> {
 }
 
 /// Runs `f` on every item, at most `limit` at a time, and returns the
-/// results in input order, whatever order the items finish in. The first
-/// error to happen ends the whole operation, even with earlier items still
-/// pending: the remaining items are aborted and drained, then the error is
-/// returned. A panic does the same and is resumed here. Each item runs as a
-/// task in its own scope, so this needs a Tokio runtime.
+/// results in input order, whatever order the items finish in. A `limit` of
+/// zero means one. The first error to happen ends the whole operation, even
+/// with earlier items still pending: no further item is taken, the running
+/// items are aborted and drained, then the error is returned. A panic in an
+/// item's future does the same and is resumed here.
+///
+/// Apart from calling `into_iter`, nothing happens until the returned future
+/// is first polled, and a future that is never polled never calls `f`. Each
+/// poll takes an item and calls `f` only while fewer than `limit` items are
+/// unfinished, so at most `limit` of `f`'s futures exist at once however long
+/// the input is. Finished results are held until the end, so they still take
+/// memory in proportion to the items completed.
+///
+/// The iterator and `f` live in the returned future, which is why they must
+/// be `Send`; `I` and the items need not be. Both run inside the future's
+/// poll rather than in a task, so a slow iterator or `f` holds up whoever is
+/// awaiting, including noticing that an item failed: put slow work in the
+/// future `f` returns. A panic in the iterator or in `f` itself unwinds
+/// through the poll and aborts the running items without waiting for them.
+///
+/// Each item runs as a task in its own scope, so polling needs a Tokio
+/// runtime, and panics at the first item without one.
 pub fn concurrently<I, F, Fut, T, E>(
     items: I,
     limit: usize,
-    f: F,
+    mut f: F,
 ) -> impl Future<Output = Result<Vec<T>, E>> + Send
 where
     I: IntoIterator,
-    F: FnMut(I::Item) -> Fut,
+    I::IntoIter: Send,
+    F: FnMut(I::Item) -> Fut + Send,
     Fut: Future<Output = Result<T, E>> + Send + 'static,
     T: Send + 'static,
     E: Send + 'static,
 {
-    let permits = Arc::new(Semaphore::new(limit.max(1)));
-    let mut tasks = Tasks::new();
-    let handles: Vec<Task<T, E>> = {
-        let mut f = f;
-        items
-            .into_iter()
-            .map(|item| {
-                let future = f(item);
-                let permits = Arc::clone(&permits);
-                tasks.spawn(async move {
-                    // The permit lives until the future finishes. Acquiring
-                    // fails only if the semaphore is closed, which it never is.
-                    let _permit = permits.acquire_owned().await;
-                    future.await
-                })
-            })
-            .collect()
-    };
+    // The loop comes back for another item after every join, and an iterator
+    // may resume or panic if it is called again after its first `None`.
+    let mut items = items.into_iter().fuse();
+    let limit = limit.max(1);
     async move {
-        // Items finish in any order, and join sees each as it ends, so a
-        // failure never waits behind an earlier item.
+        let mut tasks = Tasks::new();
+        // Tasks report here rather than through handles, so items that finish
+        // behind a slow one leave only their results behind.
+        let finished = shared(Vec::new());
+        let mut started = 0;
+        // Fill the window, then wait for a place to open. A task records its
+        // error just before it ends, so this stops before taking another item.
+        while !any_recorded(&tasks.errors) {
+            if tasks.len() < limit
+                && let Some(item) = items.next()
+            {
+                let index = started;
+                started += 1;
+                let future = f(item);
+                let finished = Arc::clone(&finished);
+                tasks.spawn(async move {
+                    let value = future.await?;
+                    lock(&finished).push((index, value));
+                    Ok(())
+                });
+                continue;
+            }
+            match tasks.set.join_next().await {
+                Some(Ok(())) => {}
+                Some(Err(join_error)) => {
+                    // Nothing here has aborted a task, so a cancellation means
+                    // its runtime shut down, and that item will have no result.
+                    tasks.remember_panic(join_error);
+                    tasks.abort();
+                    break;
+                }
+                None => break,
+            }
+        }
         tasks.join(Ok(())).await?;
-        Ok(handles.into_iter().map(Task::into_finished).collect())
+        let mut finished = std::mem::take(&mut *lock(&finished));
+        if finished.len() != started {
+            no_result();
+        }
+        finished.sort_unstable_by_key(|(index, _)| *index);
+        let mut values: Vec<T> = finished.into_iter().map(|(_, value)| value).collect();
+        // The indexes and the growth of `finished` left spare room that the
+        // caller would otherwise keep for as long as it keeps the results.
+        values.shrink_to_fit();
+        Ok(values)
     }
 }
 
