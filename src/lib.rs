@@ -11,8 +11,9 @@
 //! Everything here is `Send + Sync + 'static` when its element types are, so
 //! a value of any of these types can be handed to a task without ceremony.
 //!
-//! The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, and
-//! `blocking`. Disable default features to use the values, actors, and channels
+//! The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, the
+//! ordered and unordered concurrent streams, and `blocking`.
+//! Disable default features to use the values, actors, and channels
 //! without a Tokio dependency, including on WASI.
 
 #![forbid(unsafe_code)]
@@ -37,4 +38,7 @@ pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
 pub use set::Set;
 pub use string::Str;
 #[cfg(feature = "tokio")]
-pub use tasks::{Cancellation, ScopeError, Task, Tasks, blocking, concurrently};
+pub use tasks::{
+    Cancellation, ScopeError, Task, Tasks, blocking, concurrently, concurrently_ordered,
+    concurrently_ordered_until, concurrently_unordered, concurrently_unordered_until,
+};

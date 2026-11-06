@@ -15,6 +15,12 @@ use tokio::{
     time::Instant,
 };
 
+mod stream;
+pub use stream::{
+    concurrently_ordered, concurrently_ordered_until, concurrently_unordered,
+    concurrently_unordered_until,
+};
+
 /// A cloneable, one-way shutdown request shared by a caller and its work.
 ///
 /// Cancelling any clone wakes all [`cancelled`](Self::cancelled) waiters.

@@ -15,8 +15,8 @@ Add the library to a project:
 adamantium = { git = "https://github.com/xipkit/adamantium.git", rev = "..." }
 ```
 
-The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, and
-`blocking`. Set `default-features = false` to use `Actor`, `Str`, `Bytes`,
+The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, the
+concurrent streams, and `blocking`. Set `default-features = false` to use `Actor`, `Str`, `Bytes`,
 `Array`, `Deque`, `Map`, `Set`, and `Channel` without Tokio, including on WASI. The `serde`
 feature can be enabled independently.
 
@@ -147,6 +147,75 @@ cannot be forcibly stopped, so cleanup can extend beyond the deadline. The free
 when an enclosing async task is aborted. Dropping a scope future or panicking in
 its body signals shutdown and requests aborts but cannot wait for cleanup. For
 that guarantee, request cancellation and continue awaiting the scope.
+
+### Streaming concurrent maps
+
+Use `concurrently_ordered(items, limit, f)` to consume results in input order,
+or `concurrently_unordered(items, limit, f)` for observed completion order
+(simultaneous completions have unspecified order). Both return a `Send` stream
+of `Result<T, ScopeError<E>>`. Pin it and consume it with `StreamExt::next` from
+`futures-util` or another compatible stream library:
+
+```rust
+use adamantium::concurrently_ordered;
+use futures_util::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), adamantium::ScopeError<std::io::Error>> {
+    let results = concurrently_ordered(0..100, 8, |n| async move {
+        Ok::<_, std::io::Error>(n * 2)
+    });
+    let mut results = std::pin::pin!(results);
+    while let Some(result) = results.next().await {
+        println!("{}", result?);
+    }
+    Ok(())
+}
+```
+
+`cargo run --example streaming` demonstrates both result orders, a slow
+consumer, and explicit cancellation.
+
+The window bounds **started but not yet yielded** items to `max(limit, 1)`.
+Running futures and buffered results share that bound. A slow first ordered
+item therefore stops refill even when later items finish; the unordered variant
+can yield those later results and refill their slots. This trades ordered
+throughput for bounded storage. Memory is O(limit), excluding the caller's
+iterator, individual values, and results the consumer retains. Neither variant
+collects the input or spawns a background producer. Pausing consumption stops
+new scheduling; already started tasks may finish into the bounded buffer.
+Apart from `into_iter`, input consumption and closure calls happen only during
+polling. Both must be quick and `Send`; input items need not be `Send`. Polling
+the first nonempty window needs a Tokio runtime.
+
+For shutdown, use `concurrently_ordered_until(items, limit, cancellation, f)`
+or `concurrently_unordered_until(...)`. These **observe** their supplied signal;
+completion, error, panic, and drop never cancel it or sibling streams. This
+differs from the fresh, scope-owned signal passed to `Tasks::run_until`.
+Tasks can capture a clone to observe parent shutdown. A cancellation request
+while consumption is paused takes effect when polling resumes.
+
+On an observed error or cancellation, intake stops, outstanding async tasks
+are aborted and drained, and buffered successes are discarded. The stream
+yields one terminal error and then ends. A child panic is resumed after
+draining and wins over the oldest recorded child error, which wins over
+`Cancelled`. Errors bypass a slow earlier item in either order. Results already
+yielded remain with the consumer. Unexpected runtime task cancellation drains
+and panics if no child panic or error explains the missing result.
+
+Dropping a pending `next()` while retaining the stream preserves its work.
+Dropping the stream, or a panic in the iterator/closure itself, requests aborts
+without waiting. To await cleanup, request cancellation and keep polling to the
+terminal error. Only async tasks are registered: asynchronous cleanup is not
+guaranteed, and detached work such as a started `blocking` closure can outlive
+the stream.
+
+Streaming uses optional `futures-core` for the standard `Stream` trait and
+`async-stream` for the yielding state machine, both enabled by the existing
+`tokio` feature. `futures-util` is a dev dependency for examples and tests;
+consumers using its extensions add it themselves. Disabling default features
+excludes Tokio and `async-stream`; `futures-core` is still used transitively by
+the existing runtime-independent channel dependency.
 
 With `serde`, `Bytes` accepts numeric sequences in human-readable formats and
 byte strings in binary formats; JSON strings are rejected. Binary byte strings

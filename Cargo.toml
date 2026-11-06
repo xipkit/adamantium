@@ -57,11 +57,13 @@ publish.workspace = true
 
 [features]
 default = ["tokio"]
-tokio = ["dep:tokio"]
+tokio = ["dep:tokio", "dep:async-stream", "dep:futures-core"]
 serde = ["dep:serde", "indexmap/serde"]
 
 [dependencies]
 async-channel = "2"
+async-stream = { version = "0.3", optional = true }
+futures-core = { version = "0.3", optional = true }
 indexmap = "2"
 serde = { version = "1", optional = true }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"], optional = true }
@@ -69,6 +71,7 @@ tokio = { version = "1", features = ["macros", "rt", "sync", "time"], optional =
 [dev-dependencies]
 cbor4ii = { version = "1", features = ["serde1", "use_alloc"] }
 criterion = { version = "0.5", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 serde_json = "1"
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
@@ -76,6 +79,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 [[bench]]
 name = "cow"
 harness = false
+
+[[example]]
+name = "streaming"
+required-features = ["tokio"]
 
 [profile.release]
 overflow-checks = true
