@@ -162,11 +162,24 @@ pub fn run(path: &Path, cargo_args: &[String], json: bool) -> Result<ExitCode> {
     Ok(report.status.exit_code())
 }
 
+/// Writes Adamantium's `clippy.toml` into `dir`, which becomes
+/// `CLIPPY_CONF_DIR`, and returns the path Clippy's diagnostics will name it
+/// by. Clippy canonicalizes `CLIPPY_CONF_DIR` before reading it, so when `dir`
+/// is reached through a symlink, as macOS's temporary directory is through
+/// `/var`, the two spellings differ.
+fn write_clippy_config(dir: &Path) -> Result<PathBuf> {
+    let dir = dir
+        .canonicalize()
+        .with_context(|| format!("resolving {}", dir.display()))?;
+    let path = dir.join("clippy.toml");
+    fs::write(&path, CLIPPY_TOML).with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
 fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
     let config = Config::load(root)?;
     let conf = tempfile::tempdir().context("creating a directory for clippy.toml")?;
-    let clippy_config = conf.path().join("clippy.toml");
-    fs::write(&clippy_config, CLIPPY_TOML)?;
+    let clippy_config = write_clippy_config(conf.path())?;
 
     let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -574,6 +587,21 @@ mod tests {
         assert!(report.warnings.is_empty());
         assert!(report.errors.is_empty());
         assert!(report.findings.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clippy_config_is_named_by_its_canonical_path() {
+        let real = tempfile::tempdir().unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("conf");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        let path = write_clippy_config(&link).unwrap();
+        assert_eq!(
+            path,
+            real.path().canonicalize().unwrap().join("clippy.toml")
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), CLIPPY_TOML);
     }
 
     #[test]
