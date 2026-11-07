@@ -78,7 +78,9 @@ fn unresolved(
 ) -> Result<BTreeSet<String>> {
     let config = config.to_string();
     let dir = tempfile::tempdir()?;
-    let file = dir.path().join("clippy.toml");
+    // Clippy names the file by its canonical path, which differs when the
+    // temporary directory is reached through a symlink, as on macOS.
+    let file = dir.path().canonicalize()?.join("clippy.toml");
     fs::write(&file, &config)?;
     let entries = entries(&config)?;
     let output = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
