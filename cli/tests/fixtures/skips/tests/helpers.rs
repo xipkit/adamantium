@@ -1,10 +1,10 @@
-// A helper is not a test to Clippy, so this unwrap would count. The skip list
-// leaves the whole directory out.
-fn helper(value: Option<i32>) -> i32 {
-    value.unwrap()
+// Clippy applies the cast rules to tests as well, so this cast would count.
+// The skip list leaves the whole directory out.
+fn helper(value: u64) -> u8 {
+    value as u8
 }
 
 #[test]
 fn uses_helper() {
-    assert_eq!(helper(Some(1)), 1);
+    assert_eq!(helper(1), 1);
 }
