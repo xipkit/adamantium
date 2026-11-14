@@ -13,10 +13,10 @@ pub fn counter() -> u64 {
     total
 }
 
-pub fn settings() -> (Vec<String>, usize) {
-    let settings: ::adamantium::Actor<Vec<String>> = ::adamantium::Actor::default();
+pub fn settings() -> (Vec<&'static str>, usize) {
+    let settings: ::adamantium::Actor<Vec<&'static str>> = ::adamantium::Actor::default();
     let writer = settings.clone();
-    writer.with(|writer| { (*writer).push("verbose".to_owned()); });
+    writer.with(|writer| { (*writer).push("verbose"); });
     let current = settings.with(|settings| (*settings).clone());
     let count = settings.with(|settings| (*settings).len());
     (current, count)
@@ -35,7 +35,7 @@ pub fn aliased() -> u32 {
 
 #[derive(Debug, Default)]
 pub struct Cart {
-    pub items: Vec<String>,
+    pub items: Vec<&'static str>,
     pub total: u64,
 }
 
@@ -44,13 +44,13 @@ pub fn branches(prices: &[u64]) -> u64 {
     for price in prices {
         cart.with(|cart| cart.total += price);
     }
-    let add = |item: &str| cart.with(|cart| cart.items.push(item.to_owned()));
+    let add = |item: &'static str| cart.with(|cart| cart.items.push(item));
     add("pen");
     if cart.read(|cart| cart.total > 10) {
-        cart.with(|cart| { cart.items.push("discount".to_owned()); });
+        cart.with(|cart| { cart.items.push("discount"); });
     }
     while cart.with(|cart| cart.items.len() < 3) {
-        cart.with(|cart| cart.items.push("filler".to_owned()))
+        cart.with(|cart| cart.items.push("filler"))
     }
     let kind = match prices.len() {
         0 => cart.with(|cart| cart.items.len()),
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn rewritten_state_behaves_the_same() {
         assert_eq!(counter(), 2);
-        assert_eq!(settings(), (vec!["verbose".to_owned()], 1));
+        assert_eq!(settings(), (vec!["verbose"], 1));
         assert_eq!(aliased(), 132);
         assert_eq!(branches(&[4, 8]), 12);
         assert_eq!(branches(&[]), 0);

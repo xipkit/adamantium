@@ -303,6 +303,7 @@ fn shared_state_fix_cannot_follow_is_reported_and_left_unchanged() {
         ("awaited", "a-lock-held-across-an-await"),
         ("checking", "two-locks-at-once"),
         ("savings", "two-locks-at-once"),
+        ("calls", "two-locks-at-once"),
         ("escapes", "shared-state"),
         ("macro_use", "shared-state"),
     ] {

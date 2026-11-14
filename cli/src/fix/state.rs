@@ -36,6 +36,10 @@ pub(super) enum Reason {
     /// The guard is taken inside another actor's `with` or `read` callback,
     /// where calling an actor panics.
     InsideActor,
+    /// The statement that takes the guard calls a function, or a method on
+    /// a value other than the state, which might call an actor and would
+    /// then panic inside the callback.
+    Calls,
     /// Any other use that the rewrite can't follow.
     Unfollowed(&'static str),
 }
@@ -46,7 +50,7 @@ impl Reason {
         match self {
             Self::AcrossStatements => "a-guard-held-across-statements",
             Self::AcrossAwait => "a-lock-held-across-an-await",
-            Self::TwoLocks | Self::InsideActor => "two-locks-at-once",
+            Self::TwoLocks | Self::InsideActor | Self::Calls => "two-locks-at-once",
             Self::ControlFlow | Self::Unfollowed(_) => "shared-state",
         }
     }
@@ -58,6 +62,9 @@ impl Reason {
             Self::TwoLocks => "a statement holding its guard takes another lock",
             Self::ControlFlow => "a statement holding its guard can return, break or use `?`",
             Self::InsideActor => "it is locked inside another actor's `with` or `read` callback",
+            Self::Calls => {
+                "a statement holding its guard calls a function or another value's method, which might use an actor"
+            }
             Self::Unfollowed(detail) => detail,
         }
     }
@@ -1570,6 +1577,9 @@ impl<'a> Walker<'a> {
         if let Some(reason) = inside.unfollowed {
             return Err(Reason::Unfollowed(reason));
         }
+        if inside.calls {
+            return Err(Reason::Calls);
+        }
         // Method lookup on a guard starts at the guard and reaches the state
         // through `Deref`; on the callback's `&mut T` it would start at the
         // reference and could pick another trait's method. Starting at `*m`
@@ -2124,6 +2134,7 @@ struct Scan<'w, 'a> {
     awaits: bool,
     locks: bool,
     leaves: bool,
+    calls: bool,
     unfollowed: Option<&'static str>,
 }
 
@@ -2137,6 +2148,7 @@ impl<'w, 'a> Scan<'w, 'a> {
             awaits: false,
             locks: false,
             leaves: false,
+            calls: false,
             unfollowed: None,
         }
     }
@@ -2145,6 +2157,34 @@ impl<'w, 'a> Scan<'w, 'a> {
         match full {
             Full::Expr(expr) => self.visit_expr(expr),
             Full::Macro(mac) => self.visit_macro(mac),
+        }
+    }
+
+    /// Whether `expr` is the state or a value computed from it alone: the
+    /// guard reached through fields, indexes, unary operators, borrows,
+    /// casts and method calls, or a macro, such as `write!`, given the guard.
+    fn computed_from_state(&self, mut expr: &Expr) -> bool {
+        loop {
+            if is(expr, self.guard) {
+                return true;
+            }
+            expr =
+                match expr {
+                    Expr::Field(field) => &field.base,
+                    Expr::Index(index) => &index.expr,
+                    Expr::Unary(unary) => &unary.expr,
+                    Expr::Reference(reference) => &reference.expr,
+                    Expr::Paren(paren) => &paren.expr,
+                    Expr::Cast(cast) => &cast.expr,
+                    Expr::MethodCall(call) => &call.receiver,
+                    Expr::Macro(_) => {
+                        let text = &self.walker.text;
+                        return text.of(expr).zip(text.of(self.guard)).is_some_and(
+                            |(outer, guard)| outer.start <= guard.start && guard.end <= outer.end,
+                        );
+                    }
+                    _ => return false,
+                };
         }
     }
 }
@@ -2174,10 +2214,12 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
             {
                 self.locks = true;
             }
-            Expr::Call(call) if self.walker.local(&call.func).is_some() => {
-                // A local closure might use this or another actor.
-                self.unfollowed
-                    .get_or_insert("a statement holding its guard calls a local closure");
+            // An actor's callback can't use any actor, and a function or a
+            // method on another value might. Only methods on the state, or
+            // on a value computed from it, are called under the guard.
+            Expr::Call(_) => self.calls = true,
+            Expr::MethodCall(call) if !self.computed_from_state(&call.receiver) => {
+                self.calls = true
             }
             Expr::Closure(_) | Expr::Async(_) => {
                 self.deferred += 1;
@@ -2684,7 +2726,6 @@ mod tests {
             "fn f() { let m = Arc::new(Mutex::new(0)); println!(\"{m:?}\"); }",
             "fn f() { let m = Arc::new(Mutex::new(0)); other!(m); }",
             "fn f() { let m = Arc::new(Mutex::new(0)); let h = m.clone(); *m.lock().unwrap() += 1; consume(h); }",
-            "fn f() { let m = Arc::new(Mutex::new(0)); let g = || 1; *m.lock().unwrap() += g(); }",
             "fn f() { let m = Arc::new(Mutex::new(vec![1])); let n = m.lock().unwrap().len(); }",
             "fn f() { let m = Arc::new(Mutex::new(0)); if let Ok(mut g) = m.lock() { *g += 1; } }",
             "fn f() { #[cfg(test)] let m = Arc::new(Mutex::new(0)); *m.lock().unwrap() += 1; }",
@@ -2724,8 +2765,8 @@ mod tests {
     #[test]
     fn a_statement_naming_the_binding_again_is_refused() {
         for body in [
-            "fn f() { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().push({ let h = m.clone(); drop(h); 1 }); }",
-            "fn f() { let m = Arc::new(Mutex::new(vec![1])); m.lock().unwrap().push(format!(\"{m:?}\").len()); }",
+            "fn f() { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().push({ let h = &m; 1 }); }",
+            "fn f() { let m = Arc::new(Mutex::new(Vec::new())); m.lock().unwrap().push(format!(\"{m:?}\")); }",
         ] {
             let source = format!("use std::sync::{{Arc, Mutex}};\n{body}\n");
             let (fixed, refusals) = fix(&source, &["Mutex"]);
@@ -2749,13 +2790,38 @@ mod tests {
     }
 
     #[test]
-    fn call_arguments_are_reborrowed_not_copied() {
+    fn coercion_site_operands_are_reborrowed_not_copied() {
         let (fixed, refusals) = fix(
-            "use std::sync::{Arc, Mutex};\nfn bump(x: &mut i32) { *x += 1; }\nfn f(mut x: i32) {\n    let m = Arc::new(Mutex::new(&mut x));\n    bump(*m.lock().unwrap());\n}\n",
+            "use std::sync::{Arc, Mutex};\nstruct S<'a> { x: &'a mut i32 }\nfn f(mut x: i32) {\n    let m = Arc::new(Mutex::new(&mut x));\n    S { x: *m.lock().unwrap() };\n}\n",
             &["Mutex"],
         );
         assert_eq!(refusals, []);
-        assert!(fixed.contains("m.with(|m| { bump(*m); });"), "{fixed}");
+        assert!(fixed.contains("m.with(|m| { S { x: *m }; });"), "{fixed}");
+    }
+
+    #[test]
+    fn calls_that_might_use_an_actor_are_refused() {
+        for body in [
+            "fn other() -> u32 { 1 }\nfn f() { let m = Arc::new(Mutex::new(0u32)); *m.lock().unwrap() += other(); }",
+            "fn f() { let m = Arc::new(Mutex::new(0u32)); let other = || 1; *m.lock().unwrap() += other(); }",
+            "fn bump(x: &mut u32) { *x += 1; }\nfn f() { let m = Arc::new(Mutex::new(0u32)); bump(&mut *m.lock().unwrap()); }",
+        ] {
+            refused(body, "m", Reason::Calls);
+        }
+        for body in [
+            "fn f(other: &[u32]) { let m = Arc::new(Mutex::new(0usize)); *m.lock().unwrap() += other.len(); }",
+            "fn f(other: &[u32]) { let m = Arc::new(Mutex::new(0usize)); *m.lock().unwrap() += (other, 1).0.len(); }",
+            "fn f(other: &[u32]) { let m = Arc::new(Mutex::new(0usize)); let _n = (other, m.lock().unwrap().len()).0.len(); }",
+        ] {
+            refused(body, "m", Reason::Calls);
+        }
+        // A copy read out of the state leaves the call outside the callback.
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nfn other() -> u32 { 1 }\nfn f() -> u32 {\n    let m = Arc::new(Mutex::new(0u32));\n    *m.lock().unwrap() + other()\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(fixed.contains("m.read(|m| *m) + other()"), "{fixed}");
     }
 
     #[test]
@@ -2795,7 +2861,7 @@ mod tests {
     #[test]
     fn a_write_destination_is_borrowed_mutably() {
         let (fixed, refusals) = fix(
-            "use std::fmt::Write;\nuse std::sync::{Arc, Mutex};\nfn f() -> std::fmt::Result {\n    let m = Arc::new(Mutex::new(String::new()));\n    write!(*m.lock().unwrap(), \"hello\").unwrap();\n    writeln!(String::new(), \"{}\", *m.lock().unwrap())\n}\n",
+            "use std::fmt::Write;\nuse std::sync::{Arc, Mutex};\nfn f(mut out: String) -> std::fmt::Result {\n    let m = Arc::new(Mutex::new(String::new()));\n    write!(*m.lock().unwrap(), \"hello\").unwrap();\n    writeln!(out, \"{}\", *m.lock().unwrap())\n}\n",
             &["Mutex"],
         );
         assert_eq!(refusals, []);
@@ -2804,7 +2870,7 @@ mod tests {
             "{fixed}"
         );
         assert!(
-            fixed.contains("m.read(|m| writeln!(String::new(), \"{}\", *m))"),
+            fixed.contains("m.read(|m| writeln!(out, \"{}\", *m))"),
             "{fixed}"
         );
     }
@@ -2857,7 +2923,7 @@ mod tests {
     #[test]
     fn values_moved_on_one_path_are_refused() {
         refused(
-            "struct D;\nfn f(flag: bool, d: D) { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().extend(if flag { Some(d) } else { None }); }",
+            "struct D;\nfn f(flag: bool, d: D) { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().extend(if flag { [d] } else { [D] }); }",
             "m",
             Reason::Unfollowed(
                 "a statement holding its guard may move a variable on only one path",
@@ -2923,12 +2989,12 @@ mod tests {
     #[test]
     fn a_clone_that_borrows_stays_inside_its_statement() {
         let (fixed, refusals) = fix(
-            "use std::sync::{Arc, Mutex};\nstruct S;\nimpl S { fn clone(&self) -> &Self { self } }\nfn consume(_: &S) {}\nfn f() {\n    let m = Arc::new(Mutex::new(S));\n    consume(m.lock().unwrap().clone());\n}\n",
+            "use std::sync::{Arc, Mutex};\nstruct S;\nimpl S { fn clone(&self) -> &Self { self } fn touch(&self) {} }\nfn f() {\n    let m = Arc::new(Mutex::new(S));\n    m.lock().unwrap().clone().touch();\n}\n",
             &["Mutex"],
         );
         assert_eq!(refusals, []);
         assert!(
-            fixed.contains("m.with(|m| { consume((*m).clone()); });"),
+            fixed.contains("m.with(|m| { (*m).clone().touch(); });"),
             "{fixed}"
         );
     }
@@ -2950,8 +3016,8 @@ mod tests {
     #[test]
     fn assertion_messages_and_debug_assertions_are_conditional() {
         for body in [
-            "struct D;\nfn f(d: D) { let m = Arc::new(Mutex::new(true)); assert!(*m.lock().unwrap(), \"{}\", { drop(d); \"bad\" }); }",
-            "struct D;\nfn f(d: D) { let m = Arc::new(Mutex::new(1)); debug_assert_eq!(*m.lock().unwrap(), { drop(d); 1 }); }",
+            "struct D;\nfn f(d: D) { let m = Arc::new(Mutex::new(true)); assert!(*m.lock().unwrap(), \"{}\", { let _d = d; \"bad\" }); }",
+            "struct D;\nfn f(d: D) { let m = Arc::new(Mutex::new(1)); debug_assert_eq!(*m.lock().unwrap(), { let _d = d; 1 }); }",
         ] {
             refused(
                 body,

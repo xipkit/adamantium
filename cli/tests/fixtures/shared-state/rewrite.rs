@@ -17,10 +17,10 @@ pub fn counter() -> u64 {
     total
 }
 
-pub fn settings() -> (Vec<String>, usize) {
-    let settings: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::default());
+pub fn settings() -> (Vec<&'static str>, usize) {
+    let settings: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::default());
     let writer = settings.clone();
-    writer.lock().unwrap().push("verbose".to_owned());
+    writer.lock().unwrap().push("verbose");
     let current = settings.lock().expect("settings lock").clone();
     let count = settings.lock().unwrap().len();
     (current, count)
@@ -39,7 +39,7 @@ pub fn aliased() -> u32 {
 
 #[derive(Debug, Default)]
 pub struct Cart {
-    pub items: Vec<String>,
+    pub items: Vec<&'static str>,
     pub total: u64,
 }
 
@@ -48,13 +48,13 @@ pub fn branches(prices: &[u64]) -> u64 {
     for price in prices {
         cart.lock().unwrap().total += price;
     }
-    let add = |item: &str| cart.lock().unwrap().items.push(item.to_owned());
+    let add = |item: &'static str| cart.lock().unwrap().items.push(item);
     add("pen");
     if cart.lock().unwrap().total > 10 {
-        cart.lock().unwrap().items.push("discount".to_owned());
+        cart.lock().unwrap().items.push("discount");
     }
     while cart.lock().unwrap().items.len() < 3 {
-        cart.lock().unwrap().items.push("filler".to_owned())
+        cart.lock().unwrap().items.push("filler")
     }
     let kind = match prices.len() {
         0 => cart.lock().unwrap().items.len(),
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn rewritten_state_behaves_the_same() {
         assert_eq!(counter(), 2);
-        assert_eq!(settings(), (vec!["verbose".to_owned()], 1));
+        assert_eq!(settings(), (vec!["verbose"], 1));
         assert_eq!(aliased(), 132);
         assert_eq!(branches(&[4, 8]), 12);
         assert_eq!(branches(&[]), 0);
