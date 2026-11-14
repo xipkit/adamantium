@@ -15,6 +15,8 @@ use tokio::{
     time::Instant,
 };
 
+use crate::time;
+
 mod stream;
 #[cfg(feature = "tracing")]
 mod trace;
@@ -62,6 +64,47 @@ impl Cancellation {
             drop(requested.wait_for(|requested| *requested).await);
         })
         .await
+    }
+
+    /// Requests shutdown on SIGINT or SIGTERM on Unix, or Ctrl-C on Windows.
+    ///
+    /// Requires the opt-in `signal` feature and a Tokio runtime with signal
+    /// handling enabled. Listening starts when this future is first polled;
+    /// registration errors are returned without requesting cancellation.
+    /// It also returns successfully if this signal is cancelled another way.
+    /// An already cancelled signal does not register process handlers.
+    ///
+    /// Await this alongside the work that observes this cancellation, for
+    /// example with `tokio::try_join!`. No background task is spawned. Dropping
+    /// the future stops listening without cancelling, but Tokio's process-wide
+    /// signal handlers remain installed, replacing the default termination
+    /// behavior even after the listener is dropped.
+    #[cfg(all(feature = "signal", any(unix, windows)))]
+    pub async fn cancel_on_signal(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        let received = async {
+            use tokio::signal::unix::{SignalKind, signal};
+
+            let mut interrupt = signal(SignalKind::interrupt())?;
+            let mut terminate = signal(SignalKind::terminate())?;
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
+            }
+            Ok::<(), std::io::Error>(())
+        };
+        #[cfg(windows)]
+        let received = tokio::signal::ctrl_c();
+
+        tokio::select! {
+            biased;
+            () = self.cancelled() => Ok(()),
+            result = received => {
+                result?;
+                self.cancel();
+                Ok(())
+            }
+        }
     }
 }
 
@@ -151,7 +194,7 @@ pub(crate) async fn shutdown(cancellation: &Cancellation, deadline: Option<Insta
     let mut cancelled = pin!(cancellation.cancelled());
     let mut elapsed = pin!(async {
         match deadline {
-            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            Some(deadline) => time::sleep_until(deadline).await,
             None => std::future::pending().await,
         }
     });
@@ -161,7 +204,7 @@ pub(crate) async fn shutdown(cancellation: &Cancellation, deadline: Option<Insta
         }
         // Tokio timers round up to milliseconds. Check the clock as well so an
         // expired deadline wins before polling the waiter's work on every poll.
-        if deadline.is_some_and(|deadline| deadline <= Instant::now())
+        if deadline.is_some_and(|deadline| deadline <= time::now())
             || elapsed.as_mut().poll(cx).is_ready()
         {
             return Poll::Ready(Shutdown::DeadlineExceeded);
@@ -347,14 +390,14 @@ impl<E: Send + 'static> Tasks<E> {
     /// cancellation and keep awaiting this future instead of dropping it.
     ///
     /// ```
-    /// use adamantium::{Cancellation, ScopeError, Tasks};
-    /// use tokio::time::{Duration, Instant};
+    /// use adamantium::{Cancellation, ScopeError, Tasks, time};
+    /// use std::time::Duration;
     /// # #[tokio::main] async fn main() {
     /// let cancellation = Cancellation::new();
     /// let worker = cancellation.clone();
     /// let result = Tasks::<std::io::Error>::run_until(
     ///     cancellation,
-    ///     Some(Instant::now() + Duration::from_secs(1)),
+    ///     Some(time::now() + Duration::from_secs(1)),
     ///     async |tasks| {
     ///         let work = tasks.spawn_blocking(move || {
     ///             // Real blocking work checks this between bounded operations.

@@ -7,10 +7,10 @@ mod style;
 
 use std::{io::Write, path::PathBuf, process::ExitCode};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::lints::{CLIPPY_TOML, LINTS, lints_toml};
+use crate::lints::{CLIPPY_TOML, OVERFLOW_EXAMPLE, OVERFLOW_RULE, OVERFLOW_WHY, lints_toml};
 
 #[derive(Parser)]
 #[command(
@@ -33,6 +33,9 @@ enum Command {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
         format: ReportFormat,
+        /// Include the strict rules, starting with arithmetic_side_effects.
+        #[arg(long)]
+        strict: bool,
         /// Arguments passed on to `cargo clippy`, such as `--release` or `-p name`.
         #[arg(last = true)]
         cargo_args: Vec<String>,
@@ -45,11 +48,24 @@ enum Command {
         /// Replace a clippy.toml that differs from adamantium's.
         #[arg(long)]
         force: bool,
+        /// Include the strict rules, starting with arithmetic_side_effects.
+        #[arg(long)]
+        strict: bool,
     },
     /// Print the rules.
     Rules {
         #[arg(long, value_enum, default_value_t = RulesFormat::Text)]
         format: RulesFormat,
+        /// Include the strict rules, starting with arithmetic_side_effects.
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Explain a rule with a before-and-after example and its replacement.
+    Explain {
+        /// A bare or qualified rule name, such as unwrap_used or clippy::unwrap_used.
+        rule: String,
+        #[arg(long, value_enum, default_value_t = ExplainFormat::Text)]
+        format: ExplainFormat,
     },
     /// Review Rust files against the judgment-based parts of the Google Rust
     /// style guide, through a model provider (the OpenAI Decisions API by
@@ -76,10 +92,49 @@ enum RulesFormat {
     Toml,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum ExplainFormat {
+    Text,
+    Json,
+}
+
+#[derive(serde::Serialize)]
+struct Explanation {
+    schema_version: u32,
+    rule: String,
+    why: &'static str,
+    #[serde(flatten)]
+    example: lints::Example,
+}
+
+impl Explanation {
+    fn for_rule(rule: &str) -> Result<Self> {
+        if rule == OVERFLOW_RULE || Some(rule) == OVERFLOW_RULE.strip_prefix("adamantium::") {
+            return Ok(Self {
+                schema_version: 1,
+                rule: OVERFLOW_RULE.to_owned(),
+                why: OVERFLOW_WHY,
+                example: OVERFLOW_EXAMPLE,
+            });
+        }
+        let lint = lints::selected(true)
+            .find(|lint| lint.name == rule || lint.qualified() == rule)
+            .ok_or_else(|| {
+                anyhow!("unknown rule `{rule}`; `cargo adamantium rules` lists the lint names")
+            })?;
+        Ok(Self {
+            schema_version: 1,
+            rule: lint.qualified(),
+            why: lint.why,
+            example: lint.example,
+        })
+    }
+}
+
 #[derive(serde::Serialize)]
 struct Rules {
     schema_version: u32,
-    lints: &'static [lints::Lint],
+    lints: Vec<&'static lints::Lint>,
     clippy_toml: &'static str,
 }
 
@@ -104,12 +159,17 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Check {
             path,
             format,
+            strict,
             cargo_args,
-        } => check::run(&path, &cargo_args, format),
-        Command::Init { path, force } => {
+        } => check::run(&path, &cargo_args, format, strict),
+        Command::Init {
+            path,
+            force,
+            strict,
+        } => {
             let root = manifest::root(&path)?;
             let config = config::Config::load(&root)?;
-            let changes = manifest::init(&root, force, &config)?;
+            let changes = manifest::init(&root, force, &config, strict)?;
             let mut stderr = std::io::stderr().lock();
             if changes.notes.is_empty() {
                 writeln!(
@@ -124,11 +184,28 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Style(command) => style::run(command),
-        Command::Rules { format } => {
+        Command::Explain { rule, format } => {
+            let explanation = Explanation::for_rule(&rule)?;
+            let mut stdout = std::io::stdout().lock();
+            match format {
+                ExplainFormat::Text => {
+                    writeln!(stdout, "{}\n\nWhy: {}", explanation.rule, explanation.why)?;
+                    writeln!(stdout, "\nReplacement: {}", explanation.example.replacement)?;
+                    writeln!(stdout, "\nBefore:\n{}", explanation.example.before)?;
+                    writeln!(stdout, "\nAfter:\n{}", explanation.example.after)?;
+                }
+                ExplainFormat::Json => {
+                    serde_json::to_writer_pretty(&mut stdout, &explanation)?;
+                    writeln!(stdout)?;
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Rules { format, strict } => {
             let mut stdout = std::io::stdout().lock();
             match format {
                 RulesFormat::Text => {
-                    for lint in LINTS {
+                    for lint in lints::selected(strict) {
                         writeln!(
                             stdout,
                             "{:<6} {:<36} {}",
@@ -144,13 +221,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         &mut stdout,
                         &Rules {
                             schema_version: 1,
-                            lints: LINTS,
+                            lints: lints::selected(strict).collect(),
                             clippy_toml: CLIPPY_TOML,
                         },
                     )?;
                     writeln!(stdout)?;
                 }
-                RulesFormat::Toml => write!(stdout, "{}", lints_toml(true))?,
+                RulesFormat::Toml => write!(stdout, "{}", lints_toml(true, strict))?,
             }
             Ok(ExitCode::SUCCESS)
         }
