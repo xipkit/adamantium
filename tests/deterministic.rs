@@ -334,6 +334,28 @@ fn replay_detects_changed_scenario() {
 }
 
 #[test]
+fn replay_rejects_early_panics_and_reports_the_observed_trace() {
+    let successful = testing::check(config(), atomic_increment).unwrap();
+    let failed = testing::check(config(), broken_increment).unwrap_err();
+    for original in [&successful, failed.replay()] {
+        let mismatch = testing::replay(original, || async {
+            panic!("unrelated early failure");
+        })
+        .unwrap_err();
+        assert_eq!(mismatch.kind(), FailureKind::ReplayMismatch);
+        assert_ne!(mismatch.replay(), original);
+        assert_eq!(mismatch.replay().seed(), original.seed());
+        assert_eq!(mismatch.replay().iteration(), original.iteration());
+        let reproduced = testing::replay(mismatch.replay(), || async {
+            panic!("unrelated early failure");
+        })
+        .unwrap_err();
+        assert_eq!(reproduced.kind(), FailureKind::Panic);
+        assert_eq!(reproduced.replay(), mismatch.replay());
+    }
+}
+
+#[test]
 fn prepolled_channel_future_is_rejected_before_receiving() {
     use futures_util::FutureExt;
     let channel = Arc::new(Channel::bounded(1));

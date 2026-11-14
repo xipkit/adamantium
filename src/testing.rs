@@ -180,7 +180,8 @@ impl Failure {
         self.kind
     }
 
-    /// The execution record, suitable for [`replay`] or [`Replay::save`].
+    /// The observed execution record, suitable for [`replay`] or [`Replay::save`].
+    /// On a replay mismatch, this contains the steps actually executed.
     pub fn replay(&self) -> &Replay {
         &self.replay
     }
@@ -365,16 +366,17 @@ where
         shuttle::Runner::new(scheduler, engine).run(move || shuttle::future::block_on(factory()));
     }));
     let record = lock(&trace).record.clone();
-    let kind = match result {
-        Ok(()) if original.as_ref().is_some_and(|r| r.steps != record.steps) => {
-            FailureKind::ReplayMismatch
+    let kind = if original.as_ref().is_some_and(|r| r.steps != record.steps) {
+        FailureKind::ReplayMismatch
+    } else {
+        match result {
+            Ok(()) => return Ok(record),
+            Err(payload) => classify(&*payload, original.is_some()),
         }
-        Ok(()) => return Ok(record),
-        Err(payload) => classify(&*payload, original.is_some()),
     };
     let failure = Failure {
         kind,
-        replay: original.unwrap_or(record),
+        replay: record,
     };
     eprintln!("{failure}");
     Err(failure)
