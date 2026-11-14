@@ -1,9 +1,11 @@
 #![cfg(all(feature = "signal", any(unix, windows)))]
 
+mod support;
+
 use std::{pin::pin, task::Poll, time::Duration};
 
 use adamantium::{Cancellation, Tasks};
-use tokio::time::timeout;
+use support::timeout;
 
 const HUNG: Duration = Duration::from_secs(10);
 

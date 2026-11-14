@@ -52,9 +52,9 @@ items! {
     pub fn second() {}
 }
 
-// Counted in macros: the bare attributes, also with a metavariable for a
-// value or a predicate, and the `unsafe` of the other, but not the one a
-// `cfg_attr` can't add.
+// Counted in macros, since the scan doesn't expand a call in a function:
+// the bare attributes, also with a metavariable for a value or a predicate,
+// and the `unsafe` of the other, but not the one a `cfg_attr` can't add.
 macro_rules! export {
     ($name:ident, $section:ident, $other:ident, $symbol:literal, $place:literal, $cfg:meta) => {
         #[no_mangle]
@@ -70,4 +70,6 @@ macro_rules! export {
     };
 }
 
-export!(exported, EXPORTED, other, "exported_symbol", ".data.configured", all());
+pub fn exporter() {
+    export!(exported, EXPORTED, other, "exported_symbol", ".data.configured", all());
+}

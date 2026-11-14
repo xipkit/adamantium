@@ -1,5 +1,7 @@
 #![cfg(feature = "tokio")]
 
+mod support;
+
 use std::{
     future,
     pin::Pin,
@@ -17,8 +19,8 @@ use adamantium::{
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
+use support::timeout;
 use tokio::sync::{Semaphore, oneshot};
-use tokio::time::timeout;
 
 const HUNG: Duration = Duration::from_secs(30);
 
@@ -287,7 +289,7 @@ on_both_runtimes! {
             assert_eq!(failure.next().await, Some(Err(ScopeError::Failed("error"))));
         }
         {
-            let mut abandoned = Box::pin(concurrently_ordered_until(0..1, 1, parent.clone(), |_| future::pending::<Result<(), &str>>()));
+            let mut abandoned = std::pin::pin!(concurrently_ordered_until(0..1, 1, parent.clone(), |_| future::pending::<Result<(), &str>>()));
             pending(abandoned.as_mut()).await;
         }
         assert!(!parent.is_cancelled());

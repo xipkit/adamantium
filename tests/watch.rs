@@ -2,6 +2,9 @@
 //! latest-value type stays available to crates that leave Tokio out.
 
 #[cfg(feature = "tokio")]
+mod support;
+
+#[cfg(feature = "tokio")]
 use adamantium::{Cancellation, ReceiveError, Tasks, time};
 use adamantium::{Closed, TryReceiveError, Watch, Watcher};
 #[cfg(feature = "tokio")]
@@ -475,7 +478,7 @@ async fn a_send_racing_a_new_wait_is_never_missed() {
             let waiting = t.spawn(async move { Ok(watcher.receive().await) });
             let writer = watch.clone();
             t.spawn(async move { writer.send(round).map_err(|_| "closed") });
-            let received = tokio::time::timeout(Duration::from_secs(5), t.value(waiting))
+            let received = support::timeout(Duration::from_secs(5), t.value(waiting))
                 .await
                 .map_err(|_| "a wait missed its send")??;
             if received != Some(round) {

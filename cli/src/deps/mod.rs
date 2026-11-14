@@ -6,10 +6,11 @@
 mod cfg;
 mod disallowed;
 mod metadata;
+mod rules;
 mod scan;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     io::{self, Write},
     path::{Path, PathBuf},
     process::ExitCode,
@@ -89,24 +90,55 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
     let disallowed = Disallowed::bundled()?;
     let (triple, printed) = metadata::host(root)?;
     let target = Target::parse(&printed);
-    let mut dependencies = Vec::new();
-    for dependency in metadata::dependencies(root, &triple, &target, cargo_args)? {
-        let scan = match &dependency.lib {
-            Some(lib) => scan::scan(
-                &Crate {
-                    name: &lib.name,
-                    root: &dependency.root,
-                    src: &lib.src_path,
-                    edition_2015: lib.edition == "2015",
-                    externs: &dependency.externs,
-                    cfg: Cfg {
-                        target: &target,
-                        features: &dependency.features,
-                        proc_macro: lib.proc_macro,
-                    },
+    let resolved = metadata::dependencies(root, &triple, &target, cargo_args)?;
+    // Each library's dependencies by the names its code uses, mapped to
+    // their library names.
+    let externs: HashMap<&str, BTreeMap<String, String>> = resolved
+        .iter()
+        .map(|dependency| {
+            let names = dependency
+                .externs
+                .iter()
+                .map(|(name, dependency)| (name.clone(), dependency.lib.clone()))
+                .collect();
+            (dependency.id.as_str(), names)
+        })
+        .collect();
+    let indices: HashMap<&str, usize> = resolved
+        .iter()
+        .filter(|dependency| dependency.lib.is_some())
+        .enumerate()
+        .map(|(index, dependency)| (dependency.id.as_str(), index))
+        .collect();
+    let crates: Vec<Crate> = resolved
+        .iter()
+        .filter_map(|dependency| {
+            let lib = dependency.lib.as_ref()?;
+            let externs = externs.get(dependency.id.as_str())?;
+            let dependencies = dependency
+                .externs
+                .iter()
+                .filter_map(|(name, dep)| Some((name.clone(), *indices.get(dep.id.as_str())?)))
+                .collect();
+            Some(Crate {
+                name: &lib.name,
+                root: &dependency.root,
+                src: &lib.src_path,
+                edition_2015: lib.edition == "2015",
+                externs,
+                dependencies,
+                cfg: Cfg {
+                    target: &target,
+                    features: &dependency.features,
+                    proc_macro: lib.proc_macro,
                 },
-                &disallowed,
-            ),
+            })
+        })
+        .collect();
+    let mut dependencies = Vec::new();
+    for dependency in &resolved {
+        let scan = match indices.get(dependency.id.as_str()).copied() {
+            Some(entry) => scan::scan(&crates, entry, &disallowed),
             None => scan::Scan {
                 unscanned: vec![Unscanned {
                     file: "Cargo.toml".to_owned(),
@@ -130,9 +162,9 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
             })
             .collect();
         dependencies.push(Dependency {
-            name: dependency.name,
-            version: dependency.version,
-            source: dependency.source,
+            name: dependency.name.clone(),
+            version: dependency.version.clone(),
+            source: dependency.source.clone(),
             kind: dependency.kind,
             forbids_unsafe: scan.forbids_unsafe,
             unsafe_code: scan.unsafe_code,

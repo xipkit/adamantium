@@ -14,12 +14,15 @@ publish = false
 off = ["spawner/off"]
 
 [dependencies]
-assembly = { path = "vendor/assembly" }
 codegen = { path = "vendor/codegen" }
 exports = { path = "vendor/exports" }
+facade = { path = "vendor/facade" }
 ffi = { path = "vendor/ffi" }
 old = { path = "vendor/old" }
+platform = { path = "vendor/platform" }
+runner = { path = "vendor/runner" }
 safe = { path = "vendor/safe" }
+selector = { path = "vendor/selector" }
 spawner = { path = "vendor/spawner", features = ["on"] }
 
 [build-dependencies]

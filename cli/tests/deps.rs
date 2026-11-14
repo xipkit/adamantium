@@ -129,15 +129,21 @@ fn deps_lists_runtime_and_build_dependencies_but_not_members_or_dev_dependencies
     assert_eq!(
         kinds,
         BTreeMap::from([
-            ("assembly", "runtime"),
             ("builder", "build"),
+            ("cfg-if", "runtime"),
             ("codegen", "build"),
             ("exports", "runtime"),
+            ("facade", "runtime"),
             ("ffi", "runtime"),
+            ("futures", "runtime"),
+            ("futures-util", "runtime"),
             ("helper", "build"),
             ("old", "runtime"),
+            ("platform", "runtime"),
             ("pool", "runtime"),
+            ("runner", "runtime"),
             ("safe", "runtime"),
+            ("selector", "runtime"),
             ("spawner", "runtime"),
             ("tokio", "runtime"),
         ])
@@ -148,7 +154,8 @@ fn deps_lists_runtime_and_build_dependencies_but_not_members_or_dev_dependencies
 fn deps_finds_each_marked_call_and_nothing_else() {
     let report = report(&[]).unwrap();
     for name in [
-        "spawner", "tokio", "old", "builder", "pool", "safe", "helper",
+        "spawner", "tokio", "old", "runner", "builder", "pool", "safe", "helper", "platform",
+        "facade", "selector",
     ] {
         let (sites, unresolved) = marked(name).unwrap();
         let dependency = dependency(&report, name).unwrap();
@@ -184,7 +191,6 @@ fn deps_counts_each_kind_of_unsafe_and_notes_forbidding_crates() {
             "traits": 1,
             "extern_blocks": 0,
             "attributes": 0,
-            "global_asm": 0,
             "in_macros": 1,
         })
     );
@@ -207,7 +213,6 @@ fn deps_counts_each_kind_of_unsafe_and_notes_forbidding_crates() {
             "traits": 0,
             "extern_blocks": 1,
             "attributes": 0,
-            "global_asm": 0,
             "in_macros": 0,
         })
     );
@@ -222,23 +227,7 @@ fn deps_counts_each_kind_of_unsafe_and_notes_forbidding_crates() {
             "traits": 0,
             "extern_blocks": 0,
             "attributes": 9,
-            "global_asm": 0,
             "in_macros": 4,
-        })
-    );
-    // `global_asm!` invocations, by each path and `use` that leads to it,
-    // and the ones written in a macro body.
-    assert_eq!(
-        dependency(&report, "assembly").unwrap()["unsafe"],
-        json!({
-            "functions": 0,
-            "blocks": 0,
-            "impls": 0,
-            "traits": 0,
-            "extern_blocks": 0,
-            "attributes": 0,
-            "global_asm": 10,
-            "in_macros": 2,
         })
     );
     // By attribute, by a lint level string, and by a lint level table.
@@ -269,6 +258,112 @@ fn deps_names_source_it_could_not_scan() {
 }
 
 #[test]
+fn deps_names_modules_declared_in_macro_bodies_it_could_not_read() {
+    let report = report(&[]).unwrap();
+    // Modules in conditional macro branches that can't be built aren't listed.
+    assert_eq!(
+        dependency(&report, "platform").unwrap()["unscanned"],
+        json!([{
+            "file": "src/lib.rs",
+            "line": 22,
+            "reason": "module `hidden` is declared in a macro body the scan can't read",
+        }])
+    );
+}
+
+#[test]
+fn deps_scans_each_conditional_macro_branch_that_may_be_built() {
+    let report = report(&[]).unwrap();
+    // Unknown predicates keep both possible branches. Nested `cfg_if!` and
+    // `cfg_select!` invocations load their modules too, as does the call of
+    // the crate's own macro. `hidden.rs` isn't counted.
+    assert_eq!(
+        dependency(&report, "platform").unwrap()["unsafe"],
+        json!({
+            "functions": 4,
+            "blocks": 1,
+            "impls": 1,
+            "traits": 1,
+            "extern_blocks": 0,
+            "attributes": 0,
+            "in_macros": 0,
+        })
+    );
+}
+
+#[test]
+fn deps_reads_modules_the_crates_own_macros_declare() {
+    let report = report(&[]).unwrap();
+    let facade = dependency(&report, "facade").unwrap();
+    // The `unsafe impl` in `root!` counts where it is called, not in the
+    // definition's body, and the modules it declares are scanned, one where
+    // its `#[path]` may put it, as is the one `backend!` declares through
+    // `$crate::declare!`.
+    assert_eq!(
+        facade["unsafe"],
+        json!({
+            "functions": 1,
+            "blocks": 1,
+            "impls": 1,
+            "traits": 0,
+            "extern_blocks": 0,
+            "attributes": 0,
+            "in_macros": 0,
+        })
+    );
+    assert_eq!(facade["unscanned"], json!([]));
+    let files: BTreeSet<String> = reported(facade)
+        .unwrap()
+        .into_iter()
+        .map(|(_, file, _)| file)
+        .collect();
+    assert_eq!(
+        files,
+        BTreeSet::from(["src/driver.rs", "src/macros.rs"].map(str::to_owned))
+    );
+}
+
+#[test]
+fn deps_reads_modules_other_crates_macros_declare_where_called_by_path_or_use() {
+    let report = report(&[]).unwrap();
+    let runner = dependency(&report, "runner").unwrap();
+    assert_eq!(runner["unscanned"], json!([]));
+    let files: BTreeSet<String> = reported(runner)
+        .unwrap()
+        .into_iter()
+        .map(|(_, file, _)| file)
+        .collect();
+    assert_eq!(
+        files,
+        BTreeSet::from(
+            [
+                "src/fast.rs",
+                "src/slow.rs",
+                "src/imported/fast.rs",
+                "src/imported/slow.rs"
+            ]
+            .map(str::to_owned)
+        )
+    );
+}
+
+#[test]
+fn deps_reads_modules_reexported_macros_from_other_crates_declare() {
+    let report = report(&[]).unwrap();
+    let selector = dependency(&report, "selector").unwrap();
+    assert_eq!(selector["unscanned"], json!([]));
+    let files: BTreeSet<String> = reported(selector)
+        .unwrap()
+        .into_iter()
+        .map(|(_, file, _)| file)
+        .collect();
+    assert_eq!(
+        files,
+        BTreeSet::from(["src/first.rs", "src/second.rs"].map(str::to_owned))
+    );
+}
+
+#[test]
 fn deps_passes_features_to_cargo_metadata() {
     let off = ("tokio::spawn".to_owned(), "src/off.rs".to_owned(), 3);
     let without = report(&[]).unwrap();
@@ -291,17 +386,21 @@ fn deps_prints_a_table_and_each_call_as_text() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     for line in [
-        "      5     27           6  spawner 0.1.0 (partly unscanned)",
+        "      5     30           6  spawner 0.1.0 (partly unscanned)",
         "      0      0           0  safe 0.0.0 (forbids unsafe)",
         "      1      0           0  helper 0.0.0",
         "      1      0           0  ffi 0.0.0",
         "     13      0           0  exports 0.0.0",
-        "     12      0           0  assembly 0.0.0",
+        "      7      2           0  platform 0.0.0 (partly unscanned)",
         "  tokio::task::spawn: an unstructured task; spawn inside adamantium::Tasks",
         "    src/nested/deeper.rs:2:5",
         "  unresolved calls: leak 1, spawn 5",
         "  unscanned: src/lib.rs:11: module `missing` has no file: neither missing.rs nor missing/mod.rs",
-        "adamantium: 11 dependencies; 6 with unsafe code, 4 with disallowed calls, 1 with unresolved calls, 1 partly unscanned",
+        "  unscanned: src/lib.rs:22: module `hidden` is declared in a macro body the scan can't read",
+        "      3      2           0  facade 0.0.0",
+        "    src/driver.rs:2:5",
+        "    src/macros.rs:15:13",
+        "adamantium: 17 dependencies; 7 with unsafe code, 8 with disallowed calls, 1 with unresolved calls, 2 partly unscanned",
     ] {
         assert!(
             stdout.lines().any(|printed| printed == line),
