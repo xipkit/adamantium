@@ -367,12 +367,23 @@ fn write_clippy_config(dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn check(
+pub(crate) fn check(
     root: &Path,
     cargo_args: &[String],
     echo: bool,
     strict: bool,
     baseline: Option<Baseline>,
+) -> Result<Report> {
+    check_with_suggestions(root, cargo_args, echo, strict, baseline, None)
+}
+
+pub(crate) fn check_with_suggestions(
+    root: &Path,
+    cargo_args: &[String],
+    echo: bool,
+    strict: bool,
+    baseline: Option<Baseline>,
+    mut diagnostics: Option<&mut Vec<serde_json::Value>>,
 ) -> Result<Report> {
     let config = Config::load(root)?;
     let conf = tempfile::tempdir().context("creating a directory for clippy.toml")?;
@@ -429,7 +440,17 @@ fn check(
         match parsed.reason.as_str() {
             "compiler-message" => {
                 if let Some(diagnostic) = parsed.message {
+                    let before = sorted.findings.len();
                     classify(diagnostic, &setting, &mut sorted);
+                    if sorted.findings.len() > before
+                        && let Some(diagnostics) = diagnostics.as_mut()
+                        // Deep macro diagnostics are still reported by check,
+                        // but are never candidates for source fixes.
+                        && let Ok(raw) = serde_json::from_str::<serde_json::Value>(&line)
+                        && let Some(message) = raw.get("message")
+                    {
+                        diagnostics.push(message.clone());
+                    }
                 }
             }
             "build-finished" => built = parsed.success.unwrap_or(false),

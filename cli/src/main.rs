@@ -1,6 +1,7 @@
 mod check;
 mod config;
 mod deps;
+mod fix;
 mod lints;
 mod manifest;
 mod sarif;
@@ -42,6 +43,18 @@ enum Command {
         #[arg(long, value_name = "REPORT")]
         baseline: Option<PathBuf>,
         /// Arguments passed on to `cargo clippy`, such as `--release` or `-p name`.
+        #[arg(last = true)]
+        cargo_args: Vec<String>,
+    },
+    /// Apply machine-applicable fixes and mechanical migration rewrites.
+    Fix {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Print a unified diff without changing source files.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        strict: bool,
         #[arg(last = true)]
         cargo_args: Vec<String>,
     },
@@ -181,6 +194,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             baseline,
             cargo_args,
         } => check::run(&path, &cargo_args, format, strict, baseline.as_deref()),
+        Command::Fix {
+            path,
+            dry_run,
+            strict,
+            cargo_args,
+        } => fix::run(&path, &cargo_args, strict, dry_run),
         Command::Init {
             path,
             force,

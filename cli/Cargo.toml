@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
 serde_stacker = "0.1"
 sha2 = "0.11"
-syn = { version = "3", default-features = false, features = ["clone-impls", "full", "parsing", "visit", "visit-mut"] }
+syn = { version = "3", default-features = false, features = ["clone-impls", "full", "parsing", "printing", "visit", "visit-mut"] }
 tempfile = "3"
 toml_edit = "0.25"
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
