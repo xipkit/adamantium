@@ -120,6 +120,7 @@ impl<'a> Walker<'a> {
                 group: Some(index),
                 used: true,
                 field: true,
+                mutex_ref: false,
                 record: None,
             });
             // A second candidate of the same name is refused once the
@@ -285,20 +286,16 @@ impl<'a> Walker<'a> {
             self.add_edit(var, edit);
             return;
         }
+        let Some(group) = self.group_of(var) else {
+            self.visit_expr(expr);
+            return;
+        };
         if let Some((source, replacement)) = self.clone_of(expr) {
-            if let Some(entry) = self.vars.get_mut(source) {
-                entry.used = true;
-            }
-            self.link(var, source);
-            if let Some(replacement) = replacement {
-                match self.text.of(expr) {
-                    Some(range) => {
-                        let edit = self.edit(range, replacement);
-                        self.add_edit(var, edit);
-                    }
-                    None => self.refuse(var, super::UNLOCATED),
-                }
-            }
+            self.flows(group, source, expr, replacement);
+            return;
+        }
+        if let Some(returned) = self.returned_by(expr) {
+            self.links.push((group, returned));
             return;
         }
         self.refuse(
@@ -306,13 +303,6 @@ impl<'a> Walker<'a> {
             Reason::Unfollowed("a struct literal sets it to a value fix can't follow"),
         );
         self.visit_expr(expr);
-    }
-
-    /// Records that two variables hold the same state.
-    fn link(&mut self, a: usize, b: usize) {
-        if let (Some(a), Some(b)) = (self.group_of(a), self.group_of(b)) {
-            self.links.push((a, b));
-        }
     }
 
     /// Refuses a candidate field used in a form fix doesn't rewrite.
@@ -336,16 +326,16 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Refuses every candidate field that an attribute macro's input names,
-    /// since the macro may use it in code fix can't see.
+    /// Refuses every candidate field and function that an attribute
+    /// macro's input names, since the macro may use them in code fix can't
+    /// see.
     pub(super) fn attribute_macro(&mut self, tokens: TokenStream) {
         let mut names = BTreeSet::<String>::new();
         idents(tokens, &mut names);
         for name in names {
-            self.mention_field(
-                &name,
-                Reason::Unfollowed("an attribute macro reads code that names it"),
-            );
+            let reason = Reason::Unfollowed("an attribute macro reads code that names it");
+            self.mention_field(&name, reason);
+            self.mention_callee(&name, reason);
         }
     }
 
@@ -434,7 +424,7 @@ fn state_type(ty: &Type) -> Option<&Type> {
 
 /// Whether `state` might be unsized given the struct's generics: a
 /// parameter declared `?Sized`, or an associated type, which may be too.
-fn may_be_unsized(state: &Type, generics: &syn::Generics) -> bool {
+pub(super) fn may_be_unsized(state: &Type, generics: &syn::Generics) -> bool {
     let params: BTreeSet<String> = generics
         .type_params()
         .map(|param| param.ident.to_string())
@@ -591,7 +581,7 @@ mod tests {
                 "it is used in a macro",
             ),
             (
-                "fn f() -> Counter { let hits = Arc::new(Mutex::new(0)); Counter { hits: hits.clone(), ..Counter::default() } }\nfn g(hits: Arc<Mutex<u64>>) -> Counter { Counter { hits, name: String::new() } }",
+                "fn f() -> Counter { let hits = Arc::new(Mutex::new(0)); Counter { hits: hits.clone(), ..Counter::default() } }\nfn g(all: &[Arc<Mutex<u64>>]) -> Counter { Counter { hits: all[0].clone(), name: String::new() } }",
                 "a struct literal sets it to a value fix can't follow",
             ),
             (
