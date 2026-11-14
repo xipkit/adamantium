@@ -6,11 +6,12 @@
 //! out. syn sees syntax, not resolved names, so paths are resolved as far as
 //! the crate's source shows them: through each module's `use` and `extern
 //! crate` items, `crate`, `self` and `super`, re-exports between the crate's
-//! modules, its dependencies' names and the standard prelude. A call with no
-//! input of the crate's own `macro_rules!`, as `crate_root!();`, is read as
-//! its expansion where the macro has one rule whose matcher is empty. A call that
-//! this can't tie to a path, such as a method call on a value, is counted as
-//! unresolved under its name rather than guessed at.
+//! modules, its dependencies' names and the standard prelude. A module-level
+//! call of the crate's own `macro_rules!`, as `crate_root!();` or Tokio's
+//! `feature! { #![unix] ... }`, is read as its expansion where its rules can
+//! be matched without compiling the crate. A call that this can't tie to a
+//! path, such as a method call on a value, is counted as unresolved under
+//! its name rather than guessed at.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -39,6 +40,7 @@ use toml_edit::DocumentMut;
 use super::{
     cfg::{Cfg, Truth},
     disallowed::{Disallowed, canonical},
+    rules::Rules,
 };
 
 /// The library to scan.
@@ -97,7 +99,7 @@ impl UnsafeCounts {
 }
 
 /// A place in a dependency's source.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct Site {
     pub file: String,
     pub line: usize,
@@ -141,9 +143,9 @@ pub fn scan(krate: &Crate, disallowed: &Disallowed) -> Scan {
         modules: HashMap::new(),
         definitions: HashMap::new(),
         expanded: HashSet::new(),
-        expanded_calls: HashSet::new(),
         unexpanded: HashSet::new(),
         deferred: BTreeMap::new(),
+        sources: HashMap::new(),
     };
     // Every module's names are bound before any code is read, so a path can
     // be followed through another module's `use` items.
@@ -503,13 +505,15 @@ const PRELUDE: [(&str, &str); 37] = [
 const SYSROOT: [&str; 5] = ["std", "core", "alloc", "proc_macro", "test"];
 
 /// A parsed file of the module tree, or the items a `macro_rules!` call
-/// expands to.
+/// expands to. The calls of the crate's `macro_rules!` that are expanded
+/// aren't among its items.
 struct Loaded {
     /// The file's inner attributes; an expansion has none.
     attrs: Vec<Attribute>,
     items: Vec<Item>,
     /// Its name relative to the package. An expansion's is the name of the
-    /// file its macro is written in, where its spans are.
+    /// file its macro is written in; its spans may be in the call's file
+    /// too.
     rel: String,
     module: Vec<String>,
     /// Where its child modules' files are.
@@ -550,15 +554,16 @@ struct Scanner<'a> {
     /// The `macro_rules!` expanded where they are called, by file and where
     /// their names are written.
     expanded: HashSet<(String, usize, usize)>,
-    /// The calls read as their expansions, by file and where their macros'
-    /// names are written.
-    expanded_calls: HashSet<(String, usize, usize)>,
     /// The names of the macros called where the scan doesn't expand them.
     unexpanded: HashSet<String>,
     /// The bodies of the expanded `macro_rules!` that are read as tokens
     /// only if a call of their name isn't expanded, by file and where their
     /// names are written.
     deferred: BTreeMap<(String, usize, usize), Deferred>,
+    /// The files read, relative to the package, by the source their spans
+    /// are in, as [`Span::file`] names it. A macro's expansion has tokens
+    /// from the call and from the macro, which may be in different files.
+    sources: HashMap<String, String>,
 }
 
 /// The body of an expanded `macro_rules!`, and the module it is written in.
@@ -573,10 +578,9 @@ struct Deferred {
 /// A `macro_rules!` in textual scope.
 struct MacroRules {
     name: String,
-    /// The items it expands to, if the scan can expand it: it has one rule,
-    /// whose matcher is empty and whose transcriber is items. A macro with
-    /// any other rules isn't expanded, nor is any call it may shadow.
-    items: Option<Vec<Item>>,
+    /// Its rules, if the scan can read them. A macro whose rules it can't
+    /// read isn't expanded, nor is any call it may shadow.
+    rules: Option<Rules>,
     /// The file it is written in.
     rel: String,
     /// Where its name is written.
@@ -604,14 +608,14 @@ struct Textual {
 impl Textual {
     /// The definitions a call of `name` may expand, the latest first: each
     /// one back to the first that every build defines. `None` if there is
-    /// none, or one of them can't be expanded.
-    fn candidates(&self, name: &str) -> Option<Vec<(&MacroRules, &[Item])>> {
+    /// none, or the rules of one of them can't be read.
+    fn candidates(&self, name: &str) -> Option<Vec<(&MacroRules, &Rules)>> {
         let mut candidates = Vec::new();
         for definition in self.macros.iter().rev() {
             if definition.name != name {
                 continue;
             }
-            candidates.push((definition, definition.items.as_deref()?));
+            candidates.push((definition, definition.rules.as_ref()?));
             if definition.certain {
                 break;
             }
@@ -686,6 +690,11 @@ impl Scanner<'_> {
                 return Vec::new();
             }
         };
+        let mut first = FirstSpan(None);
+        first.visit_file(&file);
+        if let FirstSpan(Some(span)) = first {
+            self.sources.insert(span.file(), rel.clone());
+        }
         if self.krate.cfg.enabled(&file.attrs) == Truth::False {
             return Vec::new();
         }
@@ -708,7 +717,7 @@ impl Scanner<'_> {
             path_dir: &dir,
             rel: &rel,
         };
-        self.index(&file.items, place, &mut scope, textual);
+        self.index(&mut file.items, place, &mut scope, textual);
         textual.conditions.truncate(outer);
         self.add_scope(&module, scope);
         let attrs = file.attrs.clone();
@@ -727,19 +736,33 @@ impl Scanner<'_> {
     /// `scope`, and reads what they bring into the module tree, in the order
     /// they are written: the modules they declare, and the expansions of
     /// their calls of `macro_rules!` in `textual`, which their own
-    /// `macro_rules!` join.
-    fn index(&mut self, items: &[Item], place: Place, scope: &mut Scope, textual: &mut Textual) {
-        self.bind(scope, items, Some(place.module));
-        for item in items {
-            match item {
+    /// `macro_rules!` join. A call that is expanded is taken out of the
+    /// items, so a call left among them isn't.
+    fn index(
+        &mut self,
+        items: &mut Vec<Item>,
+        place: Place,
+        scope: &mut Scope,
+        textual: &mut Textual,
+    ) {
+        self.bind(scope, items.iter(), Some(place.module));
+        let mut indexed = Vec::with_capacity(items.len());
+        for mut item in mem::take(items) {
+            match &mut item {
                 Item::Mod(item) => self.child(item, place, textual),
-                Item::Macro(item) => match &item.ident {
-                    Some(name) => self.define(item, name, place.rel, textual),
-                    None => self.expand(item, place, scope, textual),
+                Item::Macro(call) => match &call.ident {
+                    Some(name) => self.define(call, name, place.rel, textual),
+                    None => {
+                        if self.expand(call, place, scope, textual) {
+                            continue;
+                        }
+                    }
                 },
                 _ => {}
             }
+            indexed.push(item);
         }
+        *items = indexed;
     }
 
     /// Adds the names a module binds to those already bound for its path.
@@ -755,7 +778,7 @@ impl Scanner<'_> {
     /// Reads a module that the module at `place` declares. Its
     /// `macro_rules!` stay in textual scope after it if it is
     /// `#[macro_use]`, by an outer attribute or an inner one.
-    fn child(&mut self, item: &ItemMod, place: Place, textual: &mut Textual) {
+    fn child(&mut self, item: &mut ItemMod, place: Place, textual: &mut Textual) {
         if self.krate.cfg.enabled(&item.attrs) == Truth::False {
             return;
         }
@@ -767,7 +790,7 @@ impl Scanner<'_> {
         match self.locate(item, place.mod_dir, place.path_dir) {
             // syn gives an inline module's inner attributes with its outer ones.
             Location::Inline { dir } => {
-                if let Some((_, items)) = &item.content {
+                if let Some((_, items)) = &mut item.content {
                     let mut scope = Scope::default();
                     let inner = Place {
                         module: &child,
@@ -782,8 +805,9 @@ impl Scanner<'_> {
             }
             // Each file may have its own `#![macro_use]`.
             Location::Files(files) => {
+                let declared = self.file_of(item.ident.span(), place.rel);
                 for file in files {
-                    let from = Some((place.rel, item.ident.span()));
+                    let from = Some((declared.as_str(), item.ident.span()));
                     let outer = textual.conditions.len();
                     let macros = textual.macros.len();
                     textual.conditions.extend(file.condition);
@@ -794,7 +818,7 @@ impl Scanner<'_> {
                 }
             }
             Location::Unscannable(reason) => self.scan.unscanned.push(Unscanned {
-                file: place.rel.to_owned(),
+                file: self.file_of(item.ident.span(), place.rel),
                 line: Some(item.ident.span().start().line),
                 reason,
             }),
@@ -812,7 +836,7 @@ impl Scanner<'_> {
             // may shadow can't be expanded.
             Truth::Unknown => {
                 for definition in textual.macros.iter_mut().skip(start) {
-                    definition.items = None;
+                    definition.rules = None;
                 }
             }
             Truth::False => textual.macros.truncate(start),
@@ -829,8 +853,16 @@ impl Scanner<'_> {
             .fold(Truth::False, |truth, (applies, _)| truth.or(*applies))
     }
 
-    /// Brings a `macro_rules!` named `name`, written in `rel`, into textual
-    /// scope.
+    /// The file, relative to the package, that the token at `span` is
+    /// written in, or `fallback` if it isn't in a file the scan read.
+    fn file_of(&self, span: Span, fallback: &str) -> String {
+        self.sources
+            .get(&span.file())
+            .map_or_else(|| fallback.to_owned(), Clone::clone)
+    }
+
+    /// Brings a `macro_rules!` named `name`, read from the code of `rel`,
+    /// into textual scope.
     fn define(&self, item: &ItemMacro, name: &Ident, rel: &str, textual: &mut Textual) {
         let mut condition = textual.conditions.clone();
         condition.extend(cfg_predicates(&item.attrs));
@@ -844,56 +876,56 @@ impl Scanner<'_> {
             Truth::Unknown => false,
             Truth::False => return,
         };
-        let items = item
-            .mac
-            .parse_body_with(parse_empty_rule)
-            .ok()
-            .map(|mut items| {
-                Expand.fragment(&mut items);
-                items
-            });
         textual.macros.push(MacroRules {
             name: name.unraw().to_string(),
-            items,
-            rel: rel.to_owned(),
+            rules: Rules::parse(item.mac.tokens.clone()),
+            rel: self.file_of(name.span(), rel),
             span: name.span(),
             condition,
             certain,
         });
     }
 
-    /// Expands a call of a `macro_rules!` in textual scope with no input, as
-    /// `crate_root!();`, where it is written. Each definition the call may
-    /// name expands under the `cfg`s that select it: its own, and none of
-    /// the later ones'. The expansion is part of the calling module, but its
-    /// code is in the macro's file, so it is read as its own [`Loaded`].
-    fn expand(&mut self, call: &ItemMacro, place: Place, scope: &mut Scope, textual: &mut Textual) {
+    /// Expands a call of a `macro_rules!` in textual scope where it is
+    /// written, as `crate_root!();` or `feature! { #![unix] mod symlink; }`,
+    /// and returns whether it did. Each definition the call may name expands
+    /// under the `cfg`s that select it: its own, and none of the later
+    /// ones'. A call that one of them can't be matched to or doesn't expand
+    /// to items isn't expanded. The expansion is
+    /// part of the calling module, but it is read as its own [`Loaded`], so
+    /// that its code counts for each call.
+    fn expand(
+        &mut self,
+        call: &ItemMacro,
+        place: Place,
+        scope: &mut Scope,
+        textual: &mut Textual,
+    ) -> bool {
         let Some(name) = call.mac.path.get_ident() else {
-            return;
+            return false;
         };
-        if !call.mac.tokens.is_empty() || self.krate.cfg.enabled(&call.attrs) == Truth::False {
-            return;
+        if self.krate.cfg.enabled(&call.attrs) == Truth::False {
+            return false;
         }
         let Some(candidates) = textual.candidates(&name.unraw().to_string()) else {
-            return;
+            return false;
         };
+        let file = self.file_of(name.span(), place.rel);
         let start = name.span().start();
-        self.expanded_calls
-            .insert((place.rel.to_owned(), start.line, start.column));
         if textual.depth == MAX_EXPANSIONS {
             self.scan.unscanned.push(Unscanned {
-                file: place.rel.to_owned(),
-                line: Some(name.span().start().line),
+                file,
+                line: Some(start.line),
                 reason: format!(
                     "`{name}!` expands to more than {MAX_EXPANSIONS} nested macro calls"
                 ),
             });
-            return;
+            return true;
         }
         let call_condition = cfg_predicates(&call.attrs);
         let mut later = Vec::new();
         let mut expansions = Vec::new();
-        for (candidate, items) in candidates {
+        for (candidate, rules) in candidates {
             // The expansion is visited apart from other files, and no
             // attribute starts at a macro's name, so the `cfg` it is given
             // is told apart from those written in it.
@@ -912,7 +944,13 @@ impl Scanner<'_> {
             if self.krate.cfg.holds(predicate.clone()) == Truth::False {
                 continue;
             }
-            let mut items = items.to_vec();
+            let Some(mut items) = rules
+                .expand(call.mac.tokens.clone())
+                .and_then(|tokens| parse_items.parse2(tokens).ok())
+            else {
+                return false;
+            };
+            Expand.fragment(&mut items);
             if !condition.is_empty() {
                 let cfg = cfg_attribute(predicate, span);
                 for item in &mut items {
@@ -927,12 +965,12 @@ impl Scanner<'_> {
             let at = (candidate.rel.clone(), start.line, start.column);
             expansions.push((items, at));
         }
-        for (items, at) in expansions {
+        for (mut items, at) in expansions {
             let rel = at.0.clone();
             self.expanded.insert(at);
             let inner = Place { rel: &rel, ..place };
             textual.depth += 1;
-            self.index(&items, inner, scope, textual);
+            self.index(&mut items, inner, scope, textual);
             textual.depth -= 1;
             self.files.push(Loaded {
                 attrs: Vec::new(),
@@ -943,6 +981,7 @@ impl Scanner<'_> {
                 path_dir: place.path_dir.to_path_buf(),
             });
         }
+        true
     }
 
     /// Where a module's code is. Where its `#[path]` depends on a `cfg` the
@@ -1692,6 +1731,29 @@ fn bind_use(
     }
 }
 
+/// Finds the span of an identifier in a file, which names the source that
+/// every span in the file is in. A file with no identifier has no site the
+/// scan reports.
+struct FirstSpan(Option<Span>);
+
+impl<'ast> Visit<'ast> for FirstSpan {
+    fn visit_attribute(&mut self, attr: &'ast Attribute) {
+        if self.0.is_none() {
+            visit::visit_attribute(self, attr);
+        }
+    }
+
+    fn visit_item(&mut self, item: &'ast Item) {
+        if self.0.is_none() {
+            visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_ident(&mut self, ident: &'ast Ident) {
+        self.0.get_or_insert(ident.span());
+    }
+}
+
 /// Replaces each item macro whose body parses as items with those items, as
 /// macros such as Tokio's `cfg_rt! { ... }` expand to their input, and each
 /// `cfg_if!` or `cfg_select!` with the items of its branches, under the
@@ -1761,24 +1823,6 @@ impl VisitMut for Expand {
         }
         visit_mut::visit_item_mod_mut(self, item);
     }
-}
-
-/// Parses the body of a `macro_rules!` with one rule whose matcher is empty
-/// into the items of its transcriber.
-fn parse_empty_rule(input: ParseStream) -> syn::Result<Vec<Item>> {
-    let matcher: Group = input.parse()?;
-    if !matcher.stream().is_empty() {
-        return Err(syn::Error::new(matcher.span(), "expected an empty matcher"));
-    }
-    input.parse::<Token![=>]>()?;
-    let transcriber: Group = input.parse()?;
-    if input.peek(Token![;]) {
-        input.parse::<Token![;]>()?;
-    }
-    if !input.is_empty() {
-        return Err(input.error("expected one rule"));
-    }
-    parse_items.parse2(transcriber.stream())
 }
 
 /// The attributes as they apply after `cfg_attr` is expanded, each with the
@@ -2145,9 +2189,8 @@ struct FileVisitor<'s, 'a> {
     path_dir: PathBuf,
     /// The names bound by the blocks around the current place.
     blocks: Vec<Scope>,
-    /// Where the attributes already visited are written, by line and
-    /// column.
-    attributes: HashSet<(usize, usize)>,
+    /// Where the attributes already visited are written.
+    attributes: HashSet<Site>,
 }
 
 impl FileVisitor<'_, '_> {
@@ -2155,10 +2198,12 @@ impl FileVisitor<'_, '_> {
         self.scanner.krate.cfg.enabled(attrs) != Truth::False
     }
 
+    /// Where the token at `span` is written: in the file being visited,
+    /// or, in a macro's expansion, in the call's file or the macro's.
     fn site(&self, span: Span) -> Site {
         let start = span.start();
         Site {
-            file: self.file.clone(),
+            file: self.scanner.file_of(span, &self.file),
             line: start.line,
             column: start.column + 1,
         }
@@ -2373,7 +2418,8 @@ impl FileVisitor<'_, '_> {
                 // functions, so none of its calls are expanded.
                 let textual = &mut Textual::default();
                 for file in files {
-                    let from = (self.file.as_str(), item.ident.span());
+                    let declared = self.site(item.ident.span()).file;
+                    let from = (declared.as_str(), item.ident.span());
                     self.scanner
                         .load(&file.path, module.clone(), file.mod_rs, Some(from), textual);
                 }
@@ -2550,8 +2596,8 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
             // A `macro_rules!` that was expanded is read where it is called,
             // and as tokens only if some call of it isn't expanded.
             Some(name) => {
-                let start = name.span().start();
-                let at = (self.file.clone(), start.line, start.column);
+                let site = self.site(name.span());
+                let at = (site.file, site.line, name.span().start().column);
                 if self.scanner.expanded.contains(&at) {
                     let deferred = Deferred {
                         name: name.unraw().to_string(),
@@ -2564,16 +2610,8 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
                     return;
                 }
             }
-            None => {
-                let expanded = item.mac.path.segments.last().is_some_and(|segment| {
-                    let start = segment.ident.span().start();
-                    let at = (self.file.clone(), start.line, start.column);
-                    self.scanner.expanded_calls.contains(&at)
-                });
-                if !expanded {
-                    self.unexpanded(&item.mac);
-                }
-            }
+            // The calls that are expanded aren't among the items.
+            None => self.unexpanded(&item.mac),
         }
         // A `macro_rules!` definition, or an invocation whose body isn't
         // items.
@@ -2664,8 +2702,7 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
     /// invocation's attributes, so an attribute counts only the first time
     /// it is seen where it is written.
     fn visit_attribute(&mut self, attr: &'ast Attribute) {
-        let start = attr.pound_token.span.start();
-        if self.attributes.insert((start.line, start.column)) {
+        if self.attributes.insert(self.site(attr.pound_token.span)) {
             self.scanner.scan.unsafe_code.attributes +=
                 self.unsafe_attributes(attr.meta.clone()).len();
         }
@@ -3278,16 +3315,94 @@ pick!();
         assert_eq!(scan.unsafe_code.functions, 2);
     }
 
-    /// A call that may name a macro the scan can't expand, one with input or
-    /// another rule, is left alone.
+    /// A call of the crate's own `macro_rules!` with input, as Tokio's
+    /// `feature! { #![unix] mod symlink; }`, is read as the rule it matches:
+    /// the modules it declares are scanned under the `cfg` the rule gives
+    /// them, its code counts for each call, and its sites are where their
+    /// tokens are written, in the call's file or the macro's.
     #[test]
-    fn calls_of_other_macros_are_not_expanded() {
+    fn calls_of_crate_macros_with_input_are_expanded() {
+        let scan = scan_files(&[
+            (
+                "lib.rs",
+                r"#[macro_use]
+mod macros;
+
+feature! {
+    #![unix]
+    mod symlink;
+    pub use self::symlink::symlink;
+}
+
+feature! {
+    #![windows]
+    mod windows;
+}
+
+feature! {
+    #![demo_custom]
+    mod missing;
+}
+",
+            ),
+            (
+                "macros.rs",
+                r"macro_rules! feature {
+    (
+        #![$meta:meta]
+        $($item:item)*
+    ) => {
+        $(
+            #[cfg($meta)]
+            $item
+        )*
+        const _: fn() = || unsafe { std::thread::sleep(std::time::Duration::ZERO) };
+    };
+}
+",
+            ),
+            (
+                "symlink.rs",
+                "pub unsafe fn symlink() {\n    std::thread::sleep(std::time::Duration::ZERO);\n}\n",
+            ),
+            ("windows.rs", "pub unsafe fn windows() {}\n"),
+        ]);
+        let missing = "module `missing` has no file: neither missing.rs nor missing/mod.rs";
+        assert_eq!(scan.unscanned, [unscanned("src/lib.rs", 17, missing)]);
+        assert_eq!(scan.unsafe_code.functions, 1);
+        assert_eq!(scan.unsafe_code.blocks, 3);
+        let site = |file: &str, line, column| Site {
+            file: file.to_owned(),
+            line,
+            column,
+        };
+        let rule = site("src/macros.rs", 10, 37);
+        let mut sites: Vec<_> = scan.calls.values().flatten().cloned().collect();
+        sites.sort();
+        assert_eq!(
+            sites,
+            [
+                rule.clone(),
+                rule.clone(),
+                rule,
+                site("src/symlink.rs", 2, 5)
+            ]
+        );
+    }
+
+    /// A call the scan can't match to a rule as rustc would is read as
+    /// tokens, as is one that may name a macro whose rules it can't read or
+    /// that a module that may be `#[macro_use]` defines.
+    #[test]
+    fn calls_the_scan_cannot_match_are_not_expanded() {
         let scan = scan_files(&[(
             "lib.rs",
-            r"macro_rules! rules { () => { mod a; }; (more) => { mod b; }; }
-rules!();
-macro_rules! input { ($name:ident) => { mod c; }; }
-input!(x);
+            r"macro_rules! expr { ($e:expr) => { mod a; }; }
+expr!(1 + 1);
+macro_rules! unread { () => { ${ignore(x)} mod b; }; }
+unread!();
+macro_rules! nothing { (a) => { mod c; }; }
+nothing!(b);
 macro_rules! maybe { () => { mod d; }; }
 #[cfg_attr(demo_custom, macro_use)]
 mod inner {
@@ -3298,7 +3413,7 @@ maybe!();
         )]);
         let reason =
             |name: &str| format!("module `{name}` is declared in a macro body the scan can't read");
-        let listed = [(1, "a"), (1, "b"), (3, "c"), (5, "d"), (8, "e")]
+        let listed = [(1, "a"), (3, "b"), (5, "c"), (7, "d"), (10, "e")]
             .map(|(line, name)| unscanned("src/lib.rs", line, &reason(name)));
         assert_eq!(scan.unscanned, listed);
     }

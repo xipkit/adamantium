@@ -6,8 +6,20 @@ macro_rules! when {
     };
 }
 
-// The body isn't items, so the scan can't load `hidden.rs` and lists it.
-when! { unix => mod hidden; }
+// A call is read as the rule it matches, so `matched.rs` is loaded, under
+// the `cfg` the rule gives it, and `excluded`, which has no file, isn't.
+when! { unix => mod matched; }
+when! { windows => mod excluded; }
+
+macro_rules! unless {
+    ($cfg:expr => $($item:item)*) => {
+        $($item)*
+    };
+}
+
+// An `expr` fragment can't be matched without compiling the crate, so the
+// scan can't load `hidden.rs` and lists it.
+unless! { cfg!(windows) => mod hidden; }
 
 use cfg_if::cfg_if;
 
