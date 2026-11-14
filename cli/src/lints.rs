@@ -2,7 +2,7 @@
 //! Clippy configuration file. The repository's own `Cargo.toml` carries the
 //! same levels, and a test keeps the two equal.
 
-use std::fmt::{self, Write};
+use std::fmt;
 
 use serde::Serialize;
 
@@ -94,6 +94,20 @@ pub const LINTS: &[Lint] = &[
 }"#,
             r#"fn first(values: &[u32]) -> Option<&u32> {
     values.first()
+}"#,
+        ),
+    ),
+    rust(
+        "unused_must_use",
+        Level::Deny,
+        "a result or future was left unused; handle the result or await the future",
+        example(
+            "Return or handle Result values and await futures, so failures reach the caller or an enclosing adamantium::Tasks scope.",
+            r#"fn load(path: &std::path::Path) {
+    std::fs::read(path);
+}"#,
+            r#"fn load(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
 }"#,
         ),
     ),
@@ -302,6 +316,32 @@ fn main() -> std::process::ExitCode {
         ),
     ),
     clippy(
+        "let_underscore_future",
+        "a future assigned to `_` is dropped without being awaited",
+        example(
+            "Await the future so its work runs. For concurrent work, spawn it inside adamantium::Tasks and observe its result within the scope.",
+            r#"async fn example() {
+    let _ = async { println!("done"); };
+}"#,
+            r#"async fn example() {
+    async { println!("done"); }.await;
+}"#,
+        ),
+    ),
+    clippy(
+        "let_underscore_must_use",
+        "a must-use value assigned to `_` is silently discarded; handle it or explicitly drop it",
+        example(
+            "Return or handle the must-use value instead of hiding it with let _. Propagate Result failures to the caller or an enclosing adamantium::Tasks scope.",
+            r#"fn load(path: &std::path::Path) {
+    let _ = std::fs::read(path);
+}"#,
+            r#"fn load(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
+}"#,
+        ),
+    ),
+    clippy(
         "mem_forget",
         "leaks",
         example(
@@ -472,10 +512,9 @@ pub fn lints_toml(workspace: bool) -> String {
         if !out.is_empty() {
             out.push('\n');
         }
-        // Writing to a String cannot fail.
-        let _ = writeln!(out, "[{prefix}lints.{tool}]");
+        out.push_str(&format!("[{prefix}lints.{tool}]\n"));
         for lint in LINTS.iter().filter(|lint| lint.tool == tool) {
-            let _ = writeln!(out, "{} = \"{}\"", lint.name, lint.level);
+            out.push_str(&format!("{} = \"{}\"\n", lint.name, lint.level));
         }
     }
     out

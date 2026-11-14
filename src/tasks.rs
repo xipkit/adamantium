@@ -16,6 +16,8 @@ use tokio::{
 };
 
 mod stream;
+#[cfg(feature = "tracing")]
+mod trace;
 pub use stream::{
     concurrently_ordered, concurrently_ordered_until, concurrently_unordered,
     concurrently_unordered_until,
@@ -53,7 +55,8 @@ impl Cancellation {
     /// Dropping this future does not lose the request.
     pub async fn cancelled(&self) {
         let mut requested = self.requested.subscribe();
-        let _ = requested.wait_for(|requested| *requested).await;
+        // Borrowing self keeps the sender alive, so the channel cannot close.
+        drop(requested.wait_for(|requested| *requested).await);
     }
 }
 
@@ -216,6 +219,8 @@ pub struct Tasks<E> {
     set: tokio::task::JoinSet<()>,
     errors: SharedErrors<E>,
     cancellation: Option<Cancellation>,
+    #[cfg(feature = "tracing")]
+    named: Option<Shared<trace::Running>>,
 }
 
 /// The handle to a task spawned in a [`Tasks`] scope.
@@ -243,6 +248,8 @@ impl<E: Send + 'static> Tasks<E> {
                 panic: None,
             }),
             cancellation: None,
+            #[cfg(feature = "tracing")]
+            named: None,
         }
     }
 
@@ -336,12 +343,14 @@ impl<E: Send + 'static> Tasks<E> {
         tasks.cancellation = Some(cancellation.clone());
         let reason = tokio::select! {
             biased;
-            reason = shutdown(&cancellation, deadline) => reason.scope_error(),
+            reason = shutdown(&cancellation, deadline) => reason,
             result = body(&mut tasks) => return tasks.join_until(cancellation, deadline, result).await,
         };
+        #[cfg(feature = "tracing")]
+        tasks.report_deadline(&reason);
         tasks.abort();
         tasks.join(Ok(())).await.map_err(ScopeError::Failed)?;
-        Err(reason)
+        Err(reason.scope_error())
     }
 
     /// Starts `future` as a task of this scope and returns its handle.
@@ -356,11 +365,42 @@ impl<E: Send + 'static> Tasks<E> {
             let result = future.await.map_err(|error| record(&errors, error));
             // Without a handle to take it, a value is dropped and an error
             // stays recorded for join.
-            let _ = tx.send(result);
+            drop(tx.send(result));
         });
         Task {
             rx,
             errors: Arc::clone(&self.errors),
+        }
+    }
+
+    /// Starts a named task. With the `tracing` feature, its future is polled
+    /// inside an `adamantium.task` span with a `task.name` field, parented to
+    /// the current span. Unfinished named tasks are reported at scope deadlines.
+    /// Without `tracing`, this behaves as [`spawn`](Self::spawn) without
+    /// converting or storing the name.
+    pub fn spawn_named<T, F>(&mut self, name: impl Into<crate::Str>, future: F) -> Task<T, E>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, E>> + Send + 'static,
+    {
+        #[cfg(feature = "tracing")]
+        {
+            use tracing::{Instrument, instrument::WithSubscriber};
+
+            let (running, span) = self.track(name.into());
+            self.spawn(
+                async move {
+                    let _running = running;
+                    future.await
+                }
+                .instrument(span)
+                .with_current_subscriber(),
+            )
+        }
+        #[cfg(not(feature = "tracing"))]
+        {
+            let _ = name;
+            self.spawn(future)
         }
     }
 
@@ -380,11 +420,41 @@ impl<E: Send + 'static> Tasks<E> {
         let errors = Arc::clone(&self.errors);
         self.set.spawn_blocking(move || {
             let result = f().map_err(|error| record(&errors, error));
-            let _ = tx.send(result);
+            // A dropped handle discards the value; errors stay recorded for join.
+            drop(tx.send(result));
         });
         Task {
             rx,
             errors: Arc::clone(&self.errors),
+        }
+    }
+
+    /// Registers named blocking work, with the same cleanup contract as
+    /// [`spawn_blocking`](Self::spawn_blocking). With `tracing`, the closure
+    /// runs inside an `adamantium.task` span and is included in deadline reports
+    /// until it finishes. Without `tracing`, the name is not converted or stored.
+    pub fn spawn_blocking_named<T, F>(&mut self, name: impl Into<crate::Str>, f: F) -> Task<T, E>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        #[cfg(feature = "tracing")]
+        {
+            let (running, span) = self.track(name.into());
+            let dispatch = tracing::dispatcher::get_default(Clone::clone);
+            self.spawn_blocking(move || {
+                tracing::dispatcher::with_default(&dispatch, move || {
+                    span.in_scope(move || {
+                        let _running = running;
+                        f()
+                    })
+                })
+            })
+        }
+        #[cfg(not(feature = "tracing"))]
+        {
+            let _ = name;
+            self.spawn_blocking(f)
         }
     }
 
@@ -429,16 +499,20 @@ impl<E: Send + 'static> Tasks<E> {
         async move {
             let reason = tokio::select! {
                 biased;
-                reason = shutdown(&cancellation, deadline) => Some(reason.scope_error()),
+                reason = shutdown(&cancellation, deadline) => Some(reason),
                 () = self.settle(body.is_err()) => None,
             };
-            if reason.is_some() {
+            if let Some(reason) = &reason {
+                #[cfg(feature = "tracing")]
+                self.report_deadline(reason);
+                #[cfg(not(feature = "tracing"))]
+                let _ = reason;
                 self.abort();
                 self.drain().await;
             }
             let value = self.result(body).map_err(ScopeError::Failed)?;
             match reason {
-                Some(reason) => Err(reason),
+                Some(reason) => Err(reason.scope_error()),
                 None => Ok(value),
             }
         }
