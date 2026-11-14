@@ -648,6 +648,9 @@ struct Scanner<'a> {
     /// Whether a call wasn't expanded because the scan didn't know yet all
     /// the names its path may lead through.
     pending: bool,
+    /// How many of the crate's own `macro_rules!` definitions have been
+    /// read, in every reading of the module tree, which numbers each.
+    instances: usize,
 }
 
 /// A definition of one of the crate's own macros that a path names.
@@ -700,6 +703,10 @@ struct MacroRules {
     /// Whether a build that `condition` holds for defines it: not known
     /// where it is defined in the expansion of another crate's macro.
     defined: Truth,
+    /// Which of the crate's definitions it is, by the order the scan read
+    /// them in. Calls of a macro that writes a definition give one for each
+    /// call, all written in one place.
+    instance: usize,
 }
 
 /// Another crate's `#[macro_export]` macro that a `#[macro_use] extern
@@ -765,18 +772,9 @@ struct Candidate<'t> {
     /// Whether a build that `condition` holds for defines it.
     defined: Truth,
     origin: Origin,
-    /// Whether another crate defines it.
-    foreign: bool,
-}
-
-impl Candidate<'_> {
-    /// Whether this definition is written where `other` is.
-    fn is_at(&self, other: &Self) -> bool {
-        let (start, other_start) = (self.span.start(), other.span.start());
-        self.rel == other.rel
-            && start.line == other_start.line
-            && start.column == other_start.column
-    }
+    /// Which of the crate's own definitions it is, or `None` for another
+    /// crate's.
+    instance: Option<usize>,
 }
 
 /// The `macro_rules!` a call can name by its bare name at a place in the
@@ -866,6 +864,7 @@ impl<'a> Scanner<'a> {
             macro_calls: HashMap::new(),
             last_pass: HashMap::new(),
             pending: false,
+            instances: 0,
         }
     }
 
@@ -913,6 +912,7 @@ impl<'a> Scanner<'a> {
             next.sources = mem::take(&mut scanner.sources);
             next.foreign = mem::take(&mut scanner.foreign);
             next.dollar_crates = mem::take(&mut scanner.dollar_crates);
+            next.instances = scanner.instances;
             next.macro_paths = mem::take(&mut scanner.macro_paths);
             for named in next.macro_paths.values_mut().flatten() {
                 named.read = false;
@@ -1234,7 +1234,9 @@ impl<'a> Scanner<'a> {
             } else {
                 Truth::True
             },
+            instance: self.instances,
         };
+        self.instances += 1;
         if self.exports.is_some() {
             // A `$crate` the crate's macros write may end up in an exported
             // macro another one defines, as `crate`.
@@ -1640,7 +1642,7 @@ impl<'a> Scanner<'a> {
                 condition: &definition.condition,
                 defined: definition.defined,
                 origin: Origin::Local,
-                foreign: false,
+                instance: Some(definition.instance),
             });
             if definition.certain {
                 return Some(candidates);
@@ -1654,7 +1656,10 @@ impl<'a> Scanner<'a> {
                 .found_candidates(found, certain)?
                 .into_iter()
                 .filter(|candidate| {
-                    candidate.foreign || !candidates.iter().any(|local| candidate.is_at(local))
+                    candidate.instance.is_none()
+                        || !candidates
+                            .iter()
+                            .any(|local| local.instance == candidate.instance)
                 })
                 .collect();
             candidates.extend(found);
@@ -1690,7 +1695,7 @@ impl<'a> Scanner<'a> {
                         condition: &imported.condition,
                         defined: imported.defined,
                         origin: Origin::MacroUse(imported.import),
-                        foreign: true,
+                        instance: None,
                     });
                 }
                 if imported.certain {
@@ -1721,7 +1726,7 @@ impl<'a> Scanner<'a> {
                         condition: &[],
                         defined: export.defined,
                         origin: Origin::Path,
-                        foreign: true,
+                        instance: None,
                     }
                 }
                 Found::Own { path, definition } => {
@@ -1734,7 +1739,7 @@ impl<'a> Scanner<'a> {
                         condition: &definition.condition,
                         defined: definition.defined,
                         origin: Origin::Path,
-                        foreign: false,
+                        instance: Some(definition.instance),
                     }
                 }
             };
@@ -1918,7 +1923,7 @@ impl<'a> Scanner<'a> {
             }
             let start = span.start();
             let at = (candidate.rel.to_owned(), start.line, start.column);
-            expansions.push((items, at, candidate.foreign, defined));
+            expansions.push((items, at, candidate.instance.is_none(), defined));
         }
         self.expansions += 1;
         for (mut items, at, foreign, defined) in expansions {
@@ -5960,6 +5965,43 @@ macro_rules! pick {
 }
 
 mod second {
+    crate::pick!();
+}
+",
+        )]);
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 2);
+    }
+
+    /// A call by a bare name reads a definition in textual scope once, but
+    /// another one a call of the same macro wrote at the same place, out of
+    /// textual scope, too.
+    #[test]
+    fn definitions_written_at_one_place_are_told_apart() {
+        let scan = scan_files(&[(
+            "lib.rs",
+            r"macro_rules! make {
+    (yes $body:item) => {
+        #[macro_export]
+        macro_rules! pick {
+            () => {
+                $body
+            };
+        }
+    };
+}
+
+#[cfg(demo_custom)]
+mod hidden {
+    make!(yes pub unsafe fn f() {});
+}
+
+#[cfg(not(demo_custom))]
+make!(yes pub fn f() {});
+
+pick!();
+
+mod user {
     crate::pick!();
 }
 ",
