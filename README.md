@@ -275,6 +275,48 @@ so `Bytes` requests a sequence instead of a byte string. This hint preserves
 support for text formats such as quick-xml, csv, and envy, whose
 `deserialize_any` does not produce a sequence.
 
+## Deterministic Actor tests
+
+Enable `deterministic` in a test dependency to explore Actor interleavings with a
+repeatable seed. Backend selection is per execution: ordinary application code
+and Tokio tests continue to use production primitives in the same build.
+
+```rust
+use adamantium::{Actor, testing::{self, Config}};
+
+#[test]
+fn concurrent_updates() {
+    testing::check(Config { seed: 143, ..Config::default() }, || async {
+        let count = Actor::new(0);
+        let workers = (0..2).map(|_| {
+            let count = count.clone();
+            async move { count.with(|n| *n += 1); }
+        }).collect::<Vec<_>>();
+        testing::parallel(workers).await;
+        assert_eq!(count.into_inner().ok(), Some(2));
+    }).unwrap();
+}
+```
+
+The factory creates fresh state for every execution. The harness schedules
+synchronous Actor calls and ownership operations too, so a separate `read`
+followed by `with` can reveal a lost update even without an `await` between them.
+On failure it prints a JSON replay record with the seed, failing iteration,
+step bound, pinned engine versions and exact schedule, excluding user payloads.
+Save `failure.replay()` with `Replay::save`, load it with `Replay::load`, and pass
+it and the same factory to `testing::replay`. Keep code, dependencies and fixture
+inputs unchanged when replaying. Deadlock and step exhaustion are failures;
+passing exploration is not a proof of all executions.
+
+This first stage supports Actor only. `testing::parallel` provides independent
+test workers; it does not model Tasks' cleanup semantics. Channel, Tasks,
+Cancellation and blocking work reject use in the harness until their adapters
+land (ADAM-159 and ADAM-160); virtual deadlines follow in ADAM-161. Use `#[test]`,
+not `#[tokio::test]`, and create actors inside the execution that uses them.
+Replace I/O, real time, uncontrolled randomness and foreign executors with
+deterministic fixtures. Arbitrary foreign futures cannot all be diagnosed, and
+a step bound cannot interrupt a loop that makes no scheduling calls.
+
 ## The rules
 
 The lint levels are in this repository's `[workspace.lints]`, and the Clippy configuration is in `clippy.toml`. `cargo adamantium rules` prints both. The rules and library provide the following properties for code that follows them:
