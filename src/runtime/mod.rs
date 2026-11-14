@@ -14,6 +14,9 @@ use std::{
 #[cfg(feature = "deterministic")]
 pub(crate) mod execution;
 
+pub(crate) mod queue;
+pub(crate) mod wait;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct World {
     #[cfg(feature = "deterministic")]
@@ -36,11 +39,18 @@ impl World {
         );
     }
 
-    fn step(self) {
+    pub(crate) fn step(self) {
         self.check();
         #[cfg(feature = "deterministic")]
         if self.execution.is_some() {
             shuttle::thread::yield_now();
+        }
+    }
+
+    pub(crate) fn step_unless_panicking(self) {
+        #[cfg(feature = "deterministic")]
+        if !std::thread::panicking() {
+            self.step();
         }
     }
 }
@@ -49,7 +59,7 @@ pub(crate) fn production_only(_primitive: &str) {
     #[cfg(feature = "deterministic")]
     assert!(
         execution::current().is_none(),
-        "adamantium::testing harness: {_primitive} is not supported yet; this execution supports Actor only"
+        "adamantium::testing harness: {_primitive} is not supported yet; this execution supports Actor and Channel only"
     );
 }
 

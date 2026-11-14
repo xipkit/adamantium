@@ -1,0 +1,19 @@
+{
+  "date": "2026-11-14",
+  "machine": "OTIS",
+  "cpu": "Apple M4",
+  "os": "macOS 27.0.1",
+  "rustc": "1.99.1 (58cf8f9c3 2026-10-13) Homebrew",
+  "baseline_commit": "ce1ffb9e379619bfccdd339be2063e5adefe2c26",
+  "profile": "release; overflow-checks=true; default features",
+  "tokio_workers": 4,
+  "warmups_per_binary": 3,
+  "pairs_per_comparison": 20,
+  "binaries": {
+    "baseline": "89f0f77c1b612b0f1b9d4a59dac00798c190b880d41f9cc23b882c5280d74130",
+    "candidate": "16c650be51315a0a454d763a24ec7a5a16a51c8a6a9c69949f2e6942b6e2e2a4",
+    "baseline2": "a949ef33dcf70be447ca367464f253c49f45e12c44bc19faa76dede7a25a2c02",
+    "probe": "47fda30756d5e3f247291b60a958437dc12740db7b613d711bc709dfb839673c",
+    "final": "500d0d3f64c0b24161c7db9f23a2b4d6b767fdfeb8cbc3950d586cde611a1c56"
+  }
+}

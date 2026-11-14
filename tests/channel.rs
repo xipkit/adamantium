@@ -535,3 +535,46 @@ mod stream {
         assert_eq!(result, Ok(()));
     }
 }
+
+#[test]
+fn dropping_a_notified_receive_passes_the_message_to_the_next_waiter() {
+    let (sender, receiver) = Channel::bounded(1).split();
+    let first_wake = Arc::new(WakeCounter::default());
+    let second_wake = Arc::new(WakeCounter::default());
+    let mut first = Box::pin(receiver.receive());
+    let mut second = Box::pin(receiver.receive());
+    assert!(poll_once(first.as_mut(), &first_wake).is_pending());
+    assert!(poll_once(second.as_mut(), &second_wake).is_pending());
+    sender.try_send(7).unwrap();
+    assert!(first_wake.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(second_wake.0.load(Ordering::SeqCst), 0);
+    drop(first);
+    assert!(second_wake.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        poll_once(second.as_mut(), &second_wake),
+        Poll::Ready(Some(7))
+    );
+}
+
+#[test]
+fn dropping_a_notified_send_passes_room_without_sending_its_value() {
+    let (sender, receiver) = Channel::bounded(1).split();
+    sender.try_send(0).unwrap();
+    let first_wake = Arc::new(WakeCounter::default());
+    let second_wake = Arc::new(WakeCounter::default());
+    let mut first = Box::pin(sender.send(1));
+    let mut second = Box::pin(sender.send(2));
+    assert!(poll_once(first.as_mut(), &first_wake).is_pending());
+    assert!(poll_once(second.as_mut(), &second_wake).is_pending());
+    assert_eq!(receiver.try_receive(), Ok(0));
+    assert!(first_wake.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(second_wake.0.load(Ordering::SeqCst), 0);
+    drop(first);
+    assert!(second_wake.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        poll_once(second.as_mut(), &second_wake),
+        Poll::Ready(Ok(()))
+    );
+    assert_eq!(receiver.try_receive(), Ok(2));
+    assert_eq!(receiver.try_receive(), Err(TryReceiveError::Empty));
+}
