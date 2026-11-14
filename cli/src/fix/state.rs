@@ -16,7 +16,8 @@ use std::{
 use proc_macro2::{Span, TokenStream, TokenTree};
 use syn::{
     BinOp, Block, Expr, GenericArgument, Item, ItemUse, Lit, Local, Macro, Pat, PathArguments,
-    Stmt, Type, UnOp, UseTree, punctuated::Punctuated, spanned::Spanned, visit::Visit,
+    Stmt, Type, UnOp, UseTree, ext::IdentExt, punctuated::Punctuated, spanned::Spanned,
+    visit::Visit,
 };
 
 use super::Edit;
@@ -597,7 +598,10 @@ enum Resolved {
 
 /// A local variable.
 struct Var {
+    /// The name without `r#`, under which `m` and `r#m` are one variable.
     name: String,
+    /// The name as the declaration spells it, for generated code.
+    spelling: String,
     /// The shared-state binding this variable holds, if it holds one.
     group: Option<usize>,
     used: bool,
@@ -738,6 +742,7 @@ impl<'a> Walker<'a> {
     fn declare(&mut self, name: String, group: Option<usize>) -> usize {
         let index = self.vars.len();
         self.vars.push(Var {
+            spelling: name.clone(),
             name,
             group,
             used: false,
@@ -789,7 +794,7 @@ impl<'a> Walker<'a> {
         if path.qself.is_some() || !path.attrs.is_empty() {
             return None;
         }
-        self.lookup(&path.path.get_ident()?.to_string())
+        self.lookup(&bare(path.path.get_ident()?))
     }
 
     /// A tracked variable named by `expr`.
@@ -1000,7 +1005,7 @@ impl<'a> Walker<'a> {
                     return None;
                 }
                 let var = self.tracked(&reference.expr)?;
-                let name = &self.vars.get(var)?.name;
+                let name = &self.vars.get(var)?.spelling;
                 Some((var, Some(format!("{name}.clone()"))))
             }
             _ => None,
@@ -1023,7 +1028,8 @@ impl<'a> Walker<'a> {
             .map(|init| &*init.expr);
         let line = self.text.line(local.let_token.span);
         if let (Some(ident), Some(init)) = (ident, init) {
-            let name = ident.ident.to_string();
+            let name = bare(&ident.ident);
+            let spelling = ident.ident.to_string();
             let ty_edit = match ty {
                 None => Some(None),
                 Some(ty) => self
@@ -1053,6 +1059,9 @@ impl<'a> Walker<'a> {
                 }
                 self.groups.push(group_state);
                 let var = self.declare(name, Some(group));
+                if let Some(entry) = self.vars.get_mut(var) {
+                    entry.spelling = spelling;
+                }
                 self.settle(local, Some(var));
                 return;
             }
@@ -1088,6 +1097,9 @@ impl<'a> Walker<'a> {
                     );
                 }
                 let var = self.declare(name, group);
+                if let Some(entry) = self.vars.get_mut(var) {
+                    entry.spelling = spelling;
+                }
                 self.settle(local, Some(var));
                 return;
             }
@@ -1162,7 +1174,7 @@ fn is_unsized(ty: &Type, aliases: &BTreeSet<String>) -> bool {
 fn pattern_names(pat: &Pat, names: &mut Vec<String>) {
     match pat {
         Pat::Ident(ident) => {
-            names.push(ident.ident.to_string());
+            names.push(bare(&ident.ident));
             if let Some((_, subpat)) = &ident.subpat {
                 pattern_names(subpat, names);
             }
@@ -1296,7 +1308,7 @@ impl<'a> Walker<'a> {
         let start = self.text.range(first.method.span())?.start;
         let end = self.text.range(first.paren_token.span.close())?.end;
         let unwrap = self.text.get(start..end)?;
-        let name = &self.vars.get(var)?.name;
+        let name = &self.vars.get(var)?.spelling;
         Some((var, format!("{name}.into_inner(){ok}.{unwrap}")))
     }
 
@@ -1525,10 +1537,10 @@ impl<'a> Walker<'a> {
             return Err(Reason::InsideActor);
         }
         let plan = self.plan(guard)?;
-        let name = self
+        let (bare_name, name) = self
             .vars
             .get(var)
-            .map(|var| var.name.clone())
+            .map(|var| (var.name.clone(), var.spelling.clone()))
             .ok_or(UNLOCATED)?;
         let guard_range = self.text.of(guard).ok_or(UNLOCATED)?;
         let full = plan.root.full();
@@ -1558,7 +1570,7 @@ impl<'a> Walker<'a> {
         // moves into the closure must not name the binding anywhere else.
         let substitute = |range: Range<usize>| -> Result<String, Reason> {
             let region = self.text.get(range.clone()).ok_or(UNLOCATED)?;
-            if names_in(region, &name) != Some(1) {
+            if names_in(region, &bare_name) != Some(1) {
                 return Err(Reason::Unfollowed(
                     "a statement holding its guard names it again",
                 ));
@@ -1797,10 +1809,7 @@ impl<'a> Walker<'a> {
             match token {
                 TokenTree::Group(group) => self.mentions(group.stream()),
                 TokenTree::Ident(ident) => {
-                    self.mention(
-                        &ident.to_string(),
-                        Reason::Unfollowed("it is used in a macro"),
-                    );
+                    self.mention(&bare(&ident), Reason::Unfollowed("it is used in a macro"));
                 }
                 TokenTree::Literal(literal) => {
                     if let Ok(Lit::Str(string)) =
@@ -1829,6 +1838,11 @@ fn callee_name(func: &Expr) -> Option<String> {
     }
 }
 
+/// An identifier's name without `r#`, which Rust resolves as the same name.
+fn bare(ident: &proc_macro2::Ident) -> String {
+    ident.unraw().to_string()
+}
+
 /// How many times `text` names `name`, as an identifier or as a variable
 /// that a string captures, or `None` if it doesn't tokenize.
 fn names_in(text: &str, name: &str) -> Option<usize> {
@@ -1837,7 +1851,7 @@ fn names_in(text: &str, name: &str) -> Option<usize> {
             .into_iter()
             .map(|token| match token {
                 TokenTree::Group(group) => count(group.stream(), name),
-                TokenTree::Ident(ident) => usize::from(ident == name),
+                TokenTree::Ident(ident) => usize::from(bare(&ident) == name),
                 TokenTree::Literal(literal) => {
                     match syn::parse2::<Lit>(TokenTree::Literal(literal).into()) {
                         Ok(Lit::Str(string)) => format_captures(&string.value())
@@ -2017,7 +2031,7 @@ impl<'a> Visit<'a> for Walker<'a> {
                     && let Some(name) = path.path.get_ident()
                 {
                     self.mention(
-                        &name.to_string(),
+                        &bare(name),
                         Reason::Unfollowed(
                             "it is passed, returned or stored where fix can't follow it",
                         ),
@@ -2931,6 +2945,19 @@ mod tests {
                 ),
             );
         }
+    }
+
+    #[test]
+    fn raw_identifiers_name_the_same_variable() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nfn f() {\n    let r#m = Arc::new(Mutex::new(0));\n    *m.lock().unwrap() += 1;\n    let h = r#m.clone();\n    drop(h);\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert_eq!(
+            fixed,
+            "fn f() {\n    let r#m = ::adamantium::Actor::new(0);\n    r#m.with(|r#m| *r#m += 1);\n    let h = r#m.clone();\n    drop(h);\n}\n"
+        );
     }
 
     #[test]
