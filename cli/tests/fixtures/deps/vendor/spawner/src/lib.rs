@@ -19,6 +19,8 @@ mod tiny;
 mod custom;
 mod declared;
 mod alternatives;
+mod chain;
+mod circular;
 
 pub mod shim {
     pub use std::thread;
