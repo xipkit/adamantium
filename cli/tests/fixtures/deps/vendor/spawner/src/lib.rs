@@ -97,6 +97,17 @@ cfg_on! {
     }
 }
 
+pub fn nested_cfg() -> [(); 1] {
+    [
+        #[cfg(any())]
+        unsafe {
+            rt::spawn(())
+        },
+        #[cfg(all())]
+        task::spawn(()), // tokio::task::spawn
+    ]
+}
+
 pub fn blocks() {
     unsafe { rt::task::raw() };
     println!("{:?}", task::spawn(())); // tokio::task::spawn

@@ -19,9 +19,9 @@ use std::{
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use serde::Serialize;
 use syn::{
-    Arm, Attribute, Block, Expr, ExprCall, ExprLit, ExprMethodCall, ExprPath, ExprUnsafe, File,
-    ImplItem, ImplItemFn, Item, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemTrait, Lit, Macro, Meta,
-    Safety, Stmt, Token, TraitItem, TraitItemFn, Type, UseTree,
+    Arm, Attribute, Block, Expr, ExprCall, ExprLit, ExprMethodCall, ExprPath, ExprUnsafe,
+    FieldValue, File, ImplItem, ImplItemFn, Item, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemTrait,
+    Lit, Macro, Meta, Safety, Stmt, Token, TraitItem, TraitItemFn, Type, UseTree,
     ext::IdentExt,
     parse::ParseStream,
     punctuated::Punctuated,
@@ -1279,14 +1279,28 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
     }
 
     fn visit_stmt(&mut self, stmt: &'ast Stmt) {
+        // Items and expressions check their own attributes.
         let attrs = match stmt {
             Stmt::Local(local) => &local.attrs[..],
-            Stmt::Expr(expr, _) => expr_attrs(expr),
             Stmt::Macro(mac) => &mac.attrs,
-            Stmt::Item(_) => &[],
+            Stmt::Expr(..) | Stmt::Item(_) => &[],
         };
         if self.enabled(attrs) {
             visit::visit_stmt(self, stmt);
+        }
+    }
+
+    /// Any expression can carry a `cfg`, such as an array element or a
+    /// call's argument.
+    fn visit_expr(&mut self, expr: &'ast Expr) {
+        if self.enabled(expr_attrs(expr)) {
+            visit::visit_expr(self, expr);
+        }
+    }
+
+    fn visit_field_value(&mut self, field: &'ast FieldValue) {
+        if self.enabled(&field.attrs) {
+            visit::visit_field_value(self, field);
         }
     }
 

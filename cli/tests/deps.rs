@@ -235,7 +235,7 @@ fn deps_prints_a_table_and_each_call_as_text() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     for line in [
-        "      5     16           5  spawner 0.1.0 (partly unscanned)",
+        "      5     17           5  spawner 0.1.0 (partly unscanned)",
         "      0      0           0  safe 0.0.0 (forbids unsafe)",
         "      1      0           0  helper 0.0.0",
         "  tokio::task::spawn: an unstructured task; spawn inside adamantium::Tasks",
