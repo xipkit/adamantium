@@ -62,6 +62,7 @@ publish.workspace = true
 [features]
 default = ["tokio"]
 tokio = ["dep:tokio", "dep:async-stream", "dep:futures-core"]
+signal = ["tokio", "tokio/signal"]
 serde = ["dep:serde", "indexmap/serde"]
 deterministic = ["tokio", "dep:shuttle", "dep:shuttle-engine", "dep:shuttle-std", "dep:shuttle-schedulers", "dep:serde", "dep:serde_json"]
 tracing = ["dep:tracing"]
