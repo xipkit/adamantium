@@ -2021,6 +2021,9 @@ struct Scan<'w, 'a> {
     guard: &'a Expr,
     /// Inside a closure or async block, which doesn't run here.
     deferred: usize,
+    /// Inside code that runs only on some paths: a branch, a match arm, the
+    /// second operand of `&&` or `||`, or a loop body.
+    branch: usize,
     awaits: bool,
     locks: bool,
     leaves: bool,
@@ -2033,6 +2036,7 @@ impl<'w, 'a> Scan<'w, 'a> {
             walker,
             guard,
             deferred: 0,
+            branch: 0,
             awaits: false,
             locks: false,
             leaves: false,
@@ -2076,6 +2080,48 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
                 self.deferred += 1;
                 syn::visit::visit_expr(self, expr);
                 self.deferred -= 1;
+                return;
+            }
+            // A closure captures a variable it may move, so a value moved on
+            // only one path would be dropped when the closure returns rather
+            // than at the end of its scope.
+            Expr::Path(_)
+                if self.branch > 0 && self.deferred == 0 && self.walker.local(expr).is_some() =>
+            {
+                self.unfollowed.get_or_insert(
+                    "a statement holding its guard may move a variable on only one path",
+                );
+            }
+            Expr::If(branch) => {
+                self.visit_expr(&branch.cond);
+                self.branch += 1;
+                self.visit_block(&branch.then_branch);
+                if let Some((_, other)) = &branch.else_branch {
+                    self.visit_expr(other);
+                }
+                self.branch -= 1;
+                return;
+            }
+            Expr::Match(m) => {
+                self.visit_expr(&m.expr);
+                self.branch += 1;
+                for arm in &m.arms {
+                    self.visit_arm(arm);
+                }
+                self.branch -= 1;
+                return;
+            }
+            Expr::Binary(binary) if matches!(binary.op, BinOp::And(_) | BinOp::Or(_)) => {
+                self.visit_expr(&binary.left);
+                self.branch += 1;
+                self.visit_expr(&binary.right);
+                self.branch -= 1;
+                return;
+            }
+            Expr::While(_) | Expr::ForLoop(_) | Expr::Loop(_) => {
+                self.branch += 1;
+                syn::visit::visit_expr(self, expr);
+                self.branch -= 1;
                 return;
             }
             _ => {}
@@ -2699,6 +2745,17 @@ mod tests {
         assert_eq!(
             fixed,
             "use std::sync::Arc;\nfn f() {\n    let m = ::adamantium::Actor::new(Arc::new(1));\n    drop(m);\n}\n"
+        );
+    }
+
+    #[test]
+    fn values_moved_on_one_path_are_refused() {
+        refused(
+            "struct D;\nfn f(flag: bool, d: D) { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().extend(if flag { Some(d) } else { None }); }",
+            "m",
+            Reason::Unfollowed(
+                "a statement holding its guard may move a variable on only one path",
+            ),
         );
     }
 
