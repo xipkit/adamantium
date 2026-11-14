@@ -53,6 +53,9 @@ pub(super) struct Crate {
     /// Single names used as values. A method can't be named this way, only
     /// a function or a variable.
     bare_values: BTreeSet<String>,
+    /// The names each name is imported under with `use ... as`, so a call
+    /// under the new name still reaches the original.
+    renames: HashMap<String, BTreeSet<String>>,
     /// Whether an actor callback already in the package calls anything.
     callbacks: bool,
     /// Whether the package has a library, whose public functions another
@@ -155,10 +158,18 @@ impl Crate {
     }
 
     /// `functions` and every function that mentions one of them, directly or
-    /// through another: every function that may run one of them.
+    /// through another: every function that may run one of them. A name an
+    /// import gives one of them counts as reached too, so it can be called,
+    /// or used as a value, under that name.
     pub(super) fn callers(&self, functions: &BTreeSet<String>) -> BTreeSet<String> {
         let mut reached = functions.clone();
         loop {
+            let aliases = reached
+                .iter()
+                .filter_map(|name| self.renames.get(name))
+                .flatten()
+                .filter(|alias| !reached.contains(*alias))
+                .cloned();
             let more: Vec<String> = self
                 .functions
                 .iter()
@@ -169,6 +180,7 @@ impl Crate {
                             .any(|function| !function.mentions.is_disjoint(&reached))
                 })
                 .map(|(name, _)| name.clone())
+                .chain(aliases)
                 .collect();
             if more.is_empty() {
                 return reached;
@@ -653,6 +665,14 @@ impl<'ast> Visit<'ast> for Scan<'_> {
             }
         }
         syn::visit::visit_expr_path(self, path);
+    }
+
+    fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
+        self.krate
+            .renames
+            .entry(rename.ident.unraw().to_string())
+            .or_default()
+            .insert(rename.rename.unraw().to_string());
     }
 
     fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {

@@ -1,6 +1,7 @@
 //! Every form of shared state that `cargo adamantium fix` rewrites. The test
-//! applies the fix, compares the result with `rewrite.fixed.rs`, checks it and
-//! runs these tests against it.
+//! makes this the main file of a binary, so no other crate can call these
+//! functions inside an actor's callback, applies the fix, compares the result
+//! with `rewrite.fixed.rs`, checks it and runs these tests against it.
 
 use std::sync::{Arc, Mutex};
 use std::{
@@ -8,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-pub fn counter() -> u64 {
+fn counter() -> u64 {
     let hits = Arc::new(Mutex::new(0u64));
     let handle = Arc::clone(&hits);
     *handle.lock().unwrap() += 1;
@@ -17,7 +18,7 @@ pub fn counter() -> u64 {
     total
 }
 
-pub fn settings() -> (Vec<&'static str>, usize) {
+fn settings() -> (Vec<&'static str>, usize) {
     let settings: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::default());
     let writer = settings.clone();
     writer.lock().unwrap().push("verbose");
@@ -26,7 +27,7 @@ pub fn settings() -> (Vec<&'static str>, usize) {
     (current, count)
 }
 
-pub fn aliased() -> u32 {
+fn aliased() -> u32 {
     let state = Shared::new(Lock::new(2u32));
     let full = std::sync::Arc::new(std::sync::Mutex::new(3u32));
     let module = sync::Arc::new(sync::Mutex::new(4u32));
@@ -39,18 +40,17 @@ pub fn aliased() -> u32 {
 }
 
 #[derive(Debug, Default)]
-pub struct Cart {
-    pub items: Vec<&'static str>,
-    pub total: u64,
+struct Cart {
+    items: Vec<&'static str>,
+    total: u64,
 }
 
-pub fn branches(prices: &[u64]) -> u64 {
+fn branches(prices: &[u64]) -> u64 {
     let cart = Arc::new(Mutex::new(Cart::default()));
     for _ in prices {
         cart.lock().unwrap().total += 6;
     }
-    let add = |item: &'static str| cart.lock().unwrap().items.push(item);
-    add("pen");
+    cart.lock().unwrap().items.push("pen");
     if cart.lock().unwrap().total > 10 {
         cart.lock().unwrap().items.push("discount");
     }
@@ -75,16 +75,15 @@ pub fn branches(prices: &[u64]) -> u64 {
     total + kind as u64 + extra as u64
 }
 
-pub async fn deferred() -> Vec<u32> {
+fn shadowed() -> Vec<u32> {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let task = {
+    {
         let log = Arc::clone(&log);
-        async move {
-            log.lock().unwrap().push(1);
-        }
-    };
-    task.await;
-    (2..4).for_each(|n| log.lock().unwrap().push(n));
+        log.lock().unwrap().push(1);
+    }
+    for n in 2..4 {
+        log.lock().unwrap().push(n);
+    }
     let shadow = log.lock().unwrap().len();
     {
         let log = shadow;
@@ -96,13 +95,13 @@ pub async fn deferred() -> Vec<u32> {
     entries
 }
 
-pub fn timeout() -> Duration {
+fn timeout() -> Duration {
     Duration::from_millis(1)
 }
 
 /// Implemented for the state and for a reference to it, so a method call
 /// resolves to the state's only if lookup starts where the guard's did.
-pub trait Value {
+trait Value {
     fn value(&self) -> u32;
 }
 
@@ -118,10 +117,23 @@ impl Value for &mut u32 {
     }
 }
 
-pub fn lookup() -> u32 {
+fn lookup() -> u32 {
     let state = Arc::new(Mutex::new(7u32));
     let value = state.lock().unwrap().value();
     value
+}
+
+fn main() {
+    println!(
+        "{} {:?} {} {} {:?} {:?} {}",
+        counter(),
+        settings(),
+        aliased(),
+        branches(&[4, 8]),
+        shadowed(),
+        timeout(),
+        lookup()
+    );
 }
 
 #[cfg(test)]
@@ -153,9 +165,6 @@ mod tests {
         assert_eq!(unwrapped(), [1]);
         assert_eq!(timeout(), Duration::from_millis(1));
         assert_eq!(lookup(), 7);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        assert_eq!(runtime.block_on(deferred()), [1, 2, 3]);
+        assert_eq!(shadowed(), [1, 2, 3]);
     }
 }

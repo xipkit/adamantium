@@ -276,11 +276,15 @@ impl Draft {
         }
     }
 
-    /// Refuses each field that the package might reach where fix can't
-    /// follow, with every group holding its state.
+    /// Refuses each state that the package might reach where fix can't
+    /// follow, with every group holding it. A local is reached through the
+    /// functions that lock it as a field is, since a caller of one of them
+    /// might run inside an actor's callback.
     fn reach(&mut self, krate: &Crate, callbacks: &BTreeSet<String>) {
         for group in &mut self.groups {
-            if let Some(member) = &group.member
+            if let Some(reason) = krate.unreadable_reason() {
+                group.refuse(Reason::Unfollowed(reason));
+            } else if let Some(member) = &group.member
                 && let Some(reason) = Self::unseen(krate, member, &self.file)
             {
                 group.refuse(reason);
@@ -291,18 +295,13 @@ impl Draft {
                 .iter()
                 .filter_map(|&group| self.groups.get(group))
                 .collect();
-            let Some(&first) = component.iter().find(|&&group| {
-                self.groups
-                    .get(group)
-                    .is_some_and(|group| group.member.is_some())
-            }) else {
-                continue;
-            };
             if groups.iter().any(|group| group.refusal.is_some()) {
                 continue;
             }
             if let Some(reason) = Self::hazard(&groups, krate, callbacks)
-                && let Some(group) = self.groups.get_mut(first)
+                && let Some(group) = component
+                    .first()
+                    .and_then(|&first| self.groups.get_mut(first))
             {
                 group.refuse(reason);
             }
@@ -311,9 +310,6 @@ impl Draft {
 
     /// Why the package might use the field `member` where fix can't see.
     fn unseen(krate: &Crate, member: &str, file: &Path) -> Option<Reason> {
-        if let Some(reason) = krate.unreadable_reason() {
-            return Some(Reason::Unfollowed(reason));
-        }
         if krate.field_declarations(member) > 1 {
             return Some(Reason::Unfollowed(
                 "another struct, union or variant in its package has a field of its name",
@@ -887,7 +883,7 @@ struct Group {
     /// Whether a guard of it is taken in a closure, an async block or
     /// outside any function.
     escapes: bool,
-    /// The names in the statements that become its callbacks.
+    /// The names of the functions and methods its callbacks might run.
     callbacks: BTreeSet<String>,
 }
 
@@ -1879,15 +1875,21 @@ impl<'a> Walker<'a> {
             entry.used = true;
         }
         match self.guard_edit(var, guard) {
-            Ok(edit) => {
-                self.lock_site(var, &edit);
+            Ok((edit, runs)) => {
+                self.lock_site(var, runs);
                 self.add_edit(var, edit);
             }
             Err(reason) => self.refuse(var, reason),
         }
     }
 
-    fn guard_edit(&mut self, var: usize, guard: &'a Expr) -> Result<Edit, Reason> {
+    /// The edit that turns `guard`'s statement into an actor call, and the
+    /// names of the functions and methods its callback might run.
+    fn guard_edit(
+        &mut self,
+        var: usize,
+        guard: &'a Expr,
+    ) -> Result<(Edit, BTreeSet<String>), Reason> {
         if self.inside_actor() {
             return Err(Reason::InsideActor);
         }
@@ -1929,6 +1931,7 @@ impl<'a> Walker<'a> {
         if inside.calls {
             return Err(Reason::Calls);
         }
+        let Scan { runs, .. } = inside;
         // Method lookup on a guard starts at the guard and reaches the state
         // through `Deref`; on the callback's `&mut T` it would start at the
         // reference and could pick another trait's method. Starting at `*m`
@@ -1961,7 +1964,7 @@ impl<'a> Walker<'a> {
         if let Some(expr) = plan.narrow {
             let range = self.text.of(expr).ok_or(UNLOCATED)?;
             let replacement = format!("{holder}.read(|{name}| {})", substitute(range.clone())?);
-            return Ok(self.edit(range, replacement));
+            return Ok((self.edit(range, replacement), runs));
         }
         let method = plan.mode.method();
         let (range, replacement) = match plan.root {
@@ -2028,7 +2031,7 @@ impl<'a> Walker<'a> {
                 (range, format!("{holder}.{method}(|{name}| {body})"))
             }
         };
-        Ok(self.edit(range, replacement))
+        Ok((self.edit(range, replacement), runs))
     }
 
     /// Whether the node on top of the stack is inside a closure passed to a
@@ -2531,6 +2534,10 @@ struct Scan<'w, 'a> {
     leaves: bool,
     calls: bool,
     unfollowed: Option<&'static str>,
+    /// The names of the functions and methods the code might run: method
+    /// names and every path that doesn't name a local. A field or a local
+    /// doesn't run anything.
+    runs: BTreeSet<String>,
 }
 
 impl<'w, 'a> Scan<'w, 'a> {
@@ -2545,6 +2552,7 @@ impl<'w, 'a> Scan<'w, 'a> {
             leaves: false,
             calls: false,
             unfollowed: None,
+            runs: BTreeSet::new(),
         }
     }
 
@@ -2588,6 +2596,20 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
     fn visit_expr(&mut self, expr: &'a Expr) {
         if is(expr, self.guard) {
             return;
+        }
+        match expr {
+            Expr::MethodCall(call) => {
+                self.runs.insert(bare(&call.method));
+            }
+            Expr::Path(path) if self.walker.local(expr).is_none() => {
+                self.runs.extend(
+                    path.path
+                        .segments
+                        .iter()
+                        .map(|segment| bare(&segment.ident)),
+                );
+            }
+            _ => {}
         }
         match expr {
             Expr::Await(_) if self.deferred == 0 => self.awaits = true,
@@ -3225,6 +3247,101 @@ mod tests {
             "m",
             Reason::InsideActor,
         );
+    }
+
+    #[test]
+    fn locals_whose_function_might_run_inside_an_actor_callback_are_refused() {
+        const COUNT: &str =
+            "fn count() { let m = Arc::new(Mutex::new(0)); *m.lock().unwrap() += 1; }";
+        for (body, reason) in [
+            (
+                format!("{COUNT}\nfn f(a: &adamantium::Actor<u8>) {{ a.with(|_| count()); }}"),
+                Reason::Nested("an actor callback in its package calls code that might lock it"),
+            ),
+            (
+                format!("{COUNT}\nfn all() {{ [1].iter().for_each(|_| count()); }}"),
+                Reason::Nested(
+                    "a function that locks it is used as a value, or in a closure, an async block or a macro, which might run inside an actor's callback",
+                ),
+            ),
+            (
+                "fn f() { let m = Arc::new(Mutex::new(0)); let bump = || *m.lock().unwrap() += 1; bump(); }".to_owned(),
+                Reason::Nested(
+                    "it is locked in a closure or an async block, which might run inside an actor's callback",
+                ),
+            ),
+            (
+                "async fn f() { let m = Arc::new(Mutex::new(0)); *m.lock().unwrap() += 1; }"
+                    .to_owned(),
+                Reason::Unfollowed("it is locked in async code, which fix doesn't follow yet"),
+            ),
+            (
+                "trait Bump { fn bump(&self) { let m = Arc::new(Mutex::new(0)); *m.lock().unwrap() += 1; } }".to_owned(),
+                Reason::Nested(
+                    "it is locked through a trait method, which might run inside an actor's callback",
+                ),
+            ),
+        ] {
+            refused(&body, "m", reason);
+        }
+    }
+
+    #[test]
+    fn a_local_locked_by_a_method_another_callback_calls_is_refused() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};
+struct S;
+impl S { fn bump(&self) { count(); } }
+fn count() { let m = Arc::new(Mutex::new(0)); *m.lock().unwrap() += 1; }
+fn f() { let s = Arc::new(Mutex::new(S)); s.lock().unwrap().bump(); }
+",
+            &["Mutex"],
+        );
+        assert_eq!(
+            refusals,
+            [(
+                "m".to_owned(),
+                Reason::Nested(
+                    "a function that locks it is called in a statement that becomes an actor's callback"
+                )
+            )]
+        );
+        assert!(fixed.contains("s.with(|s| { (*s).bump(); });"), "{fixed}");
+    }
+
+    #[test]
+    fn a_local_locked_by_a_function_imported_under_another_name_is_refused() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nmod inner {\n    use std::sync::{Arc, Mutex};\n    pub(crate) fn count() { let m = Arc::new(Mutex::new(0)); *m.lock().unwrap() += 1; }\n}\nuse inner::count as bump;\nstruct S;\nimpl S { fn go(&self) { bump(); } }\nfn f() { let s = Arc::new(Mutex::new(S)); s.lock().unwrap().go(); }\n",
+            &["Mutex"],
+        );
+        assert_eq!(
+            refusals,
+            [(
+                "m".to_owned(),
+                Reason::Nested(
+                    "a function that locks it is called in a statement that becomes an actor's callback"
+                )
+            )]
+        );
+        assert!(fixed.contains("s.with(|s| { (*s).go(); });"), "{fixed}");
+    }
+
+    #[test]
+    fn a_local_named_like_its_function_is_rewritten() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};
+fn hits() -> u32 {
+    let hits = Arc::new(Mutex::new(0u32));
+    *hits.lock().unwrap() += 1;
+    let value = *hits.lock().unwrap();
+    value
+}
+",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(fixed.contains("hits.with(|hits| *hits += 1);"), "{fixed}");
     }
 
     #[test]
