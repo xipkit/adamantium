@@ -57,6 +57,31 @@ items! {
     core::arch::global_asm!("");
 }
 
+// Each copy of a call that a macro writes twice is read through its input,
+// though only one is built. The tag keeps the scan from reading `twice!`
+// through its input instead of expanding it.
+macro_rules! passthrough {
+    ($($item:item)*) => { $($item)* };
+}
+
+macro_rules! twice {
+    (tag $item:item) => {
+        #[cfg(any())]
+        mod disabled {
+            $item
+        }
+        mod enabled {
+            $item
+        }
+    };
+}
+
+twice! {
+    tag passthrough! {
+        core::arch::global_asm!("");
+    }
+}
+
 // Not counted: it isn't built, it is another macro, or a `macro_rules!` in
 // textual scope hides it, with or without a `use` of it. Matching reaches
 // an `expr`, so the scan doesn't expand those calls.

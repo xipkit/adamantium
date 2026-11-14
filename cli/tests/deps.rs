@@ -246,7 +246,7 @@ fn deps_counts_each_kind_of_unsafe_and_notes_forbidding_crates() {
             "traits": 0,
             "extern_blocks": 0,
             "attributes": 0,
-            "global_asm": 12,
+            "global_asm": 13,
             "in_macros": 2,
         })
     );
@@ -413,7 +413,7 @@ fn deps_prints_a_table_and_each_call_as_text() {
         "      1      0           0  helper 0.0.0",
         "      1      0           0  ffi 0.0.0",
         "     13      0           0  exports 0.0.0",
-        "     14      0           0  assembly 0.0.0",
+        "     15      0           0  assembly 0.0.0",
         "      7      2           0  platform 0.0.0 (partly unscanned)",
         "  tokio::task::spawn: an unstructured task; spawn inside adamantium::Tasks",
         "    src/nested/deeper.rs:2:5",

@@ -658,8 +658,6 @@ struct Scanner<'a> {
     /// How many definitions were read at each place in this reading of the
     /// module tree.
     read_at: HashMap<(String, usize, usize), usize>,
-    /// The calls that [`Expand`] read as their input, by [`call_site`].
-    flattened: HashSet<(String, usize, usize)>,
     /// Whether a bare call left unexpanded among a module's items names a
     /// `macro_rules!` in textual scope that every build has, by
     /// [`call_site`]: true only if it does everywhere the call is read, as
@@ -907,7 +905,6 @@ impl<'a> Scanner<'a> {
             path_calls: Vec::new(),
             instances: HashMap::new(),
             read_at: HashMap::new(),
-            flattened: HashSet::new(),
             hidden: HashMap::new(),
         }
     }
@@ -1082,9 +1079,7 @@ impl<'a> Scanner<'a> {
         if self.krate.cfg.enabled(&file.attrs) == Truth::False {
             return Vec::new();
         }
-        let mut expand = Expand::default();
-        expand.visit_file_mut(&mut file);
-        self.flattened.extend(expand.flattened);
+        Expand.visit_file_mut(&mut file);
         if module.len() == 1 {
             self.scan.forbids_unsafe |= self.forbids_unsafe(&file.attrs);
         }
@@ -1152,9 +1147,7 @@ impl<'a> Scanner<'a> {
                     Some(name) => self.define(call, name, place, scope, textual),
                     None => {
                         let site = call_site(&call.mac);
-                        if !self.flattened.contains(&site)
-                            && self.expand(call, place, scope, textual)
-                        {
+                        if !reads_input(&call.mac) && self.expand(call, place, scope, textual) {
                             continue;
                         }
                         if is_bare(&call.mac.path)
@@ -1937,7 +1930,6 @@ impl<'a> Scanner<'a> {
         let mut later = Vec::new();
         let mut group: Option<(Origin, Option<TokenStream>)> = None;
         let mut expansions = Vec::new();
-        let mut expand = Expand::default();
         for candidate in candidates {
             // The expansion is visited apart from other files, and no
             // attribute starts at a macro's name, so the `cfg` it is given
@@ -1984,7 +1976,7 @@ impl<'a> Scanner<'a> {
             else {
                 return false;
             };
-            expand.fragment(&mut items);
+            Expand.fragment(&mut items);
             if !condition.is_empty() {
                 let cfg = cfg_attribute(predicate, span);
                 for item in &mut items {
@@ -1999,7 +1991,6 @@ impl<'a> Scanner<'a> {
             let at = (candidate.rel.to_owned(), start.line, start.column);
             expansions.push((items, at, candidate.instance.is_none(), defined));
         }
-        self.flattened.extend(expand.flattened);
         self.expansions += 1;
         for (mut items, at, foreign, defined) in expansions {
             let rel = at.0.clone();
@@ -2997,14 +2988,11 @@ impl<'ast> Visit<'ast> for FirstSpan {
 /// for [`Scanner::index`] to expand, since it can only be read through the
 /// macro's definition.
 ///
-/// The call stays before its items, and is noted in `flattened`, since its
-/// path may name a macro that doesn't expand to its input: `global_asm!`
-/// takes a template, and `global_asm!(concat! { ... })` parses as items.
-#[derive(Default)]
-struct Expand {
-    /// The calls read as their input, by [`call_site`].
-    flattened: HashSet<(String, usize, usize)>,
-}
+/// The call stays before its items, since its path may name a macro that
+/// doesn't expand to its input: `global_asm!` takes a template, and
+/// `global_asm!(concat! { ... })` parses as items. [`reads_input`] tells
+/// such a call apart from one that is read as its expansion or as tokens.
+struct Expand;
 
 impl Expand {
     /// Expands the items of a module, as in a file, and those of the modules
@@ -3023,25 +3011,13 @@ impl Expand {
                 expanded.push(item);
                 continue;
             };
-            if item.ident.is_some()
-                || is_include(&item.mac)
-                || item.mac.tokens.is_empty()
-                || self.flattened.contains(&call_site(&item.mac))
-            {
-                expanded.push(Item::Macro(item));
-                continue;
-            }
-            let parsed = if is_cfg_if(&item.mac) {
-                item.mac.parse_body_with(parse_cfg_if)
-            } else if is_cfg_select(&item.mac) {
-                item.mac.parse_body_with(parse_cfg_select)
-            } else {
-                item.mac.parse_body_with(parse_items)
+            let input = match item.ident {
+                Some(_) => None,
+                None => input_items(&item.mac),
             };
-            match parsed {
-                Ok(mut inner) => {
+            match input {
+                Some(mut inner) => {
                     self.items(&mut inner);
-                    self.flattened.insert(call_site(&item.mac));
                     let outer = item.attrs.clone();
                     expanded.push(Item::Macro(item));
                     for mut inner in inner {
@@ -3053,11 +3029,35 @@ impl Expand {
                         expanded.push(inner);
                     }
                 }
-                Err(_) => expanded.push(Item::Macro(item)),
+                None => expanded.push(Item::Macro(item)),
             }
         }
         *items = expanded;
     }
+}
+
+/// The items a call is read as by [`Expand`]: its input, where it parses as
+/// items, or the branches of a `cfg_if!` or `cfg_select!`. A call with an
+/// empty body, or of `include!`, has none.
+fn input_items(mac: &Macro) -> Option<Vec<Item>> {
+    if is_include(mac) || mac.tokens.is_empty() {
+        return None;
+    }
+    let parsed = if is_cfg_if(mac) {
+        mac.parse_body_with(parse_cfg_if)
+    } else if is_cfg_select(mac) {
+        mac.parse_body_with(parse_cfg_select)
+    } else {
+        mac.parse_body_with(parse_items)
+    };
+    parsed.ok()
+}
+
+/// Whether [`Expand`] reads a call as its input, which follows it among the
+/// items. It decides by the call's tokens alone, so each copy of a call that
+/// a macro writes more than once is read the same way.
+fn reads_input(mac: &Macro) -> bool {
+    input_items(mac).is_some()
 }
 
 impl VisitMut for Expand {
@@ -3947,7 +3947,7 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         if item.ident.is_none() {
             self.item_call(&item.mac);
             // Its input is among the items after it, with its attributes.
-            if self.scanner.flattened.contains(&call_site(&item.mac)) {
+            if reads_input(&item.mac) {
                 return;
             }
         }
@@ -4300,8 +4300,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let mut expand = Expand::default();
-        expand.visit_file_mut(&mut file);
+        Expand.visit_file_mut(&mut file);
         // Each call read as its input stays before its items.
         let built: Vec<(String, Truth)> = file
             .items
@@ -4310,7 +4309,7 @@ mod tests {
                 let name = match item {
                     Item::Fn(item) => item.sig.ident.to_string(),
                     Item::Struct(item) => item.ident.to_string(),
-                    Item::Macro(call) if expand.flattened.contains(&call_site(&call.mac)) => {
+                    Item::Macro(call) if reads_input(&call.mac) => {
                         return None;
                     }
                     _ => panic!("an item that isn't a function, struct or flattened call"),
@@ -4352,7 +4351,7 @@ mod tests {
             "other! { if #[cfg(unix)] { fn a() {} } }",
         ] {
             let mut file = syn::parse_file(source).unwrap();
-            Expand::default().visit_file_mut(&mut file);
+            Expand.visit_file_mut(&mut file);
             assert!(
                 matches!(&file.items[..], [Item::Macro(_)]),
                 "{source}: {:?}",
@@ -4409,8 +4408,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let mut expand = Expand::default();
-        expand.visit_file_mut(&mut file);
+        Expand.visit_file_mut(&mut file);
         // Each call read as its input stays before its items.
         let built: Vec<_> = file
             .items
@@ -4419,7 +4417,7 @@ mod tests {
                 let name = match item {
                     Item::Fn(item) => item.sig.ident.to_string(),
                     Item::Struct(item) => item.ident.to_string(),
-                    Item::Macro(call) if expand.flattened.contains(&call_site(&call.mac)) => {
+                    Item::Macro(call) if reads_input(&call.mac) => {
                         return None;
                     }
                     _ => panic!("an item that isn't a function, struct or flattened call"),
@@ -4468,7 +4466,7 @@ mod tests {
             "std::other::cfg_select! { unix => { fn a() {} } }",
         ] {
             let mut file = syn::parse_file(source).unwrap();
-            Expand::default().visit_file_mut(&mut file);
+            Expand.visit_file_mut(&mut file);
             assert!(
                 matches!(&file.items[..], [Item::Macro(_)]),
                 "{source}: {:?}",
