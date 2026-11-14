@@ -1,7 +1,8 @@
-use std::{collections::BTreeMap, fs::File, io::Read, path::Path};
+use std::{collections::BTreeMap, fmt, fs::File, io::Read, path::Path};
 
 use anyhow::{Context, Result, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::style::{
     provider::{Answer, Evaluation, FileReview, Provider, ProviderKind, ReviewError, Verdict},
@@ -9,30 +10,82 @@ use crate::style::{
     scan::Scan,
 };
 
-#[derive(Serialize)]
+/// The version of the JSON report this build writes.
+pub(crate) const SCHEMA_VERSION: u8 = 2;
+
+#[derive(Deserialize, Serialize)]
 pub(crate) struct Report {
     pub schema_version: u8,
-    pub status: &'static str,
-    pub provider: ProviderKind,
-    pub model: String,
+    pub status: ReportStatus,
+    #[serde(flatten)]
+    pub key: ReviewKey,
     pub root: String,
     pub selected_rules: Vec<String>,
     pub files: Vec<FileReport>,
 }
 
-#[derive(Serialize)]
+/// Everything besides a file's path and source that decides its review. Two
+/// reviews of the same source under the same key ask the same questions.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct ReviewKey {
+    pub provider: ProviderKind,
+    pub model: String,
+    /// SHA-256 of the selected rules' full definitions, as sent.
+    pub rules_sha256: String,
+    /// SHA-256 of `--context`, or `None` without one.
+    pub context_sha256: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReportStatus {
+    Planned,
+    Incomplete,
+    Complete,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct FileReport {
     pub path: String,
-    pub scope: &'static str,
-    pub status: &'static str,
+    pub scope: Scope,
+    pub status: FileStatus,
+    /// Whether these results were carried over from a previous report
+    /// instead of asking the provider again.
+    pub cached: bool,
+    /// SHA-256 of the source the results describe.
+    pub source_sha256: Option<String>,
     pub findings: Vec<Finding>,
     pub unresolved: Vec<Unresolved>,
     pub no_violation_count: usize,
+    /// Input tokens spent on this file in this run; `None` for cached files.
     pub input_tokens: Option<u64>,
     pub error: Option<String>,
 }
 
-#[derive(Serialize)]
+/// The part of a file a finding applies to. Providers give no reliable
+/// locations, so findings describe the whole file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Scope {
+    File,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FileStatus {
+    /// Not sent yet, or not sent because this is a dry run.
+    Planned,
+    /// Every rule was answered.
+    Checked,
+    /// The provider answered, but left some rules unresolved.
+    Incomplete,
+    /// The file could not be reviewed.
+    Error,
+    /// Not sent because an earlier service failure stopped the run.
+    NotChecked,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Finding {
     pub rule: String,
     pub guidance: String,
@@ -40,26 +93,52 @@ pub(crate) struct Finding {
     pub probabilities: BTreeMap<String, f64>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Unresolved {
     pub rule: String,
-    pub reason: &'static str,
+    pub reason: UnresolvedReason,
     pub confidence: Option<f64>,
     pub probabilities: Option<BTreeMap<String, f64>>,
 }
 
-impl Report {
-    pub fn planned(
-        scan: &Scan,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UnresolvedReason {
+    Refusal,
+    InsufficientContext,
+}
+
+impl ReviewKey {
+    pub fn new(
         provider: ProviderKind,
         model: &str,
         questions: &[Question],
-    ) -> Self {
-        Self {
-            schema_version: 1,
-            status: "planned",
+        context: Option<&str>,
+    ) -> Result<Self> {
+        Ok(Self {
             provider,
             model: model.to_owned(),
+            rules_sha256: sha256_hex(&serde_json::to_vec(questions)?),
+            context_sha256: context.map(|context| sha256_hex(context.as_bytes())),
+        })
+    }
+}
+
+/// The lowercase hexadecimal SHA-256 digest of `bytes`.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+impl Report {
+    /// A report listing every scanned file as planned.
+    pub fn planned(scan: &Scan, key: ReviewKey, questions: &[Question]) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            status: ReportStatus::Planned,
+            key,
             root: scan.root.to_string_lossy().into_owned(),
             selected_rules: questions
                 .iter()
@@ -73,19 +152,30 @@ impl Report {
         }
     }
 
+    /// Whether any file is still waiting to be sent to the provider.
+    pub fn has_planned_files(&self) -> bool {
+        self.files
+            .iter()
+            .any(|file| file.status == FileStatus::Planned)
+    }
+
+    /// Sends each planned file to the provider, in scan order, then settles
+    /// the report's status. `scan` must be the scan the report was planned
+    /// from.
     pub fn check(
+        &mut self,
         scan: &Scan,
-        kind: ProviderKind,
-        model: &str,
         questions: &[Question],
         context: Option<&str>,
         provider: &dyn Provider,
-    ) -> Self {
-        let mut report = Self::planned(scan, kind, model, questions);
+    ) {
         let mut service_failed = false;
-        for (file, path) in report.files.iter_mut().zip(&scan.files) {
+        for (file, path) in self.files.iter_mut().zip(&scan.files) {
+            if file.status != FileStatus::Planned {
+                continue;
+            }
             if service_failed {
-                file.status = "not_checked";
+                file.status = FileStatus::NotChecked;
                 continue;
             }
             let source = match read_source(path, provider.max_source_bytes()) {
@@ -95,8 +185,9 @@ impl Report {
                     continue;
                 }
             };
+            file.source_sha256 = Some(sha256_hex(source.as_bytes()));
             let review = FileReview {
-                model,
+                model: &self.key.model,
                 questions,
                 path: &file.path,
                 source: &source,
@@ -117,16 +208,25 @@ impl Report {
                 }
             }
         }
-        report.status = if report.files.iter().all(|file| file.status == "checked") {
-            "complete"
+        self.settle();
+    }
+
+    /// Sets the status of a report whose files have all been reviewed or
+    /// taken from a cache.
+    pub fn settle(&mut self) {
+        self.status = if self
+            .files
+            .iter()
+            .all(|file| file.status == FileStatus::Checked)
+        {
+            ReportStatus::Complete
         } else {
-            "incomplete"
+            ReportStatus::Incomplete
         };
-        report
     }
 
     pub fn exit_code(&self) -> u8 {
-        if self.status == "incomplete" {
+        if self.status == ReportStatus::Incomplete {
             2
         } else if self.files.iter().any(|file| !file.findings.is_empty()) {
             1
@@ -152,8 +252,10 @@ impl FileReport {
     fn new(path: String) -> Self {
         Self {
             path,
-            scope: "file",
-            status: "planned",
+            scope: Scope::File,
+            status: FileStatus::Planned,
+            cached: false,
+            source_sha256: None,
             findings: Vec::new(),
             unresolved: Vec::new(),
             no_violation_count: 0,
@@ -163,7 +265,7 @@ impl FileReport {
     }
 
     fn fail(&mut self, error: String) {
-        self.status = "error";
+        self.status = FileStatus::Error;
         self.error = Some(error);
     }
 
@@ -179,7 +281,7 @@ impl FileReport {
             match answer {
                 Answer::Refusal => self.unresolved.push(Unresolved {
                     rule,
-                    reason: "refusal",
+                    reason: UnresolvedReason::Refusal,
                     confidence: None,
                     probabilities: None,
                 }),
@@ -203,19 +305,50 @@ impl FileReport {
                     probabilities,
                 } => self.unresolved.push(Unresolved {
                     rule,
-                    reason: "insufficient_context",
+                    reason: UnresolvedReason::InsufficientContext,
                     confidence: Some(confidence),
                     probabilities: Some(probabilities),
                 }),
             }
         }
         self.status = if self.unresolved.is_empty() {
-            "checked"
+            FileStatus::Checked
         } else {
-            "incomplete"
+            FileStatus::Incomplete
         };
         self.input_tokens = evaluation.input_tokens;
         Ok(())
+    }
+}
+
+impl fmt::Display for FileStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Planned => "planned",
+            Self::Checked => "checked",
+            Self::Incomplete => "incomplete",
+            Self::Error => "error",
+            Self::NotChecked => "not_checked",
+        })
+    }
+}
+
+impl fmt::Display for ReportStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Planned => "planned",
+            Self::Incomplete => "incomplete",
+            Self::Complete => "complete",
+        })
+    }
+}
+
+impl fmt::Display for UnresolvedReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Refusal => "refusal",
+            Self::InsufficientContext => "insufficient_context",
+        })
     }
 }
 
@@ -298,14 +431,16 @@ mod tests {
 
     fn check(dir: &Path, questions: &[Question], provider: &FakeProvider) -> Report {
         let scan = Scan::discover(dir).unwrap();
-        Report::check(
-            &scan,
+        let key = ReviewKey::new(
             ProviderKind::Decisions,
             "test-model",
             questions,
             Some("library"),
-            provider,
         )
+        .unwrap();
+        let mut report = Report::planned(&scan, key, questions);
+        report.check(&scan, questions, Some("library"), provider);
+        report
     }
 
     #[test]
@@ -316,11 +451,11 @@ mod tests {
         let questions = &rules.questions[..2];
         let fake = FakeProvider::answering(&[Verdict::Violation, Verdict::InsufficientContext]);
         let report = check(dir.path(), questions, &fake);
-        assert_eq!(report.status, "incomplete");
+        assert_eq!(report.status, ReportStatus::Incomplete);
         assert_eq!(report.exit_code(), 2);
-        assert_eq!(report.provider, ProviderKind::Decisions);
-        assert_eq!(report.model, "test-model");
-        assert_eq!(report.files[0].scope, "file");
+        assert_eq!(report.key.provider, ProviderKind::Decisions);
+        assert_eq!(report.key.model, "test-model");
+        assert_eq!(report.files[0].scope, Scope::File);
         assert_eq!(report.files[0].path, "lib.rs");
         assert_eq!(report.files[0].findings[0].rule, questions[0].name);
         assert_eq!(
@@ -328,7 +463,10 @@ mod tests {
             questions[0].instructions
         );
         assert_eq!(report.files[0].unresolved[0].rule, questions[1].name);
-        assert_eq!(report.files[0].unresolved[0].reason, "insufficient_context");
+        assert_eq!(
+            report.files[0].unresolved[0].reason,
+            UnresolvedReason::InsufficientContext
+        );
         assert_eq!(report.files[0].input_tokens, Some(123));
         assert_eq!(
             fake.reviews.with(|reviews| reviews.clone()),
@@ -338,6 +476,69 @@ mod tests {
                 Some("library".to_owned())
             )]
         );
+    }
+
+    #[test]
+    fn records_the_hash_of_the_source_it_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let fake = FakeProvider::answering(&[Verdict::NoViolation]);
+        let report = check(dir.path(), &rules.questions[..1], &fake);
+        assert_eq!(
+            report.files[0].source_sha256.as_deref(),
+            Some(sha256_hex(b"fn example() {}\n").as_str())
+        );
+        assert!(!report.files[0].cached);
+        assert_eq!(report.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn the_review_key_covers_rule_definitions_and_context() {
+        let rules = RuleSet::load().unwrap();
+        let questions = &rules.questions[..2];
+        let key = |questions: &[Question], context| {
+            ReviewKey::new(ProviderKind::Decisions, "test-model", questions, context).unwrap()
+        };
+        let base = key(questions, Some("library"));
+        assert_eq!(base, key(questions, Some("library")));
+        assert_eq!(
+            base.context_sha256.as_deref(),
+            Some(sha256_hex(b"library").as_str())
+        );
+        assert_eq!(key(questions, None).context_sha256, None);
+        assert_ne!(base, key(questions, Some("application")));
+        assert_ne!(base, key(&questions[..1], Some("library")));
+
+        let mut reworded = questions.to_vec();
+        reworded[1].instructions.push_str(" Also consider tests.");
+        assert_eq!(reworded[1].name, questions[1].name);
+        assert_ne!(base, key(&reworded, Some("library")));
+        let mut redescribed = questions.to_vec();
+        redescribed[0].choices[0].description.push('.');
+        assert_ne!(base, key(&redescribed, Some("library")));
+
+        let other_model =
+            ReviewKey::new(ProviderKind::Decisions, "other", questions, Some("library")).unwrap();
+        assert_ne!(base, other_model);
+    }
+
+    #[test]
+    fn a_written_report_reads_back_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let fake = FakeProvider::answering(&[Verdict::Violation, Verdict::InsufficientContext]);
+        let report = check(dir.path(), &rules.questions[..2], &fake);
+        let written = serde_json::to_value(&report).unwrap();
+        assert_eq!(written["provider"], "decisions");
+        assert_eq!(written["files"][0]["status"], "incomplete");
+        assert_eq!(
+            written["files"][0]["unresolved"][0]["reason"],
+            "insufficient_context"
+        );
+        let read: Report = serde_json::from_value(written.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&read).unwrap(), written);
     }
 
     #[test]
@@ -352,8 +553,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(file.status, "incomplete");
-        assert_eq!(file.unresolved[0].reason, "refusal");
+        assert_eq!(file.status, FileStatus::Incomplete);
+        assert_eq!(file.unresolved[0].reason, UnresolvedReason::Refusal);
         assert_eq!(file.unresolved[0].confidence, None);
     }
 
@@ -366,12 +567,12 @@ mod tests {
         let fake = FakeProvider::unavailable();
         let report = check(dir.path(), &rules.questions[..1], &fake);
         assert_eq!(report.exit_code(), 2);
-        assert_eq!(report.files[0].status, "error");
+        assert_eq!(report.files[0].status, FileStatus::Error);
         assert_eq!(
             report.files[0].error.as_deref(),
             Some("service unavailable")
         );
-        assert_eq!(report.files[1].status, "not_checked");
+        assert_eq!(report.files[1].status, FileStatus::NotChecked);
         assert_eq!(fake.review_count(), 1);
     }
 
@@ -383,13 +584,13 @@ mod tests {
         let rules = RuleSet::load().unwrap();
         let fake = FakeProvider::answering(&[Verdict::NoViolation]);
         let report = check(dir.path(), &rules.questions[..2], &fake);
-        assert_eq!(report.files[0].status, "error");
+        assert_eq!(report.files[0].status, FileStatus::Error);
         assert_eq!(
             report.files[0].error.as_deref(),
             Some("provider returned 1 answers for 2 questions")
         );
         assert!(report.files[0].findings.is_empty());
-        assert_eq!(report.files[1].status, "not_checked");
+        assert_eq!(report.files[1].status, FileStatus::NotChecked);
         assert_eq!(fake.review_count(), 1);
     }
 
@@ -404,9 +605,9 @@ mod tests {
             ..FakeProvider::answering(&[Verdict::NoViolation])
         };
         let report = check(dir.path(), &rules.questions[..1], &fake);
-        assert_eq!(report.status, "incomplete");
+        assert_eq!(report.status, ReportStatus::Incomplete);
         for file in &report.files {
-            assert_eq!(file.status, "error");
+            assert_eq!(file.status, FileStatus::Error);
             assert_eq!(file.error.as_deref(), Some("too large for this model"));
         }
         assert_eq!(fake.review_count(), 2);
@@ -421,7 +622,7 @@ mod tests {
         let run = |verdict| check(dir.path(), questions, &FakeProvider::answering(&[verdict]));
         assert_eq!(run(Verdict::Violation).exit_code(), 1);
         let clean = run(Verdict::NoViolation);
-        assert_eq!(clean.status, "complete");
+        assert_eq!(clean.status, ReportStatus::Complete);
         assert_eq!(clean.exit_code(), 0);
         assert_eq!(clean.files[0].no_violation_count, 1);
     }
@@ -434,8 +635,8 @@ mod tests {
         let rules = RuleSet::load().unwrap();
         let fake = FakeProvider::answering(&[Verdict::NoViolation]);
         let report = check(dir.path(), &rules.questions[..1], &fake);
-        assert_eq!(report.status, "incomplete");
-        assert_eq!(report.files[0].status, "error");
+        assert_eq!(report.status, ReportStatus::Incomplete);
+        assert_eq!(report.files[0].status, FileStatus::Error);
         assert!(
             report.files[0]
                 .error
@@ -443,7 +644,7 @@ mod tests {
                 .unwrap()
                 .contains("input limit")
         );
-        assert_eq!(report.files[1].status, "checked");
+        assert_eq!(report.files[1].status, FileStatus::Checked);
         assert_eq!(fake.review_count(), 1);
     }
 }

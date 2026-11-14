@@ -15,7 +15,13 @@ use std::{io::Write, path::PathBuf, process::ExitCode};
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 
-use self::{provider::ProviderKind, report::Report, rules::RuleSet, scan::Scan};
+use self::{
+    provider::ProviderKind,
+    report::{Report, ReviewKey},
+    resume::Cache,
+    rules::RuleSet,
+    scan::Scan,
+};
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -47,8 +53,12 @@ pub struct CheckArgs {
     /// Show the files and rules that would be checked without an API call.
     #[arg(long)]
     dry_run: bool,
+    /// Reuse results from a previous JSON report for files whose source,
+    /// provider, model, rules and context are unchanged.
+    #[arg(long, value_name = "REPORT")]
+    cache_from: Option<PathBuf>,
     /// Retry files that failed or were not checked in a previous JSON report.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cache_from")]
     retry_from: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = Format::Json)]
     format: Format,
@@ -83,6 +93,12 @@ pub fn run(command: Command) -> Result<ExitCode> {
         }
         Command::Check(args) => {
             let questions = rules.select(&args.rules)?;
+            let key = ReviewKey::new(
+                args.provider,
+                &rules.model,
+                &questions,
+                args.context.as_deref(),
+            )?;
             let mut scan = Scan::discover(&args.path)?;
             if let Some(previous) = &args.retry_from {
                 resume::select_pending(
@@ -93,23 +109,23 @@ pub fn run(command: Command) -> Result<ExitCode> {
                     &questions,
                 )?;
             }
-            let report = if args.dry_run {
-                Report::planned(&scan, args.provider, &rules.model, &questions)
-            } else if scan.files.is_empty() {
-                let mut report = Report::planned(&scan, args.provider, &rules.model, &questions);
-                report.status = "complete";
-                report
-            } else {
-                let provider = args.provider.connect()?;
-                Report::check(
-                    &scan,
-                    args.provider,
-                    &rules.model,
-                    &questions,
-                    args.context.as_deref(),
-                    provider.as_ref(),
-                )
-            };
+            let mut report = Report::planned(&scan, key, &questions);
+            if let Some(previous) = &args.cache_from {
+                Cache::load(previous, &scan, &report.key)?.apply(&mut report, &scan);
+            }
+            if !args.dry_run {
+                if report.has_planned_files() {
+                    let provider = args.provider.connect()?;
+                    report.check(
+                        &scan,
+                        &questions,
+                        args.context.as_deref(),
+                        provider.as_ref(),
+                    );
+                } else {
+                    report.settle();
+                }
+            }
             let stdout = std::io::stdout();
             let mut output = stdout.lock();
             match args.format {
@@ -127,7 +143,8 @@ pub fn run(command: Command) -> Result<ExitCode> {
 fn render_text(output: &mut impl Write, report: &Report) -> Result<()> {
     writeln!(output, "{}: {}", report.status, report.root)?;
     for file in &report.files {
-        writeln!(output, "{}: {}", file.path, file.status)?;
+        let cached = if file.cached { " (cached)" } else { "" };
+        writeln!(output, "{}: {}{cached}", file.path, file.status)?;
         for finding in &file.findings {
             writeln!(
                 output,

@@ -382,7 +382,11 @@ mod tests {
     use adamantium::Actor;
 
     use super::*;
-    use crate::style::{provider::ProviderKind, rules::RuleSet};
+    use crate::style::{
+        provider::ProviderKind,
+        report::{Report, ReportStatus, ReviewKey},
+        rules::RuleSet,
+    };
 
     type StubResponse = (u16, Option<&'static str>, &'static str);
 
@@ -738,15 +742,11 @@ mod tests {
             key: "local-test-key".into(),
             url: DECISIONS_URL.into(),
         };
-        let report = crate::style::report::Report::check(
-            &scan,
-            ProviderKind::Decisions,
-            &rules.model,
-            &rules.questions[..1],
-            None,
-            &client,
-        );
-        assert_eq!(report.status, "complete");
+        let questions = &rules.questions[..1];
+        let key = ReviewKey::new(ProviderKind::Decisions, &rules.model, questions, None).unwrap();
+        let mut report = Report::planned(&scan, key, questions);
+        report.check(&scan, questions, None, &client);
+        assert_eq!(report.status, ReportStatus::Complete);
         assert_eq!(report.exit_code(), 1);
         assert_eq!(report.files[0].findings[0].rule, rules.questions[0].name);
     }
