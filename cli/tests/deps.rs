@@ -254,7 +254,7 @@ fn deps_names_source_it_could_not_scan() {
 #[test]
 fn deps_names_modules_declared_in_macro_bodies_it_could_not_read() {
     let report = report(&[]).unwrap();
-    // Modules in `cfg_if!` branches that can't be built aren't listed.
+    // Modules in conditional macro branches that can't be built aren't listed.
     assert_eq!(
         dependency(&report, "platform").unwrap()["unscanned"],
         json!([{
@@ -266,18 +266,17 @@ fn deps_names_modules_declared_in_macro_bodies_it_could_not_read() {
 }
 
 #[test]
-fn deps_scans_each_cfg_if_branch_that_may_be_built() {
+fn deps_scans_each_conditional_macro_branch_that_may_be_built() {
     let report = report(&[]).unwrap();
-    // An `unsafe impl` behind a cfg that can't be known, and in the branch
-    // after it an `unsafe` block, and an `unsafe fn` in a `cfg_if!` inside
-    // a module that a `cfg_if!` declares. `hidden.rs` isn't counted.
+    // Unknown predicates keep both possible branches. Nested `cfg_if!` and
+    // `cfg_select!` invocations load their modules too. `hidden.rs` isn't counted.
     assert_eq!(
         dependency(&report, "platform").unwrap()["unsafe"],
         json!({
-            "functions": 1,
+            "functions": 3,
             "blocks": 1,
             "impls": 1,
-            "traits": 0,
+            "traits": 1,
             "extern_blocks": 0,
             "attributes": 0,
             "in_macros": 0,
@@ -313,7 +312,7 @@ fn deps_prints_a_table_and_each_call_as_text() {
         "      1      0           0  helper 0.0.0",
         "      1      0           0  ffi 0.0.0",
         "     13      0           0  exports 0.0.0",
-        "      3      1           0  platform 0.0.0 (partly unscanned)",
+        "      6      2           0  platform 0.0.0 (partly unscanned)",
         "  tokio::task::spawn: an unstructured task; spawn inside adamantium::Tasks",
         "    src/nested/deeper.rs:2:5",
         "  unresolved calls: leak 1, spawn 5",
