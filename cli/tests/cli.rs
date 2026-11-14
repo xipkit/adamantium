@@ -607,6 +607,76 @@ fn check_with(dir: &Path, args: &[&str]) -> io::Result<(Option<i32>, Vec<u8>, St
 }
 
 #[test]
+fn check_reports_recursive_macros_at_each_caller() {
+    let fixture = fixture("macros");
+    let (code, stdout, stderr) = check_with(&fixture, &["--format", "json"]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(report["errors"], serde_json::json!([]), "{report}");
+    assert_eq!(report["warnings"], serde_json::json!([]), "{report}");
+    let findings = report["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 3, "{report}");
+    let mut macro_lines = Vec::new();
+    for finding in findings {
+        assert_eq!(finding["file"], "src/lib.rs", "{report}");
+        assert_eq!(finding["column"], 5, "{report}");
+        if finding["rule"] == "clippy::disallowed_methods" {
+            assert_eq!(finding["source"], "recursive_macros::sleep!();", "{report}");
+            macro_lines.push(finding["line"].as_u64().unwrap());
+        } else {
+            assert_eq!(finding["rule"], "clippy::unwrap_used", "{report}");
+            assert_eq!(finding["line"], 8, "{report}");
+            assert_eq!(finding["source"], "value.unwrap()", "{report}");
+        }
+    }
+    macro_lines.sort_unstable();
+    assert_eq!(macro_lines, [2, 5], "{report}");
+    assert_eq!(
+        report["skipped"],
+        serde_json::json!({ "clippy::disallowed_methods": 1 }),
+        "{report}"
+    );
+
+    let (code, _, stderr) = check_with(&fixture, &[]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    for line in macro_lines {
+        assert!(
+            stderr.contains(&format!("--> src/lib.rs:{line}:5")),
+            "{stderr}"
+        );
+    }
+    assert!(!stderr.contains("--> src/skipped.rs:"), "{stderr}");
+    assert!(
+        stderr.contains("adamantium: 3 findings in src/lib.rs"),
+        "{stderr}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let baseline = dir.path().join("baseline.json");
+    fs::write(&baseline, stdout).unwrap();
+    let (code, stdout, stderr) = check_with(
+        &fixture,
+        &["--format", "json", "--baseline", baseline.to_str().unwrap()],
+    )
+    .unwrap();
+    assert_eq!(code, Some(0), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(report["status"], "clean", "{report}");
+    assert_eq!(report["findings"], serde_json::json!([]), "{report}");
+    assert_eq!(
+        report["skipped"],
+        serde_json::json!({ "clippy::disallowed_methods": 1 }),
+        "{report}"
+    );
+    assert_eq!(
+        report["baselined"],
+        serde_json::json!({ "clippy::disallowed_methods": 2, "clippy::unwrap_used": 1 }),
+        "{report}"
+    );
+    assert_eq!(report["baseline_unmatched"], 0, "{report}");
+}
+
+#[test]
 fn check_with_a_baseline_fails_only_on_new_findings() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("src")).unwrap();

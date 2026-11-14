@@ -1,0 +1,17 @@
+[workspace]
+exclude = ["vendor"]
+
+[package]
+name = "fixture-macros"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+recursive-macros = { path = "vendor/recursive-macros" }
+
+[package.metadata.adamantium.exceptions]
+disallowed_methods = ["src/skipped.rs"]
+
+[profile.release]
+overflow-checks = true
