@@ -1318,6 +1318,7 @@ impl<'a> Scanner<'a> {
                 return Some(candidates);
             }
         }
+        let used = imported.map_or(&[][..], |(found, _)| found);
         if let Some((found, certain)) = imported {
             candidates.extend(self.found_candidates(found, certain)?);
             if certain {
@@ -1338,15 +1339,21 @@ impl<'a> Scanner<'a> {
                 if hidden.is_some_and(|import| imported.import != import) {
                     break;
                 }
-                let export = self.export(&imported.library, imported.export)?;
-                candidates.push(Candidate {
-                    rules: export.rules.as_ref()?,
-                    rel: &export.rel,
-                    span: export.span,
-                    condition: &imported.condition,
-                    defined: imported.defined,
-                    origin: Origin::MacroUse(imported.import),
+                // A macro the `use` brings in too is read once, as that.
+                let read = used.iter().any(|found| {
+                    found.library == imported.library && found.export == imported.export
                 });
+                if !read {
+                    let export = self.export(&imported.library, imported.export)?;
+                    candidates.push(Candidate {
+                        rules: export.rules.as_ref()?,
+                        rel: &export.rel,
+                        span: export.span,
+                        condition: &imported.condition,
+                        defined: imported.defined,
+                        origin: Origin::MacroUse(imported.import),
+                    });
+                }
                 if imported.certain {
                     hidden = Some(imported.import);
                 }
@@ -4850,6 +4857,30 @@ crate::own! { yes { mod own; } }
         let listed = [(1, "other"), (2, "spawn"), (3, "missing"), (6, "own")]
             .map(|(line, name)| unscanned("src/lib.rs", line, &reason(name)));
         assert_eq!(scan.unscanned, listed);
+    }
+
+    /// A macro that a `use` under an unknown `cfg` brings in, and a
+    /// `#[macro_use] extern crate` brings in too, is read once.
+    #[test]
+    fn macros_a_use_and_the_prelude_both_bring_in_are_read_once() {
+        let picks = Library {
+            name: "picks",
+            features: &[],
+            files: &[(
+                "lib.rs",
+                "#[macro_export]\nmacro_rules! pick { (yes { $($yes:tt)* }) => { $($yes)* }; }\n",
+            )],
+        };
+        let scan = scan_with(
+            &[(
+                "lib.rs",
+                "#[macro_use]\nextern crate picks;\n\n#[cfg(demo_custom)]\nuse picks::pick;\n\npick! { yes { pub unsafe fn f() {} } }\n",
+            )],
+            false,
+            &[picks],
+        );
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 1);
     }
 
     /// A module's `use` of another crate's macro can be followed from the
