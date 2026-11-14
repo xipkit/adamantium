@@ -52,6 +52,9 @@ pub struct Finding {
     pub file: String,
     pub line: Option<u64>,
     pub column: Option<u64>,
+    /// The source line the finding starts on, without its indentation or
+    /// trailing whitespace, or `None` when the finding has no line.
+    pub source: Option<String>,
 }
 
 /// A compiler error or configuration warning unrelated to the rules.
@@ -90,6 +93,14 @@ struct Span {
     line_start: u64,
     column_start: u64,
     is_primary: bool,
+    /// The source lines the span covers, starting with `line_start`.
+    #[serde(default)]
+    text: Vec<SpanLine>,
+}
+
+#[derive(Deserialize)]
+struct SpanLine {
+    text: String,
 }
 
 #[derive(PartialEq, Eq, Hash)]
@@ -268,6 +279,7 @@ fn check(root: &Path, cargo_args: &[String], echo: bool, strict: bool) -> Result
             file: "Cargo.toml".to_owned(),
             line: None,
             column: None,
+            source: None,
         };
         if echo {
             eprintln!(
@@ -293,7 +305,7 @@ fn check(root: &Path, cargo_args: &[String], echo: bool, strict: bool) -> Result
         Status::Findings
     };
     Ok(Report {
-        schema_version: 2,
+        schema_version: 3,
         root: root.to_path_buf(),
         status,
         findings,
@@ -406,6 +418,7 @@ fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted) 
             file,
             line: Some(span.line_start),
             column: Some(span.column_start),
+            source: span.text.first().map(|line| line.text.trim().to_owned()),
         }),
         _ if diagnostic.level == "error" => sorted.errors.push(Problem {
             message: diagnostic.message,
@@ -470,6 +483,9 @@ mod tests {
                 line_start: 7,
                 column_start: 3,
                 is_primary: true,
+                text: vec![SpanLine {
+                    text: "    let value = option.unwrap();  ".to_owned(),
+                }],
             }],
         }
     }
@@ -490,7 +506,7 @@ mod tests {
             classify(diagnostic, &setting, &mut sorted);
         }
         Report {
-            schema_version: 2,
+            schema_version: 3,
             root: root.to_path_buf(),
             status: Status::Clean,
             findings: sorted.findings,
@@ -647,6 +663,11 @@ mod tests {
             ]
         );
         assert_eq!(report.findings.len(), 1);
-        assert_eq!(report.findings.first().unwrap().rule, "clippy::unwrap_used");
+        let finding = report.findings.first().unwrap();
+        assert_eq!(finding.rule, "clippy::unwrap_used");
+        assert_eq!(
+            finding.source.as_deref(),
+            Some("let value = option.unwrap();")
+        );
     }
 }

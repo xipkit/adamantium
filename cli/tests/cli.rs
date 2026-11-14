@@ -259,7 +259,7 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["schema_version"], 2, "{stderr}");
+    assert_eq!(report["schema_version"], 3, "{stderr}");
     assert_eq!(report["warnings"], serde_json::json!([]), "{stderr}");
     assert_eq!(report["status"], "findings", "{stderr}");
     assert_eq!(report["errors"], serde_json::json!([]), "{stderr}");
@@ -312,6 +312,23 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
     let first = &report["findings"][0];
     assert!(first["file"].as_str().unwrap().ends_with(".rs"));
     assert!(first["line"].as_u64().is_some());
+    // Each finding carries the trimmed text of the line it starts on, so a
+    // baseline can match it after the line moves.
+    for finding in report["findings"].as_array().unwrap() {
+        let Some(line) = finding["line"].as_u64() else {
+            assert_eq!(finding["source"], serde_json::Value::Null, "{finding}");
+            continue;
+        };
+        let text =
+            fs::read_to_string(fixture("violations").join(finding["file"].as_str().unwrap()))
+                .unwrap();
+        let expected = text
+            .lines()
+            .nth(usize::try_from(line - 1).unwrap())
+            .unwrap()
+            .trim();
+        assert_eq!(finding["source"], expected, "{finding}");
+    }
     // The binary depends on the library. Its finding is only reported when
     // the library's findings do not fail the build and skip what depends on it.
     assert!(
@@ -540,7 +557,7 @@ fn check_passes_the_clean_fixture_and_prints_a_summary() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["schema_version"], 3);
     assert_eq!(report["status"], "clean");
     assert_eq!(report["findings"], serde_json::json!([]));
     assert_eq!(report["warnings"], serde_json::json!([]));
@@ -577,7 +594,7 @@ fn check_reports_spanless_lint_warnings_once_in_json_and_text() {
         assert_eq!(output.status.code(), Some(0), "{format}: {stderr}");
         if format == "json" {
             let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(report["schema_version"], 2, "{report}");
+            assert_eq!(report["schema_version"], 3, "{report}");
             assert_eq!(report["status"], "clean", "{report}");
             assert_eq!(report["findings"], serde_json::json!([]), "{report}");
             assert_eq!(report["errors"], serde_json::json!([]), "{report}");
