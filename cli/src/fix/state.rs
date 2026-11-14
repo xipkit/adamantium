@@ -317,6 +317,9 @@ fn known_macro(name: &str) -> Option<usize> {
 struct MacroArgs {
     args: Vec<Expr>,
     format: usize,
+    /// Whether the first argument is borrowed mutably, as the destination of
+    /// `write!` and `writeln!` is.
+    destination: bool,
 }
 
 /// Parses the arguments of every standard macro call, nested ones included,
@@ -329,13 +332,15 @@ struct Parsed<'t> {
 
 impl<'ast> Visit<'ast> for Parsed<'_> {
     fn visit_macro(&mut self, mac: &'ast Macro) {
-        let Some(format) = mac
+        let Some(name) = mac
             .path
             .get_ident()
             .map(ToString::to_string)
             .filter(|name| mac.path.leading_colon.is_none() && !self.names.macros.contains(name))
-            .and_then(|name| known_macro(&name))
         else {
+            return;
+        };
+        let Some(format) = known_macro(&name) else {
             return;
         };
         let Some(start) = self.text.of(mac).map(|range| range.start) else {
@@ -349,7 +354,14 @@ impl<'ast> Visit<'ast> for Parsed<'_> {
         for arg in &args {
             self.visit_expr(arg);
         }
-        self.macros.insert(start, MacroArgs { args, format });
+        self.macros.insert(
+            start,
+            MacroArgs {
+                args,
+                format,
+                destination: name == "write" || name == "writeln",
+            },
+        );
     }
 }
 
@@ -559,7 +571,7 @@ enum Node<'a> {
     Stmt(&'a Stmt),
     Block(&'a Block, BlockKind),
     /// The arguments of a standard macro.
-    Macro,
+    Macro(&'a MacroArgs),
 }
 
 /// The expression whose evaluation a guard's temporary spans.
@@ -1358,7 +1370,7 @@ impl<'a> Walker<'a> {
                     }
                     Stmt::Item(_) => return Err(Reason::Unfollowed("a guard is in an item")),
                 },
-                Node::Block(..) | Node::Macro => {}
+                Node::Block(..) | Node::Macro(_) => {}
             }
         }
         Err(Reason::Unfollowed("a guard is outside any statement"))
@@ -1431,7 +1443,12 @@ impl<'a> Walker<'a> {
                             Expr::Return(_) | Expr::If(_) | Expr::While(_) | Expr::Closure(_)
                         )
                 }
-                Some(Node::Macro | Node::Stmt(Stmt::Local(_))) => true,
+                // Format and assertion macros take their arguments by
+                // reference, except a `write!` destination.
+                Some(Node::Macro(args)) => {
+                    !(args.destination && args.args.first().is_some_and(|first| is(first, chain)))
+                }
+                Some(Node::Stmt(Stmt::Local(_))) => true,
                 Some(Node::Stmt(Stmt::Expr(_, None))) => true,
                 _ => false,
             };
@@ -1689,7 +1706,7 @@ impl<'a> Walker<'a> {
             self.mentions(mac.tokens.clone());
             return;
         };
-        self.stack.push(Node::Macro);
+        self.stack.push(Node::Macro(parsed));
         for (position, arg) in parsed.args.iter().enumerate() {
             if position == parsed.format
                 && let Expr::Lit(lit) = arg
@@ -2592,6 +2609,23 @@ mod tests {
         assert_eq!(refusals, []);
         assert!(
             fixed.starts_with("use std::sync::Arc;\nuse Arc as Shared;\n"),
+            "{fixed}"
+        );
+    }
+
+    #[test]
+    fn a_write_destination_is_borrowed_mutably() {
+        let (fixed, refusals) = fix(
+            "use std::fmt::Write;\nuse std::sync::{Arc, Mutex};\nfn f() -> std::fmt::Result {\n    let m = Arc::new(Mutex::new(String::new()));\n    write!(*m.lock().unwrap(), \"hello\").unwrap();\n    writeln!(String::new(), \"{}\", *m.lock().unwrap())\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(
+            fixed.contains("m.with(|m| { write!(*m, \"hello\").unwrap(); });"),
+            "{fixed}"
+        );
+        assert!(
+            fixed.contains("m.read(|m| writeln!(String::new(), \"{}\", *m))"),
             "{fixed}"
         );
     }
