@@ -33,8 +33,9 @@ pub fn aliased() -> u32 {
     let copy: Shared<Lock<u32>> = Shared::clone(&state);
     *copy.lock().unwrap() *= 5;
     let product = *state.lock().unwrap() * 3;
-    let sum = product + *full.lock().unwrap();
-    sum * *module.lock().unwrap()
+    let full_value = *full.lock().unwrap();
+    let module_value = *module.lock().unwrap();
+    (product + full_value) * module_value
 }
 
 #[derive(Debug, Default)]
@@ -70,7 +71,8 @@ pub fn branches(prices: &[u64]) -> u64 {
     } else {
         0
     };
-    cart.lock().unwrap().total + kind as u64 + extra as u64
+    let total = cart.lock().unwrap().total;
+    total + kind as u64 + extra as u64
 }
 
 pub async fn deferred() -> Vec<u32> {

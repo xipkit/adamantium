@@ -1293,20 +1293,6 @@ fn is_assignment(op: &BinOp) -> bool {
     )
 }
 
-/// Whether `parent` copies its operand `child` out by value. A place read
-/// through a guard by value must be `Copy`, so the value read can't borrow
-/// the state. Only operator operands and indexes count: at a coercion site,
-/// such as a call argument or a field, a `&mut` place is reborrowed rather
-/// than copied, and the reborrow needs the guard.
-fn copies_out(parent: &Expr, child: &Expr) -> bool {
-    match parent {
-        Expr::Binary(binary) => !is_comparison(&binary.op) && !is_assignment(&binary.op),
-        Expr::Unary(unary) => !matches!(unary.op, UnOp::Deref(_)),
-        Expr::Index(index) => is(&index.index, child),
-        _ => false,
-    }
-}
-
 impl<'a> Walker<'a> {
     /// The variable whose guard `expr` is: `m.lock().unwrap()` or
     /// `m.lock().expect("...")`.
@@ -1563,14 +1549,15 @@ impl<'a> Walker<'a> {
             {
                 Some(expr)
             }
-            Some(Node::Expr(expr)) if projected && copies_out(expr, chain) => Some(chain),
+            // An operand or index that reads a `&mut` through the guard
+            // reborrows it rather than copying it out, so other reads stay
+            // in the statement's `with`.
             _ => None,
         };
         let read = projected
             && match parent {
                 Some(Node::Expr(expr)) => {
-                    copies_out(expr, chain)
-                        || matches!(expr, Expr::Binary(binary) if is_comparison(&binary.op))
+                    matches!(expr, Expr::Binary(binary) if is_comparison(&binary.op))
                         || matches!(expr, Expr::Reference(reference) if reference.mutability.is_none())
                         || matches!(
                             expr,
@@ -2924,13 +2911,14 @@ mod tests {
         ] {
             refused(body, "m", Reason::Calls);
         }
-        // A copy read out of the state leaves the call outside the callback.
-        let (fixed, refusals) = fix(
-            "use std::sync::{Arc, Mutex};\nfn other() -> u32 { 1 }\nfn f() -> u32 {\n    let m = Arc::new(Mutex::new(0u32));\n    *m.lock().unwrap() + other()\n}\n",
-            &["Mutex"],
+        // Without types, an operand read through the guard might be a `&mut`
+        // that the operator reborrows, so the whole statement stays in the
+        // callback, call and all.
+        refused(
+            "fn other() -> u32 { 1 }\nfn f() -> u32 { let m = Arc::new(Mutex::new(0u32)); *m.lock().unwrap() + other() }",
+            "m",
+            Reason::Calls,
         );
-        assert_eq!(refusals, []);
-        assert!(fixed.contains("m.read(|m| *m) + other()"), "{fixed}");
     }
 
     #[test]
@@ -3268,6 +3256,24 @@ mod tests {
         );
         assert_eq!(refusals, []);
         assert!(fixed.contains("m.with(|m| m.items[0] = 2);"), "{fixed}");
+    }
+
+    #[test]
+    fn operator_and_index_operands_stay_in_with() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nfn f(mut n: i32) -> i32 {\n    let m = Arc::new(Mutex::new(&mut n));\n    let doubled = **m.lock().unwrap() * 2;\n    doubled\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(
+            fixed.contains("let doubled = m.with(|m| **m * 2);"),
+            "{fixed}"
+        );
+        refused(
+            "struct S;\nimpl std::ops::Add<&mut i32> for S { type Output = i32; fn add(self, x: &mut i32) -> i32 { *x } }\nfn f(mut n: i32) -> i32 { let m = Arc::new(Mutex::new(&mut n)); let x = S + *m.lock().unwrap(); x }",
+            "m",
+            Reason::Calls,
+        );
     }
 
     #[test]

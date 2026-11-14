@@ -9,7 +9,7 @@ pub fn counter() -> u64 {
     let handle = hits.clone();
     handle.with(|handle| *handle += 1);
     hits.read(|hits| { assert_eq!(*hits, 1); });
-    let total = hits.read(|hits| *hits) + 1;
+    let total = hits.with(|hits| *hits + 1);
     total
 }
 
@@ -28,9 +28,10 @@ pub fn aliased() -> u32 {
     let module = ::adamantium::Actor::new(4u32);
     let copy: ::adamantium::Actor<u32> = state.clone();
     copy.with(|copy| *copy *= 5);
-    let product = state.read(|state| *state) * 3;
-    let sum = product + full.read(|full| *full);
-    sum * module.read(|module| *module)
+    let product = state.with(|state| *state * 3);
+    let full_value = full.read(|full| *full);
+    let module_value = module.read(|module| *module);
+    (product + full_value) * module_value
 }
 
 #[derive(Debug, Default)]
@@ -66,7 +67,8 @@ pub fn branches(prices: &[u64]) -> u64 {
     } else {
         0
     };
-    cart.read(|cart| cart.total) + kind as u64 + extra as u64
+    let total = cart.read(|cart| cart.total);
+    total + kind as u64 + extra as u64
 }
 
 pub async fn deferred() -> Vec<u32> {
