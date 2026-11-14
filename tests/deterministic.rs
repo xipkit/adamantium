@@ -226,6 +226,23 @@ fn supported_primitives_select_the_model_and_reject_foreign_channels() {
         assert_eq!(adamantium::blocking(|| 42).await, 42);
     })
     .unwrap();
+    #[cfg(all(feature = "signal", any(unix, windows)))]
+    assert_eq!(
+        testing::check(
+            Config {
+                iterations: 1,
+                ..config()
+            },
+            || async {
+                let cancel = Cancellation::new();
+                cancel.cancel();
+                cancel.cancel_on_signal().await.unwrap();
+            },
+        )
+        .unwrap_err()
+        .kind(),
+        FailureKind::Panic
+    );
     let channel = Arc::new(Channel::bounded(1));
     assert!(
         testing::check(config(), move || {
@@ -333,6 +350,10 @@ fn trace_files_round_trip_without_payloads_and_validate_versions() {
     let json = std::fs::read_to_string(&path).unwrap();
     assert!(!json.contains("private fixture payload"));
     assert_eq!(Replay::load(&path).unwrap(), *failure.replay());
+    let previous_format = json.replace("\"format\":2", "\"format\":1");
+    assert_ne!(previous_format, json);
+    std::fs::write(&path, previous_format).unwrap();
+    assert!(Replay::load(&path).is_err());
     let incompatible = json.replace("shuttle=0.9.10", "shuttle=0.0.0");
     std::fs::write(&path, incompatible).unwrap();
     assert!(Replay::load(&path).is_err());
