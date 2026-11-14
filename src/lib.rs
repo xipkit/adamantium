@@ -58,3 +58,9 @@ pub use tasks::{
     concurrently_ordered_until, concurrently_unordered, concurrently_unordered_until,
 };
 pub use watch::{Watch, Watcher};
+
+// Runs the migration guide's examples as doctests, so its rewrites keep
+// compiling against the current API.
+#[cfg(all(doctest, feature = "tokio"))]
+#[doc = include_str!("../docs/migrating.md")]
+struct MigratingGuide;
