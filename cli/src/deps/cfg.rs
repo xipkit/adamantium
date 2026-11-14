@@ -7,6 +7,8 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use proc_macro2::TokenStream;
+
 use syn::{
     Attribute, Ident, LitStr, Meta, Token,
     ext::IdentExt,
@@ -211,10 +213,17 @@ impl Cfg<'_> {
     /// whether it applies. Attributes of a `cfg_attr` whose predicate is
     /// false are left out.
     pub fn effective(&self, attrs: &[Attribute]) -> Vec<(Truth, Meta)> {
+        attrs
+            .iter()
+            .flat_map(|attr| self.expanded(attr.meta.clone()))
+            .collect()
+    }
+
+    /// The attributes that one attribute, written as `meta`, stands for
+    /// after `cfg_attr` is expanded, as [`Cfg::effective`] gives them.
+    pub fn expanded(&self, meta: Meta) -> Vec<(Truth, Meta)> {
         let mut metas = Vec::new();
-        for attr in attrs {
-            self.expand(Truth::True, attr.meta.clone(), &mut metas);
-        }
+        self.expand(Truth::True, meta, &mut metas);
         metas
     }
 
@@ -243,6 +252,14 @@ impl Cfg<'_> {
                 }
             }
         }
+    }
+
+    /// Whether a predicate written as tokens holds. One that doesn't parse,
+    /// such as one with a macro's metavariable in it, is unknown.
+    pub fn holds(&self, predicate: TokenStream) -> Truth {
+        (|input: ParseStream| self.predicate(input))
+            .parse2(predicate)
+            .unwrap_or(Truth::Unknown)
     }
 
     fn predicate(&self, input: ParseStream) -> syn::Result<Truth> {

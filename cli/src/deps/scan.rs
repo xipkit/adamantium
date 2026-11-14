@@ -70,8 +70,13 @@ pub struct UnsafeCounts {
     /// 2024 allow, isn't counted: its functions can only be called in
     /// `unsafe` blocks, which are.
     pub extern_blocks: usize,
+    /// Attributes that `unsafe_code` reports, such as `#[no_mangle]`, with
+    /// or without the `unsafe(...)` the 2024 edition requires, including
+    /// those a `cfg_attr` adds.
+    pub attributes: usize,
     /// `unsafe` in macro bodies that syn can't parse as code, such as
-    /// `macro_rules!` definitions.
+    /// `macro_rules!` definitions, and the attributes `unsafe_code` reports
+    /// that are written there without `unsafe(...)`.
     pub in_macros: usize,
 }
 
@@ -82,6 +87,7 @@ impl UnsafeCounts {
             + self.impls
             + self.traits
             + self.extern_blocks
+            + self.attributes
             + self.in_macros
     }
 }
@@ -147,7 +153,11 @@ pub fn scan(krate: &Crate, disallowed: &Disallowed) -> Scan {
                 mod_dir: loaded.mod_dir.clone(),
                 path_dir: loaded.path_dir.clone(),
                 blocks: Vec::new(),
+                attributes: HashSet::new(),
             };
+            for attr in &loaded.file.attrs {
+                visitor.visit_attribute(attr);
+            }
             for item in &loaded.file.items {
                 visitor.visit_item(item);
             }
@@ -1285,6 +1295,28 @@ fn is_unsafe(safety: &Safety) -> bool {
     matches!(safety, Safety::Unsafe(_))
 }
 
+/// The attributes that the `unsafe_code` lint reports when they are written
+/// without `unsafe(...)`, as editions before 2024 allow: rustc's unsafe
+/// attributes, stable and unstable, and `allow_internal_unsafe`.
+const UNSAFE_ATTRIBUTES: [&str; 8] = [
+    "no_mangle",
+    "export_name",
+    "link_section",
+    "naked",
+    "ffi_pure",
+    "ffi_const",
+    "force_target_feature",
+    "allow_internal_unsafe",
+];
+
+/// Whether `unsafe_code` reports an attribute. rustc accepts `unsafe(...)`
+/// only around an unsafe attribute, so any attribute written that way is
+/// one.
+fn is_unsafe_attribute(meta: &Meta) -> bool {
+    let path = meta.path();
+    path.is_ident("unsafe") || UNSAFE_ATTRIBUTES.iter().any(|name| path.is_ident(name))
+}
+
 /// Walks one module's syntax tree.
 struct FileVisitor<'s, 'a> {
     scanner: &'s mut Scanner<'a>,
@@ -1297,6 +1329,9 @@ struct FileVisitor<'s, 'a> {
     path_dir: PathBuf,
     /// The names bound by the blocks around the current place.
     blocks: Vec<Scope>,
+    /// Where the attributes already visited are written, by line and
+    /// column.
+    attributes: HashSet<(usize, usize)>,
 }
 
 impl FileVisitor<'_, '_> {
@@ -1320,6 +1355,19 @@ impl FileVisitor<'_, '_> {
             line: Some(site.line),
             reason,
         });
+    }
+
+    /// The attributes that `unsafe_code` reports among those one attribute,
+    /// written as `meta`, stands for once `cfg_attr` is expanded.
+    fn unsafe_attributes(&self, meta: Meta) -> Vec<Meta> {
+        self.scanner
+            .krate
+            .cfg
+            .expanded(meta)
+            .into_iter()
+            .map(|(_, meta)| meta)
+            .filter(is_unsafe_attribute)
+            .collect()
     }
 
     fn unresolved(&mut self, name: &str) {
@@ -1388,6 +1436,12 @@ impl FileVisitor<'_, '_> {
                     self.scanner.scan.unsafe_code.in_macros += 1;
                 }
                 TokenTree::Group(group) => {
+                    if group.delimiter() == Delimiter::Bracket
+                        && is_attribute(previous.as_ref(), before.as_ref())
+                    {
+                        self.scanner.scan.unsafe_code.in_macros +=
+                            self.bare_unsafe_attributes(group.stream());
+                    }
                     if group.delimiter() == Delimiter::Parenthesis
                         && let Some(TokenTree::Ident(name)) = &previous
                     {
@@ -1412,7 +1466,43 @@ impl FileVisitor<'_, '_> {
         }
     }
 
+    /// The attributes that `unsafe_code` reports, written without
+    /// `unsafe(...)`, among those an attribute in a macro body stands for
+    /// once `cfg_attr` is expanded. One written as `unsafe(...)` counts as
+    /// the `unsafe` in it. The attribute is read as tokens, not parsed, since
+    /// its value may be a metavariable, as in `#[export_name = $name]`, and a
+    /// `cfg_attr` predicate that doesn't parse is unknown.
+    fn bare_unsafe_attributes(&self, attribute: TokenStream) -> usize {
+        let mut trees = attribute.into_iter();
+        let Some(TokenTree::Ident(name)) = trees.next() else {
+            return 0;
+        };
+        if UNSAFE_ATTRIBUTES
+            .iter()
+            .any(|unsafe_name| name == unsafe_name)
+        {
+            return 1;
+        }
+        if name != "cfg_attr" {
+            return 0;
+        }
+        let (Some(TokenTree::Group(group)), None) = (trees.next(), trees.next()) else {
+            return 0;
+        };
+        let mut parts = split_commas(group.stream()).into_iter();
+        let Some(predicate) = parts.next() else {
+            return 0;
+        };
+        if self.scanner.krate.cfg.holds(predicate) == Truth::False {
+            return 0;
+        }
+        parts.map(|part| self.bare_unsafe_attributes(part)).sum()
+    }
+
     fn module_item(&mut self, item: &ItemMod) {
+        for attr in &item.attrs {
+            self.visit_attribute(attr);
+        }
         let mut module = self.module.clone();
         module.push(item.ident.unraw().to_string());
         let location = self.scanner.locate(item, &self.mod_dir, &self.path_dir);
@@ -1529,6 +1619,31 @@ impl FileVisitor<'_, '_> {
     }
 }
 
+/// Whether a bracketed group that follows these tokens is an attribute:
+/// `#[...]` or `#![...]`.
+fn is_attribute(previous: Option<&TokenTree>, before: Option<&TokenTree>) -> bool {
+    is_punct(previous, '#') || (is_punct(previous, '!') && is_punct(before, '#'))
+}
+
+/// The comma-separated parts of a token stream, without empty ones, as a
+/// trailing comma leaves.
+fn split_commas(stream: TokenStream) -> Vec<TokenStream> {
+    let mut parts = vec![TokenStream::new()];
+    for tree in stream {
+        if is_punct(Some(&tree), ',') {
+            parts.push(TokenStream::new());
+        } else if let Some(part) = parts.last_mut() {
+            part.extend([tree]);
+        }
+    }
+    parts.retain(|part| !part.is_empty());
+    parts
+}
+
+fn is_punct(tree: Option<&TokenTree>, char: char) -> bool {
+    matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == char)
+}
+
 /// The names that patterns bind.
 fn pattern_names<'p>(patterns: impl IntoIterator<Item = &'p Pat>) -> Vec<String> {
     struct Names(Vec<String>);
@@ -1579,6 +1694,9 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
                 "include! of another file is not followed".to_owned(),
             );
             return;
+        }
+        for attr in &item.attrs {
+            self.visit_attribute(attr);
         }
         // A `macro_rules!` definition, or an invocation whose body isn't
         // items.
@@ -1665,6 +1783,18 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         });
     }
 
+    /// `Expand` gives each item a macro invocation expands to a copy of the
+    /// invocation's attributes, so an attribute counts only the first time
+    /// it is seen where it is written.
+    fn visit_attribute(&mut self, attr: &'ast Attribute) {
+        let start = attr.pound_token.span.start();
+        if self.attributes.insert((start.line, start.column)) {
+            self.scanner.scan.unsafe_code.attributes +=
+                self.unsafe_attributes(attr.meta.clone()).len();
+        }
+        visit::visit_attribute(self, attr);
+    }
+
     fn visit_block(&mut self, block: &'ast Block) {
         self.stmts(&block.stmts);
     }
@@ -1720,11 +1850,17 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
     }
 
     fn visit_expr_for_loop(&mut self, expr: &'ast ExprForLoop) {
+        for attr in &expr.attrs {
+            self.visit_attribute(attr);
+        }
         self.visit_expr(&expr.expr);
         self.with_patterns([&*expr.pat], |this| this.visit_block(&expr.body));
     }
 
     fn visit_expr_if(&mut self, expr: &'ast ExprIf) {
+        for attr in &expr.attrs {
+            self.visit_attribute(attr);
+        }
         self.blocks.push(Scope::default());
         self.condition(&expr.cond);
         self.visit_block(&expr.then_branch);
@@ -1735,6 +1871,9 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
     }
 
     fn visit_expr_while(&mut self, expr: &'ast ExprWhile) {
+        for attr in &expr.attrs {
+            self.visit_attribute(attr);
+        }
         self.blocks.push(Scope::default());
         self.condition(&expr.cond);
         self.visit_block(&expr.body);
@@ -1826,6 +1965,42 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
             self.stmts(&stmts);
         } else {
             self.tokens(mac.tokens.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use syn::parse::Parser;
+
+    use super::*;
+
+    /// Whether `unsafe_code` reports each attribute, as rustc 1.100 does.
+    #[test]
+    fn unsafe_attributes_are_the_ones_unsafe_code_reports() {
+        for (source, reported) in [
+            ("#[no_mangle]", true),
+            ("#[export_name = \"name\"]", true),
+            ("#[link_section = \".data\"]", true),
+            ("#[naked]", true),
+            ("#[ffi_pure]", true),
+            ("#[ffi_const]", true),
+            ("#[force_target_feature(enable = \"avx2\")]", true),
+            ("#[allow_internal_unsafe]", true),
+            ("#[unsafe(no_mangle)]", true),
+            ("#[unsafe(export_name = \"name\")]", true),
+            ("#[used]", false),
+            ("#[link_name = \"name\"]", false),
+            ("#[inline]", false),
+            ("#[target_feature(enable = \"avx2\")]", false),
+            ("#[allow(unsafe_code)]", false),
+            ("#[other::no_mangle]", false),
+        ] {
+            let attrs = Attribute::parse_outer.parse_str(source).unwrap();
+            let [attr] = &attrs[..] else {
+                panic!("{source} is one attribute");
+            };
+            assert_eq!(is_unsafe_attribute(&attr.meta), reported, "{source}");
         }
     }
 }
