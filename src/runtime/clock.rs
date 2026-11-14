@@ -16,6 +16,7 @@ use std::{
     pin::Pin,
     sync::OnceLock,
     task::{Context, Poll, Waker},
+    time::Duration,
 };
 
 use shuttle::scheduler::{Task, TaskId};
@@ -64,6 +65,20 @@ pub(crate) fn clear() {
 
 pub(crate) fn now() -> Instant {
     with(|clock| clock.now)
+}
+
+pub(crate) fn deadline_after(duration: Duration) -> Instant {
+    let now = now();
+    // Match Tokio's safe_delay cap, using virtual time rather than its clock.
+    let mut delay = duration.min(Duration::from_secs(86400 * 365 * 30));
+    loop {
+        if let Some(deadline) = now.checked_add(delay) {
+            return deadline;
+        }
+        // An execution can advance near Instant's platform limit. Keep even
+        // the fallback representable there; zero always fits at the limit.
+        delay /= 2;
+    }
 }
 
 pub(crate) fn start() {

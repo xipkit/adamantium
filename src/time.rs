@@ -50,6 +50,7 @@ pub fn now() -> Instant {
 /// Starts on the first poll. Uses virtual time in the deterministic harness;
 /// otherwise requires Tokio's time driver, with millisecond timer granularity.
 /// Dropping the future cancels the wait.
+/// Very large relative waits use a finite far-future deadline, like Tokio.
 pub async fn sleep(duration: Duration) {
     wait(Delay::For(duration)).await;
 }
@@ -88,7 +89,7 @@ async fn wait(delay: Delay) {
         #[cfg(feature = "deterministic")]
         if owner.0.is_model() {
             let deadline = match delay {
-                Delay::For(duration) => now() + duration,
+                Delay::For(duration) => crate::runtime::clock::deadline_after(duration),
                 Delay::Until(deadline) => deadline,
             };
             crate::runtime::clock::Sleep::new(deadline).await;

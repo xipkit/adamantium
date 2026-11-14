@@ -80,6 +80,135 @@ fn virtual_sleep_and_absolute_deadlines_run_without_a_tokio_runtime() {
 }
 
 #[test]
+fn oversized_sleeps_and_retry_backoffs_finish_and_replay() {
+    check(|| async {
+        let start = time::now();
+        time::sleep(Duration::MAX).await;
+        let delay = time::now() - start;
+        assert!(delay > TICK);
+        let mut calls = 0;
+        let result = adamantium::retry(
+            &Cancellation::new(),
+            None,
+            adamantium::Backoff::exponential(Duration::MAX, Duration::MAX).attempts(3),
+            || {
+                calls += 1;
+                async { Err::<(), _>("no") }
+            },
+        )
+        .await;
+        assert_eq!(result, Err(ScopeError::Failed("no")));
+        assert_eq!(calls, 3);
+        assert_eq!(time::now(), start + delay * 3);
+    });
+}
+
+#[test]
+fn modeled_relative_sleep_delays_match_tokio() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    let expected = {
+        let _entered = runtime.enter();
+        [
+            Duration::ZERO,
+            Duration::from_nanos(1),
+            TICK,
+            TICK * 365 * 31,
+            Duration::MAX,
+        ]
+        .map(|duration| {
+            let start = time::now();
+            let delay = tokio::time::sleep(duration).deadline() - start;
+            (duration, delay)
+        })
+    };
+    drop(runtime);
+    check(move || async move {
+        for (duration, delay) in expected {
+            let start = time::now();
+            time::sleep(duration).await;
+            assert_eq!(time::now() - start, delay);
+        }
+    });
+}
+
+#[test]
+fn oversized_sleep_fallback_cannot_overflow_near_the_instant_limit() {
+    check(|| async {
+        let mut limit = time::now();
+        let mut step = Duration::MAX;
+        while !step.is_zero() {
+            if let Some(later) = limit.checked_add(step) {
+                limit = later;
+            }
+            step /= 2;
+        }
+        assert!(limit.checked_add(TICK).is_none());
+        time::sleep_until(limit).await;
+        time::sleep(Duration::MAX).await;
+        assert!(time::now() >= limit);
+    });
+}
+
+#[test]
+fn oversized_sleeps_and_backoffs_allow_earlier_shutdown() {
+    check(|| async {
+        let start = time::now();
+        assert_eq!(
+            Tasks::<()>::run_until(Cancellation::new(), Some(start + TICK), async |_| {
+                time::sleep(Duration::MAX).await;
+                Ok(())
+            },)
+            .await,
+            Err(ScopeError::DeadlineExceeded)
+        );
+        assert_eq!(time::now(), start + TICK);
+
+        for cancelled in [false, true] {
+            let start = time::now();
+            let signal = Cancellation::new();
+            let mut tasks = Tasks::<()>::new();
+            let deadline = if cancelled {
+                let request = signal.clone();
+                tasks.spawn(async move {
+                    time::sleep(TICK).await;
+                    request.cancel();
+                    Ok(())
+                });
+                None
+            } else {
+                Some(start + TICK)
+            };
+            let mut calls = 0;
+            let result = adamantium::retry(
+                &signal,
+                deadline,
+                adamantium::Backoff::constant(Duration::MAX),
+                || {
+                    calls += 1;
+                    async { Err::<(), _>("no") }
+                },
+            )
+            .await;
+            assert_eq!(
+                result,
+                Err(if cancelled {
+                    ScopeError::Cancelled
+                } else {
+                    ScopeError::DeadlineExceeded
+                })
+            );
+            assert_eq!(calls, 1);
+            assert_eq!(time::now(), start + TICK);
+            tasks.join(Ok(())).await.unwrap();
+        }
+    });
+}
+
+#[test]
 fn time_stays_frozen_while_any_task_is_runnable_or_self_woken() {
     check(|| {
         Box::pin(async {
