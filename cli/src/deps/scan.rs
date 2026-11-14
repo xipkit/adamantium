@@ -11,9 +11,10 @@
 //! unresolved under its name rather than guessed at.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs, mem,
     path::{Component, Path, PathBuf},
+    slice,
 };
 
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
@@ -21,9 +22,9 @@ use serde::Serialize;
 use syn::{
     Arm, Attribute, Block, Expr, ExprCall, ExprClosure, ExprForLoop, ExprIf, ExprLit,
     ExprMethodCall, ExprPath, ExprUnsafe, ExprWhile, Field, FieldValue, File, FnArg, GenericParam,
-    Generics, ImplItem, ImplItemFn, Item, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemTrait, Lit,
-    Macro, Meta, Pat, PatIdent, Safety, Signature, Stmt, Token, TraitItem, TraitItemFn, Type,
-    UseTree, Variant,
+    Generics, ImplItem, ImplItemFn, Item, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod,
+    ItemTrait, Lit, Macro, Meta, Pat, PatIdent, Safety, Signature, Stmt, Token, TraitItem,
+    TraitItemFn, Type, UseTree, Variant,
     ext::IdentExt,
     parse::ParseStream,
     punctuated::Punctuated,
@@ -65,6 +66,10 @@ pub struct UnsafeCounts {
     pub impls: usize,
     /// `unsafe trait`.
     pub traits: usize,
+    /// `unsafe extern` blocks. A plain `extern` block, which editions before
+    /// 2024 allow, isn't counted: its functions can only be called in
+    /// `unsafe` blocks, which are.
+    pub extern_blocks: usize,
     /// `unsafe` in macro bodies that syn can't parse as code, such as
     /// `macro_rules!` definitions.
     pub in_macros: usize,
@@ -72,7 +77,12 @@ pub struct UnsafeCounts {
 
 impl UnsafeCounts {
     pub fn total(&self) -> usize {
-        self.functions + self.blocks + self.impls + self.traits + self.in_macros
+        self.functions
+            + self.blocks
+            + self.impls
+            + self.traits
+            + self.extern_blocks
+            + self.in_macros
     }
 }
 
@@ -173,7 +183,7 @@ fn manifest_forbids_unsafe(root: &Path) -> bool {
 }
 
 /// What a name is bound to in a scope.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Binding {
     /// An item with a known path.
     Item(Vec<String>),
@@ -181,6 +191,19 @@ enum Binding {
     Use { path: Vec<String>, leading: bool },
     /// An item local to a block, which has no path.
     Opaque,
+    /// Bindings of one name that any build may have, such as two `use`
+    /// items behind `cfg`s the audit can't know: a path through the name may
+    /// mean any of them.
+    Either(Vec<Binding>),
+}
+
+impl Binding {
+    fn alternatives(&self) -> &[Self] {
+        match self {
+            Self::Either(alternatives) => alternatives,
+            other => slice::from_ref(other),
+        }
+    }
 }
 
 /// The namespaces a name can be bound in. Modules and types share one,
@@ -192,39 +215,121 @@ enum Namespace {
     Values,
 }
 
+/// A name's binding in one namespace of a scope.
+#[derive(Debug)]
+struct Bound {
+    binding: Binding,
+    /// Whether every build has it: the `cfg`s on it are known to hold.
+    certain: bool,
+}
+
+impl Bound {
+    /// Adds another binding the name may have.
+    fn add(&mut self, binding: Binding) {
+        self.certain = false;
+        let mut alternatives = match mem::replace(&mut self.binding, Binding::Opaque) {
+            Binding::Either(alternatives) => alternatives,
+            other => vec![other],
+        };
+        for binding in binding.alternatives() {
+            if !alternatives.contains(binding) {
+                alternatives.push(binding.clone());
+            }
+        }
+        self.binding = match <[Binding; 1]>::try_from(alternatives) {
+            Ok([only]) => only,
+            Err(alternatives) => Binding::Either(alternatives),
+        };
+    }
+}
+
 /// The names one module or block binds.
 #[derive(Debug, Default)]
 struct Scope {
-    types: HashMap<String, Binding>,
-    values: HashMap<String, Binding>,
+    types: HashMap<String, Bound>,
+    values: HashMap<String, Bound>,
     globs: bool,
 }
 
 impl Scope {
-    fn get(&self, namespace: Namespace, name: &str) -> Option<&Binding> {
+    fn map(&mut self, namespace: Namespace) -> &mut HashMap<String, Bound> {
         match namespace {
-            Namespace::Types => self.types.get(name),
-            Namespace::Values => self.values.get(name),
+            Namespace::Types => &mut self.types,
+            Namespace::Values => &mut self.values,
         }
     }
 
-    /// Binds an item defined here.
-    fn define(&mut self, namespace: Namespace, name: String, binding: Binding) {
-        match namespace {
-            Namespace::Types => self.types.insert(name, binding),
-            Namespace::Values => self.values.insert(name, binding),
+    fn get(&self, namespace: Namespace, name: &str) -> Option<&Binding> {
+        let map = match namespace {
+            Namespace::Types => &self.types,
+            Namespace::Values => &self.values,
         };
+        map.get(name).map(|bound| &bound.binding)
+    }
+
+    /// Binds a local variable or a generic parameter, which hides what the
+    /// scope bound to its name before.
+    fn shadow(&mut self, namespace: Namespace, name: String) {
+        self.map(namespace).insert(
+            name,
+            Bound {
+                binding: Binding::Opaque,
+                certain: true,
+            },
+        );
+    }
+
+    /// Binds an item defined here. `certain` is whether every build has
+    /// it. Two items of one name can't both be in a build, so where one of
+    /// them depends on a `cfg` the audit can't know, either may be.
+    fn define(&mut self, namespace: Namespace, name: String, binding: Binding, certain: bool) {
+        let map = self.map(namespace);
+        match map.get_mut(&name) {
+            Some(bound) if !(certain && bound.certain) => bound.add(binding),
+            _ => {
+                map.insert(name, Bound { binding, certain });
+            }
+        }
     }
 
     /// Binds a `use` in both namespaces, since the audit can't tell which
-    /// its target is in. Where an item of the same name is defined, the
-    /// `use` must be in the other namespace.
-    fn import(&mut self, name: String, binding: Binding) {
+    /// its target is in. Where every build defines an item of the same name,
+    /// the `use` must be in the other namespace. Two `use` items of one name
+    /// that every build has are in different namespaces, so either may be
+    /// the one a path means.
+    fn import(&mut self, name: String, binding: Binding, certain: bool) {
         for map in [&mut self.types, &mut self.values] {
-            if !matches!(map.get(&name), Some(Binding::Item(_) | Binding::Opaque)) {
-                map.insert(name.clone(), binding.clone());
+            match map.get_mut(&name) {
+                None => {
+                    map.insert(
+                        name.clone(),
+                        Bound {
+                            binding: binding.clone(),
+                            certain,
+                        },
+                    );
+                }
+                Some(bound)
+                    if certain
+                        && bound.certain
+                        && matches!(bound.binding, Binding::Item(_) | Binding::Opaque) => {}
+                Some(bound) => bound.add(binding.clone()),
             }
         }
+    }
+
+    /// Adds the names another scope of the same module binds, as where two
+    /// modules of one path are each behind a `cfg`: either may be built.
+    fn merge(&mut self, other: Self) {
+        for (namespace, map) in [
+            (Namespace::Types, other.types),
+            (Namespace::Values, other.values),
+        ] {
+            for (name, bound) in map {
+                self.define(namespace, name, bound.binding, false);
+            }
+        }
+        self.globs |= other.globs;
     }
 }
 
@@ -245,17 +350,59 @@ enum Resolved {
     /// A local variable or an item local to a block.
     Local,
     Unknown,
+    /// What a path through a name with more than one binding may mean.
+    Either(Vec<Resolved>),
 }
 
 impl Resolved {
-    fn join(self, rest: &[String]) -> Self {
-        match self {
-            Self::Path(mut path) => {
-                path.extend(rest.iter().cloned());
-                Self::Path(path)
+    /// What a path may mean when it may mean any of `alternatives`.
+    fn either(alternatives: impl IntoIterator<Item = Self>) -> Self {
+        let mut flat = Vec::new();
+        for alternative in alternatives {
+            for resolved in alternative.into_alternatives() {
+                if !flat.contains(&resolved) {
+                    flat.push(resolved);
+                }
             }
-            other => other,
         }
+        match <[Self; 1]>::try_from(flat) {
+            Ok([only]) => only,
+            Err(flat) if flat.is_empty() => Self::Unknown,
+            Err(flat) => Self::Either(flat),
+        }
+    }
+
+    fn alternatives(&self) -> &[Self] {
+        match self {
+            Self::Either(alternatives) => alternatives,
+            other => slice::from_ref(other),
+        }
+    }
+
+    fn into_alternatives(self) -> Vec<Self> {
+        match self {
+            Self::Either(alternatives) => alternatives,
+            other => vec![other],
+        }
+    }
+
+    /// Applies `f` to each path the resolution may be.
+    fn map_paths(self, mut f: impl FnMut(Vec<String>) -> Self) -> Self {
+        Self::either(
+            self.into_alternatives()
+                .into_iter()
+                .map(|resolved| match resolved {
+                    Self::Path(path) => f(path),
+                    other => other,
+                }),
+        )
+    }
+
+    fn join(self, rest: &[String]) -> Self {
+        self.map_paths(|mut path| {
+            path.extend(rest.iter().cloned());
+            Self::Path(path)
+        })
     }
 }
 
@@ -413,7 +560,12 @@ impl Scanner<'_> {
         rel: &str,
     ) {
         let scope = self.bind(items, Some(module));
-        self.modules.insert(module.to_vec(), scope);
+        match self.modules.get_mut(module) {
+            Some(existing) => existing.merge(scope),
+            None => {
+                self.modules.insert(module.to_vec(), scope);
+            }
+        }
         for item in items {
             let Item::Mod(item) = item else {
                 continue;
@@ -543,17 +695,15 @@ impl Scanner<'_> {
     ) -> Scope {
         let mut scope = Scope::default();
         for item in items {
-            if self.krate.cfg.enabled(item_attrs(item)) == Truth::False {
-                continue;
-            }
+            let certain = match self.krate.cfg.enabled(item_attrs(item)) {
+                Truth::True => true,
+                Truth::Unknown => false,
+                Truth::False => continue,
+            };
             let ident = match item {
                 Item::Use(item) => {
-                    bind_use(
-                        &item.tree,
-                        &mut Vec::new(),
-                        item.leading_colon.is_some(),
-                        &mut scope,
-                    );
+                    let leading = item.leading_colon.is_some();
+                    bind_use(&item.tree, &mut Vec::new(), leading, certain, &mut scope);
                     continue;
                 }
                 Item::ExternCrate(item) => {
@@ -571,6 +721,7 @@ impl Scanner<'_> {
                         Namespace::Types,
                         name.unraw().to_string(),
                         Binding::Item(vec![target]),
+                        certain,
                     );
                     continue;
                 }
@@ -598,7 +749,7 @@ impl Scanner<'_> {
                 None => Binding::Opaque,
             };
             for namespace in namespaces {
-                scope.define(*namespace, name.clone(), binding.clone());
+                scope.define(*namespace, name.clone(), binding.clone(), certain);
             }
         }
         scope
@@ -638,19 +789,24 @@ impl Scanner<'_> {
     }
 
     /// The binding of `name` in `namespace`, in the blocks around a place in
-    /// `module` or in the module itself.
+    /// `module` or in the module itself, with the blocks around the scope
+    /// that binds it: a `use` resolves there, not where its name is used.
     fn lookup<'s>(
         &'s self,
         module: &[String],
         blocks: &'s [Scope],
         namespace: Namespace,
         name: &str,
-    ) -> Option<&'s Binding> {
-        blocks
-            .iter()
-            .rev()
-            .chain(self.modules.get(module))
-            .find_map(|scope| scope.get(namespace, name))
+    ) -> Option<(&'s Binding, &'s [Scope])> {
+        for (index, scope) in blocks.iter().enumerate().rev() {
+            if let Some(binding) = scope.get(namespace, name) {
+                return Some((binding, blocks.get(..=index).unwrap_or_default()));
+            }
+        }
+        self.modules
+            .get(module)
+            .and_then(|scope| scope.get(namespace, name))
+            .map(|binding| (binding, &[][..]))
     }
 
     /// Resolves a binding in `namespace`, found in `module`.
@@ -668,6 +824,11 @@ impl Scanner<'_> {
             Binding::Use { path, leading } => {
                 self.use_path(module, blocks, namespace, path, *leading, depth + 1)
             }
+            Binding::Either(alternatives) => Resolved::either(
+                alternatives
+                    .iter()
+                    .map(|alternative| self.binding(module, blocks, namespace, alternative, depth)),
+            ),
         }
     }
 
@@ -694,20 +855,56 @@ impl Scanner<'_> {
         if self.krate.edition_2015 {
             return self.root_path(path, namespace, depth);
         }
-        let first_namespace = self::namespace(path, 0, namespace);
-        if !leading
-            && let Some(binding) = self.lookup(module, blocks, first_namespace, first)
-            && !is_use_of(binding, path)
-        {
-            let resolved = self
-                .binding(module, blocks, first_namespace, binding, depth)
-                .join(rest);
-            return self.followed(resolved, namespace, depth);
-        }
-        match self.extern_crate(first) {
+        let unbound = || match self.extern_crate(first) {
             Some(krate) => Resolved::Path(vec![krate]).join(rest),
             None => Resolved::Unknown,
+        };
+        let first_namespace = self::namespace(path, 0, namespace);
+        if !leading
+            && let Some((binding, scope)) = self.lookup(module, blocks, first_namespace, first)
+        {
+            return self.use_binding(module, scope, binding, path, namespace, depth, unbound);
         }
+        unbound()
+    }
+
+    /// Resolves a `use` path written in `module`, whose first segment is
+    /// bound to `binding` in `scope`. A `use` can't refer to itself: in
+    /// `use tokio;`, `tokio` is the crate. So where the binding is the `use`
+    /// of the path, the path resolves as `unbound` says a path whose first
+    /// segment isn't bound does.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each is a part of the place being resolved"
+    )]
+    fn use_binding(
+        &self,
+        module: &[String],
+        scope: &[Scope],
+        binding: &Binding,
+        path: &[String],
+        namespace: Namespace,
+        depth: usize,
+        unbound: impl FnOnce() -> Resolved,
+    ) -> Resolved {
+        let first_namespace = self::namespace(path, 0, namespace);
+        let rest = path.get(1..).unwrap_or_default();
+        let mut alternatives = Vec::new();
+        let mut itself = false;
+        for alternative in binding.alternatives() {
+            if is_use_of(alternative, path) {
+                itself = true;
+                continue;
+            }
+            let resolved = self
+                .binding(module, scope, first_namespace, alternative, depth)
+                .join(rest);
+            alternatives.push(self.followed(resolved, namespace, depth));
+        }
+        if itself {
+            alternatives.push(unbound());
+        }
+        Resolved::either(alternatives)
     }
 
     /// Resolves a 2015 `use` path, which starts at the crate root.
@@ -716,28 +913,23 @@ impl Scanner<'_> {
             return Resolved::Unknown;
         };
         let root = [self.krate.name.to_owned()];
+        let unbound = || {
+            if let Some(krate) = self.extern_crate(first) {
+                return Resolved::Path(vec![krate]).join(rest);
+            }
+            let mut full = root.to_vec();
+            full.extend(path.iter().cloned());
+            self.follow(full, namespace, depth)
+        };
         let first_namespace = self::namespace(path, 0, namespace);
-        if let Some(binding) = self.lookup(&root, &[], first_namespace, first)
-            && !is_use_of(binding, path)
-        {
-            let resolved = self
-                .binding(&root, &[], first_namespace, binding, depth)
-                .join(rest);
-            return self.followed(resolved, namespace, depth);
+        if let Some((binding, _)) = self.lookup(&root, &[], first_namespace, first) {
+            return self.use_binding(&root, &[], binding, path, namespace, depth, unbound);
         }
-        if let Some(krate) = self.extern_crate(first) {
-            return Resolved::Path(vec![krate]).join(rest);
-        }
-        let mut full = root.to_vec();
-        full.extend(path.iter().cloned());
-        self.follow(full, namespace, depth)
+        unbound()
     }
 
     fn followed(&self, resolved: Resolved, namespace: Namespace, depth: usize) -> Resolved {
-        match resolved {
-            Resolved::Path(path) => self.follow(path, namespace, depth),
-            other => other,
-        }
+        resolved.map_paths(|path| self.follow(path, namespace, depth))
     }
 
     /// Follows a path into this crate through the `use` items of the modules
@@ -752,10 +944,21 @@ impl Scanner<'_> {
     }
 
     fn step(&self, path: Vec<String>, namespace: Namespace, depth: usize) -> Resolved {
+        self.walk(path, 1, namespace, depth)
+    }
+
+    /// Follows a path into this crate from its segment at `start`.
+    fn walk(
+        &self,
+        path: Vec<String>,
+        start: usize,
+        namespace: Namespace,
+        depth: usize,
+    ) -> Resolved {
         if path.first().map(String::as_str) != Some(self.krate.name) || depth > MAX_DEPTH {
             return Resolved::Path(path);
         }
-        for end in 1..path.len() {
+        for end in start..path.len() {
             let (Some(module), Some(name)) = (path.get(..end), path.get(end)) else {
                 break;
             };
@@ -765,12 +968,18 @@ impl Scanner<'_> {
             };
             let name_namespace = self::namespace(&path, end, namespace);
             match scope.get(name_namespace, name) {
-                Some(binding @ Binding::Use { .. }) => {
+                Some(binding @ (Binding::Use { .. } | Binding::Either(_))) => {
                     let rest = path.get(end + 1..).unwrap_or_default();
-                    let resolved = self
-                        .binding(module, &[], name_namespace, binding, depth + 1)
-                        .join(rest);
-                    return self.followed(resolved, namespace, depth + 1);
+                    return Resolved::either(binding.alternatives().iter().map(|alternative| {
+                        if let Binding::Use { .. } = alternative {
+                            let resolved = self
+                                .binding(module, &[], name_namespace, alternative, depth + 1)
+                                .join(rest);
+                            self.followed(resolved, namespace, depth + 1)
+                        } else {
+                            self.walk(path.clone(), end + 1, namespace, depth + 1)
+                        }
+                    }));
                 }
                 Some(_) => {}
                 None if scope.globs => return Resolved::Unknown,
@@ -789,10 +998,15 @@ impl Scanner<'_> {
             if path.first().map(String::as_str) != Some(self.krate.name) {
                 continue;
             }
-            if let Resolved::Path(definition) = self.step(path.to_vec(), Namespace::Values, 0)
-                && definition != path
+            for definition in self
+                .step(path.to_vec(), Namespace::Values, 0)
+                .into_alternatives()
             {
-                definitions.insert(definition, entry);
+                if let Resolved::Path(definition) = definition
+                    && definition != path
+                {
+                    definitions.insert(definition, entry);
+                }
             }
         }
         definitions
@@ -836,9 +1050,9 @@ impl Scanner<'_> {
             };
         }
         let first_namespace = self::namespace(path, 0, namespace);
-        if let Some(binding) = self.lookup(module, blocks, first_namespace, first) {
+        if let Some((binding, scope)) = self.lookup(module, blocks, first_namespace, first) {
             let resolved = self
-                .binding(module, blocks, first_namespace, binding, 0)
+                .binding(module, scope, first_namespace, binding, 0)
                 .join(rest);
             return self.followed(resolved, namespace, 0);
         }
@@ -866,16 +1080,23 @@ fn is_use_of(binding: &Binding, path: &[String]) -> bool {
 }
 
 /// Records the names a `use` tree binds, under the path `prefix` leads to.
-fn bind_use(tree: &UseTree, prefix: &mut Vec<String>, leading: bool, scope: &mut Scope) {
+/// `certain` is whether every build has the `use`.
+fn bind_use(
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+    leading: bool,
+    certain: bool,
+    scope: &mut Scope,
+) {
     let mut bind = |name: String, path: Vec<String>| {
         if name != "_" {
-            scope.import(name, Binding::Use { path, leading });
+            scope.import(name, Binding::Use { path, leading }, certain);
         }
     };
     match tree {
         UseTree::Path(tree) => {
             prefix.push(tree.ident.unraw().to_string());
-            bind_use(&tree.tree, prefix, leading, scope);
+            bind_use(&tree.tree, prefix, leading, certain, scope);
             prefix.pop();
         }
         UseTree::Name(name) => {
@@ -901,7 +1122,7 @@ fn bind_use(tree: &UseTree, prefix: &mut Vec<String>, leading: bool, scope: &mut
         UseTree::Glob(_) => scope.globs = true,
         UseTree::Group(group) => {
             for tree in &group.items {
-                bind_use(tree, prefix, leading, scope);
+                bind_use(tree, prefix, leading, certain, scope);
             }
         }
     }
@@ -1139,10 +1360,7 @@ impl FileVisitor<'_, '_> {
                 leading,
             ),
         };
-        match resolved {
-            Resolved::Path(path) => Resolved::Path(canonical(path)),
-            other => other,
-        }
+        resolved.map_paths(|path| Resolved::Path(canonical(path)))
     }
 
     fn start(expr: &ExprPath) -> Span {
@@ -1244,7 +1462,7 @@ impl FileVisitor<'_, '_> {
                 && let Some(block) = self.blocks.last_mut()
             {
                 for name in pattern_names([&local.pat]) {
-                    block.define(Namespace::Values, name, Binding::Opaque);
+                    block.shadow(Namespace::Values, name);
                 }
             }
         }
@@ -1261,7 +1479,7 @@ impl FileVisitor<'_, '_> {
                 self.visit_pat(&expr.pat);
                 if let Some(block) = self.blocks.last_mut() {
                     for name in pattern_names([&*expr.pat]) {
-                        block.define(Namespace::Values, name, Binding::Opaque);
+                        block.shadow(Namespace::Values, name);
                     }
                 }
             }
@@ -1280,16 +1498,12 @@ impl FileVisitor<'_, '_> {
         let mut scope = Scope::default();
         for param in &generics.params {
             match param {
-                GenericParam::Type(param) => scope.define(
-                    Namespace::Types,
-                    param.ident.unraw().to_string(),
-                    Binding::Opaque,
-                ),
-                GenericParam::Const(param) => scope.define(
-                    Namespace::Values,
-                    param.ident.unraw().to_string(),
-                    Binding::Opaque,
-                ),
+                GenericParam::Type(param) => {
+                    scope.shadow(Namespace::Types, param.ident.unraw().to_string());
+                }
+                GenericParam::Const(param) => {
+                    scope.shadow(Namespace::Values, param.ident.unraw().to_string());
+                }
                 _ => {}
             }
         }
@@ -1307,7 +1521,7 @@ impl FileVisitor<'_, '_> {
     ) {
         let mut scope = Scope::default();
         for name in pattern_names(patterns) {
-            scope.define(Namespace::Values, name, Binding::Opaque);
+            scope.shadow(Namespace::Values, name);
         }
         self.blocks.push(scope);
         visit(self);
@@ -1394,6 +1608,13 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
             self.scanner.scan.unsafe_code.traits += 1;
         }
         self.with_generics(&item.generics, |this| visit::visit_item_trait(this, item));
+    }
+
+    fn visit_item_foreign_mod(&mut self, item: &'ast ItemForeignMod) {
+        if item.unsafety.is_some() {
+            self.scanner.scan.unsafe_code.extern_blocks += 1;
+        }
+        visit::visit_item_foreign_mod(self, item);
     }
 
     fn visit_impl_item(&mut self, item: &'ast ImplItem) {
@@ -1525,10 +1746,19 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         visit::visit_expr_unsafe(self, expr);
     }
 
+    /// A path that may mean any of several items counts for each of them
+    /// that is disallowed.
     fn visit_expr_path(&mut self, expr: &'ast ExprPath) {
-        if let Resolved::Path(path) = self.resolve(expr)
-            && let Some(entry) = self.scanner.entry(&path)
-        {
+        let entries: BTreeSet<usize> = self
+            .resolve(expr)
+            .alternatives()
+            .iter()
+            .filter_map(|resolved| match resolved {
+                Resolved::Path(path) => self.scanner.entry(path),
+                _ => None,
+            })
+            .collect();
+        for entry in entries {
             let site = self.site(Self::start(expr));
             self.scanner.scan.calls.entry(entry).or_default().push(site);
         }
@@ -1545,19 +1775,24 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
             && self.scanner.disallowed.has_name(&name)
         {
             let disallowed = self.scanner.disallowed;
-            let unresolved = match self.resolve(func) {
-                // A path into a crate no entry names may be a re-export of
-                // a disallowed item, as `smol::Executor` is
-                // `async_executor::Executor`.
-                Resolved::Path(path) => {
-                    self.scanner.entry(&path).is_none()
-                        && path
-                            .first()
-                            .is_none_or(|krate| !disallowed.names_crate(krate))
-                }
-                Resolved::Local => false,
-                Resolved::Unknown => true,
-            };
+            let resolved = self.resolve(func);
+            let unresolved = resolved
+                .alternatives()
+                .iter()
+                .any(|resolved| match resolved {
+                    // A path into a crate no entry names may be a re-export of
+                    // a disallowed item, as `smol::Executor` is
+                    // `async_executor::Executor`.
+                    Resolved::Path(path) => {
+                        self.scanner.entry(path).is_none()
+                            && path
+                                .first()
+                                .is_none_or(|krate| !disallowed.names_crate(krate))
+                    }
+                    Resolved::Local => false,
+                    // Alternatives are never nested, so `Either` isn't one.
+                    Resolved::Unknown | Resolved::Either(_) => true,
+                });
             if unresolved {
                 self.unresolved(&name);
             }

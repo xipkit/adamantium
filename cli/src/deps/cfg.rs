@@ -185,11 +185,16 @@ pub struct Cfg<'a> {
 
 impl Cfg<'_> {
     /// Whether code with these attributes builds: every `cfg` on it, and
-    /// every `cfg` that a `cfg_attr` adds, must hold.
+    /// every `cfg` that a `cfg_attr` adds, must hold. A `#[test]` or
+    /// `#[bench]` function is built only for tests, like `#[cfg(test)]`.
     pub fn enabled(&self, attrs: &[Attribute]) -> Truth {
         let mut truth = Truth::True;
         for (applies, meta) in self.effective(attrs) {
-            if meta.path().is_ident("cfg") {
+            if let Meta::Path(path) = &meta
+                && (path.is_ident("test") || path.is_ident("bench"))
+            {
+                truth = truth.and(applies.not());
+            } else if meta.path().is_ident("cfg") {
                 let holds = match &meta {
                     Meta::List(list) => list
                         .parse_args_with(|input: ParseStream| self.predicate(input))
@@ -410,5 +415,28 @@ mod tests {
         assert_eq!(cfg.enabled(&item.attrs), Truth::Unknown);
         let item: syn::ItemFn = syn::parse_str("#[cfg(unix)] #[cfg(test)] fn f() {}").unwrap();
         assert_eq!(cfg.enabled(&item.attrs), Truth::False);
+    }
+
+    #[test]
+    fn test_functions_are_left_out() {
+        let target = Target::parse(LINUX);
+        let features = Features::default();
+        let cfg = Cfg {
+            target: &target,
+            features: &features,
+            proc_macro: false,
+        };
+        for (source, expected) in [
+            ("#[test] fn f() {}", Truth::False),
+            ("#[bench] fn f() {}", Truth::False),
+            ("#[cfg_attr(unix, test)] fn f() {}", Truth::False),
+            ("#[cfg_attr(windows, test)] fn f() {}", Truth::True),
+            ("#[cfg_attr(loom, test)] fn f() {}", Truth::Unknown),
+            // A procedural macro, which the audit does not expand.
+            ("#[tokio::test] fn f() {}", Truth::True),
+        ] {
+            let item: syn::ItemFn = syn::parse_str(source).unwrap();
+            assert_eq!(cfg.enabled(&item.attrs), expected, "{source}");
+        }
     }
 }
