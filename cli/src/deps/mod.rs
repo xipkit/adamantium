@@ -104,40 +104,41 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
             (dependency.id.as_str(), names)
         })
         .collect();
-    let none = BTreeMap::new();
-    // Each library as a crate that depends on it reads it for its exported
-    // macros, which doesn't look past it to the crates it depends on.
-    let libraries: HashMap<&str, Crate> = resolved
+    let indices: HashMap<&str, usize> = resolved
+        .iter()
+        .filter(|dependency| dependency.lib.is_some())
+        .enumerate()
+        .map(|(index, dependency)| (dependency.id.as_str(), index))
+        .collect();
+    let crates: Vec<Crate> = resolved
         .iter()
         .filter_map(|dependency| {
             let lib = dependency.lib.as_ref()?;
             let externs = externs.get(dependency.id.as_str())?;
-            Some((
-                dependency.id.as_str(),
-                library(dependency, lib, externs, &none, &target),
-            ))
+            let dependencies = dependency
+                .externs
+                .iter()
+                .filter_map(|(name, dep)| Some((name.clone(), *indices.get(dep.id.as_str())?)))
+                .collect();
+            Some(Crate {
+                name: &lib.name,
+                root: &dependency.root,
+                src: &lib.src_path,
+                edition_2015: lib.edition == "2015",
+                externs,
+                dependencies,
+                cfg: Cfg {
+                    target: &target,
+                    features: &dependency.features,
+                    proc_macro: lib.proc_macro,
+                },
+            })
         })
         .collect();
     let mut dependencies = Vec::new();
     for dependency in &resolved {
-        let read = dependency
-            .lib
-            .as_ref()
-            .zip(externs.get(dependency.id.as_str()));
-        let scan = match read {
-            Some((lib, externs)) => {
-                let readable = dependency
-                    .externs
-                    .iter()
-                    .filter_map(|(name, dependency)| {
-                        Some((name.clone(), libraries.get(dependency.id.as_str())?))
-                    })
-                    .collect();
-                scan::scan(
-                    &library(dependency, lib, externs, &readable, &target),
-                    &disallowed,
-                )
-            }
+        let scan = match indices.get(dependency.id.as_str()).copied() {
+            Some(entry) => scan::scan(&crates, entry, &disallowed),
             None => scan::Scan {
                 unscanned: vec![Unscanned {
                     file: "Cargo.toml".to_owned(),
@@ -178,31 +179,6 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
         target: triple,
         dependencies,
     })
-}
-
-/// A dependency's library as the scan reads it. `externs` are its
-/// dependencies' library names, and `dependencies` the ones whose source
-/// can be read, by the names its code uses.
-fn library<'a>(
-    dependency: &'a metadata::Dependency,
-    lib: &'a metadata::Lib,
-    externs: &'a BTreeMap<String, String>,
-    dependencies: &'a BTreeMap<String, &'a Crate<'a>>,
-    target: &'a Target,
-) -> Crate<'a> {
-    Crate {
-        name: &lib.name,
-        root: &dependency.root,
-        src: &lib.src_path,
-        edition_2015: lib.edition == "2015",
-        externs,
-        dependencies,
-        cfg: Cfg {
-            target,
-            features: &dependency.features,
-            proc_macro: lib.proc_macro,
-        },
-    }
 }
 
 fn print_text(out: &mut impl Write, report: &Report) -> io::Result<()> {
