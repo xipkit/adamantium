@@ -2170,14 +2170,21 @@ impl<'t> Imports<'t> {
     }
 
     /// Records the identifiers that could name an import: not those in `use`
-    /// items, nor those after `::`, which belong to a longer path.
+    /// items, nor those after `::` in a longer path, except a path through
+    /// `self`, `super` or `crate`, which can reach the import.
     fn collect(&mut self, tokens: TokenStream, uses: &[Range<usize>]) {
         let mut colons = 0;
+        let mut module = false;
         for token in tokens {
             match token {
-                TokenTree::Group(group) => self.collect(group.stream(), uses),
+                TokenTree::Group(group) => {
+                    module = false;
+                    self.collect(group.stream(), uses);
+                }
                 TokenTree::Ident(ident) => {
-                    if colons < 2
+                    let reachable = colons < 2 || module;
+                    module = ident == "self" || ident == "super" || ident == "crate";
+                    if reachable
                         && let Some(range) = self.text.range(ident.span())
                         && !uses
                             .iter()
@@ -2193,7 +2200,7 @@ impl<'t> Imports<'t> {
                     colons += 1;
                     continue;
                 }
-                TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+                TokenTree::Punct(_) | TokenTree::Literal(_) => module = false,
             }
             colons = 0;
         }
@@ -2628,6 +2635,16 @@ mod tests {
             fixed.contains("m.read(|m| writeln!(String::new(), \"{}\", *m))"),
             "{fixed}"
         );
+    }
+
+    #[test]
+    fn imports_named_through_module_paths_are_kept() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nfn f() -> self::Arc<u8> {\n    let m = Arc::new(Mutex::new(1));\n    drop(m);\n    self::Arc::new(1)\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(fixed.starts_with("use std::sync::Arc;\nfn f()"), "{fixed}");
     }
 
     #[test]
