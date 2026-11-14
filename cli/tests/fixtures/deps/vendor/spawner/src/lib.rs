@@ -150,6 +150,16 @@ pub struct Fields {
     pub enabled: u8,
 }
 
+// A `let` in a condition binds its names after its initializer runs.
+pub fn condition_order() {
+    if let Some(blocking) = Some(blocking(())) { // tokio::task::spawn_blocking
+        blocking;
+    }
+    while let Some(blocking) = Some(blocking(())) { // tokio::task::spawn_blocking
+        blocking;
+    }
+}
+
 pub fn blocks() {
     unsafe { rt::task::raw() };
     println!("{:?}", task::spawn(())); // tokio::task::spawn

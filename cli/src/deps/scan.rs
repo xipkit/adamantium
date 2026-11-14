@@ -1236,6 +1236,29 @@ impl FileVisitor<'_, '_> {
         self.blocks.pop();
     }
 
+    /// Visits an `if` or `while` condition from left to right, binding each
+    /// `let`'s names in the innermost block after its initializer, so that in
+    /// `if let Some(x) = y && let Ok(z) = x` the second `let` sees `x`.
+    fn condition(&mut self, condition: &Expr) {
+        match condition {
+            Expr::Let(expr) if self.enabled(&expr.attrs) => {
+                self.visit_expr(&expr.expr);
+                self.visit_pat(&expr.pat);
+                if let Some(block) = self.blocks.last_mut() {
+                    for name in pattern_names([&*expr.pat]) {
+                        block.define(Namespace::Values, name, Binding::Opaque);
+                    }
+                }
+            }
+            Expr::Binary(expr) if self.enabled(&expr.attrs) => {
+                self.condition(&expr.left);
+                self.condition(&expr.right);
+            }
+            Expr::Paren(expr) if self.enabled(&expr.attrs) => self.condition(&expr.expr),
+            expr => self.visit_expr(expr),
+        }
+    }
+
     /// Visits code with the names some patterns bind in scope, such as a
     /// function's parameters or a match arm's pattern.
     fn with_patterns<'p>(
@@ -1275,21 +1298,6 @@ fn parameters(sig: &Signature) -> impl Iterator<Item = &Pat> {
         FnArg::Typed(typed) => Some(&*typed.pat),
         FnArg::Receiver(_) => None,
     })
-}
-
-/// The patterns of the `let`s in a condition, such as `if let Some(x) = y &&
-/// let Ok(z) = x`, whose names the condition's block sees.
-fn condition_patterns(condition: &Expr) -> Vec<&Pat> {
-    match condition {
-        Expr::Let(expr) => vec![&*expr.pat],
-        Expr::Binary(expr) => {
-            let mut patterns = condition_patterns(&expr.left);
-            patterns.extend(condition_patterns(&expr.right));
-            patterns
-        }
-        Expr::Paren(expr) => condition_patterns(&expr.expr),
-        _ => Vec::new(),
-    }
 }
 
 fn segments(path: &syn::Path) -> Vec<String> {
@@ -1451,20 +1459,20 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
     }
 
     fn visit_expr_if(&mut self, expr: &'ast ExprIf) {
-        self.with_patterns(condition_patterns(&expr.cond), |this| {
-            this.visit_expr(&expr.cond);
-            this.visit_block(&expr.then_branch);
-        });
+        self.blocks.push(Scope::default());
+        self.condition(&expr.cond);
+        self.visit_block(&expr.then_branch);
+        self.blocks.pop();
         if let Some((_, otherwise)) = &expr.else_branch {
             self.visit_expr(otherwise);
         }
     }
 
     fn visit_expr_while(&mut self, expr: &'ast ExprWhile) {
-        self.with_patterns(condition_patterns(&expr.cond), |this| {
-            this.visit_expr(&expr.cond);
-            this.visit_block(&expr.body);
-        });
+        self.blocks.push(Scope::default());
+        self.condition(&expr.cond);
+        self.visit_block(&expr.body);
+        self.blocks.pop();
     }
 
     fn visit_expr_unsafe(&mut self, expr: &'ast ExprUnsafe) {
