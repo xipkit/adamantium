@@ -637,7 +637,7 @@ struct Scanner<'a> {
     /// from textual scope where it is. Each path has the definitions a build
     /// may have. The last reading of the module tree's are kept, for a path
     /// to a macro the crate defines after the call.
-    macro_paths: HashMap<Vec<String>, Vec<Named>>,
+    macro_paths: HashMap<Vec<String>, Vec<MacroRules>>,
     /// The names each module bound in the last reading of the module tree,
     /// by module path, which paths are resolved through while the scan
     /// reads it again.
@@ -645,9 +645,14 @@ struct Scanner<'a> {
     /// The calls by path, or by a name a `use` may bind, read so far in
     /// this reading of the module tree, with the macros each was read as.
     path_calls: Vec<PathCall>,
-    /// How many of the crate's own `macro_rules!` definitions have been
-    /// read, in every reading of the module tree, which numbers each.
-    instances: usize,
+    /// The numbers of the crate's own `macro_rules!` definitions, by where
+    /// each is written and how many were read there before it in its
+    /// reading of the module tree, kept from one reading to the next, so
+    /// that a definition read again has the number it had.
+    instances: HashMap<(String, usize, usize, usize), usize>,
+    /// How many definitions were read at each place in this reading of the
+    /// module tree.
+    read_at: HashMap<(String, usize, usize), usize>,
 }
 
 /// A call of a macro by path, or by a bare name a `use` may bind, as the
@@ -659,14 +664,6 @@ struct PathCall {
     /// What its path was resolved to name: `None` where it doesn't lead to
     /// macros the scan can read.
     found: Option<Vec<Found>>,
-}
-
-/// A definition of one of the crate's own macros that a path names.
-struct Named {
-    definition: MacroRules,
-    /// Whether this reading of the module tree has read it, not only the
-    /// last one.
-    read: bool,
 }
 
 /// A `#[macro_export]` macro of a crate, as another crate calls it.
@@ -711,9 +708,8 @@ struct MacroRules {
     /// Whether a build that `condition` holds for defines it: not known
     /// where it is defined in the expansion of another crate's macro.
     defined: Truth,
-    /// Which of the crate's definitions it is, by the order the scan read
-    /// them in. Calls of a macro that writes a definition give one for each
-    /// call, all written in one place.
+    /// Which of the crate's definitions it is, as [`Scanner::instance`]
+    /// numbers them.
     instance: usize,
 }
 
@@ -897,7 +893,8 @@ impl<'a> Scanner<'a> {
             macro_paths: HashMap::new(),
             last_pass: HashMap::new(),
             path_calls: Vec::new(),
-            instances: 0,
+            instances: HashMap::new(),
+            read_at: HashMap::new(),
         }
     }
 
@@ -936,11 +933,8 @@ impl<'a> Scanner<'a> {
             next.sources = mem::take(&mut scanner.sources);
             next.foreign = mem::take(&mut scanner.foreign);
             next.dollar_crates = mem::take(&mut scanner.dollar_crates);
-            next.instances = scanner.instances;
+            next.instances = mem::take(&mut scanner.instances);
             next.macro_paths = mem::take(&mut scanner.macro_paths);
-            for named in next.macro_paths.values_mut().flatten() {
-                named.read = false;
-            }
             next.last_pass = mem::take(&mut scanner.modules);
             scanner = next;
         }
@@ -991,29 +985,31 @@ impl<'a> Scanner<'a> {
 
     /// Notes that `path` names `definition`, among the definitions a build
     /// may have. Where the last reading of the module tree found it, it
-    /// replaces what that reading found. Calls of a macro that write a
-    /// definition give each one written in one place, and each reading
-    /// reads them again in order, so it replaces the first the last reading
-    /// found there that it hasn't read yet.
+    /// replaces what that reading found.
     fn name_macro(&mut self, path: Vec<String>, definition: MacroRules) {
         let definitions = self.macro_paths.entry(path).or_default();
-        let start = definition.span.start();
-        let same = definitions.iter_mut().find(|named| {
-            let known = &named.definition;
-            let known_start = known.span.start();
-            !named.read
-                && known.rel == definition.rel
-                && known_start.line == start.line
-                && known_start.column == start.column
-        });
-        let named = Named {
-            definition,
-            read: true,
-        };
+        let same = definitions
+            .iter_mut()
+            .find(|known| known.instance == definition.instance);
         match same {
-            Some(known) => *known = named,
-            None => definitions.push(named),
+            Some(known) => *known = definition,
+            None => definitions.push(definition),
         }
+    }
+
+    /// The number of the definition whose name is written at `span` in
+    /// `rel`: the one it had in the last reading of the module tree, if it
+    /// was read then. Calls of a macro that writes a definition give one
+    /// for each call, all written in one place, and each reading reads them
+    /// in order.
+    fn instance(&mut self, rel: &str, span: Span) -> usize {
+        let start = span.start();
+        let place = (rel.to_owned(), start.line, start.column);
+        let before = self.read_at.entry(place.clone()).or_default();
+        let key = (place.0, place.1, place.2, *before);
+        *before += 1;
+        let next = self.instances.len();
+        *self.instances.entry(key).or_insert(next)
     }
 
     /// Loads the file of the module at `module`, and the modules it declares.
@@ -1280,6 +1276,7 @@ impl<'a> Scanner<'a> {
         let rel = self.file_of(name.span(), place.rel);
         let unraw = name.unraw().to_string();
         let rules = Rules::parse(item.mac.tokens.clone());
+        let instance = self.instance(&rel, name.span());
         let definition = MacroRules {
             name: unraw.clone(),
             rules,
@@ -1292,9 +1289,8 @@ impl<'a> Scanner<'a> {
             } else {
                 Truth::True
             },
-            instance: self.instances,
+            instance,
         };
-        self.instances += 1;
         if self.exports.is_some() {
             // A `$crate` the crate's macros write may end up in an exported
             // macro another one defines, as `crate`.
@@ -1784,7 +1780,7 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 Found::Own { path, definition } => {
-                    let definition = &self.macro_paths.get(path)?.get(*definition)?.definition;
+                    let definition = self.macro_paths.get(path)?.get(*definition)?;
                     places.insert((None, path.clone()));
                     Candidate {
                         rules: definition.rules.as_ref()?,
@@ -6081,6 +6077,39 @@ use a::m as chosen;
 use b::m as chosen;
 
 chosen!();
+",
+        )]);
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 1);
+    }
+
+    /// A definition keeps its identity when the scan reads the module tree
+    /// again, so a call that names it one way the last reading found and
+    /// another this one reads it once.
+    #[test]
+    fn definitions_keep_their_identity_across_readings() {
+        let scan = scan_files(&[(
+            "lib.rs",
+            r"macro_rules! m {
+    () => {
+        pub unsafe fn f() {}
+    };
+}
+
+mod a {
+    pub(crate) use m;
+}
+
+#[cfg(demo_custom)]
+use a::m as chosen;
+#[cfg(not(demo_custom))]
+use b::m as chosen;
+
+chosen!();
+
+mod b {
+    pub(crate) use m;
+}
 ",
         )]);
         assert_eq!(scan.unscanned, []);
