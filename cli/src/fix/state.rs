@@ -1121,18 +1121,16 @@ fn is_assignment(op: &BinOp) -> bool {
     )
 }
 
-/// Whether `parent` moves or copies its operand `child` out by value. A place
-/// read through a guard by value must be `Copy`, so the value read can't
-/// borrow the state.
-fn takes_by_value(parent: &Expr, child: &Expr) -> bool {
+/// Whether `parent` copies its operand `child` out by value. A place read
+/// through a guard by value must be `Copy`, so the value read can't borrow
+/// the state. Only operator operands and indexes count: at a coercion site,
+/// such as a call argument or a field, a `&mut` place is reborrowed rather
+/// than copied, and the reborrow needs the guard.
+fn copies_out(parent: &Expr, child: &Expr) -> bool {
     match parent {
         Expr::Binary(binary) => !is_comparison(&binary.op) && !is_assignment(&binary.op),
         Expr::Unary(unary) => !matches!(unary.op, UnOp::Deref(_)),
-        Expr::Cast(_) | Expr::Tuple(_) | Expr::Array(_) | Expr::Range(_) | Expr::Struct(_) => true,
-        Expr::Call(call) => call.args.iter().any(|arg| is(arg, child)),
-        Expr::MethodCall(call) => call.args.iter().any(|arg| is(arg, child)),
         Expr::Index(index) => is(&index.index, child),
-        Expr::Assign(assign) => is(&assign.right, child),
         _ => false,
     }
 }
@@ -1389,7 +1387,7 @@ impl<'a> Walker<'a> {
             {
                 Some((expr, Narrow::Read))
             }
-            Some(Node::Expr(expr)) if projected && takes_by_value(expr, chain) => {
+            Some(Node::Expr(expr)) if projected && copies_out(expr, chain) => {
                 Some((chain, Narrow::Read))
             }
             _ => None,
@@ -1397,7 +1395,7 @@ impl<'a> Walker<'a> {
         let read = projected
             && match parent {
                 Some(Node::Expr(expr)) => {
-                    takes_by_value(expr, chain)
+                    copies_out(expr, chain)
                         || matches!(expr, Expr::Binary(binary) if is_comparison(&binary.op))
                         || matches!(expr, Expr::Reference(reference) if reference.mutability.is_none())
                         || matches!(
@@ -2413,6 +2411,16 @@ mod tests {
             fixed,
             "fn f() {\n    let m = ::adamantium::Actor::new(1);\n    drop(m);\n}\n"
         );
+    }
+
+    #[test]
+    fn call_arguments_are_reborrowed_not_copied() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nfn bump(x: &mut i32) { *x += 1; }\nfn f(mut x: i32) {\n    let m = Arc::new(Mutex::new(&mut x));\n    bump(*m.lock().unwrap());\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(fixed.contains("m.with(|m| { bump(*m); });"), "{fixed}");
     }
 
     #[test]
