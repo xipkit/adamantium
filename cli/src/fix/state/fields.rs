@@ -100,6 +100,12 @@ impl<'a> Walker<'a> {
                     "its struct has an attribute or a derive other than `Clone` and `Default`",
                 ));
             }
+            if state_type(&field.ty).is_none_or(|state| may_be_unsized(state, &structure.generics))
+            {
+                group.refuse(Reason::Unfollowed(
+                    "its state might be unsized, which an actor can't hold",
+                ));
+            }
             if self.declared.get(&name).copied() != Some(1) {
                 group.refuse(Reason::Unfollowed(
                     "another item or import in the file has its struct's name",
@@ -415,6 +421,74 @@ impl<'a> Walker<'a> {
     }
 }
 
+/// `T` in `Arc<Mutex<T>>`.
+fn state_type(ty: &Type) -> Option<&Type> {
+    fn inner(ty: &Type) -> Option<&Type> {
+        let Type::Path(path) = ty else {
+            return None;
+        };
+        let syn::PathArguments::AngleBracketed(args) = &path.path.segments.last()?.arguments else {
+            return None;
+        };
+        match args.args.first()? {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        }
+    }
+    inner(inner(ty)?)
+}
+
+/// Whether `state` might be unsized given the struct's generics: a
+/// parameter declared `?Sized`, or an associated type, which may be too.
+fn may_be_unsized(state: &Type, generics: &syn::Generics) -> bool {
+    let params: BTreeSet<String> = generics
+        .type_params()
+        .map(|param| param.ident.to_string())
+        .collect();
+    let relaxed = |bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>| {
+        bounds.iter().any(
+            |bound| matches!(bound, syn::TypeParamBound::Trait(bound) if bound.maybe.is_some()),
+        )
+    };
+    let mut unsized_params: BTreeSet<String> = generics
+        .type_params()
+        .filter(|param| relaxed(&param.bounds))
+        .map(|param| param.ident.to_string())
+        .collect();
+    for predicate in generics
+        .where_clause
+        .iter()
+        .flat_map(|clause| &clause.predicates)
+    {
+        if let syn::WherePredicate::Type(predicate) = predicate
+            && relaxed(&predicate.bounds)
+            && let Type::Path(path) = &predicate.bounded_ty
+            && let Some(ident) = path.path.get_ident()
+        {
+            unsized_params.insert(ident.to_string());
+        }
+    }
+    match state {
+        Type::Paren(inner) => may_be_unsized(&inner.elem, generics),
+        Type::Group(inner) => may_be_unsized(&inner.elem, generics),
+        Type::Path(path) => {
+            path.qself.is_some()
+                || path
+                    .path
+                    .get_ident()
+                    .is_some_and(|ident| unsized_params.contains(&ident.to_string()))
+                || (path.path.segments.len() > 1
+                    && path.path.leading_colon.is_none()
+                    && path
+                        .path
+                        .segments
+                        .first()
+                        .is_some_and(|first| params.contains(&first.ident.to_string())))
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
@@ -600,6 +674,40 @@ mod tests {
             fixed.contains("hits: ::adamantium::Actor::new(0)"),
             "{fixed}"
         );
+    }
+
+    #[test]
+    fn state_that_might_be_unsized_is_left_alone() {
+        for source in [
+            "use std::sync::{Arc, Mutex};\nstruct Shared<T: ?Sized> { state: Arc<Mutex<T>> }\n",
+            "use std::sync::{Arc, Mutex};\nstruct Shared<T> where T: ?Sized { state: Arc<Mutex<T>> }\n",
+            "use std::sync::{Arc, Mutex};\nstruct Shared<T: Iterator> { state: Arc<Mutex<T::Item>> }\n",
+            "use std::sync::{Arc, Mutex};\nstruct Shared<T: Iterator> { state: Arc<Mutex<<T as Iterator>::Item>> }\n",
+        ] {
+            let (fixed, refusals) = fix(
+                source,
+                &[
+                    "Mutex",
+                    "Mutex<T>",
+                    "Mutex<T::Item>",
+                    "Mutex<<T as Iterator>::Item>",
+                ],
+            );
+            assert_eq!(fixed, source);
+            assert!(
+                refusals.contains(&(
+                    "Shared.state".to_owned(),
+                    Reason::Unfollowed("its state might be unsized, which an actor can't hold")
+                )),
+                "{refusals:?}\n{source}"
+            );
+        }
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nstruct Shared<T> { state: Arc<Mutex<T>> }\n",
+            &["Mutex", "Mutex<T>"],
+        );
+        assert_eq!(refusals, []);
+        assert!(fixed.contains("state: ::adamantium::Actor<T>"), "{fixed}");
     }
 
     #[test]
