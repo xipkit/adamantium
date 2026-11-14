@@ -7,7 +7,9 @@
 //! taking the state back. Any other use leaves the binding and all of its
 //! clones unchanged, and the caller reports why with a link to the guide.
 //! Fields follow the same rules, with the extra checks in `fields`, and a
-//! field and the locals holding its state stand or fall together.
+//! field and the locals holding its state stand or fall together. So do a
+//! private function's parameters and return value and the values its calls
+//! pass and take, with the checks in `calls`.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -30,6 +32,7 @@ use super::{
     scan::{Crate, Hazard, macro_attribute},
 };
 
+mod calls;
 mod fields;
 
 /// Why a binding was left for review.
@@ -106,6 +109,9 @@ pub(super) struct Draft {
     /// Groups that hold one state, such as a field and a local it is
     /// cloned into, which stand or fall together.
     links: Vec<(usize, usize)>,
+    /// The functions with parameters or a return value to rewrite, each
+    /// with how many of its calls fix followed and its groups.
+    callees: Vec<(String, usize, Vec<usize>)>,
 }
 
 const ACTOR: &str = "::adamantium::Actor";
@@ -144,6 +150,7 @@ pub(super) fn plan(file: &Path, source: &str, mutexes: &BTreeSet<(usize, usize)>
         source: source.to_owned(),
         groups: Vec::new(),
         links: Vec::new(),
+        callees: Vec::new(),
     };
     let Ok(tree) = syn::parse_file(source) else {
         return draft;
@@ -173,11 +180,17 @@ pub(super) fn plan(file: &Path, source: &str, mutexes: &BTreeSet<(usize, usize)>
         awaiting: Vec::new(),
         fields: HashMap::new(),
         impls: Vec::new(),
+        owners: Vec::new(),
         functions: Vec::new(),
         links: Vec::new(),
         declared: HashMap::new(),
+        callees: Vec::new(),
+        callee_names: HashMap::new(),
+        signatures: HashMap::new(),
+        returns: Vec::new(),
     };
     walker.candidates(&tree);
+    walker.callee_candidates(&tree.items);
     walker.visit_file(&tree);
     let Walker {
         vars,
@@ -185,6 +198,7 @@ pub(super) fn plan(file: &Path, source: &str, mutexes: &BTreeSet<(usize, usize)>
         pending,
         awaiting,
         links,
+        callees,
         ..
     } = walker;
     for (group, _) in awaiting {
@@ -206,6 +220,13 @@ pub(super) fn plan(file: &Path, source: &str, mutexes: &BTreeSet<(usize, usize)>
     refuse_overlaps(&mut groups);
     draft.groups = groups;
     draft.links = links;
+    draft.callees = callees
+        .into_iter()
+        .map(|callee| {
+            let groups = callee.groups().collect();
+            (callee.name, callee.calls, groups)
+        })
+        .collect();
     draft
 }
 
@@ -288,6 +309,19 @@ impl Draft {
                 && let Some(reason) = Self::unseen(krate, member, &self.file)
             {
                 group.refuse(reason);
+            }
+        }
+        // Every mention of a function's name but its own must be a call fix
+        // followed, or code fix can't see might pass or take other values.
+        for (name, calls, groups) in &self.callees {
+            if krate.occurrences(name) != calls + 1 {
+                for &group in groups {
+                    if let Some(group) = self.groups.get_mut(group) {
+                        group.refuse(Reason::Unfollowed(
+                            "its function is named somewhere fix doesn't follow as a call",
+                        ));
+                    }
+                }
             }
         }
         for component in self.components() {
@@ -865,6 +899,9 @@ struct Var {
     /// Whether this stands for a struct field rather than a local. Its name
     /// is the field's, and an access through a traced receiver uses it.
     field: bool,
+    /// Whether this is a `&Mutex<T>` parameter or a copy of one, whose
+    /// `clone` copies the reference where an actor's copies the actor.
+    mutex_ref: bool,
     /// The struct with candidate fields that this variable holds or points
     /// to, by its declared type or a struct literal.
     record: Option<String>,
@@ -996,12 +1033,25 @@ struct Walker<'a> {
     /// For each enclosing `impl`, the struct with candidate fields it is
     /// for, if it is for one.
     impls: Vec<Option<String>>,
+    /// For each enclosing `impl`, the type whose methods `self` calls, if
+    /// fix can name it; `None` for a function or trait, where `self` and
+    /// `Self` mean something else.
+    owners: Vec<Option<String>>,
     /// The enclosing functions, with the stack depth where each body starts.
     functions: Vec<(String, usize)>,
     /// Pairs of groups that hold the same state.
     links: Vec<(usize, usize)>,
     /// How many items and imports in the file bind each name.
     declared: HashMap<String, usize>,
+    /// The private functions with parameters or a return value to rewrite.
+    callees: Vec<calls::Callee>,
+    /// Each candidate function by name, or `None` when two have one name.
+    callee_names: HashMap<String, Option<usize>>,
+    /// Each candidate function by where its name is declared.
+    signatures: HashMap<usize, usize>,
+    /// For each enclosing function, closure and async block, the group of
+    /// the value it returns, when it is a function that returns one.
+    returns: Vec<Option<calls::Frame<'a>>>,
 }
 
 impl<'a> Walker<'a> {
@@ -1043,6 +1093,7 @@ impl<'a> Walker<'a> {
             group,
             used: false,
             field: false,
+            mutex_ref: false,
             record: None,
         });
         if let Some(scope) = self.scopes.last_mut() {
@@ -1234,6 +1285,16 @@ impl<'a> Walker<'a> {
 
     /// `Arc<Mutex<T>>`, as `::adamantium::Actor<T>`.
     fn actor_type(&self, ty: &Type) -> Option<String> {
+        self.actor_of(self.arc_state(ty)?)
+    }
+
+    /// `::adamantium::Actor<T>` for the state `T`.
+    fn actor_of(&self, state: &Type) -> Option<String> {
+        Some(format!("{ACTOR}<{}>", self.text.get(self.text.of(state)?)?))
+    }
+
+    /// `T` in `Arc<Mutex<T>>`.
+    fn arc_state<'t>(&self, ty: &'t Type) -> Option<&'t Type> {
         let Type::Path(arc) = ty else {
             return None;
         };
@@ -1248,7 +1309,15 @@ impl<'a> Walker<'a> {
         if args.args.len() != 1 || !self.is_arc(&prefix, 0) {
             return None;
         }
-        let Some(GenericArgument::Type(Type::Path(mutex))) = args.args.first() else {
+        let Some(GenericArgument::Type(mutex)) = args.args.first() else {
+            return None;
+        };
+        self.mutex_state(mutex)
+    }
+
+    /// `T` in a `Mutex<T>` that Clippy resolved to `std::sync::Mutex`.
+    fn mutex_state<'t>(&self, ty: &'t Type) -> Option<&'t Type> {
+        let Type::Path(mutex) = ty else {
             return None;
         };
         if mutex.qself.is_some() || !self.is_mutex(self.text.of(mutex)) {
@@ -1264,7 +1333,7 @@ impl<'a> Walker<'a> {
         if inner.args.len() != 1 || is_unsized(state, &self.names.unsized_aliases) {
             return None;
         }
-        Some(format!("{ACTOR}<{}>", self.text.get(self.text.of(state)?)?))
+        Some(state)
     }
 
     /// `Arc::new(Mutex::new(x))` or `Arc::new(Mutex::default())`, as an
@@ -1310,33 +1379,41 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// The variable cloned or moved by `Arc::clone(&m)`, `m.clone()` or `m`,
-    /// with the replacement for the first form.
+    /// The variable cloned or moved by `Arc::clone(&m)`, `Arc::clone(r)`
+    /// for a reference `r`, `m.clone()` or `m`, with the replacement for the
+    /// first two forms.
     fn clone_of(&self, expr: &Expr) -> Option<(usize, Option<String>)> {
         match expr {
             Expr::Path(_) => self.tracked(expr).map(|var| (var, None)),
             Expr::MethodCall(call)
                 if call.method == "clone" && call.args.is_empty() && call.turbofish.is_none() =>
             {
-                self.tracked(&call.receiver).map(|var| (var, None))
+                self.tracked(&call.receiver)
+                    .filter(|&var| !self.vars.get(var).is_some_and(|var| var.mutex_ref))
+                    .map(|var| (var, None))
             }
             Expr::Call(call) => {
                 let Expr::Path(func) = &*call.func else {
                     return None;
                 };
-                let Some(Expr::Reference(reference)) = call.args.first() else {
-                    return None;
-                };
                 if func.qself.is_some()
                     || call.args.len() != 1
-                    || reference.mutability.is_some()
                     || func.path.segments.last()?.ident != "clone"
                     || !self.is_arc(&func.path, 1)
                 {
                     return None;
                 }
-                let var = self.tracked(&reference.expr)?;
-                let name = self.holder(var, &reference.expr)?;
+                // A variable passed as it is compiles only as a reference,
+                // a parameter or a copy of one.
+                let held = match call.args.first()? {
+                    Expr::Reference(reference) if reference.mutability.is_none() => {
+                        &*reference.expr
+                    }
+                    held @ Expr::Path(_) => held,
+                    _ => return None,
+                };
+                let var = self.tracked(held)?;
+                let name = self.holder(var, held)?;
                 Some((var, Some(format!("{name}.clone()"))))
             }
             _ => None,
@@ -1372,7 +1449,6 @@ impl<'a> Walker<'a> {
             .as_ref()
             .filter(|init| init.diverge.is_none())
             .map(|init| &*init.expr);
-        let line = self.text.line(local.let_token.span);
         if let (Some(ident), Some(init)) = (ident, init) {
             let name = bare(&ident.ident);
             let spelling = ident.ident.to_string();
@@ -1387,24 +1463,19 @@ impl<'a> Walker<'a> {
                 && let Some(range) = self.text.of(init)
             {
                 self.visit_expr(init);
-                let group = self.groups.len();
-                let mut group_state =
-                    Group::new(name.clone(), line, vec![self.edit(range, constructor)]);
-                group_state.edits.extend(ty_edit);
-                if !local.attrs.is_empty() {
-                    group_state.refuse(Reason::Unfollowed("its declaration has attributes"));
+                let edits = std::iter::once(self.edit(range, constructor))
+                    .chain(ty_edit)
+                    .collect();
+                self.bind(local, name, spelling, edits);
+                return;
+            }
+            if let Some(ty_edit) = ty_edit.clone()
+                && let Some(returned) = self.returned_by(init)
+            {
+                let var = self.bind(local, name, spelling, ty_edit.into_iter().collect());
+                if let Some(group) = self.group_of(var) {
+                    self.links.push((group, returned));
                 }
-                if self.names.constants.contains(&name) {
-                    group_state.refuse(Reason::Unfollowed(
-                        "a constant, static, struct or import in the file has its name",
-                    ));
-                }
-                self.groups.push(group_state);
-                let var = self.declare(name, Some(group));
-                if let Some(entry) = self.vars.get_mut(var) {
-                    entry.spelling = spelling;
-                }
-                self.settle(local, Some(var));
                 return;
             }
             if let Some((source, replacement)) = self.clone_of(init) {
@@ -1438,9 +1509,13 @@ impl<'a> Walker<'a> {
                         ),
                     );
                 }
+                // A copy of a `&Mutex<T>` is one too.
+                let mutex_ref = matches!(init, Expr::Path(_))
+                    && self.vars.get(source).is_some_and(|var| var.mutex_ref);
                 let var = self.declare(name, group);
                 if let Some(entry) = self.vars.get_mut(var) {
                     entry.spelling = spelling;
+                    entry.mutex_ref = mutex_ref;
                 }
                 self.settle(local, Some(var));
                 return;
@@ -1469,6 +1544,33 @@ impl<'a> Walker<'a> {
             }
         }
         self.settle(local, ident.and(declared));
+    }
+
+    /// Declares the local that `local` binds as a new state, with `edits`.
+    fn bind(
+        &mut self,
+        local: &'a Local,
+        name: String,
+        spelling: String,
+        edits: Vec<Edit>,
+    ) -> usize {
+        let group = self.groups.len();
+        let mut state = Group::new(name.clone(), self.text.line(local.let_token.span), edits);
+        if !local.attrs.is_empty() {
+            state.refuse(Reason::Unfollowed("its declaration has attributes"));
+        }
+        if self.names.constants.contains(&name) {
+            state.refuse(Reason::Unfollowed(
+                "a constant, static, struct or import in the file has its name",
+            ));
+        }
+        self.groups.push(state);
+        let var = self.declare(name, Some(group));
+        if let Some(entry) = self.vars.get_mut(var) {
+            entry.spelling = spelling;
+        }
+        self.settle(local, Some(var));
+        var
     }
 
     /// Resolves the checks waiting on `local`: a value read under a guard
@@ -2100,15 +2202,24 @@ impl<'a> Walker<'a> {
             vars: Vec::new(),
             barrier: true,
         });
-        for input in &sig.inputs {
-            if let syn::FnArg::Typed(typed) = input {
-                self.declare_pattern(&typed.pat);
-                self.record(&typed.pat, &typed.ty);
+        let callee = self.signature(sig);
+        let inputs = sig.inputs.iter().filter_map(|input| match input {
+            syn::FnArg::Typed(typed) => Some(typed),
+            syn::FnArg::Receiver(_) => None,
+        });
+        for (position, typed) in inputs.enumerate() {
+            self.declare_pattern(&typed.pat);
+            self.record(&typed.pat, &typed.ty);
+            if let Some(callee) = callee {
+                self.parameter(callee, position, &typed.pat);
             }
         }
+        let frame = callee.and_then(|callee| self.frame(callee, body));
+        self.returns.push(frame);
         self.functions.push((bare(&sig.ident), self.stack.len()));
         self.generic(&sig.generics, |walker| walker.block(body, BlockKind::Body));
         self.functions.pop();
+        self.returns.pop();
         self.scopes.pop();
     }
 
@@ -2357,18 +2468,25 @@ impl<'a> Visit<'a> for Walker<'a> {
             }
             Item::Fn(function) => {
                 self.impls.push(None);
+                self.owners.push(None);
                 self.function(&function.sig, &function.block);
+                self.owners.pop();
                 self.impls.pop();
             }
             Item::Impl(item) => self.generic(&item.generics, |walker| {
                 let structure = walker.impl_struct(item);
+                let owner = walker.owner(item);
                 walker.impls.push(structure);
+                walker.owners.push(owner);
                 syn::visit::visit_item_impl(walker, item);
+                walker.owners.pop();
                 walker.impls.pop();
             }),
             Item::Trait(item) => self.generic(&item.generics, |walker| {
                 walker.impls.push(None);
+                walker.owners.push(None);
                 syn::visit::visit_item_trait(walker, item);
+                walker.owners.pop();
                 walker.impls.pop();
             }),
             _ => syn::visit::visit_item(self, item),
@@ -2412,6 +2530,10 @@ impl<'a> Visit<'a> for Walker<'a> {
     }
 
     fn visit_expr(&mut self, expr: &'a Expr) {
+        if let Some(group) = self.tail(expr) {
+            self.returned(group, expr);
+            return;
+        }
         if let Some(var) = self.guard_var(expr) {
             self.stack.push(Node::Expr(expr));
             self.guard(var, expr);
@@ -2441,6 +2563,10 @@ impl<'a> Visit<'a> for Walker<'a> {
             self.assigns(&assign.left);
         }
         self.stack.push(Node::Expr(expr));
+        if self.followed_call(expr) || self.followed_return(expr) {
+            self.stack.pop();
+            return;
+        }
         match expr {
             Expr::Struct(literal) => self.literal(literal),
             Expr::Field(field) if self.candidate(&field.member).is_some() => {
@@ -2459,20 +2585,29 @@ impl<'a> Visit<'a> for Walker<'a> {
                     );
                 }
             }
-            Expr::Closure(closure) => self.scoped(|walker| {
-                for input in &closure.inputs {
-                    walker.declare_pattern(input);
-                }
-                match &*closure.body {
-                    Expr::Block(body) if body.attrs.is_empty() && body.label.is_none() => {
-                        walker.stack.push(Node::Expr(&closure.body));
-                        walker.block(&body.block, BlockKind::Body);
-                        walker.stack.pop();
+            // A closure's or an async block's `return` is its own.
+            Expr::Closure(closure) => {
+                self.returns.push(None);
+                self.scoped(|walker| {
+                    for input in &closure.inputs {
+                        walker.declare_pattern(input);
                     }
-                    body => walker.visit_expr(body),
-                }
-            }),
-            Expr::Async(block) => self.block(&block.block, BlockKind::Body),
+                    match &*closure.body {
+                        Expr::Block(body) if body.attrs.is_empty() && body.label.is_none() => {
+                            walker.stack.push(Node::Expr(&closure.body));
+                            walker.block(&body.block, BlockKind::Body);
+                            walker.stack.pop();
+                        }
+                        body => walker.visit_expr(body),
+                    }
+                });
+                self.returns.pop();
+            }
+            Expr::Async(block) => {
+                self.returns.push(None);
+                self.block(&block.block, BlockKind::Body);
+                self.returns.pop();
+            }
             Expr::If(branch) => {
                 self.scoped(|walker| {
                     walker.condition(&branch.cond);
@@ -3190,7 +3325,7 @@ mod tests {
             "fn f() { let m = Arc::new(Mutex::new(0)); consume(m.clone()); }",
             "fn f() { let m = Arc::new(Mutex::new(0)); let n = Arc::strong_count(&m); consume(n); }",
             "fn f() { let m = Arc::new(Mutex::new(0)); consume(Holder { m }); }\nstruct Holder { m: Arc<Mutex<i32>> }",
-            "fn f() -> Arc<Mutex<i32>> { let m = Arc::new(Mutex::new(0)); m }",
+            "fn f() -> Option<Arc<Mutex<i32>>> { let m = Arc::new(Mutex::new(0)); Some(m) }",
             "fn f() { let m = Arc::new(Mutex::new(0)); println!(\"{m:?}\"); }",
             "fn f() { let m = Arc::new(Mutex::new(0)); other!(m); }",
             "fn f() { let m = Arc::new(Mutex::new(0)); let h = m.clone(); *m.lock().unwrap() += 1; consume(h); }",

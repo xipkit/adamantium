@@ -61,6 +61,9 @@ pub(super) struct Crate {
     /// Whether the package has a library, whose public functions another
     /// crate can call.
     library: bool,
+    /// How many times each name appears in the package's source, in code,
+    /// in macros and in string literals other than documentation.
+    words: HashMap<String, usize>,
 }
 
 impl Crate {
@@ -122,6 +125,7 @@ impl Crate {
         if includes(tree.to_token_stream()) {
             self.unreadable("its package reads source through `include!` or `#[path]`");
         }
+        words(tree.to_token_stream(), &mut self.words);
         let mut macros = BTreeSet::new();
         for item in &tree.items {
             collect_macro_names(item, &mut macros);
@@ -155,6 +159,11 @@ impl Crate {
     /// How many named fields in the package are called `name`.
     pub(super) fn field_declarations(&self, name: &str) -> usize {
         self.fields.get(name).copied().unwrap_or(0)
+    }
+
+    /// How many times `name` appears anywhere in the package's source.
+    pub(super) fn occurrences(&self, name: &str) -> usize {
+        self.words.get(name).copied().unwrap_or(0)
     }
 
     /// `functions` and every function that mentions one of them, directly or
@@ -294,6 +303,46 @@ pub(super) fn idents(tokens: TokenStream, names: &mut BTreeSet<String>) {
                 names.insert(ident.unraw().to_string());
             }
             TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+        }
+    }
+}
+
+/// Counts every name in `tokens`, without `r#`, and every word in their
+/// string literals, which an attribute such as serde's `default = "fresh"`
+/// or a format string may use as a name. Documentation is prose, not code.
+fn words(tokens: TokenStream, counts: &mut HashMap<String, usize>) {
+    let tokens: Vec<TokenTree> = tokens.into_iter().collect();
+    let punct = |index: Option<usize>, c: char| matches!(index.and_then(|index| tokens.get(index)), Some(TokenTree::Punct(punct)) if punct.as_char() == c);
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            TokenTree::Group(group) => {
+                // `#[doc = "..."]` or `#![doc = "..."]`.
+                let attribute = punct(index.checked_sub(1), '#')
+                    || (punct(index.checked_sub(1), '!') && punct(index.checked_sub(2), '#'));
+                let documentation = attribute
+                    && group.delimiter() == Delimiter::Bracket
+                    && matches!(group.stream().into_iter().next(), Some(TokenTree::Ident(name)) if name == "doc");
+                if !documentation {
+                    words(group.stream(), counts);
+                }
+            }
+            TokenTree::Ident(ident) => {
+                *counts.entry(ident.unraw().to_string()).or_default() += 1;
+            }
+            TokenTree::Literal(literal) => {
+                if let Ok(syn::Lit::Str(string)) =
+                    syn::parse2::<syn::Lit>(TokenTree::Literal(literal.clone()).into())
+                {
+                    for word in string
+                        .value()
+                        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .filter(|word| !word.is_empty())
+                    {
+                        *counts.entry(word.to_owned()).or_default() += 1;
+                    }
+                }
+            }
+            TokenTree::Punct(_) => {}
         }
     }
 }
