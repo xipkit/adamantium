@@ -1,6 +1,6 @@
 //! Conservative fixes: compiler suggestions first, then guide-approved syntax.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -12,6 +12,8 @@ use serde_json::Value;
 use syn::{spanned::Spanned, visit::Visit};
 
 use crate::{check, manifest};
+
+mod state;
 
 const GUIDE: &str = "https://github.com/xipkit/adamantium/blob/main/docs/migrating.md";
 
@@ -51,6 +53,31 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
     for diagnostic in fallback {
         for suggestion in mechanical(diagnostic, &root)? {
             accept(&mut edits, suggestion);
+        }
+    }
+    // A shared-state rewrite changes every use of a binding at once, so it
+    // plans a whole file and its edits stand or fall together.
+    for (file, mutexes) in mutexes(&diagnostics, &root) {
+        if !migration_available(&file, &root, Api::Core)? {
+            continue;
+        }
+        let source = fs::read_to_string(&file)?;
+        let outcome = state::plan(&file, &source, &mutexes);
+        for refusal in &outcome.refusals {
+            eprintln!(
+                "{}:{}: `{}` stays an `Arc<Mutex<_>>`: {}\n  Review {GUIDE}#{}",
+                file.strip_prefix(&root).unwrap_or(&file).display(),
+                refusal.line,
+                refusal.name,
+                refusal.reason.describe(),
+                refusal.reason.section()
+            );
+        }
+        if !accept(&mut edits, outcome.edits) {
+            eprintln!(
+                "adamantium: {}: shared-state rewrites overlap another fix; run fix again once it applies",
+                file.display()
+            );
         }
     }
     edits.sort();
@@ -120,7 +147,9 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
     })
 }
 
-fn accept(edits: &mut Vec<Edit>, mut suggestion: Vec<Edit>) {
+/// Adds a suggestion's edits unless any of them conflicts, returning whether
+/// it was added.
+fn accept(edits: &mut Vec<Edit>, mut suggestion: Vec<Edit>) -> bool {
     suggestion.sort();
     suggestion.dedup();
     // Multipart suggestions are atomic, including conflicts within a group.
@@ -129,13 +158,14 @@ fn accept(edits: &mut Vec<Edit>, mut suggestion: Vec<Edit>) {
             .zip(pair.get(1))
             .is_some_and(|(a, b)| conflicts(a, b))
     });
-    if !internally_conflicting
+    let accepted = !internally_conflicting
         && suggestion
             .iter()
-            .all(|edit| !edits.iter().any(|other| conflicts(edit, other)))
-    {
+            .all(|edit| !edits.iter().any(|other| conflicts(edit, other)));
+    if accepted {
         edits.extend(suggestion);
     }
+    accepted
 }
 
 fn conflicts(a: &Edit, b: &Edit) -> bool {
@@ -210,11 +240,7 @@ fn mechanical(diagnostic: &Value, root: &Path) -> Result<Vec<Vec<Edit>>> {
     else {
         return Ok(Vec::new());
     };
-    if !has_adamantium(&file, root)? {
-        eprintln!(
-            "adamantium: {}: migration rewrites require a nonoptional, noninherited `adamantium` dependency with default features or explicit `tokio` features",
-            file.display()
-        );
+    if !migration_available(&file, root, Api::Tokio)? {
         return Ok(Vec::new());
     }
     let source = fs::read_to_string(&file)?;
@@ -244,9 +270,74 @@ fn mechanical(diagnostic: &Value, root: &Path) -> Result<Vec<Vec<Edit>>> {
     Ok(visitor.edits.into_iter().map(|edit| vec![edit]).collect())
 }
 
+/// The byte ranges in each project file that Clippy resolved to
+/// `std::sync::Mutex`, outside macro expansions.
+fn mutexes(diagnostics: &[Value], root: &Path) -> BTreeMap<PathBuf, BTreeSet<(usize, usize)>> {
+    let mut files: BTreeMap<PathBuf, BTreeSet<(usize, usize)>> = BTreeMap::new();
+    for diagnostic in diagnostics {
+        if diagnostic
+            .get("code")
+            .and_then(|code| code.get("code"))
+            .and_then(Value::as_str)
+            != Some("clippy::disallowed_types")
+            || !diagnostic["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("`std::sync::Mutex`"))
+        {
+            continue;
+        }
+        for span in diagnostic["spans"].as_array().into_iter().flatten() {
+            if span["is_primary"] != true || !span["expansion"].is_null() {
+                continue;
+            }
+            let range = span["byte_start"]
+                .as_u64()
+                .zip(span["byte_end"].as_u64())
+                .and_then(|(start, end)| {
+                    Some((usize::try_from(start).ok()?, usize::try_from(end).ok()?))
+                });
+            if let Some(file) = span["file_name"]
+                .as_str()
+                .and_then(|name| source_file(root, name))
+                && let Some(range) = range
+            {
+                files.entry(file).or_default().insert(range);
+            }
+        }
+    }
+    files
+}
+
+/// How much of Adamantium a file's package can name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Api {
+    None,
+    /// Values and actors, which need no runtime.
+    Core,
+    /// Everything, including tasks, time and blocking work.
+    Tokio,
+}
+
+/// Whether `file` can use `needs`, saying why not if it can't.
+fn migration_available(file: &Path, root: &Path, needs: Api) -> Result<bool> {
+    let available = adamantium_api(file, root)? >= needs;
+    if !available {
+        eprintln!(
+            "adamantium: {}: migration rewrites require a nonoptional, noninherited `adamantium` dependency{}",
+            file.display(),
+            if needs == Api::Tokio {
+                " with default features or explicit `tokio` features"
+            } else {
+                ""
+            }
+        );
+    }
+    Ok(available)
+}
+
 // A migration must not introduce an unresolved crate path. Aliased dependencies
 // are left for review rather than guessing which name is available in scope.
-fn has_adamantium(file: &Path, root: &Path) -> Result<bool> {
+fn adamantium_api(file: &Path, root: &Path) -> Result<Api> {
     for ancestor in file
         .ancestors()
         .skip(1)
@@ -259,7 +350,7 @@ fn has_adamantium(file: &Path, root: &Path) -> Result<bool> {
                 .get("dependencies")
                 .and_then(|deps| deps.get("adamantium"))
             else {
-                return Ok(false);
+                return Ok(Api::None);
             };
             // Optional and inherited dependencies need feature/activation
             // resolution for the selected build. Leave those for review.
@@ -273,13 +364,20 @@ fn has_adamantium(file: &Path, root: &Path) -> Result<bool> {
                         .iter()
                         .any(|feature| feature.as_str() == Some("tokio"))
                 });
-            return Ok(flag("optional") != Some(true)
-                && flag("workspace") != Some(true)
-                && package.is_none_or(|name| name == "adamantium")
-                && (flag("default-features") != Some(false) || tokio));
+            if flag("optional") == Some(true)
+                || flag("workspace") == Some(true)
+                || package.is_some_and(|name| name != "adamantium")
+            {
+                return Ok(Api::None);
+            }
+            return Ok(if flag("default-features") != Some(false) || tokio {
+                Api::Tokio
+            } else {
+                Api::Core
+            });
         }
     }
-    Ok(false)
+    Ok(Api::None)
 }
 
 struct Mechanical<'a> {
@@ -351,6 +449,11 @@ impl<'ast> Visit<'ast> for Mechanical<'_> {
 fn section(message: &str) -> &'static str {
     if message.contains("spawn_blocking") || message.contains("thread::spawn") {
         "blocking-work"
+    } else if message.contains("across an await")
+        || message.contains("`tokio::sync::Mutex`")
+        || message.contains("`futures::lock::Mutex`")
+    {
+        "a-lock-held-across-an-await"
     } else if message.contains("RwLock") {
         "rwlock"
     } else if message.contains("Mutex") || message.contains("lock") {
@@ -440,6 +543,25 @@ mod tests {
         assert_eq!(edits, vec![edit(2, 5)]);
         accept(&mut edits, vec![edit(10, 12), edit(20, 22)]);
         assert_eq!(edits.len(), 3);
+    }
+
+    #[test]
+    fn locks_held_across_an_await_link_to_their_section() {
+        for message in [
+            "this `MutexGuard` is held across an await point",
+            "use of a disallowed type `tokio::sync::Mutex`",
+            "use of a disallowed type `futures::lock::Mutex`",
+        ] {
+            assert_eq!(section(message), "a-lock-held-across-an-await");
+        }
+        assert_eq!(
+            section("use of a disallowed type `std::sync::Mutex`"),
+            "shared-state"
+        );
+        assert_eq!(
+            section("use of a disallowed type `tokio::sync::RwLock`"),
+            "rwlock"
+        );
     }
 
     #[test]

@@ -207,3 +207,120 @@ fn unavailable_or_uncertain_migration_apis_leave_source_buildable() {
         }
     }
 }
+
+#[allow(clippy::unwrap_used, reason = "a missing fixture fails the test")]
+fn shared_state_fixture(name: &str) -> String {
+    fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/shared-state")
+            .join(name),
+    )
+    .unwrap()
+}
+
+#[test]
+fn shared_state_rewrites_build_pass_check_and_keep_behavior() {
+    let source = shared_state_fixture("rewrite.rs");
+    let dir = project(&source);
+    // An actor needs no runtime, so the rewrite works without the `tokio`
+    // feature.
+    let manifest = dir.path().join("Cargo.toml");
+    let text = fs::read_to_string(&manifest).unwrap();
+    let text = text
+        .lines()
+        .map(|line| {
+            if line.starts_with("adamantium = ") {
+                format!(
+                    "{}, default-features = false }}",
+                    line.trim_end_matches('}').trim_end()
+                )
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(manifest, text).unwrap();
+    let file = dir.path().join("src/lib.rs");
+
+    let preview = run(&["fix", "--dry-run"], dir.path());
+    assert_eq!(
+        preview.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let diff = String::from_utf8(preview.stdout).unwrap();
+    assert!(
+        diff.starts_with("--- a/src/lib.rs\n+++ b/src/lib.rs\n@@"),
+        "{diff}"
+    );
+    assert!(
+        diff.contains("+    let hits = ::adamantium::Actor::new(0u64);"),
+        "{diff}"
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), source);
+
+    let fixed = run(&["fix"], dir.path());
+    assert!(
+        fixed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        shared_state_fixture("rewrite.fixed.rs")
+    );
+    let tested = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["test", "--quiet"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        tested.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&tested.stdout),
+        String::from_utf8_lossy(&tested.stderr)
+    );
+    let again = run(&["fix", "--dry-run"], dir.path());
+    assert!(again.status.success());
+    assert!(again.stdout.is_empty());
+}
+
+#[test]
+fn shared_state_fix_cannot_follow_is_reported_and_left_unchanged() {
+    let source = shared_state_fixture("review.rs");
+    let dir = project(&source);
+    let output = run(&["fix"], dir.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+        source
+    );
+    for (name, section) in [
+        ("held", "a-guard-held-across-statements"),
+        ("awaited", "a-lock-held-across-an-await"),
+        ("checking", "two-locks-at-once"),
+        ("savings", "two-locks-at-once"),
+        ("calls", "two-locks-at-once"),
+        ("escapes", "shared-state"),
+        ("macro_use", "shared-state"),
+    ] {
+        let line = source
+            .lines()
+            .position(|line| line.contains(&format!("let {name} = Arc::new(")))
+            .unwrap()
+            + 1;
+        let report = format!("src/lib.rs:{line}: `{name}` stays an `Arc<Mutex<_>>`: ");
+        let mut lines = stderr.lines().skip_while(|line| !line.starts_with(&report));
+        assert!(lines.next().is_some(), "{report}\n{stderr}");
+        assert!(
+            lines
+                .next()
+                .is_some_and(|link| link.ends_with(&format!("/docs/migrating.md#{section}"))),
+            "{name}: {stderr}"
+        );
+    }
+    assert!(stderr.contains("migrating.md#rwlock"), "{stderr}");
+}
