@@ -407,42 +407,62 @@ fn check_reports_disallowed_methods() {
     }
 }
 
-/// `sync` must produce a finding on exactly the lines of `src/lib.rs` that end
-/// in `// disallowed_types` or `// disallowed_methods`, for that rule, and no
-/// other finding. Tokio's broadcast channel is reported; a `Semaphore` permit
-/// held across an await or forgotten, `watch`, and one `Channel` per receiver
-/// are not.
-#[test]
-fn check_reports_broadcast_and_allows_semaphore() {
-    let root = fixture("sync");
+/// Checks the fixture `name` and asserts that it produces a finding on exactly
+/// the lines of `src/lib.rs` that end in `// disallowed_types` or
+/// `// disallowed_methods`, for that rule, and no other finding. Returns the
+/// findings.
+fn check_marked_rules(name: &str) -> TestResult<Vec<serde_json::Value>> {
+    let root = fixture(name);
     let mut marked = Vec::new();
-    for (index, line) in fs::read_to_string(root.join("src/lib.rs"))
-        .unwrap()
+    for (index, line) in fs::read_to_string(root.join("src/lib.rs"))?
         .lines()
         .enumerate()
     {
         for rule in ["disallowed_types", "disallowed_methods"] {
             if line.ends_with(&format!("// {rule}")) {
-                marked.push((format!("clippy::{rule}"), u64::try_from(index + 1).unwrap()));
+                marked.push((format!("clippy::{rule}"), u64::try_from(index + 1)?));
             }
         }
     }
     marked.sort();
-    assert!(!marked.is_empty(), "sync marks no lines");
+    assert!(!marked.is_empty(), "{name} marks no lines");
 
     let output = adamantium()
         .args(["adamantium", "check", "--format", "json"])
         .arg(&root)
-        .output()
-        .unwrap();
+        .output()?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["warnings"], serde_json::json!([]), "{stderr}");
-    assert_eq!(report["errors"], serde_json::json!([]), "{stderr}");
-    let findings = report["findings"].as_array().unwrap();
-    for finding in findings {
-        assert_eq!(finding["file"], "src/lib.rs", "{finding}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let none = serde_json::json!([]);
+    assert_eq!(report.get("warnings"), Some(&none), "{stderr}");
+    assert_eq!(report.get("errors"), Some(&none), "{stderr}");
+    let findings = report
+        .get("findings")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("findings is not an array")?
+        .clone();
+    let mut reported = Vec::new();
+    for finding in &findings {
+        let field = |key| finding.get(key).ok_or(format!("{finding} has no {key}"));
+        assert_eq!(field("file")?, "src/lib.rs", "{finding}");
+        let rule = field("rule")?.as_str().ok_or("a rule that is not text")?;
+        let line = field("line")?
+            .as_u64()
+            .ok_or("a line that is not a number")?;
+        reported.push((rule.to_owned(), line));
+    }
+    reported.sort();
+    reported.dedup();
+    assert_eq!(reported, marked, "{name}: {stderr}");
+    Ok(findings)
+}
+
+/// Tokio's broadcast channel is reported; a `Semaphore` permit held across an
+/// await or forgotten, `watch`, and one `Channel` per receiver are not.
+#[test]
+fn check_reports_broadcast_and_allows_semaphore() {
+    for finding in check_marked_rules("sync").unwrap() {
         assert!(
             finding["message"]
                 .as_str()
@@ -451,18 +471,36 @@ fn check_reports_broadcast_and_allows_semaphore() {
             "{finding}"
         );
     }
-    let mut reported: Vec<(String, u64)> = findings
+}
+
+/// Every access method of a `thread_local!` value is reported, called on the
+/// static or through a `&LocalKey`, unless a local allow exempts it. Atomics,
+/// `OnceLock` and `LazyLock` statics, and a static `Actor` are not.
+#[test]
+fn check_reports_thread_locals_and_allows_atomics_and_statics() {
+    let mut methods: Vec<String> = check_marked_rules("state")
+        .unwrap()
         .iter()
-        .map(|finding| {
-            (
-                finding["rule"].as_str().unwrap().to_owned(),
-                finding["line"].as_u64().unwrap(),
-            )
-        })
+        .filter(|finding| finding["rule"] == "clippy::disallowed_methods")
+        .map(|finding| finding["message"].as_str().unwrap().to_owned())
         .collect();
-    reported.sort();
-    reported.dedup();
-    assert_eq!(reported, marked, "{stderr}");
+    methods.sort();
+    methods.dedup();
+    let mut expected: Vec<String> = [
+        "get",
+        "replace",
+        "set",
+        "take",
+        "try_with",
+        "with",
+        "with_borrow",
+        "with_borrow_mut",
+    ]
+    .iter()
+    .map(|method| format!("use of a disallowed method `std::thread::LocalKey::{method}`"))
+    .collect();
+    expected.sort();
+    assert_eq!(methods, expected);
 }
 
 #[test]

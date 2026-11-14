@@ -17,7 +17,7 @@ adamantium = { git = "https://github.com/xipkit/adamantium.git", rev = "..." }
 
 The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, `first_ok`, the
 concurrent streams, and `blocking`. Set `default-features = false` to use `Actor`, `Str`, `Bytes`,
-`Array`, `Deque`, `Map`, `Set`, and `Channel` without Tokio, including on WASI. The `serde`
+`Array`, `Deque`, `Map`, `Set`, `Channel`, `Reply`, and `Watch` without Tokio, including on WASI. The `serde`
 feature can be enabled independently.
 
 Install the subcommand:
@@ -190,6 +190,26 @@ send ends with `SendError::Closed(value)`, `Cancelled(value)`, or
 `DeadlineExceeded(value)`, so the value comes back whichever way it fails. As
 with `Tasks::run_until`, a request already present wins over a ready channel,
 and cancellation wins over an equally ready deadline.
+
+`Reply::pair()` makes a one-shot **`Reply<T>`** and the **`ReplyReceiver<T>`**
+that waits for it, for request and reply between tasks. `send(value)` consumes
+the reply and never waits; it hands the value back in `Closed(value)` if the
+receiver is gone. `receive()` returns the value, or `None` if the reply was
+dropped without sending. The replying side can check `is_closed()` or await
+`closed()` to stop work whose answer nobody wants.
+
+**`Watch<T>`** holds the latest value of some state, such as configuration.
+`send(value)` replaces it and wakes every **`Watcher<T>`** made with
+`subscribe()`. A watcher's `receive()` waits for a value it hasn't seen and
+returns a copy, skipping values sent in between; `wait_for(condition)` waits for
+a value that satisfies `condition`, starting with the current one; `get()` reads
+the current value. Clones of a `Watch` can all send. Dropping the last one, or
+calling `close()`, closes it: each watcher receives the last value if it hasn't
+seen it, then `None`.
+
+Both work with `default-features = false`. Both receivers also have
+`try_receive()` and, with the `tokio` feature, `receive_until(&cancellation,
+deadline)`, which follows the channel's rules.
 
 For explicit shutdown, use `Tasks::run_until(cancellation, deadline, body)` or
 `tasks.join_until(cancellation, deadline, body_result)`. `Cancellation::new()`
@@ -403,9 +423,9 @@ inputs unchanged when replaying. Deadlock and step exhaustion are failures;
 passing exploration is not a proof of all executions.
 
 This first stage supports Actor only. `testing::parallel` provides independent
-test workers; it does not model Tasks' cleanup semantics. Channel, Tasks,
-Cancellation and blocking work reject use in the harness until their adapters
-land (ADAM-159 and ADAM-160); virtual deadlines follow in ADAM-161. Use `#[test]`,
+test workers; it does not model Tasks' cleanup semantics. Channel, Reply, Watch,
+Tasks, Cancellation and blocking work reject use in the harness until their
+adapters land (ADAM-159 and ADAM-160); virtual deadlines follow in ADAM-161. Use `#[test]`,
 not `#[tokio::test]`, and create actors inside the execution that uses them.
 Replace I/O, real time, uncontrolled randomness and foreign executors with
 deterministic fixtures. Arbitrary foreign futures cannot all be diagnosed, and
@@ -418,7 +438,7 @@ The default lint levels are in this repository's `[workspace.lints]`, and the Cl
 | Property | Enforced by |
 | --- | --- |
 | No `unsafe` code | `unsafe_code = "forbid"` |
-| Every value can cross a task | `future_not_send`; `Rc`, `RefCell`, `Cell`, and `LocalSet` disallowed, and so are `LocalRuntime`'s entry points |
+| Every value can cross a task | `future_not_send`; `Rc`, `RefCell`, `Cell`, and `LocalSet` disallowed, and so are `LocalRuntime`'s entry points and the methods that read or write a `thread_local!` value, since a task can move to another thread at any await |
 | No task outlives its scope | `tokio::spawn`, `spawn_local`, `JoinSet`, the spawn methods of Tokio's `Handle`, `Runtime`, `LocalRuntime`, and `task::Builder`, async-std's task and builder spawns, `smol::spawn`, smol's executor spawns, `std::thread::spawn`, and `scope` disallowed; tasks use `Tasks` |
 | No lock is held across an await or inside another lock | `await_holding_lock`; `Mutex` and `RwLock` from std, tokio, parking_lot, and futures disallowed; `Actor::with` is synchronous and rejects nesting |
 | Unbounded channel constructors restricted | Unbounded channel constructors from std, Tokio, async-channel, flume, and crossbeam-channel disallowed; use `Channel` |
@@ -436,6 +456,8 @@ Tests are exempt from the panic rules, so `unwrap`, indexing, and `panic!` are a
 
 The rules have limits. A plain `receive` or `send` can wait indefinitely while the channel stays open and empty or full; use `receive_until` or `send_until` to bound the wait with a `Cancellation` or a deadline. Dependencies can still use unsafe code or panic, and Clippy cannot detect every call that blocks a worker thread. `Runtime::block_on` is allowed because `#[tokio::main]` and `#[tokio::test]` expand to it; called inside a runtime, it panics at run time instead of blocking. The default tier permits arithmetic that can panic; the strict tier lints potentially panicking arithmetic operators. Neither tier prevents stack exhaustion or panics inside called methods.
 
+Atomics and `OnceLock` and `LazyLock` statics are allowed. An atomic holds no guard across an await and can't deadlock, so it suits a single counter or flag; Clippy can't see a check-then-act spread over two atomics, so state whose parts must agree belongs in one `Actor`. A `OnceLock` or `LazyLock` static is set once, but whatever in it can still change, such as an `Actor`, is outside every scope and shared by every task and every test in the binary. Prefer passing an `Actor` to the tasks that use it.
+
 Strong reference cycles are not detected or collected. An `Actor` whose state owns a clone of itself, directly or through other actors, keeps every state in the cycle alive after the last external handle is dropped. Banning `Weak` and `Arc::downgrade` does not prevent strong cycles; keep actor ownership acyclic or explicitly remove cycle-forming handles before releasing the last external handle.
 
 ## Style review
@@ -446,12 +468,15 @@ Strong reference cycles are not detected or collected. An `Actor` whose state ow
 cargo adamantium style check                      # every .rs file under the current directory
 cargo adamantium style check src/lib.rs --context "application code"
 cargo adamantium style check . --rule unnecessary_deep_clone --dry-run
+cargo adamantium style check --changed=main --cache-from last.json > next.json
 cargo adamantium style rules --format text
 ```
 
-The command prints JSON by default, or a readable report with `--format text`. It finds Rust files recursively, respects ignore files, and skips hidden directories, `target`, and `node_modules`. It does not resolve Cargo workspace membership. Each file is sent to the provider in a request with the selected rules and any context. `--provider` selects the service that answers the rules; `decisions`, the OpenAI Decisions API, is the default and currently the only provider. Reports record the provider, and `--retry-from` refuses a report from a different one. Findings apply to the whole file because Decisions does not provide reliable locations. The file, path, and context must fit within the API's 256 KiB JSON input limit. The exit status is `0` for a clean check or dry run, `1` for findings, and `2` for an incomplete check.
+The command prints JSON by default, or a readable report with `--format text`. It finds Rust files recursively, respects ignore files, and skips hidden directories, `target`, and `node_modules`. It does not resolve Cargo workspace membership. Each file is sent to the provider in a request with the selected rules and any context. `--provider` selects the service that answers the rules; `decisions`, the OpenAI Decisions API, is the default and currently the only provider. Reports record the provider, and `--retry-from` refuses a report from a different one. For each file with findings, two more requests ask Decisions to locate them, since it answers only choices: first a window of lines, then the first and last line within it. A finding located with confidence has `lines` with `start_line` and `end_line`, numbered from 1; a finding without `lines` concerns the whole file, or Decisions could not place it. A file's `input_tokens` includes these requests; when locating fails, the file has no `input_tokens`, because the requests it made before failing may have been billed. The file, path, and context must fit within the API's 256 KiB JSON input limit. The exit status is `0` for a clean check or dry run, `1` for findings, and `2` for an incomplete check.
 
 Transient failures are retried with exponential backoff and jitter, up to four attempts within three minutes per file. `Retry-After` is honored up to 30 seconds. Authentication, quota, and spending-limit errors are not retried. A service failure stops further requests and marks the remaining files as unchecked. Use `--retry-from previous.json` to retry failed and unchecked files in a new report. Supply the same scan root and `--rule` options, and pass `--context` again if needed. Do not redirect the output over the report being read.
+
+Each request is billable, so two options keep a run to the files that need it. `--changed` reviews only the Rust files that differ from `HEAD`: staged, unstaged, and untracked files that are not ignored. `--changed=BASE` adds the files committed since the current branch left `BASE`, such as `--changed=main`. Deleted files are left out. `--cache-from previous.json` reuses a previous report's results for each file whose source has the same SHA-256 and was answered under the same provider, model, rule definitions, and context. Each report records those as `source_sha256` per file and `rules_sha256` and `context_sha256` for the run; editing a rule's wording changes `rules_sha256`. Reused files keep their findings, are marked `"cached": true`, and have no `input_tokens`. A report lists reused files alongside reviewed ones, so it can serve as the cache for the next run. Files that failed or were never sent are reviewed again. The cached report must have schema version 3 and the same scan root. `--retry-from` cannot be combined with either option.
 
 Set `OPENAI_API_KEY`. On macOS, the `openai-api-key` Keychain item is used when the variable is unset. Source files and context are sent to OpenAI. Results are model estimates. Evaluate them on labeled examples before using them as a blocking check. The questions instruct the model to treat source comments and strings as untrusted evidence, but this does not guarantee resistance to adversarial input.
 

@@ -6,7 +6,7 @@
 )]
 
 use adamantium::{
-    Actor, Cancellation, Channel, Tasks,
+    Actor, Cancellation, Channel, Reply, Tasks, TryReceiveError, Watch,
     testing::{self, Config, FailureKind, Replay},
 };
 use std::{
@@ -501,4 +501,106 @@ fn foreign_receiver_stream_cannot_bypass_the_harness_boundary() {
     .unwrap_err();
     assert_eq!(failure.kind(), FailureKind::Panic);
     assert_eq!(receiver.try_receive(), Ok(42));
+}
+
+#[test]
+fn replies_and_watches_reject_the_harness() {
+    /// Runs `body` once in the harness with a value made outside it, and
+    /// returns how the execution failed.
+    fn carried_in<V: Send + 'static>(value: V, body: fn(V)) -> FailureKind {
+        let value = Mutex::new(Some(value));
+        testing::check(
+            Config {
+                iterations: 1,
+                ..config()
+            },
+            move || {
+                let value = value.lock().unwrap().take().unwrap();
+                async move { body(value) }
+            },
+        )
+        .unwrap_err()
+        .kind()
+    }
+
+    assert!(
+        testing::check(config(), || async {
+            let _reply = Reply::<u8>::pair();
+        })
+        .is_err()
+    );
+    assert!(
+        testing::check(config(), || async {
+            let _watch = Watch::new(0);
+        })
+        .is_err()
+    );
+
+    let (reply, answer) = Reply::<String>::pair();
+    assert_eq!(
+        carried_in(reply, |reply| drop(reply.send(String::from("sent")))),
+        FailureKind::Panic
+    );
+    assert_eq!(
+        answer.try_receive(),
+        Err(TryReceiveError::Closed),
+        "nothing was sent from the harness"
+    );
+    assert_eq!(
+        carried_in(answer, |answer| drop(answer.try_receive())),
+        FailureKind::Panic
+    );
+    let (reply, answer) = Reply::<String>::pair();
+    assert_eq!(carried_in(reply, drop), FailureKind::Panic);
+    assert_eq!(carried_in(answer, drop), FailureKind::Panic);
+
+    let watch = Watch::new(String::new());
+    let watcher = watch.subscribe();
+    assert_eq!(
+        carried_in(watch.clone(), |watch| drop(
+            watch.send(String::from("sent"))
+        )),
+        FailureKind::Panic
+    );
+    assert_eq!(
+        carried_in(watcher.clone(), |mut watcher| drop(watcher.try_receive())),
+        FailureKind::Panic
+    );
+    assert_eq!(carried_in(watcher, drop), FailureKind::Panic);
+    // Unwinding drops the carried watch without panicking a second time.
+    assert_eq!(
+        carried_in(watch.clone(), |watch| {
+            let _held = watch;
+            std::panic::panic_any("unwinding");
+        }),
+        FailureKind::Panic
+    );
+    assert_eq!(carried_in(watch.clone(), drop), FailureKind::Panic);
+    assert!(!watch.is_closed(), "the rejected drop left the count alone");
+    assert_eq!(watch.get(), "", "nothing was sent from the harness");
+}
+
+#[test]
+fn prepolled_watch_future_is_rejected_before_receiving() {
+    use futures_util::FutureExt;
+    let watch = Watch::new(0);
+    let mut watcher = watch.subscribe();
+    let mut reader = watcher.clone();
+    let mut future = Box::pin(async move {
+        reader.receive().await;
+    });
+    assert!(future.as_mut().now_or_never().is_none());
+    watch.send(42).unwrap();
+    let future = Mutex::new(Some(future));
+    let failure = testing::check(
+        Config {
+            iterations: 1,
+            ..config()
+        },
+        move || future.lock().unwrap().take().unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(failure.kind(), FailureKind::Panic);
+    assert_eq!(watcher.try_receive(), Ok(42));
+    assert_eq!(watcher.try_receive(), Err(TryReceiveError::Empty));
 }

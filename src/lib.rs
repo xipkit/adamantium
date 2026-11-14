@@ -4,8 +4,9 @@
 //! The crate has two halves. The library gives that fragment its vocabulary:
 //! copy-on-write values ([`Str`], [`Bytes`], [`Array`], [`Deque`], [`Map`], [`Set`]), a
 //! structured task scope (`Tasks`), shared state whose methods run one at
-//! a time ([`Actor`]), a bounded channel ([`Channel`]), and `blocking` for
-//! code that must block a thread. The `cargo adamantium` subcommand applies
+//! a time ([`Actor`]), a bounded channel ([`Channel`]), a one-shot reply
+//! ([`Reply`]), the latest value of shared state ([`Watch`]), and `blocking`
+//! for code that must block a thread. The `cargo adamantium` subcommand applies
 //! the Clippy rules that keep a crate inside the fragment.
 //!
 //! Everything here is `Send + Sync + 'static` when its element types are, so
@@ -15,8 +16,8 @@
 //! `first_ok`, the ordered and unordered concurrent streams, `blocking`, the
 //! `time` module, and `retry` and `RateLimit`, whose waits all end when a
 //! `Cancellation` is requested.
-//! Disable default features to use the values, actors, and channels
-//! without a Tokio dependency, including on WASI.
+//! Disable default features to use the values, actors, channels, replies,
+//! and watches without a Tokio dependency, including on WASI.
 //! The opt-in `signal` feature adds `Cancellation::cancel_on_signal` on Unix
 //! and Windows and enables Tokio's process signal support.
 //! Enable the optional `tracing` feature for named task spans and warnings
@@ -32,6 +33,7 @@ mod deque;
 mod map;
 #[cfg(feature = "tokio")]
 mod rate_limit;
+mod reply;
 #[cfg(feature = "tokio")]
 mod retry;
 mod runtime;
@@ -43,6 +45,7 @@ mod tasks;
 pub mod testing;
 #[cfg(feature = "tokio")]
 pub mod time;
+mod watch;
 
 pub use actor::Actor;
 pub use array::Array;
@@ -54,6 +57,7 @@ pub use deque::Deque;
 pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
 #[cfg(feature = "tokio")]
 pub use rate_limit::RateLimit;
+pub use reply::{Reply, ReplyReceiver};
 #[cfg(feature = "tokio")]
 pub use retry::{Backoff, retry, retry_if};
 pub use set::Set;
@@ -63,6 +67,7 @@ pub use tasks::{
     Cancellation, ScopeError, Task, Tasks, blocking, concurrently, concurrently_ordered,
     concurrently_ordered_until, concurrently_unordered, concurrently_unordered_until, first_ok,
 };
+pub use watch::{Watch, Watcher};
 
 // Runs the migration guide's examples as doctests, so its rewrites keep
 // compiling against the current API.

@@ -27,16 +27,20 @@ impl ProviderKind {
     }
 }
 
-/// A source of answers to the style questions, one request per file.
+/// A source of answers to the style questions.
 pub(crate) trait Provider {
     /// The largest source file, in bytes, the provider can accept.
     fn max_source_bytes(&self) -> usize;
 
     /// Answers every question for one file, in question order.
     fn review(&self, file: &FileReview<'_>) -> Result<Evaluation, ReviewError>;
+
+    /// Finds the lines that violate each question's rule in a file the
+    /// provider judged to violate all of them, in question order.
+    fn locate(&self, file: &FileReview<'_>) -> Result<Locations, ReviewError>;
 }
 
-/// One file and the questions to answer about it.
+/// One file and the questions to ask about it.
 pub(crate) struct FileReview<'a> {
     pub model: &'a str,
     pub questions: &'a [Question],
@@ -50,6 +54,22 @@ pub(crate) struct Evaluation {
     /// One answer per question, in the order the questions were asked.
     pub answers: Vec<Answer>,
     pub input_tokens: Option<u64>,
+}
+
+/// Where in a file each violated rule is broken.
+pub(crate) struct Locations {
+    /// One entry per question, in question order: `None` when the provider
+    /// gave no confident range, including when the violation concerns the
+    /// file as a whole.
+    pub lines: Vec<Option<LineRange>>,
+    pub input_tokens: Option<u64>,
+}
+
+/// Lines `start_line` through `end_line` of a file, numbered from 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct LineRange {
+    pub start_line: usize,
+    pub end_line: usize,
 }
 
 pub(crate) enum Answer {
