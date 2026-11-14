@@ -642,12 +642,37 @@ cargo publish --locked --registry crates-io -p cargo-adamantium --dry-run
 
 Pushing a tag named `v` followed by the workspace version, such as `v0.1.0`,
 starts the [publish workflow](.github/workflows/publish.yml). It checks the tag
-against both crate versions, runs the Rust tests and Clippy, and verifies both
-archives before publishing. Each crate publishes in its own job so a failed
-upload can be retried without uploading the other crate again. The publish jobs
-require the `CARGO_REGISTRY_TOKEN` repository secret.
+against both crate versions, requires its commit to have been merged into
+`main`, runs the Rust tests and Clippy, and verifies both archives before
+publishing. Verification and publishing both check out the triggering commit
+SHA, so moving the tag cannot change the source between jobs. Each crate
+publishes in its own job so a failed upload can be retried without uploading
+the other crate again.
 
-The first publication and credential setup are tracked by ADAM-136 and require
-Mauricio's go-ahead. Prepare and review the release before pushing its tag:
+The publish jobs use the `crates-io` environment. Before adding credentials, a
+repository administrator must configure the release protections in GitHub:
+
+- Protect `main` so release commits enter it through reviewed pull requests
+  with passing checks.
+- Create an active tag ruleset for `v*` that restricts tag creation, updates and
+  deletion to authorized release maintainers.
+- Create the `crates-io` environment with authorized release maintainers as
+  required reviewers, disable protection-rule bypasses, and restrict deployment
+  refs to selected **tags** matching `v*`.
+- Store `CARGO_REGISTRY_TOKEN` only as a secret of that environment. A
+  repository or organization secret is available to other workflows and would
+  bypass the release approval boundary.
+
+An environment reviewer must check that the pending job's commit SHA is the
+approved release commit before allowing either publish job to run. GitHub
+withholds environment secrets until its protection rules pass. Referencing an
+environment in YAML does not configure these protections: GitHub automatically
+creates a missing environment without reviewers or secrets. See GitHub's
+[environment setup](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
+and [tag rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets).
+
+The first publication, protection setup and credential setup are tracked by
+ADAM-136 and require Mauricio's go-ahead. Prepare and review the release before
+pushing its tag:
 published crate versions cannot be overwritten or deleted. Crate-name checks
 and dry runs do not reserve a name.

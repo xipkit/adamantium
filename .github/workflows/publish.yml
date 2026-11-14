@@ -16,6 +16,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Require a release commit from main
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo '::error::The release commit must already be merged into main.'
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -46,19 +56,22 @@ jobs:
   publish:
     needs: verify
     runs-on: ubuntu-latest
+    environment: crates-io
     strategy:
       fail-fast: false
       matrix:
         package: [adamantium, cargo-adamantium]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
-            echo '::error::Set the CARGO_REGISTRY_TOKEN repository secret before publishing.'
+            echo '::error::Set CARGO_REGISTRY_TOKEN in the protected crates-io environment before publishing.'
             exit 1
           fi
           cargo publish --locked --registry crates-io -p "${{ matrix.package }}"
