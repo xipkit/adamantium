@@ -1,5 +1,13 @@
 use std::{fs, process::Command};
 
+fn cargo_adamantium_no_key() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-adamantium"));
+    command
+        .env_remove("OPENAI_API_KEY")
+        .env("ADAMANTIUM_NO_KEYCHAIN", "1");
+    command
+}
+
 #[test]
 fn cargo_style_dry_run_is_machine_readable_without_an_api_key() {
     let dir = tempfile::tempdir().unwrap();
@@ -8,7 +16,7 @@ fn cargo_style_dry_run_is_machine_readable_without_an_api_key() {
     fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
     fs::write(dir.path().join("target/generated/build.rs"), "").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-adamantium"))
+    let output = cargo_adamantium_no_key()
         .args([
             "adamantium",
             "style",
@@ -18,7 +26,6 @@ fn cargo_style_dry_run_is_machine_readable_without_an_api_key() {
             "glob_import_context",
         ])
         .arg(dir.path())
-        .env_remove("OPENAI_API_KEY")
         .output()
         .unwrap();
     assert!(
@@ -42,10 +49,9 @@ fn provider_can_be_named_and_unknown_providers_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
     let invoke = |provider: &str| {
-        Command::new(env!("CARGO_BIN_EXE_cargo-adamantium"))
+        cargo_adamantium_no_key()
             .args(["style", "check", "--dry-run", "--provider", provider])
             .arg(dir.path())
-            .env_remove("OPENAI_API_KEY")
             .output()
             .unwrap()
     };
@@ -101,12 +107,11 @@ fn retry_uses_only_failed_and_unchecked_files_without_a_key() {
     });
     fs::write(&report_path, serde_json::to_vec(&previous).unwrap()).unwrap();
     let invoke = |dry_run: bool| {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cargo-adamantium"));
+        let mut cmd = cargo_adamantium_no_key();
         cmd.args(["style", "check"])
             .arg(dir.path())
             .args(["--rule", "glob_import_context", "--retry-from"])
-            .arg(&report_path)
-            .env_remove("OPENAI_API_KEY");
+            .arg(&report_path);
         if dry_run {
             cmd.arg("--dry-run");
         }
@@ -143,13 +148,12 @@ fn retry_uses_only_failed_and_unchecked_files_without_a_key() {
 
 /// `style check` on `dir` for one rule, without an API key.
 fn style_check(dir: &std::path::Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-adamantium"));
+    let mut command = cargo_adamantium_no_key();
     command
         .args(["style", "check"])
         .arg(dir)
         .args(["--rule", "glob_import_context"])
-        .args(args)
-        .env_remove("OPENAI_API_KEY");
+        .args(args);
     command
 }
 

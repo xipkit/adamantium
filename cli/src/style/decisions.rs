@@ -255,6 +255,11 @@ fn is_quota_error(body: &Value) -> bool {
         })
 }
 
+#[cfg(target_os = "macos")]
+fn keychain_disabled_value(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty() && v != "0" && v != "false")
+}
+
 #[allow(
     clippy::disallowed_methods,
     reason = "the CLI is synchronous; polling the Keychain helper is the only wait"
@@ -268,7 +273,7 @@ pub(crate) fn api_key() -> Result<String> {
     }
 
     #[cfg(target_os = "macos")]
-    {
+    if !keychain_disabled_value(env::var_os("ADAMANTIUM_NO_KEYCHAIN").as_deref()) {
         use std::{io::Read, process::Stdio, thread, time::Instant};
 
         let mut child = std::process::Command::new("security")
@@ -303,10 +308,8 @@ pub(crate) fn api_key() -> Result<String> {
         }
         bail!("set OPENAI_API_KEY or make the openai-api-key Keychain item accessible");
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        bail!("set OPENAI_API_KEY to use the Decisions API");
-    }
+
+    bail!("set OPENAI_API_KEY to use the Decisions API");
 }
 
 fn request(file: &FileReview<'_>) -> Result<Value> {
