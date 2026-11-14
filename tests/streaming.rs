@@ -254,7 +254,7 @@ on_both_runtimes! {
             async move {
                 let _guard = guard;
                 if let Some(cancel) = cancel {
-                    let _ = cancel.send(cancellation);
+                    cancel.send(cancellation).unwrap();
                 }
                 future::pending::<Result<(), &str>>().await
             }
@@ -603,7 +603,7 @@ async fn cancellation_waits_for_synchronous_destructors() {
     }
     impl Drop for Cleanup {
         fn drop(&mut self) {
-            let _ = self.started.take().unwrap().send(());
+            self.started.take().unwrap().send(()).unwrap();
             self.release.recv_timeout(HUNG).unwrap();
         }
     }

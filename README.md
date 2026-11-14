@@ -189,6 +189,20 @@ With the `tokio` feature, use `adamantium::time::sleep(duration)` and
 Build periodic waits with a loop over `time::sleep_until`. For measuring elapsed
 wall-clock time, `std::time::Instant::now()` remains allowed.
 
+Enable the optional `tracing` feature and use `tasks.spawn_named("fetch", future)`
+or `tasks.spawn_blocking_named("parse", closure)` to diagnose stuck work. Each
+named task runs inside an `adamantium.task` tracing span with a `task.name` field
+and the current span as its parent. On deadline expiry, the scope emits a warning
+with `running_tasks`, a snapshot of unfinished named tasks in spawn order, before
+requesting cancellation or waiting for cleanup. This includes queued work and
+started blocking closures; completed tasks are excluded even if their handles
+were never awaited. Duplicate names are retained. Install a tracing subscriber
+in the application to collect the spans and warnings.
+
+Unnamed tasks create no spans or diagnostic bookkeeping. Without `tracing`, the
+named methods behave like their unnamed equivalents and do not convert or store
+names; the library has no tracing dependency in that configuration.
+
 ### Streaming concurrent maps
 
 Use `concurrently_ordered(items, limit, f)` to consume results in input order,
@@ -268,6 +282,48 @@ so `Bytes` requests a sequence instead of a byte string. This hint preserves
 support for text formats such as quick-xml, csv, and envy, whose
 `deserialize_any` does not produce a sequence.
 
+## Deterministic Actor tests
+
+Enable `deterministic` in a test dependency to explore Actor interleavings with a
+repeatable seed. Backend selection is per execution: ordinary application code
+and Tokio tests continue to use production primitives in the same build.
+
+```rust
+use adamantium::{Actor, testing::{self, Config}};
+
+#[test]
+fn concurrent_updates() {
+    testing::check(Config { seed: 143, ..Config::default() }, || async {
+        let count = Actor::new(0);
+        let workers = (0..2).map(|_| {
+            let count = count.clone();
+            async move { count.with(|n| *n += 1); }
+        }).collect::<Vec<_>>();
+        testing::parallel(workers).await;
+        assert_eq!(count.into_inner().ok(), Some(2));
+    }).unwrap();
+}
+```
+
+The factory creates fresh state for every execution. The harness schedules
+synchronous Actor calls and ownership operations too, so a separate `read`
+followed by `with` can reveal a lost update even without an `await` between them.
+On failure it prints a JSON replay record with the seed, failing iteration,
+step bound, pinned engine versions and exact schedule, excluding user payloads.
+Save `failure.replay()` with `Replay::save`, load it with `Replay::load`, and pass
+it and the same factory to `testing::replay`. Keep code, dependencies and fixture
+inputs unchanged when replaying. Deadlock and step exhaustion are failures;
+passing exploration is not a proof of all executions.
+
+This first stage supports Actor only. `testing::parallel` provides independent
+test workers; it does not model Tasks' cleanup semantics. Channel, Tasks,
+Cancellation and blocking work reject use in the harness until their adapters
+land (ADAM-159 and ADAM-160); virtual deadlines follow in ADAM-161. Use `#[test]`,
+not `#[tokio::test]`, and create actors inside the execution that uses them.
+Replace I/O, real time, uncontrolled randomness and foreign executors with
+deterministic fixtures. Arbitrary foreign futures cannot all be diagnosed, and
+a step bound cannot interrupt a loop that makes no scheduling calls.
+
 ## The rules
 
 The lint levels are in this repository's `[workspace.lints]`, and the Clippy configuration is in `clippy.toml`. `cargo adamantium rules` prints both. The rules and library provide the following properties for code that follows them:
@@ -279,14 +335,17 @@ The lint levels are in this repository's `[workspace.lints]`, and the Clippy con
 | No task outlives its scope | `tokio::spawn`, `spawn_local`, `JoinSet`, the spawn methods of Tokio's `Handle`, `Runtime`, `LocalRuntime`, and `task::Builder`, `std::thread::spawn`, and `scope` disallowed; tasks use `Tasks` |
 | No lock is held across an await or inside another lock | `await_holding_lock`; `Mutex` and `RwLock` from std, tokio, parking_lot, and futures disallowed; `Actor::with` is synchronous and rejects nesting |
 | No worker thread is blocked | `std::thread::sleep`, `block_in_place`, every Tokio `spawn_blocking`, and `block_on` on a `Handle` or `LocalRuntime` disallowed; blocking work uses `blocking` |
+| No silently discarded must-use results or futures | `unused_must_use`, `let_underscore_must_use`, `let_underscore_future`; intentional discards use an explicit `drop` |
 | No panic from indexing, unwrapping, or an explicit `panic!` | `indexing_slicing`, `string_slice`, `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `unreachable`; `Vec::remove`, `Vec::insert`, `Vec::swap_remove`, `slice::split_at`, and `slice::copy_from_slice` disallowed |
 | No silent truncation or wrap | `cast_possible_truncation`, `cast_possible_wrap`, `cast_sign_loss`; `overflow-checks = true` in release |
-| No leaks or cycles | `mem_forget`, `Box::leak`, `Arc::downgrade`, and `Weak` disallowed |
+| Explicit leak APIs and weak references restricted | `mem_forget`, `Box::leak`, `Arc::downgrade`, and `Weak` disallowed |
 | No skipped cleanup | `exit` |
 
 Tests are exempt from the panic rules, so `unwrap`, indexing, and `panic!` are allowed in `#[test]` functions and `#[cfg(test)]` modules. Before Rust 1.100, Clippy does not treat helper functions in integration test files as tests, so those functions follow the rules. From Rust 1.100, they are exempt as well.
 
 The rules have limits. A plain `receive` or `send` can wait indefinitely while the channel stays open and empty or full; use `receive_until` or `send_until` to bound the wait with a `Cancellation` or a deadline. Dependencies can still use unsafe code or panic, and Clippy cannot detect every call that blocks a worker thread. `Runtime::block_on` is allowed because `#[tokio::main]` and `#[tokio::test]` expand to it; called inside a runtime, it panics at run time instead of blocking. Arithmetic overflow and stack exhaustion can still panic.
+
+Strong reference cycles are not detected or collected. An `Actor` whose state owns a clone of itself, directly or through other actors, keeps every state in the cycle alive after the last external handle is dropped. Banning `Weak` and `Arc::downgrade` does not prevent strong cycles; keep actor ownership acyclic or explicitly remove cycle-forming handles before releasing the last external handle.
 
 ## Style review
 

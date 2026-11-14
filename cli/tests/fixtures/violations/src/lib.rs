@@ -62,3 +62,9 @@ async fn not_send(r: Rc<i32>) -> i32 {
     tokio::time::sleep(Duration::from_millis(1)).await;
     *r
 }
+
+fn dropped_results() {
+    std::fs::read("unused");
+    let _ = std::fs::read("discarded");
+    let _ = async { 42 };
+}
