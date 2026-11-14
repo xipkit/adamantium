@@ -101,7 +101,7 @@ pub(crate) enum Shutdown {
 }
 
 impl Shutdown {
-    fn scope_error<E>(self) -> ScopeError<E> {
+    pub(crate) fn scope_error<E>(self) -> ScopeError<E> {
         match self {
             Self::Cancelled => ScopeError::Cancelled,
             Self::DeadlineExceeded => ScopeError::DeadlineExceeded,

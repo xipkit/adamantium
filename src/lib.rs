@@ -12,7 +12,8 @@
 //! a value of any of these types can be handed to a task without ceremony.
 //!
 //! The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, the
-//! ordered and unordered concurrent streams, and `blocking`.
+//! ordered and unordered concurrent streams, `blocking`, and `retry`, whose
+//! waits end when a `Cancellation` is requested.
 //! Disable default features to use the values, actors, and channels
 //! without a Tokio dependency, including on WASI.
 
@@ -24,6 +25,8 @@ mod bytes;
 mod channel;
 mod deque;
 mod map;
+#[cfg(feature = "tokio")]
+mod retry;
 mod set;
 mod string;
 #[cfg(feature = "tokio")]
@@ -37,6 +40,8 @@ pub use channel::{Channel, Closed, Receiver, Sender, TryReceiveError, TrySendErr
 pub use channel::{ReceiveError, SendError};
 pub use deque::Deque;
 pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
+#[cfg(feature = "tokio")]
+pub use retry::{Backoff, retry, retry_if};
 pub use set::Set;
 pub use string::Str;
 #[cfg(feature = "tokio")]
