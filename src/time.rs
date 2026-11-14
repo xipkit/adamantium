@@ -6,8 +6,17 @@
 //! by the library's `_until` methods. Use [`std::time::Instant::now`] to
 //! measure elapsed wall-clock time instead.
 //!
-//! These functions currently delegate to Tokio and respect its paused clock
-//! in `#[tokio::test(start_paused = true)]` tests.
+//! Outside `adamantium::testing` (with the `deterministic` feature), these functions
+//! delegate to Tokio, including its paused test clock. Inside an execution they
+//! use virtual time: the clock advances to the earliest pending deadline only
+//! when no application task can run. All timers at that instant become ready
+//! together; the scheduler explores the order in which their tasks resume.
+//!
+//! Each execution starts at the same opaque origin in this process. Compare
+//! elapsed durations, not the origin, across processes. Build deadlines inside
+//! the execution that uses them; `Instant` itself carries no execution identity.
+//! A sleep belongs to the execution where it is first polled and cannot be
+//! polled or dropped in another execution. Dropping it unregisters its timer.
 //!
 //! ```
 //! use adamantium::time;
@@ -29,29 +38,66 @@ use tokio::time::Instant;
     reason = "the clock entry point delegates to Tokio here"
 )]
 pub fn now() -> Instant {
+    #[cfg(feature = "deterministic")]
+    if crate::runtime::World::current().is_model() {
+        return crate::runtime::clock::now();
+    }
     Instant::now()
 }
 
 /// Waits for `duration` to elapse without blocking the worker thread.
 ///
-/// Uses Tokio's time driver, with millisecond timer granularity. Dropping the
-/// future cancels the wait. Awaiting it requires a runtime with time enabled.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the relative wait entry point delegates to Tokio here"
-)]
+/// Starts on the first poll. Uses virtual time in the deterministic harness;
+/// otherwise requires Tokio's time driver, with millisecond timer granularity.
+/// Dropping the future cancels the wait.
 pub async fn sleep(duration: Duration) {
-    tokio::time::sleep(duration).await;
+    wait(Delay::For(duration)).await;
 }
 
 /// Waits until `deadline`, built from [`now`], without blocking the worker thread.
 ///
-/// Uses Tokio's time driver, with millisecond timer granularity. Dropping the
-/// future cancels the wait. Awaiting it requires a runtime with time enabled.
+/// Uses virtual time in the deterministic harness; otherwise requires Tokio's
+/// time driver, with millisecond timer granularity. Dropping the future cancels
+/// the wait. Past and current virtual deadlines are immediately ready.
+pub async fn sleep_until(deadline: Instant) {
+    wait(Delay::Until(deadline)).await;
+}
+
+enum Delay {
+    For(Duration),
+    Until(Instant),
+}
+
+struct Owner(crate::runtime::World);
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            self.0.check();
+        }
+    }
+}
+
 #[allow(
     clippy::disallowed_methods,
-    reason = "the deadline wait entry point delegates to Tokio here"
+    reason = "the clock boundary selects the production time driver"
 )]
-pub async fn sleep_until(deadline: Instant) {
-    tokio::time::sleep_until(deadline).await;
+async fn wait(delay: Delay) {
+    let owner = Owner(crate::runtime::World::current());
+    crate::runtime::in_world(owner.0, async {
+        #[cfg(feature = "deterministic")]
+        if owner.0.is_model() {
+            let deadline = match delay {
+                Delay::For(duration) => now() + duration,
+                Delay::Until(deadline) => deadline,
+            };
+            crate::runtime::clock::Sleep::new(deadline).await;
+            return;
+        }
+        match delay {
+            Delay::For(duration) => tokio::time::sleep(duration).await,
+            Delay::Until(deadline) => tokio::time::sleep_until(deadline).await,
+        }
+    })
+    .await;
 }

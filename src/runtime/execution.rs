@@ -42,6 +42,7 @@ impl Execution {
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         assert_ne!(id, 0, "adamantium::testing execution identity exhausted");
         CURRENT.set(Some(id));
+        super::clock::reset();
     }
 }
 
@@ -51,6 +52,7 @@ impl Drop for Execution {
         reason = "the harness runs every modeled task on the OS thread that entered it"
     )]
     fn drop(&mut self) {
+        super::clock::clear();
         CURRENT.set(None);
     }
 }

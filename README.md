@@ -317,7 +317,10 @@ that guarantee, request cancellation and continue awaiting the scope.
 
 With the `tokio` feature, use `adamantium::time::sleep(duration)` and
 `adamantium::time::sleep_until(deadline)` for waits. These functions and
-`time::now()` currently use Tokio's clock, including its paused test clock.
+`time::now()` use Tokio's clock, including its paused test clock, outside the
+deterministic harness. Inside an execution they use virtual time without real
+timers: time advances to the earliest pending deadline only when no application
+task can run, and all timers at that instant become ready together.
 Build periodic waits with a loop over `time::sleep_until`. For measuring elapsed
 wall-clock time, `std::time::Instant::now()` remains allowed.
 
@@ -537,7 +540,12 @@ Blocking work models the queued/started boundary: queued closures can be
 aborted, while started closures finish before a scope joins. Replace real
 blocking I/O with deterministic fixtures using the modeled primitives.
 `testing::parallel` also provides independent test workers. Cancellation-aware
-operations accept `None` for deadlines; virtual deadlines follow in ADAM-161.
+operations accept virtual deadlines built from `time::now()`. Dropping a sleep
+unregisters its timer. Sleeps belong to the execution where first polled;
+carrying a pending sleep across executions is rejected. The opaque clock origin
+is shared within a process, while replay across processes preserves elapsed
+virtual durations. `Instant` itself carries no execution identity, so construct
+deadlines inside each factory execution.
 OS signal handling remains outside the harness. Use `#[test]`, not
 `#[tokio::test]`, and create primitives inside the execution that uses them.
 Replace I/O, real time, uncontrolled randomness and foreign executors with

@@ -333,6 +333,10 @@ fn trace_files_round_trip_without_payloads_and_validate_versions() {
     let json = std::fs::read_to_string(&path).unwrap();
     assert!(!json.contains("private fixture payload"));
     assert_eq!(Replay::load(&path).unwrap(), *failure.replay());
+    let previous_format = json.replace("\"format\":2", "\"format\":1");
+    assert_ne!(previous_format, json);
+    std::fs::write(&path, previous_format).unwrap();
+    assert!(Replay::load(&path).is_err());
     let incompatible = json.replace("shuttle=0.9.10", "shuttle=0.0.0");
     std::fs::write(&path, incompatible).unwrap();
     assert!(Replay::load(&path).is_err());
