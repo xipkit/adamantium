@@ -1,15 +1,12 @@
 use std::{
-    any::Any,
-    collections::BTreeMap,
-    fmt,
-    future::Future,
-    panic,
-    pin::pin,
-    sync::{Arc, PoisonError},
-    task::Poll,
+    any::Any, collections::BTreeMap, fmt, future::Future, panic, pin::pin, sync::Arc, task::Poll,
 };
 
-use tokio::{task::JoinError, time::Instant};
+use crate::runtime::{
+    Guard, Lock, World,
+    task::{JoinError, JoinSet},
+};
+use tokio::time::Instant;
 
 use crate::{Reply, ReplyReceiver, Watch, time};
 
@@ -27,21 +24,22 @@ pub use stream::{
 /// Dropping a clone does not cancel. Use a fresh signal for each scope: a
 /// cancelled signal cannot be reset, and scopes also cancel it on shutdown.
 pub struct Cancellation {
+    world: World,
     requested: Watch<bool>,
 }
 
 impl Cancellation {
     /// Creates a signal with no shutdown requested.
     pub fn new() -> Self {
-        crate::runtime::production_only("Tasks and Cancellation");
         Self {
+            world: World::current(),
             requested: Watch::new(false),
         }
     }
 
     /// Requests shutdown. Repeated requests have the same effect as one.
     pub fn cancel(&self) {
-        crate::runtime::production_only("Tasks and Cancellation");
+        self.world.check();
         self.request();
     }
 
@@ -55,14 +53,14 @@ impl Cancellation {
 
     /// Whether shutdown has been requested, including from a blocking thread.
     pub fn is_cancelled(&self) -> bool {
-        crate::runtime::production_only("Tasks and Cancellation");
+        self.world.check();
         self.requested.get()
     }
 
     /// Waits for shutdown, returning immediately if already requested.
     /// Dropping this future does not lose the request.
     pub async fn cancelled(&self) {
-        crate::runtime::production_future("Tasks and Cancellation", async move {
+        crate::runtime::in_world(self.world, async move {
             let mut requested = self.requested.subscribe();
             // Borrowing self keeps a handle alive, so the watch cannot close.
             requested.wait_for(|requested| *requested).await;
@@ -85,6 +83,7 @@ impl Cancellation {
     /// behavior even after the listener is dropped.
     #[cfg(all(feature = "signal", any(unix, windows)))]
     pub async fn cancel_on_signal(&self) -> std::io::Result<()> {
+        crate::runtime::production_only("OS signal handling");
         #[cfg(unix)]
         let received = async {
             use tokio::signal::unix::{SignalKind, signal};
@@ -92,6 +91,7 @@ impl Cancellation {
             let mut interrupt = signal(SignalKind::interrupt())?;
             let mut terminate = signal(SignalKind::terminate())?;
             tokio::select! {
+                biased;
                 _ = interrupt.recv() => {},
                 _ = terminate.recv() => {},
             }
@@ -114,7 +114,7 @@ impl Cancellation {
 
 impl fmt::Debug for Cancellation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        crate::runtime::production_only("Cancellation");
+        self.world.check();
         f.debug_struct("Cancellation")
             .field("requested", &self.requested.get())
             .finish()
@@ -125,15 +125,16 @@ impl fmt::Debug for Cancellation {
 impl Drop for Cancellation {
     fn drop(&mut self) {
         if !std::thread::panicking() {
-            crate::runtime::production_only("Cancellation");
+            self.world.check();
         }
     }
 }
 
 impl Clone for Cancellation {
     fn clone(&self) -> Self {
-        crate::runtime::production_only("Cancellation");
+        self.world.check();
         Self {
+            world: self.world,
             requested: self.requested.clone(),
         }
     }
@@ -231,22 +232,16 @@ struct Errors<E> {
 /// What a failed task sends its handle: where to claim the error.
 struct Receipt(u64);
 
-#[allow(
-    clippy::disallowed_types,
-    reason = "a lock held only inside synchronous code, never across an await"
-)]
-type Shared<V> = Arc<std::sync::Mutex<V>>;
+type Shared<V> = Arc<Lock<V>>;
 
 type SharedErrors<E> = Shared<Errors<E>>;
 
-#[allow(clippy::disallowed_types, reason = "see Shared")]
 fn shared<V>(value: V) -> Shared<V> {
-    Arc::new(std::sync::Mutex::new(value))
+    Arc::new(Lock::new(value))
 }
 
-#[allow(clippy::disallowed_types, reason = "see Shared")]
-fn lock<V>(shared: &Shared<V>) -> std::sync::MutexGuard<'_, V> {
-    shared.lock().unwrap_or_else(PoisonError::into_inner)
+fn lock<V>(shared: &Shared<V>) -> Guard<'_, V> {
+    shared.lock()
 }
 
 fn record<E>(errors: &SharedErrors<E>, error: E) -> Receipt {
@@ -291,11 +286,8 @@ fn no_result() -> ! {
 /// [`run`](Self::run) for the common shape, or [`new`](Self::new),
 /// [`spawn`](Self::spawn) and [`join`](Self::join) by hand.
 pub struct Tasks<E> {
-    #[allow(
-        clippy::disallowed_types,
-        reason = "the scope is what makes a JoinSet structured"
-    )]
-    set: tokio::task::JoinSet<()>,
+    set: JoinSet,
+    world: World,
     errors: SharedErrors<E>,
     cancellation: Option<Cancellation>,
     #[cfg(feature = "tracing")]
@@ -308,22 +300,17 @@ pub struct Tasks<E> {
 /// its result. Dropping it or keeping it is fine: the task still runs, and an
 /// error nobody took with `value` is reported when the scope joins.
 pub struct Task<T, E> {
-    #[cfg(feature = "deterministic")]
-    _runtime: crate::runtime::execution::Production,
+    world: World,
     rx: ReplyReceiver<Result<T, Receipt>>,
     errors: SharedErrors<E>,
 }
 
 impl<E: Send + 'static> Tasks<E> {
     /// An empty scope.
-    #[allow(
-        clippy::disallowed_types,
-        reason = "the scope is what makes a JoinSet structured"
-    )]
     pub fn new() -> Self {
-        crate::runtime::production_only("Tasks and Cancellation");
         Self {
-            set: tokio::task::JoinSet::new(),
+            set: JoinSet::new(),
+            world: World::current(),
             errors: shared(Errors {
                 next: 0,
                 recorded: BTreeMap::new(),
@@ -361,7 +348,7 @@ impl<E: Send + 'static> Tasks<E> {
         R: Send,
         F: AsyncFnOnce(&mut Tasks<E>) -> Result<R, E>,
     {
-        crate::runtime::production_future("Tasks and Cancellation", async move {
+        crate::runtime::in_world(World::current(), async move {
             let mut tasks = Self::new();
             let result = body(&mut tasks).await;
             tasks.join(result).await
@@ -424,7 +411,7 @@ impl<E: Send + 'static> Tasks<E> {
         R: Send,
         F: AsyncFnOnce(&mut Tasks<E>) -> Result<R, E>,
     {
-        crate::runtime::production_future("Tasks and Cancellation", async move {
+        crate::runtime::in_world(World::current(), async move {
             let mut tasks = Self::new();
             tasks.cancellation = Some(cancellation.clone());
             let reason = tokio::select! {
@@ -447,7 +434,7 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
-        crate::runtime::production_only("Tasks and Cancellation");
+        self.world.check();
         let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
         self.set.spawn(async move {
@@ -457,8 +444,7 @@ impl<E: Send + 'static> Tasks<E> {
             drop(tx.send(result));
         });
         Task {
-            #[cfg(feature = "deterministic")]
-            _runtime: crate::runtime::execution::Production("Task"),
+            world: self.world,
             rx,
             errors: Arc::clone(&self.errors),
         }
@@ -474,7 +460,7 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
-        crate::runtime::production_only("Tasks and Cancellation");
+        self.world.check();
         #[cfg(feature = "tracing")]
         {
             use tracing::{Instrument, instrument::WithSubscriber};
@@ -508,7 +494,7 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
-        crate::runtime::production_only("Tasks and Cancellation");
+        self.world.check();
         let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
         self.set.spawn_blocking(move || {
@@ -517,8 +503,7 @@ impl<E: Send + 'static> Tasks<E> {
             drop(tx.send(result));
         });
         Task {
-            #[cfg(feature = "deterministic")]
-            _runtime: crate::runtime::execution::Production("Task"),
+            world: self.world,
             rx,
             errors: Arc::clone(&self.errors),
         }
@@ -533,7 +518,7 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
-        crate::runtime::production_only("Tasks and Cancellation");
+        self.world.check();
         #[cfg(feature = "tracing")]
         {
             let (running, span) = self.track(name.into());
@@ -557,7 +542,7 @@ impl<E: Send + 'static> Tasks<E> {
     /// Waits for a task and returns its result. If the task panicked, the
     /// panic is resumed here.
     pub async fn value<T: Send>(&mut self, task: Task<T, E>) -> Result<T, E> {
-        crate::runtime::production_future("Tasks and Cancellation", async move {
+        crate::runtime::in_world(self.world, async move {
             let error = match task.rx.receive().await {
                 Some(Ok(value)) => return Ok(value),
                 Some(Err(receipt)) => claim(&task.errors, receipt),
@@ -580,7 +565,7 @@ impl<E: Send + 'static> Tasks<E> {
     /// `body` already took it with [`value`](Self::value), is returned over
     /// a successful body; a failed body's error is returned over a task's.
     pub async fn join<R: Send>(mut self, body: Result<R, E>) -> Result<R, E> {
-        crate::runtime::production_future("Tasks and Cancellation", async move {
+        crate::runtime::in_world(self.world, async move {
             self.settle(body.is_err()).await;
             self.result(body)
         })
@@ -597,9 +582,9 @@ impl<E: Send + 'static> Tasks<E> {
         deadline: Option<Instant>,
         body: Result<R, E>,
     ) -> impl Future<Output = Result<R, ScopeError<E>>> + Send {
-        crate::runtime::production_only("Tasks and Cancellation");
+        self.world.check();
         self.cancellation = Some(cancellation.clone());
-        crate::runtime::production_future("Tasks", async move {
+        crate::runtime::in_world(World::current(), async move {
             let reason = tokio::select! {
                 biased;
                 reason = shutdown(&cancellation, deadline) => Some(reason),
@@ -649,13 +634,13 @@ impl<E: Send + 'static> Tasks<E> {
 
     /// The number of tasks that have not been joined.
     pub fn len(&self) -> usize {
-        crate::runtime::production_only("Tasks and Cancellation");
+        self.world.check();
         self.set.len()
     }
 
     /// Whether every spawned task has been joined.
     pub fn is_empty(&self) -> bool {
-        crate::runtime::production_only("Tasks and Cancellation");
+        self.world.check();
         self.set.is_empty()
     }
 
@@ -714,7 +699,10 @@ impl<E> Drop for Tasks<E> {
     fn drop(&mut self) {
         #[cfg(feature = "deterministic")]
         if !std::thread::panicking() {
-            crate::runtime::production_only("Tasks");
+            self.world.check();
+        }
+        if std::thread::panicking() && self.world.is_model() && self.world != World::current() {
+            return;
         }
         if let Some(cancellation) = &self.cancellation {
             cancellation.request();
@@ -731,7 +719,7 @@ impl<E: Send + 'static> Default for Tasks<E> {
 
 impl<E> fmt::Debug for Tasks<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        crate::runtime::production_only("Tasks");
+        self.world.check();
         f.debug_struct("Tasks")
             .field("len", &self.set.len())
             .finish()
@@ -740,6 +728,7 @@ impl<E> fmt::Debug for Tasks<E> {
 
 impl<T, E> fmt::Debug for Task<T, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.world.check();
         f.write_str("Task")
     }
 }
@@ -780,12 +769,11 @@ where
     T: Send + 'static,
     E: Send + 'static,
 {
-    crate::runtime::production_only("Tasks and Cancellation");
     // The loop comes back for another item after every join, and an iterator
     // may resume or panic if it is called again after its first `None`.
     let mut items = items.into_iter().fuse();
     let limit = limit.max(1);
-    crate::runtime::production_future("Tasks", async move {
+    crate::runtime::in_world(World::current(), async move {
         let mut tasks = Tasks::new();
         // Tasks report here rather than through handles, so items that finish
         // behind a slow one leave only their results behind.
@@ -880,10 +868,9 @@ where
     T: Send + 'static,
     E: Send + 'static,
 {
-    crate::runtime::production_only("Tasks and Cancellation");
     let mut items = items.into_iter().fuse();
     let limit = limit.max(1);
-    crate::runtime::production_future("Tasks", async move {
+    crate::runtime::in_world(World::current(), async move {
         // Items report here rather than as task errors, which would make the
         // scope abort the others at the first failure.
         let mut tasks = Tasks::<std::convert::Infallible>::new();
@@ -957,12 +944,8 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    crate::runtime::production_future("Tasks and Cancellation", async move {
-        #[allow(
-            clippy::disallowed_methods,
-            reason = "the sanctioned wrapper around spawn_blocking"
-        )]
-        let handle = tokio::task::spawn_blocking(f);
+    crate::runtime::in_world(World::current(), async move {
+        let handle = crate::runtime::task::spawn_blocking(f);
         match handle.await {
             Ok(value) => value,
             Err(join_error) => {
@@ -971,4 +954,49 @@ where
         }
     })
     .await
+}
+
+#[cfg(all(test, feature = "deterministic"))]
+mod schedule_tests {
+    use super::*;
+    use crate::testing::{self, Config};
+
+    #[test]
+    fn oldest_unclaimed_error_and_body_precedence_survive_replay() {
+        async fn scenario() {
+            let mut tasks = Tasks::<&str>::new();
+            let first = tasks.spawn(async { Err::<(), _>("first") });
+            while lock(&tasks.errors).recorded.len() != 1 {
+                shuttle::future::yield_now().await;
+            }
+            let second = tasks.spawn(async { Err::<(), _>("second") });
+            while lock(&tasks.errors).recorded.len() != 2 {
+                shuttle::future::yield_now().await;
+            }
+            assert_eq!(tasks.value(first).await, Err("first"));
+            let third = tasks.spawn(async { Err::<(), _>("third") });
+            while lock(&tasks.errors).recorded.len() != 2 {
+                shuttle::future::yield_now().await;
+            }
+            // Retained result handles cannot hide errors from join.
+            assert_eq!(tasks.join(Ok(())).await, Err("second"));
+            drop((second, third));
+
+            let mut tasks = Tasks::<&str>::new();
+            let child = tasks.spawn(async { Err::<(), _>("child") });
+            while !any_recorded(&tasks.errors) {
+                shuttle::future::yield_now().await;
+            }
+            assert_eq!(tasks.join(Err::<(), _>("body")).await, Err("body"));
+            drop(child);
+        }
+        let config = Config {
+            seed: 160,
+            iterations: 500,
+            max_steps: 20_000,
+        };
+        let replay = testing::check(config, scenario).unwrap();
+        assert_eq!(testing::check(config, scenario).unwrap(), replay);
+        assert_eq!(testing::replay(&replay, scenario).unwrap(), replay);
+    }
 }

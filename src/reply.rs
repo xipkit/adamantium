@@ -1,4 +1,9 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
+
+use crate::{
+    Channel, Receiver, Sender,
+    runtime::{World, wait::WaitQueue},
+};
 
 #[cfg(feature = "tokio")]
 use tokio::time::Instant;
@@ -49,9 +54,8 @@ use crate::{Closed, TryReceiveError};
 /// # fn main() {}
 /// ```
 pub struct Reply<T> {
-    #[cfg(feature = "deterministic")]
-    _runtime: crate::runtime::execution::Production,
-    inner: async_channel::Sender<T>,
+    inner: Sender<T>,
+    closed: Arc<WaitQueue>,
 }
 
 /// The receiving half of a one-shot reply, created by [`Reply::pair`].
@@ -61,26 +65,25 @@ pub struct Reply<T> {
 /// that nobody is waiting: its [`send`](Reply::send) hands the value back
 /// and [`closed`](Reply::closed) completes.
 pub struct ReplyReceiver<T> {
-    #[cfg(feature = "deterministic")]
-    _runtime: crate::runtime::execution::Production,
-    inner: async_channel::Receiver<T>,
+    inner: Receiver<T>,
+    closed: Arc<WaitQueue>,
+    world: World,
 }
 
 impl<T> Reply<T> {
     /// A reply and the receiver that waits for it.
     pub fn pair() -> (Self, ReplyReceiver<T>) {
-        crate::runtime::production_only("Reply");
-        let (sender, receiver) = async_channel::bounded(1);
+        let (sender, receiver) = Channel::bounded(1).split();
+        let closed = Arc::new(WaitQueue::new());
         (
             Self {
-                #[cfg(feature = "deterministic")]
-                _runtime: crate::runtime::execution::Production("Reply"),
                 inner: sender,
+                closed: closed.clone(),
             },
             ReplyReceiver {
-                #[cfg(feature = "deterministic")]
-                _runtime: crate::runtime::execution::Production("Reply"),
                 inner: receiver,
+                closed,
+                world: World::current(),
             },
         )
     }
@@ -88,25 +91,32 @@ impl<T> Reply<T> {
     /// Sends the reply without waiting. Hands the value back in [`Closed`]
     /// if the receiver was dropped or closed.
     pub fn send(self, value: T) -> Result<(), Closed<T>> {
-        crate::runtime::production_only("Reply");
         // The queue holds one value and this is the only send, so it is
         // never full.
-        self.inner
-            .try_send(value)
-            .map_err(|error| Closed(error.into_inner()))
+        self.inner.try_send(value).map_err(|error| match error {
+            crate::TrySendError::Closed(value) | crate::TrySendError::Full(value) => Closed(value),
+        })
     }
 
     /// Whether the receiver was dropped or closed, so a reply would not be
     /// received.
     pub fn is_closed(&self) -> bool {
-        crate::runtime::production_only("Reply");
         self.inner.is_closed()
     }
 
     /// Waits until the receiver is dropped or closed, so work whose answer
     /// nobody wants can stop early.
     pub async fn closed(&self) {
-        crate::runtime::production_future("Reply", self.inner.closed()).await;
+        loop {
+            if self.is_closed() {
+                return;
+            }
+            let listener = self.closed.listen();
+            if self.is_closed() {
+                return;
+            }
+            listener.await;
+        }
     }
 }
 
@@ -117,9 +127,7 @@ impl<T> ReplyReceiver<T> {
     /// Dropping the returned future loses nothing: a reply sent meanwhile
     /// stays for the next receive.
     pub async fn receive(&self) -> Option<T> {
-        crate::runtime::production_future("Reply", self.inner.recv())
-            .await
-            .ok()
+        self.inner.receive().await
     }
 
     /// Receives without waiting. Returns [`TryReceiveError::Empty`] while
@@ -127,11 +135,7 @@ impl<T> ReplyReceiver<T> {
     /// dropped without sending, the receiver was closed, or the value was
     /// already received.
     pub fn try_receive(&self) -> Result<T, TryReceiveError> {
-        crate::runtime::production_only("Reply");
-        self.inner.try_recv().map_err(|error| match error {
-            async_channel::TryRecvError::Empty => TryReceiveError::Empty,
-            async_channel::TryRecvError::Closed => TryReceiveError::Closed,
-        })
+        self.inner.try_receive()
     }
 
     /// Waits for the reply until `cancellation` is requested or the
@@ -164,11 +168,11 @@ impl<T> ReplyReceiver<T> {
         cancellation: &Cancellation,
         deadline: Option<Instant>,
     ) -> Result<T, ReceiveError> {
-        crate::runtime::production_future("Reply", async move {
+        crate::runtime::in_world(self.world, async move {
             let reason = tokio::select! {
                 biased;
                 reason = shutdown(cancellation, deadline) => reason,
-                received = self.inner.recv() => return received.map_err(|_| ReceiveError::Closed),
+                received = self.inner.receive() => return received.ok_or(ReceiveError::Closed),
             };
             Err(match reason {
                 Shutdown::Cancelled => ReceiveError::Cancelled,
@@ -182,20 +186,19 @@ impl<T> ReplyReceiver<T> {
     /// the value back. A reply already sent can still be received. Returns
     /// `false` if the reply was already closed, sent, or dropped.
     pub fn close(&self) -> bool {
-        crate::runtime::production_only("Reply");
-        self.inner.close()
+        let changed = self.inner.close();
+        self.closed.notify_all();
+        changed
     }
 
     /// Whether no reply can arrive any more: it was sent, dropped, or
     /// closed. A sent reply may still be waiting to be received.
     pub fn is_closed(&self) -> bool {
-        crate::runtime::production_only("Reply");
         self.inner.is_closed()
     }
 
     /// Whether a sent reply is waiting to be received.
     pub fn is_ready(&self) -> bool {
-        crate::runtime::production_only("Reply");
         !self.inner.is_empty()
     }
 }
@@ -214,5 +217,14 @@ impl<T> fmt::Debug for ReplyReceiver<T> {
             .field("ready", &self.is_ready())
             .field("closed", &self.is_closed())
             .finish()
+    }
+}
+
+impl<T> Drop for ReplyReceiver<T> {
+    fn drop(&mut self) {
+        if std::thread::panicking() && self.world != World::current() {
+            return;
+        }
+        self.close();
     }
 }
