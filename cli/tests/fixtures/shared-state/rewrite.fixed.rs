@@ -16,9 +16,9 @@ pub fn counter() -> u64 {
 pub fn settings() -> (Vec<String>, usize) {
     let settings: ::adamantium::Actor<Vec<String>> = ::adamantium::Actor::default();
     let writer = settings.clone();
-    writer.with(|writer| { writer.push("verbose".to_owned()); });
-    let current = settings.with(|settings| settings.clone());
-    let count = settings.with(|settings| settings.len());
+    writer.with(|writer| { (*writer).push("verbose".to_owned()); });
+    let current = settings.with(|settings| (*settings).clone());
+    let count = settings.with(|settings| (*settings).len());
     (current, count)
 }
 
@@ -74,24 +74,48 @@ pub async fn deferred() -> Vec<u32> {
     let task = {
         let log = log.clone();
         async move {
-            log.with(|log| { log.push(1); });
+            log.with(|log| { (*log).push(1); });
         }
     };
     task.await;
-    (2..4).for_each(|n| log.with(|log| log.push(n)));
-    let shadow = log.with(|log| log.len());
+    (2..4).for_each(|n| log.with(|log| (*log).push(n)));
+    let shadow = log.with(|log| (*log).len());
     {
         let log = shadow;
         assert_eq!(log, 3);
     }
     let spare = log.clone();
     std::mem::drop(spare);
-    let entries = log.with(|log| log.clone());
+    let entries = log.with(|log| (*log).clone());
     entries
 }
 
 pub fn timeout() -> Duration {
     Duration::from_millis(1)
+}
+
+/// Implemented for the state and for a reference to it, so a method call
+/// resolves to the state's only if lookup starts where the guard's did.
+pub trait Value {
+    fn value(&self) -> u32;
+}
+
+impl Value for u32 {
+    fn value(&self) -> u32 {
+        *self
+    }
+}
+
+impl Value for &mut u32 {
+    fn value(&self) -> u32 {
+        0
+    }
+}
+
+pub fn lookup() -> u32 {
+    let state = ::adamantium::Actor::new(7u32);
+    let value = state.with(|state| (*state).value());
+    value
 }
 
 #[cfg(test)]
@@ -100,7 +124,7 @@ mod tests {
 
     fn taken() -> Option<String> {
         let name = ::adamantium::Actor::new(String::from("adamantium"));
-        let label = name.with(|name| format!("{:?}", name.len()));
+        let label = name.with(|name| format!("{:?}", (*name).len()));
         assert_eq!(label, "10");
         Some(name.into_inner().ok().unwrap())
     }
@@ -122,6 +146,7 @@ mod tests {
         assert_eq!(taken().as_deref(), Some("adamantium"));
         assert_eq!(unwrapped(), [1]);
         assert_eq!(timeout(), Duration::from_millis(1));
+        assert_eq!(lookup(), 7);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();

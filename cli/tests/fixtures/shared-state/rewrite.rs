@@ -98,6 +98,30 @@ pub fn timeout() -> Duration {
     Duration::from_millis(1)
 }
 
+/// Implemented for the state and for a reference to it, so a method call
+/// resolves to the state's only if lookup starts where the guard's did.
+pub trait Value {
+    fn value(&self) -> u32;
+}
+
+impl Value for u32 {
+    fn value(&self) -> u32 {
+        *self
+    }
+}
+
+impl Value for &mut u32 {
+    fn value(&self) -> u32 {
+        0
+    }
+}
+
+pub fn lookup() -> u32 {
+    let state = Arc::new(Mutex::new(7u32));
+    let value = state.lock().unwrap().value();
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +150,7 @@ mod tests {
         assert_eq!(taken().as_deref(), Some("adamantium"));
         assert_eq!(unwrapped(), [1]);
         assert_eq!(timeout(), Duration::from_millis(1));
+        assert_eq!(lookup(), 7);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();

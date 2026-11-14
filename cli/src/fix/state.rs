@@ -1206,6 +1206,9 @@ struct Plan<'a> {
     /// value can't borrow the state.
     narrow: Option<&'a Expr>,
     mode: Mode,
+    /// What replaces the guard: the callback's parameter, or for a method
+    /// receiver, the state it points to.
+    receiver: bool,
 }
 
 /// Whether `child` is the node `expr`.
@@ -1519,6 +1522,7 @@ impl<'a> Walker<'a> {
             root,
             narrow,
             mode: if read { Mode::Read } else { Mode::With },
+            receiver: !projected,
         })
     }
 
@@ -1566,6 +1570,15 @@ impl<'a> Walker<'a> {
         if let Some(reason) = inside.unfollowed {
             return Err(Reason::Unfollowed(reason));
         }
+        // Method lookup on a guard starts at the guard and reaches the state
+        // through `Deref`; on the callback's `&mut T` it would start at the
+        // reference and could pick another trait's method. Starting at `*m`
+        // keeps the state's lookup.
+        let state = if plan.receiver {
+            format!("(*{name})")
+        } else {
+            name.clone()
+        };
         // The closure's parameter takes the binding's name, so the code that
         // moves into the closure must not name the binding anywhere else.
         let substitute = |range: Range<usize>| -> Result<String, Reason> {
@@ -1578,7 +1591,7 @@ impl<'a> Walker<'a> {
             let before = self.text.get(range.start..guard_range.start);
             let after = self.text.get(guard_range.end..range.end);
             match (before, after) {
-                (Some(before), Some(after)) => Ok(format!("{before}{name}{after}")),
+                (Some(before), Some(after)) => Ok(format!("{before}{state}{after}")),
                 _ => Err(UNLOCATED),
             }
         };
@@ -2814,7 +2827,7 @@ mod tests {
         );
         assert_eq!(refusals, []);
         assert!(
-            fixed.contains("let copy: Vec<i32> = m.with(|m| m.clone());"),
+            fixed.contains("let copy: Vec<i32> = m.with(|m| (*m).clone());"),
             "{fixed}"
         );
     }
@@ -2868,7 +2881,10 @@ mod tests {
             &["Mutex"],
         );
         assert_eq!(refusals, []);
-        assert!(fixed.contains("let n = m.with(|m| m.clone());"), "{fixed}");
+        assert!(
+            fixed.contains("let n = m.with(|m| (*m).clone());"),
+            "{fixed}"
+        );
     }
 
     #[test]
@@ -2912,7 +2928,7 @@ mod tests {
         );
         assert_eq!(refusals, []);
         assert!(
-            fixed.contains("m.with(|m| { consume(m.clone()); });"),
+            fixed.contains("m.with(|m| { consume((*m).clone()); });"),
             "{fixed}"
         );
     }
