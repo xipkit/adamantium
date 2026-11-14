@@ -287,7 +287,7 @@ on_both_runtimes! {
             assert_eq!(failure.next().await, Some(Err(ScopeError::Failed("error"))));
         }
         {
-            let mut abandoned = Box::pin(concurrently_ordered_until(0..1, 1, parent.clone(), |_| future::pending::<Result<(), &str>>()));
+            let mut abandoned = std::pin::pin!(concurrently_ordered_until(0..1, 1, parent.clone(), |_| future::pending::<Result<(), &str>>()));
             pending(abandoned.as_mut()).await;
         }
         assert!(!parent.is_cancelled());
