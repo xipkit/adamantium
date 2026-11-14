@@ -578,3 +578,59 @@ fn dropping_a_notified_send_passes_room_without_sending_its_value() {
     assert_eq!(receiver.try_receive(), Ok(2));
     assert_eq!(receiver.try_receive(), Err(TryReceiveError::Empty));
 }
+
+#[test]
+fn cancelling_receive_after_a_stolen_message_keeps_the_next_waiter_live() {
+    let (sender, receiver) = Channel::bounded(1).split();
+    let first_wake = Arc::new(WakeCounter::default());
+    let second_wake = Arc::new(WakeCounter::default());
+    let mut first = Box::pin(receiver.receive());
+    let mut second = pin!(receiver.receive());
+    assert!(poll_once(first.as_mut(), &first_wake).is_pending());
+    assert!(poll_once(second.as_mut(), &second_wake).is_pending());
+
+    sender.try_send(7).unwrap();
+    assert!(first_wake.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(receiver.try_receive(), Ok(7));
+    // Consume the notification, fail the empty recheck and register again.
+    assert!(poll_once(first.as_mut(), &first_wake).is_pending());
+    drop(first);
+    assert_eq!(second_wake.0.load(Ordering::SeqCst), 0);
+
+    sender.try_send(8).unwrap();
+    assert!(second_wake.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        poll_once(second.as_mut(), &second_wake),
+        Poll::Ready(Some(8))
+    );
+    assert_eq!(receiver.try_receive(), Err(TryReceiveError::Empty));
+}
+
+#[test]
+fn cancelling_send_after_a_stolen_slot_keeps_the_next_waiter_live() {
+    let (sender, receiver) = Channel::bounded(1).split();
+    sender.try_send(0).unwrap();
+    let first_wake = Arc::new(WakeCounter::default());
+    let second_wake = Arc::new(WakeCounter::default());
+    let mut first = Box::pin(sender.send(1));
+    let mut second = pin!(sender.send(2));
+    assert!(poll_once(first.as_mut(), &first_wake).is_pending());
+    assert!(poll_once(second.as_mut(), &second_wake).is_pending());
+
+    assert_eq!(receiver.try_receive(), Ok(0));
+    assert!(first_wake.0.load(Ordering::SeqCst) > 0);
+    sender.try_send(99).unwrap();
+    // Consume the notification, fail the full recheck and register again.
+    assert!(poll_once(first.as_mut(), &first_wake).is_pending());
+    drop(first);
+    assert_eq!(second_wake.0.load(Ordering::SeqCst), 0);
+
+    assert_eq!(receiver.try_receive(), Ok(99));
+    assert!(second_wake.0.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        poll_once(second.as_mut(), &second_wake),
+        Poll::Ready(Ok(()))
+    );
+    assert_eq!(receiver.try_receive(), Ok(2));
+    assert_eq!(receiver.try_receive(), Err(TryReceiveError::Empty));
+}
