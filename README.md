@@ -15,7 +15,7 @@ Add the library to a project:
 adamantium = { git = "https://github.com/xipkit/adamantium.git", rev = "..." }
 ```
 
-The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, the
+The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, `first_ok`, the
 concurrent streams, and `blocking`. Set `default-features = false` to use `Actor`, `Str`, `Bytes`,
 `Array`, `Deque`, `Map`, `Set`, `Channel`, `Reply`, and `Watch` without Tokio, including on WASI. The `serde`
 feature can be enabled independently.
@@ -155,6 +155,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 - **`Set<T>`** stores unique values in insertion order, removes values without reordering the rest, and compares membership regardless of order. Union, intersection, difference, and symmetric difference borrow values in the documented set order; collect an iterator to make an owned set. With `serde`, sets serialize as sequences in insertion order and deserialize duplicate values only once.
 - **`Tasks<E>`** manages a scope of tasks. `spawn` starts a task, and `value` waits for its result. `join` and `Tasks::run` wait for remaining tasks. Unobserved task errors are returned at join; if the body or an unobserved task returns an error, the remaining tasks are aborted. Task panics resume in the scope. Specify the error type with `Tasks::<E>::run` when it cannot be inferred, such as when all errors pass through `?`.
 - **`concurrently`** maps items in parallel with a concurrency limit and returns results in input order. It starts when first polled and takes each item only when a place opens, so at most `limit` futures exist at once and a failure stops it taking more. The iterator and closure must be `Send`, and they run inside the returned future's poll.
+- **`first_ok`** takes items the way `concurrently` does and returns the first success, aborting and draining the items still running. A failure only frees a place for the next item; if every item fails, all the errors come back in input order. A limit of one tries the items in turn, and a limit as long as the input races them.
 - **`blocking`** runs a closure on the blocking pool and resumes any panic on the calling task.
 
 - **`Actor<S>`** shares state between tasks. `with` provides exclusive access and `read` provides read-only access through synchronous closures, so neither holds the lock across an await. A read-only method such as `Tally::total` can be passed to `read`. Calling `with` or `read` from inside either method on any actor panics to prevent deadlocks.

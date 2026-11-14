@@ -12,10 +12,10 @@
 //! Everything here is `Send + Sync + 'static` when its element types are, so
 //! a value of any of these types can be handed to a task without ceremony.
 //!
-//! The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, the
-//! ordered and unordered concurrent streams, `blocking`, the `time` module, and
-//! `retry` and `RateLimit`, whose waits all end when a `Cancellation` is
-//! requested.
+//! The default `tokio` feature provides `Task`, `Tasks`, `concurrently`,
+//! `first_ok`, the ordered and unordered concurrent streams, `blocking`, the
+//! `time` module, and `retry` and `RateLimit`, whose waits all end when a
+//! `Cancellation` is requested.
 //! Disable default features to use the values, actors, channels, replies,
 //! and watches without a Tokio dependency, including on WASI.
 //! The opt-in `signal` feature adds `Cancellation::cancel_on_signal` on Unix
@@ -65,7 +65,7 @@ pub use string::Str;
 #[cfg(feature = "tokio")]
 pub use tasks::{
     Cancellation, ScopeError, Task, Tasks, blocking, concurrently, concurrently_ordered,
-    concurrently_ordered_until, concurrently_unordered, concurrently_unordered_until,
+    concurrently_ordered_until, concurrently_unordered, concurrently_unordered_until, first_ok,
 };
 pub use watch::{Watch, Watcher};
 
