@@ -18,6 +18,7 @@
 //! unresolved under its name rather than guessed at.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs, mem,
     path::{Component, Path, PathBuf},
@@ -775,13 +776,39 @@ struct Candidate<'t> {
     /// Where its name is written.
     span: Span,
     /// The predicates of the `cfg`s it is defined under.
-    condition: &'t [TokenStream],
+    condition: Cow<'t, [TokenStream]>,
     /// Whether a build that `condition` holds for defines it.
     defined: Truth,
     origin: Origin,
     /// Which of the crate's own definitions it is, or `None` for another
     /// crate's.
     instance: Option<usize>,
+}
+
+impl Candidate<'_> {
+    /// Reads this definition where `other`, a way to the same one, holds
+    /// too.
+    fn either(&mut self, other: Self) {
+        let text = |condition: &[TokenStream]| {
+            condition
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        };
+        if text(&self.condition) != text(&other.condition) {
+            let span = self.span;
+            let either = cfg_call(
+                "any",
+                [
+                    cfg_call("all", self.condition.to_vec(), span),
+                    cfg_call("all", other.condition.to_vec(), span),
+                ],
+                span,
+            );
+            self.condition = Cow::Owned(vec![either]);
+        }
+        self.defined = self.defined.or(other.defined);
+    }
 }
 
 /// The `macro_rules!` a call can name by its bare name at a place in the
@@ -1666,7 +1693,7 @@ impl<'a> Scanner<'a> {
                 rules: definition.rules.as_ref()?,
                 rel: &definition.rel,
                 span: definition.span,
-                condition: &definition.condition,
+                condition: Cow::Borrowed(&definition.condition),
                 defined: definition.defined,
                 origin: Origin::Local,
                 instance: Some(definition.instance),
@@ -1719,7 +1746,7 @@ impl<'a> Scanner<'a> {
                         rules: export.rules.as_ref()?,
                         rel: &export.rel,
                         span: export.span,
-                        condition: &imported.condition,
+                        condition: Cow::Borrowed(&imported.condition),
                         defined: imported.defined,
                         origin: Origin::MacroUse(imported.import),
                         instance: None,
@@ -1750,7 +1777,7 @@ impl<'a> Scanner<'a> {
                         rules: export.rules.as_ref()?,
                         rel: &export.rel,
                         span: export.span,
-                        condition: &[],
+                        condition: Cow::Borrowed(&[]),
                         defined: export.defined,
                         origin: Origin::Path,
                         instance: None,
@@ -1763,14 +1790,22 @@ impl<'a> Scanner<'a> {
                         rules: definition.rules.as_ref()?,
                         rel: &definition.rel,
                         span: definition.span,
-                        condition: &definition.condition,
+                        condition: Cow::Borrowed(&definition.condition),
                         defined: definition.defined,
                         origin: Origin::Path,
                         instance: Some(definition.instance),
                     }
                 }
             };
-            definitions.push(definition);
+            // A definition the path names more than one way, as through two
+            // re-exports, is read once, where any of the ways holds.
+            let same = definitions.iter_mut().find(|known: &&mut Candidate| {
+                definition.instance.is_some() && known.instance == definition.instance
+            });
+            match same {
+                Some(known) => known.either(definition),
+                None => definitions.push(definition),
+            }
         }
         let one = certain && places.len() == 1;
         let candidates = definitions
@@ -6017,6 +6052,39 @@ mod user {
         )]);
         assert_eq!(scan.unscanned, []);
         assert_eq!(scan.unsafe_code.functions, 2);
+    }
+
+    /// A definition that paths name more than one way, as through two
+    /// re-exports that each build may take, is read once for a call, under
+    /// the `cfg`s of any of the ways.
+    #[test]
+    fn definitions_named_more_than_one_way_are_read_once() {
+        let scan = scan_files(&[(
+            "lib.rs",
+            r"macro_rules! m {
+    () => {
+        pub unsafe fn f() {}
+    };
+}
+
+mod a {
+    pub(crate) use m;
+}
+
+mod b {
+    pub(crate) use m;
+}
+
+#[cfg(demo_custom)]
+use a::m as chosen;
+#[cfg(not(demo_custom))]
+use b::m as chosen;
+
+chosen!();
+",
+        )]);
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 1);
     }
 
     struct GraphCrate<'a> {
