@@ -16,6 +16,7 @@ off = ["spawner/off"]
 [dependencies]
 codegen = { path = "vendor/codegen" }
 exports = { path = "vendor/exports" }
+facade = { path = "vendor/facade" }
 ffi = { path = "vendor/ffi" }
 old = { path = "vendor/old" }
 platform = { path = "vendor/platform" }
