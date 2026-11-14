@@ -157,7 +157,7 @@ async fn deadline_reports_blocking_work_before_waiting_for_cleanup() {
         let cancellation = Cancellation::new();
         let deadline = Instant::now() + Duration::from_secs(10);
         let (ready, started) = oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::sync_channel(1);
         let mut tasks = Tasks::<&str>::new();
         tasks.spawn_blocking_named("blocking", move || {
             ready.send(()).unwrap();

@@ -131,7 +131,7 @@ macro_rules! on_both_runtimes {
 on_both_runtimes! {
     async fn an_error_from_a_dropped_blocking_handle_is_reported_at_join() {
         let mut tasks = Tasks::<&str>::new();
-        let (release, released) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::sync_channel(1);
         let failed = tasks.spawn_blocking(move || {
             released.recv_timeout(HUNG).unwrap();
             Err::<(), _>("dropped blocking handle")
