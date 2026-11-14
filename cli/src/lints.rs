@@ -209,9 +209,9 @@ async fn example() {
     ),
     clippy(
         "disallowed_methods",
-        "unstructured spawns, blocking calls, leaks and weak references, listed in clippy.toml",
+        "panicking index methods, unstructured spawns, blocking calls, leaks and weak references, listed in clippy.toml",
         example(
-            "Use adamantium::Tasks::run and Tasks::spawn for scoped tasks, adamantium::blocking for blocking work, and tokio::time::sleep for timers. Drop resources instead of leaking them; use owned values instead of weak references.",
+            "Use adamantium::Array::remove/insert and split_at_checked for checked index operations, Tasks::run and Tasks::spawn for scoped tasks, adamantium::blocking for blocking work, and tokio::time::sleep for timers. Drop resources instead of leaking them; use owned values instead of weak references.",
             r#"async fn example() -> Result<u32, tokio::task::JoinError> {
     let task = tokio::spawn(async { 42 });
     task.await
