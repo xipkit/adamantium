@@ -603,13 +603,17 @@ on_both_runtimes! {
     // The loser can only panic once it is aborted, which happens after the
     // winner has succeeded.
     async fn first_ok_resumes_a_panic_from_a_loser_drained_after_a_success() {
-        let work = first_ok(0..2, 2, |n| {
-            let guard = (n == 0).then_some(PanicsWhenDropped);
+        let succeeded = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&succeeded);
+        let work = first_ok(0..2, 2, move |n| {
+            let guard = (n == 0).then(|| PanicsWhenDropped);
+            let succeeded = Arc::clone(&flag);
             async move {
                 let _guard = guard;
                 if n == 0 {
                     std::future::pending::<()>().await;
                 }
+                succeeded.store(true, Ordering::SeqCst);
                 Ok::<_, &str>(n)
             }
         });
@@ -617,6 +621,7 @@ on_both_runtimes! {
         let joined = tokio::spawn(work);
         let payload = timeout(HUNG, joined).await.unwrap().unwrap_err().into_panic();
         assert_eq!(payload.downcast_ref(), Some(&"kaboom while aborted"));
+        assert!(succeeded.load(Ordering::SeqCst), "the winner never succeeded");
     }
 
     async fn first_ok_aborts_its_items_if_f_panics() {
