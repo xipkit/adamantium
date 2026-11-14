@@ -54,7 +54,10 @@ enum Transcribed {
         dollar: TokenTree,
         name: Ident,
     },
-    /// `$crate`, which stands for the crate that defines the macro.
+    /// `$crate`, written as `crate` where `$crate` is. It is one token, as
+    /// in rustc, so a macro it is passed to matches it as an identifier. For
+    /// another crate's macro, the scan reads it as that crate by where it is
+    /// written.
     Crate(Span),
     Repetition(Repetition<Transcribed>),
 }
@@ -201,11 +204,18 @@ impl Rules {
         Some(Self(rules))
     }
 
+    /// Where `$crate` is written in the rules' transcribers.
+    pub fn crate_spans(&self) -> Vec<Span> {
+        let mut spans = Vec::new();
+        for rule in &self.0 {
+            crate_spans(&rule.transcriber, &mut spans);
+        }
+        spans
+    }
+
     /// The tokens a call with `input` expands to, or `None` if this can't
-    /// decide what they are. `$crate` is replaced with `krate`, a path to
-    /// the crate that defines the macro, as the calling crate can write it:
-    /// `crate` for its own macro.
-    pub fn expand(&self, input: TokenStream, krate: &[TokenTree]) -> Option<TokenStream> {
+    /// decide what they are.
+    pub fn expand(&self, input: TokenStream) -> Option<TokenStream> {
         let input = trees(input);
         let mut matching = Matching {
             steps: STEPS,
@@ -222,13 +232,24 @@ impl Rules {
                 [] => continue,
                 [end] => {
                     let mut out = Vec::new();
-                    matching.transcribe(&rule.transcriber, &end.bound, krate, &mut out)?;
+                    matching.transcribe(&rule.transcriber, &end.bound, &mut out)?;
                     return Some(out.into_iter().collect());
                 }
                 _ => return None,
             }
         }
         None
+    }
+}
+
+fn crate_spans(transcriber: &[Transcribed], spans: &mut Vec<Span>) {
+    for part in transcriber {
+        match part {
+            Transcribed::Token(_) | Transcribed::Variable { .. } => {}
+            Transcribed::Group(_, inner) => crate_spans(inner, spans),
+            Transcribed::Crate(span) => spans.push(*span),
+            Transcribed::Repetition(repetition) => crate_spans(&repetition.body, spans),
+        }
     }
 }
 
@@ -607,12 +628,11 @@ impl Matching {
     }
 
     /// Writes `transcriber` to `out` with what the metavariables bound in
-    /// the passes of the repetitions around it, and `krate` for `$crate`.
+    /// the passes of the repetitions around it.
     fn transcribe(
         &self,
         transcriber: &[Transcribed],
         bound: &Bindings,
-        krate: &[TokenTree],
         out: &mut Vec<TokenTree>,
     ) -> Option<()> {
         for part in transcriber {
@@ -620,17 +640,12 @@ impl Matching {
                 Transcribed::Token(tree) => out.push(tree.clone()),
                 Transcribed::Group(group, inner) => {
                     let mut content = Vec::new();
-                    self.transcribe(inner, bound, krate, &mut content)?;
+                    self.transcribe(inner, bound, &mut content)?;
                     let mut copy = Group::new(group.delimiter(), content.into_iter().collect());
                     copy.set_span(group.span());
                     out.push(TokenTree::Group(copy));
                 }
-                // The path is written where `$crate` is, in the macro.
-                Transcribed::Crate(span) => out.extend(krate.iter().map(|tree| {
-                    let mut tree = tree.clone();
-                    tree.set_span(*span);
-                    tree
-                })),
+                Transcribed::Crate(span) => out.push(TokenTree::Ident(Ident::new("crate", *span))),
                 Transcribed::Variable { dollar, name } => match bound.get(&name.to_string()) {
                     None => out.extend([dollar.clone(), TokenTree::Ident(name.clone())]),
                     Some(Bound::Fragment(index)) => {
@@ -647,7 +662,7 @@ impl Matching {
                     Some(Bound::Repeated(_)) => return None,
                 },
                 Transcribed::Repetition(repetition) => {
-                    self.transcribe_repetition(repetition, bound, krate, out)?;
+                    self.transcribe_repetition(repetition, bound, out)?;
                 }
             }
         }
@@ -661,7 +676,6 @@ impl Matching {
         &self,
         repetition: &Repetition<Transcribed>,
         bound: &Bindings,
-        krate: &[TokenTree],
         out: &mut Vec<TokenTree>,
     ) -> Option<()> {
         let mut repeated = Vec::new();
@@ -685,7 +699,7 @@ impl Matching {
                 let value = *each.get(index)?.get(*name)?;
                 pass.insert((*name).clone(), value);
             }
-            self.transcribe(&repetition.body, &pass, krate, out)?;
+            self.transcribe(&repetition.body, &pass, out)?;
         }
         Some(())
     }
@@ -788,18 +802,10 @@ mod tests {
         Rules::parse(body.parse().unwrap()).unwrap()
     }
 
-    /// The expansion of `input` with the rules `body` of a macro the crate
-    /// defines, flattened to text.
+    /// The expansion of `input` with the rules `body`, flattened to text.
     fn expand(body: &str, input: &str) -> Option<String> {
-        expand_in(body, input, "crate")
-    }
-
-    /// The expansion of `input` with the rules `body` of a macro that the
-    /// crate `krate` names, flattened to text.
-    fn expand_in(body: &str, input: &str, krate: &str) -> Option<String> {
-        let krate = trees(krate.parse().unwrap());
         rules(body)
-            .expand(input.parse().unwrap(), &krate)
+            .expand(input.parse().unwrap())
             .map(|tokens| flatten(tokens).to_string())
     }
 
@@ -908,25 +914,33 @@ mod tests {
         );
     }
 
-    /// `$crate` in another crate's macro is the path the calling crate
-    /// names that crate by, and it is written in the macro, where `$crate`
-    /// is.
+    /// `$crate` is one token, which a macro it is passed to matches as an
+    /// identifier, as rustc does, and the scan can find where it is written.
     #[test]
-    fn crate_is_the_defining_crate() {
-        let body = "($name:ident) => { pub use $crate::inner::$name; }";
+    fn crate_passed_on_is_an_identifier() {
+        let outer = rules("() => { inner!($crate); }");
+        let expanded = trees(outer.expand(TokenStream::new()).unwrap());
+        let Some(TokenTree::Group(forwarded)) = expanded.get(2) else {
+            panic!("{expanded:?}");
+        };
+        let inner = r"($c:ident) => { mod target; }; (::$c:ident) => { mod fallback; };";
         assert_eq!(
-            expand_in(body, "spawn", "::psm"),
-            Some(text("pub use ::psm::inner::spawn;"))
+            rules(inner)
+                .expand(forwarded.stream())
+                .map(|tokens| tokens.to_string()),
+            Some(text("mod target;"))
         );
-        let krate = trees("::psm".parse().unwrap());
-        let expanded = trees(
-            rules(body)
-                .expand("spawn".parse().unwrap(), &krate)
-                .unwrap(),
-        );
-        // `pub use :: psm`: `psm` is where `crate` is in the rule.
-        let psm = expanded.get(4).map(TokenTree::span).unwrap();
-        assert_eq!((psm.start().line, psm.start().column), (1, 28));
+        let spans = outer.crate_spans();
+        let starts: Vec<_> = spans
+            .iter()
+            .map(|span| (span.start().line, span.start().column))
+            .collect();
+        assert_eq!(starts, [(1, 16)]);
+        let crate_span = trees(forwarded.stream())
+            .first()
+            .map(TokenTree::span)
+            .unwrap();
+        assert_eq!(crate_span.start().column, 16);
     }
 
     /// An operator is one token, as rustc lexes it: `=>` is not `=` `>`, and
@@ -985,12 +999,11 @@ mod tests {
     #[test]
     fn fragments_passed_on_are_opaque() {
         let forward = rules(r"($v:vis) => { $v }");
-        let krate = trees("crate".parse().unwrap());
-        let forwarded = forward.expand("pub".parse().unwrap(), &krate).unwrap();
+        let forwarded = forward.expand("pub".parse().unwrap()).unwrap();
         let callee = r"(pub) => { mod literal; }; ($v:vis) => { mod fragment; };";
         assert_eq!(
             rules(callee)
-                .expand(forwarded, &krate)
+                .expand(forwarded)
                 .map(|tokens| tokens.to_string()),
             Some(text("mod fragment;"))
         );
