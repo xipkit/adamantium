@@ -10,6 +10,7 @@ dependencies = [
  "async-stream",
  "cbor4ii",
  "criterion",
+ "event-listener",
  "futures-core",
  "futures-util",
  "indexmap",

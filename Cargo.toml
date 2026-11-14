@@ -62,6 +62,7 @@ serde = ["dep:serde", "indexmap/serde"]
 
 [dependencies]
 async-channel = "2"
+event-listener = "5"
 async-stream = { version = "0.3", optional = true }
 futures-core = { version = "0.3", optional = true }
 indexmap = "2"
