@@ -123,7 +123,7 @@ async function main() {
       throw new Error("Usage: node scripts/evaluate-decisions.mjs [--dry-run] [--rule NAME]");
     }
   }
-  const rules = JSON.parse(await readFile(path.join(root, "rules/google-rust-decisions.json"), "utf8"));
+  const rules = JSON.parse(await readFile(path.join(root, "../cli/src/style/google-rust-decisions.json"), "utf8"));
   const cases = JSON.parse(await readFile(path.join(root, "fixtures/google-rust-cases.json"), "utf8"));
   const questions = validateInputs(rules, cases);
   if (ruleName && !questions.has(ruleName)) throw new Error(`Unknown rule: ${ruleName}`);

@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Checks that a crate stays inside the adamantium fragment of Rust"
 repository.workspace = true
+license.workspace = true
+readme.workspace = true
 publish.workspace = true
 
 [[bin]]

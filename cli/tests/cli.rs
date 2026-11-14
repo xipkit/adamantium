@@ -1389,7 +1389,7 @@ fn init_writes_the_rules_into_a_package_and_is_idempotent() {
     let clippy = fs::read_to_string(dir.path().join("clippy.toml")).unwrap();
     assert_eq!(
         clippy,
-        fs::read_to_string(repository_root().join("clippy.toml")).unwrap()
+        fs::read_to_string(repository_root().join("cli/clippy.toml")).unwrap()
     );
 
     let output = adamantium().arg("init").arg(dir.path()).output().unwrap();
@@ -1477,7 +1477,7 @@ fn init_refuses_to_overwrite_a_different_clippy_toml_and_changes_nothing() {
     let clippy = fs::read(dir.path().join("clippy.toml")).unwrap();
     assert_eq!(
         clippy,
-        fs::read(repository_root().join("clippy.toml")).unwrap()
+        fs::read(repository_root().join("cli/clippy.toml")).unwrap()
     );
 
     let output = init(dir.path(), false).unwrap();
@@ -1505,7 +1505,7 @@ fn init_treats_a_non_utf8_clippy_toml_as_a_conflict() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         fs::read(dir.path().join("clippy.toml")).unwrap(),
-        fs::read(repository_root().join("clippy.toml")).unwrap()
+        fs::read(repository_root().join("cli/clippy.toml")).unwrap()
     );
 }
 
@@ -1577,7 +1577,7 @@ fn rules_match_the_repository_manifest() {
         assert_eq!(listed, declared, "strict = {strict}");
         assert_eq!(
             rules["clippy_toml"].as_str().unwrap(),
-            fs::read_to_string(repository_root().join("clippy.toml")).unwrap()
+            fs::read_to_string(repository_root().join("cli/clippy.toml")).unwrap()
         );
     }
 }

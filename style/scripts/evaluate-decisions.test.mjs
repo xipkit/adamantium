@@ -5,7 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildRequest, parseAnswer, requestDecision, validateInputs } from "./evaluate-decisions.mjs";
 
-const rules = JSON.parse(await readFile(new URL("../rules/google-rust-decisions.json", import.meta.url)));
+const rules = JSON.parse(await readFile(new URL("../../cli/src/style/google-rust-decisions.json", import.meta.url)));
 const cases = JSON.parse(await readFile(new URL("../fixtures/google-rust-cases.json", import.meta.url)));
 
 test("each rule has labeled positive and negative examples", () => {

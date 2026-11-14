@@ -1,6 +1,6 @@
 # Rule coverage
 
-The questions in `google-rust-decisions.json` translate selected judgment-based portions of the [Google Rust style guide](https://google.github.io/styleguide/rustguide.html). Each question includes its applicability conditions and relevant exceptions. The surrounding project context must be supplied when a decision depends on information outside the candidate.
+The questions in [`cli/src/style/google-rust-decisions.json`](../../cli/src/style/google-rust-decisions.json) translate selected judgment-based portions of the [Google Rust style guide](https://google.github.io/styleguide/rustguide.html). Each question includes its applicability conditions and relevant exceptions. The surrounding project context must be supplied when a decision depends on information outside the candidate.
 
 | Guide area | Decisions question names |
 | --- | --- |
