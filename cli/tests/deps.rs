@@ -131,6 +131,7 @@ fn deps_lists_runtime_and_build_dependencies_but_not_members_or_dev_dependencies
         BTreeMap::from([
             ("builder", "build"),
             ("codegen", "build"),
+            ("exports", "runtime"),
             ("ffi", "runtime"),
             ("helper", "build"),
             ("old", "runtime"),
@@ -181,6 +182,7 @@ fn deps_counts_each_kind_of_unsafe_and_notes_forbidding_crates() {
             "impls": 1,
             "traits": 1,
             "extern_blocks": 0,
+            "attributes": 0,
             "in_macros": 1,
         })
     );
@@ -202,7 +204,21 @@ fn deps_counts_each_kind_of_unsafe_and_notes_forbidding_crates() {
             "impls": 0,
             "traits": 0,
             "extern_blocks": 1,
+            "attributes": 0,
             "in_macros": 0,
+        })
+    );
+    // Attributes that `unsafe_code` reports, such as `#[no_mangle]`.
+    assert_eq!(
+        dependency(&report, "exports").unwrap()["unsafe"],
+        json!({
+            "functions": 0,
+            "blocks": 0,
+            "impls": 0,
+            "traits": 0,
+            "extern_blocks": 0,
+            "attributes": 9,
+            "in_macros": 1,
         })
     );
     // By attribute, by a lint level string, and by a lint level table.
@@ -259,11 +275,12 @@ fn deps_prints_a_table_and_each_call_as_text() {
         "      0      0           0  safe 0.0.0 (forbids unsafe)",
         "      1      0           0  helper 0.0.0",
         "      1      0           0  ffi 0.0.0",
+        "     10      0           0  exports 0.0.0",
         "  tokio::task::spawn: an unstructured task; spawn inside adamantium::Tasks",
         "    src/nested/deeper.rs:2:5",
         "  unresolved calls: leak 1, spawn 5",
         "  unscanned: src/lib.rs:11: module `missing` has no file: neither missing.rs nor missing/mod.rs",
-        "adamantium: 9 dependencies; 4 with unsafe code, 4 with disallowed calls, 1 with unresolved calls, 1 partly unscanned",
+        "adamantium: 10 dependencies; 5 with unsafe code, 4 with disallowed calls, 1 with unresolved calls, 1 partly unscanned",
     ] {
         assert!(
             stdout.lines().any(|printed| printed == line),

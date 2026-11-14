@@ -211,10 +211,17 @@ impl Cfg<'_> {
     /// whether it applies. Attributes of a `cfg_attr` whose predicate is
     /// false are left out.
     pub fn effective(&self, attrs: &[Attribute]) -> Vec<(Truth, Meta)> {
+        attrs
+            .iter()
+            .flat_map(|attr| self.expanded(attr.meta.clone()))
+            .collect()
+    }
+
+    /// The attributes that one attribute, written as `meta`, stands for
+    /// after `cfg_attr` is expanded, as [`Cfg::effective`] gives them.
+    pub fn expanded(&self, meta: Meta) -> Vec<(Truth, Meta)> {
         let mut metas = Vec::new();
-        for attr in attrs {
-            self.expand(Truth::True, attr.meta.clone(), &mut metas);
-        }
+        self.expand(Truth::True, meta, &mut metas);
         metas
     }
 

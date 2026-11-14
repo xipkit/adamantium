@@ -15,6 +15,7 @@ off = ["spawner/off"]
 
 [dependencies]
 codegen = { path = "vendor/codegen" }
+exports = { path = "vendor/exports" }
 ffi = { path = "vendor/ffi" }
 old = { path = "vendor/old" }
 safe = { path = "vendor/safe" }
