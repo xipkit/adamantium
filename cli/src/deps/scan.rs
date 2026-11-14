@@ -670,6 +670,7 @@ enum Origin {
 }
 
 /// Another crate's `#[macro_export]` macro that a macro path may name.
+#[derive(PartialEq, Eq)]
 struct Found {
     /// The library it is read from, by the name the crate's code uses.
     library: String,
@@ -1232,18 +1233,24 @@ impl<'a> Scanner<'a> {
                 if krate != reader.krate.name {
                     return None;
                 }
-                let start = found.len();
-                found.extend(
-                    exports
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, export)| export.name == *name)
-                        .map(|(export, _)| Found {
-                            library: library.to_owned(),
-                            export,
-                        }),
-                );
-                if found.len() == start {
+                let mut any = false;
+                for (export, _) in exports
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, export)| export.name == *name)
+                {
+                    any = true;
+                    // Ways that reach one macro, as a name and a re-export
+                    // of it, name it once.
+                    let export = Found {
+                        library: library.to_owned(),
+                        export,
+                    };
+                    if !found.contains(&export) {
+                        found.push(export);
+                    }
+                }
+                if !any {
                     return None;
                 }
             }
@@ -4804,6 +4811,43 @@ crate::own! { yes { mod own; } }
         let listed = [(1, "other"), (2, "spawn"), (3, "missing"), (6, "own")]
             .map(|(line, name)| unscanned("src/lib.rs", line, &reason(name)));
         assert_eq!(scan.unscanned, listed);
+    }
+
+    /// A macro that a call may reach two ways, by its name and by a
+    /// re-export, as `use`s under unknown `cfg`s may name either, is read
+    /// once, so the code the call passes in counts once.
+    #[test]
+    fn macros_reached_two_ways_are_read_once() {
+        let picks = Library {
+            name: "picks",
+            features: &[],
+            files: &[(
+                "lib.rs",
+                r"#[macro_export]
+macro_rules! pick {
+    (yes { $($yes:tt)* }) => { $($yes)* };
+}
+
+pub use crate::pick as alias;
+",
+            )],
+        };
+        let scan = scan_with(
+            &[(
+                "lib.rs",
+                r"#[cfg(demo_custom)]
+use picks::pick;
+#[cfg(not(demo_custom))]
+use picks::alias as pick;
+
+pick! { yes { pub unsafe fn f() {} } }
+",
+            )],
+            false,
+            &[picks],
+        );
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 1);
     }
 
     /// `$crate::inner!` in another crate's macro calls that crate's
