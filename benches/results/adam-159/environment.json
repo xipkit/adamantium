@@ -14,6 +14,8 @@
     "candidate": "16c650be51315a0a454d763a24ec7a5a16a51c8a6a9c69949f2e6942b6e2e2a4",
     "baseline2": "a949ef33dcf70be447ca367464f253c49f45e12c44bc19faa76dede7a25a2c02",
     "probe": "47fda30756d5e3f247291b60a958437dc12740db7b613d711bc709dfb839673c",
-    "final": "500d0d3f64c0b24161c7db9f23a2b4d6b767fdfeb8cbc3950d586cde611a1c56"
-  }
+    "final": "500d0d3f64c0b24161c7db9f23a2b4d6b767fdfeb8cbc3950d586cde611a1c56",
+    "stream-fix": "9027628a70b68b3ec3096027ae8c81f22de7dd961d465e520de19bc146c7d6c8"
+  },
+  "current_candidate": "stream-fix"
 }

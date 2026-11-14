@@ -181,6 +181,8 @@ impl<T> Channel<T> {
             values: Bounded::new(capacity.max(1)),
             capacity: capacity.max(1),
             items: WaitQueue::new(),
+            #[cfg(feature = "tokio")]
+            streams: WaitQueue::new(),
             space: WaitQueue::new(),
             world: World::current(),
         });
@@ -356,6 +358,8 @@ impl<T> Sender<T> {
             concurrent_queue::PushError::Closed(value) => TrySendError::Closed(value),
         })?;
         self.queue.items.notify_one();
+        #[cfg(feature = "tokio")]
+        self.queue.streams.notify_all();
         Ok(())
     }
 
@@ -589,7 +593,7 @@ impl<T> Stream for Receiver<T> {
                 }
                 this.waiter = None;
             } else {
-                this.waiter = Some(this.queue.items.listen());
+                this.waiter = Some(this.queue.streams.listen());
             }
             // Recheck after registration or a consumed notification.
         }
@@ -690,6 +694,10 @@ struct Queue<T> {
     values: Bounded<T>,
     capacity: usize,
     items: WaitQueue,
+    // Next cancellation leaves its listener on the receiver. Wake every stream
+    // separately so an idle receiver cannot consume another operation's wakeup.
+    #[cfg(feature = "tokio")]
+    streams: WaitQueue,
     space: WaitQueue,
     world: World,
 }
@@ -715,6 +723,8 @@ impl<T> Queue<T> {
 
     fn wake_closed(&self) {
         self.items.notify_all();
+        #[cfg(feature = "tokio")]
+        self.streams.notify_all();
         self.space.notify_all();
     }
 

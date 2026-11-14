@@ -3,7 +3,8 @@
 ADAM-159 measurements on OTIS, Apple M4, macOS 27.0.1, rustc 1.99.1,
 2026-11-14. Release profile, overflow checks enabled, default features.
 The baseline is `ce1ffb9`, using exactly the same benchmark as the candidate.
-The candidate uses one Channel algorithm over the bounded-storage and wait-queue
+The current candidate includes the retained-stream wakeup correction and uses
+one Channel algorithm over the bounded-storage and wait-queue
 seams. Production storage is concurrent-queue 2.5.0, already used by
 async-channel; modeled storage is a locked FIFO. Watch shares the wait queue.
 
@@ -21,14 +22,22 @@ cross-workload comparisons.
 
 | Producers/receivers | Capacity | Messages | Baseline median | Candidate median | Paired B/A median | A/A median [quartiles] |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| 4/4 | 64 | 4,000,000 | 361.881 | 226.349 | 0.632 | 0.957 [0.907, 1.154] |
-| 1/1 | 64 | 2,000,000 | 118.385 | 58.351 | 0.497 | 1.003 [0.993, 1.057] |
-| 4/4 | 1 | 400,000 | 341.341 | 95.134 | 0.279 | 1.016 [0.919, 1.132] |
+| 4/4 | 64 | 4,000,000 | 345.749 | 278.269 | 0.787 | 1.015 [0.961, 1.180] |
+| 1/1 | 64 | 2,000,000 | 118.758 | 103.149 | 0.878 | 0.999 [0.852, 1.116] |
+| 4/4 | 1 | 400,000 | 344.980 | 102.788 | 0.294 | 1.022 [1.003, 1.075] |
 
-The candidate is faster in all three comparisons, including after comparing
-paired B/A against the observed A/A distribution rather than assuming the
-control equals 1.0. The production replacement gate passes for these workloads.
-These are local measurements on a shared machine, not a universal speedup claim.
+The candidate's paired median is below the A/A median in every workload. Both
+4/4 medians are below the A/A interquartile range; the 1/1 median falls within
+that range. There is no regression beyond the measured control spread, so the
+production replacement gate still passes. These are local measurements on a
+shared machine, not a universal speedup claim.
+
+Stream listeners now use a separate instance of the same WaitQueue, notified
+with wake-all on send and close. Cancelling `next()` retains the listener on its
+receiver, so letting it compete for receive's single notification could leave an
+active receive or another stream asleep with a message queued. Each woken stream
+rechecks the same bounded queue; each message still goes to one receiver.
+The table above reruns the complete gate with that correction.
 
 The initial mutex-only storage candidate failed the gate: 378.258 → 437.424 ms
 for 4/4 at capacity 64; median paired B/A was 1.213 versus an A/A median of 0.963.
@@ -39,7 +48,9 @@ storage to concurrent-queue: 339.633 → 226.781 ms; paired B/A 0.633 versus A/A
 and notification logic shared, changing only bounded storage inside an execution.
 
 [Raw pairs and environment](results/adam-159/) include every observation, order,
-load average, summary and binary SHA-256. The first mutex experiment used a fixed
+load average, summary and binary SHA-256. The `stream-fix-*.jsonl` files and
+`stream-fix` binary hash correspond to the current table; earlier measurements
+are retained separately. The first mutex experiment used a fixed
 4/4 benchmark; subsequent probes and final runs use the parameterized harness.
 
 To reproduce, build `cargo build --locked --release --bench channel` at the

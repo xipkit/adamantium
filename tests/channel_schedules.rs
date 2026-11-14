@@ -433,3 +433,37 @@ fn a_channel_cannot_be_reused_in_the_next_execution() {
     let channel = held.lock().unwrap_or_else(|p| p.into_inner()).take();
     assert!(catch_unwind(AssertUnwindSafe(|| drop(channel))).is_err());
 }
+
+#[test]
+fn cancelled_next_retained_during_active_receive_replays() {
+    check(|| {
+        Box::pin(async {
+            for stream in [false, true] {
+                let (sender, mut idle) = Channel::bounded(1).split();
+                poll_fn(|cx| {
+                    assert!(std::pin::pin!(idle.next()).poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                let mut active = idle.clone();
+                let producer = sender.clone();
+                let workers: Vec<Worker> = vec![
+                    Box::pin(async move {
+                        producer.send(7).await.unwrap();
+                    }),
+                    Box::pin(async move {
+                        let value = if stream {
+                            active.next().await
+                        } else {
+                            active.receive().await
+                        };
+                        assert_eq!(value, Some(7));
+                    }),
+                ];
+                testing::parallel(workers).await;
+                assert!(!sender.is_closed());
+                assert_eq!(idle.try_receive(), Err(TryReceiveError::Empty));
+            }
+        })
+    });
+}
