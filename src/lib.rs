@@ -29,6 +29,7 @@ mod set;
 mod string;
 #[cfg(feature = "tokio")]
 mod tasks;
+mod watch;
 
 pub use actor::Actor;
 pub use array::Array;
@@ -46,3 +47,4 @@ pub use tasks::{
     Cancellation, ScopeError, Task, Tasks, blocking, concurrently, concurrently_ordered,
     concurrently_ordered_until, concurrently_unordered, concurrently_unordered_until,
 };
+pub use watch::{Watch, Watcher};
