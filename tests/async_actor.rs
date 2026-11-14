@@ -1,5 +1,7 @@
 #![cfg(feature = "tokio")]
 
+mod support;
+
 use std::{
     pin::Pin,
     sync::{
@@ -12,7 +14,8 @@ use std::{
 
 use adamantium::{Actor, AsyncActor, Cancellation, Channel, Closed, ScopeError, Tasks};
 use futures_util::FutureExt;
-use tokio::{io::AsyncReadExt, time::timeout};
+use support::timeout;
+use tokio::io::AsyncReadExt;
 
 const HUNG: Duration = Duration::from_secs(10);
 

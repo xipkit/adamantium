@@ -1,59 +1,143 @@
-use std::{collections::BTreeMap, fs::File, io::Read, path::Path};
+use std::{collections::BTreeMap, fmt, fs::File, io::Read, path::Path};
 
-use anyhow::{Context, Result, bail, ensure};
-use serde::Serialize;
-use serde_json::Value;
+use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::style::{
-    api::{self, Decisions},
+    provider::{
+        Answer, Evaluation, FileReview, LineRange, Locations, Provider, ProviderKind, ReviewError,
+        Verdict,
+    },
     rules::Question,
     scan::Scan,
 };
 
-#[derive(Serialize)]
+/// The version of the JSON report this build writes.
+pub(crate) const SCHEMA_VERSION: u8 = 3;
+
+#[derive(Deserialize, Serialize)]
 pub(crate) struct Report {
     pub schema_version: u8,
-    pub status: &'static str,
-    pub model: String,
+    pub status: ReportStatus,
+    #[serde(flatten)]
+    pub key: ReviewKey,
     pub root: String,
     pub selected_rules: Vec<String>,
     pub files: Vec<FileReport>,
 }
 
-#[derive(Serialize)]
+/// Everything besides a file's path and source that decides its review. Two
+/// reviews of the same source under the same key ask the same questions.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct ReviewKey {
+    pub provider: ProviderKind,
+    pub model: String,
+    /// SHA-256 of the selected rules' full definitions, as sent.
+    pub rules_sha256: String,
+    /// SHA-256 of `--context`, or `None` without one.
+    pub context_sha256: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReportStatus {
+    Planned,
+    Incomplete,
+    Complete,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct FileReport {
     pub path: String,
-    pub scope: &'static str,
-    pub status: &'static str,
+    pub status: FileStatus,
+    /// Whether these results were carried over from a previous report
+    /// instead of asking the provider again.
+    pub cached: bool,
+    /// SHA-256 of the source the results describe.
+    pub source_sha256: Option<String>,
     pub findings: Vec<Finding>,
     pub unresolved: Vec<Unresolved>,
     pub no_violation_count: usize,
+    /// Input tokens spent on this file in this run, including locating its
+    /// findings; `None` for cached files or when the provider didn't say.
     pub input_tokens: Option<u64>,
     pub error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FileStatus {
+    /// Not sent yet, or not sent because this is a dry run.
+    Planned,
+    /// Every rule was answered.
+    Checked,
+    /// The provider answered, but left some rules unresolved.
+    Incomplete,
+    /// The file could not be reviewed.
+    Error,
+    /// Not sent because an earlier service failure stopped the run.
+    NotChecked,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Finding {
     pub rule: String,
+    /// The lines that break the rule. Absent when the violation concerns the
+    /// whole file or the provider gave no confident range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<LineRange>,
     pub guidance: String,
     pub confidence: f64,
     pub probabilities: BTreeMap<String, f64>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Unresolved {
     pub rule: String,
-    pub reason: &'static str,
+    pub reason: UnresolvedReason,
     pub confidence: Option<f64>,
     pub probabilities: Option<BTreeMap<String, f64>>,
 }
 
-impl Report {
-    pub fn planned(scan: &Scan, model: &str, questions: &[Question]) -> Self {
-        Self {
-            schema_version: 1,
-            status: "planned",
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UnresolvedReason {
+    Refusal,
+    InsufficientContext,
+}
+
+impl ReviewKey {
+    pub fn new(
+        provider: ProviderKind,
+        model: &str,
+        questions: &[Question],
+        context: Option<&str>,
+    ) -> Result<Self> {
+        Ok(Self {
+            provider,
             model: model.to_owned(),
+            rules_sha256: sha256_hex(&serde_json::to_vec(questions)?),
+            context_sha256: context.map(|context| sha256_hex(context.as_bytes())),
+        })
+    }
+}
+
+/// The lowercase hexadecimal SHA-256 digest of `bytes`.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+impl Report {
+    /// A report listing every scanned file as planned.
+    pub fn planned(scan: &Scan, key: ReviewKey, questions: &[Question]) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            status: ReportStatus::Planned,
+            key,
             root: scan.root.to_string_lossy().into_owned(),
             selected_rules: questions
                 .iter()
@@ -67,90 +151,86 @@ impl Report {
         }
     }
 
+    /// Whether any file is still waiting to be sent to the provider.
+    pub fn has_planned_files(&self) -> bool {
+        self.files
+            .iter()
+            .any(|file| file.status == FileStatus::Planned)
+    }
+
+    /// Sends each planned file to the provider, in scan order, asks it to
+    /// locate any findings, then settles the report's status. `scan` must be
+    /// the scan the report was planned from.
     pub fn check(
+        &mut self,
         scan: &Scan,
-        model: &str,
         questions: &[Question],
         context: Option<&str>,
-        client: &impl Decisions,
-    ) -> Self {
-        let mut report = Self::planned(scan, model, questions);
+        provider: &dyn Provider,
+    ) {
         let mut service_failed = false;
-        for (file, path) in report.files.iter_mut().zip(&scan.files) {
-            if service_failed {
-                file.status = "not_checked";
+        for (file, path) in self.files.iter_mut().zip(&scan.files) {
+            if file.status != FileStatus::Planned {
                 continue;
             }
-            let source = match read_source(path) {
+            if service_failed {
+                file.status = FileStatus::NotChecked;
+                continue;
+            }
+            let source = match read_source(path, provider.max_source_bytes()) {
                 Ok(source) => source,
                 Err(error) => {
                     file.fail(format!("cannot read source: {error}"));
                     continue;
                 }
             };
-            let request = match api::request(model, questions, &file.path, &source, context) {
-                Ok(request) => request,
-                Err(error) => {
-                    file.fail(error.to_string());
-                    continue;
-                }
-            };
-            let response = match client.evaluate(&request) {
-                Ok(response) => response,
-                Err(error) => {
-                    file.fail(error.to_string());
-                    service_failed = true;
-                    continue;
-                }
-            };
-            match interpret(&response, questions) {
-                Ok(outcomes) => {
-                    file.status = if outcomes.unresolved.is_empty() {
-                        "checked"
-                    } else {
-                        "incomplete"
-                    };
-                    file.findings = outcomes.findings;
-                    file.unresolved = outcomes.unresolved;
-                    file.no_violation_count = outcomes.no_violation_count;
-                    file.input_tokens = response
-                        .get("usage")
-                        .and_then(|usage| usage.get("input_tokens"))
-                        .and_then(Value::as_u64);
-                }
-                Err(error) => {
-                    file.fail(format!("invalid Decisions response: {error}"));
+            file.source_sha256 = Some(sha256_hex(source.as_bytes()));
+            match file.review(provider, &self.key.model, questions, &source, context) {
+                Ok(()) => {}
+                Err(ReviewError::Input(error)) => file.fail(format!("{error:#}")),
+                Err(ReviewError::Service(error)) => {
+                    file.fail(format!("{error:#}"));
                     service_failed = true;
                 }
             }
         }
-        report.status = if report.files.iter().all(|file| file.status == "checked") {
-            "complete"
-        } else {
-            "incomplete"
-        };
-        report
+        self.settle();
     }
 
-    pub fn exit_code(&self) -> u8 {
-        if self.status == "incomplete" {
-            2
-        } else if self.files.iter().any(|file| !file.findings.is_empty()) {
-            1
+    /// Sets the status of a report whose files have all been reviewed or
+    /// taken from a cache.
+    pub fn settle(&mut self) {
+        self.status = if self
+            .files
+            .iter()
+            .all(|file| file.status == FileStatus::Checked)
+        {
+            ReportStatus::Complete
         } else {
-            0
+            ReportStatus::Incomplete
+        };
+    }
+
+    /// A planned report exits 0 even when cached files carry findings: a dry
+    /// run previews the review, it doesn't judge it.
+    pub fn exit_code(&self) -> u8 {
+        match self.status {
+            ReportStatus::Planned => 0,
+            ReportStatus::Incomplete => 2,
+            ReportStatus::Complete if self.files.iter().any(|file| !file.findings.is_empty()) => 1,
+            ReportStatus::Complete => 0,
         }
     }
 }
 
-fn read_source(path: &Path) -> Result<String> {
+fn read_source(path: &Path, limit: usize) -> Result<String> {
     let file = File::open(path)?;
     let mut bytes = Vec::new();
-    file.take((api::MAX_JSON_INPUT_BYTES + 1) as u64)
+    file.take(u64::try_from(limit)?.saturating_add(1))
         .read_to_end(&mut bytes)?;
     ensure!(
-        bytes.len() <= api::MAX_JSON_INPUT_BYTES,
-        "file exceeds the Decisions API input limit"
+        bytes.len() <= limit,
+        "file exceeds the provider's input limit"
     );
     String::from_utf8(bytes).context("source is not UTF-8")
 }
@@ -159,8 +239,9 @@ impl FileReport {
     fn new(path: String) -> Self {
         Self {
             path,
-            scope: "file",
-            status: "planned",
+            status: FileStatus::Planned,
+            cached: false,
+            source_sha256: None,
             findings: Vec::new(),
             unresolved: Vec::new(),
             no_violation_count: 0,
@@ -169,101 +250,164 @@ impl FileReport {
         }
     }
 
+    /// Marks the file unreviewed, discarding any answers it already has but
+    /// keeping the tokens they cost.
     fn fail(&mut self, error: String) {
-        self.status = "error";
+        self.status = FileStatus::Error;
+        self.findings.clear();
+        self.unresolved.clear();
+        self.no_violation_count = 0;
         self.error = Some(error);
     }
-}
 
-struct Outcomes {
-    findings: Vec<Finding>,
-    unresolved: Vec<Unresolved>,
-    no_violation_count: usize,
-}
-
-fn interpret(response: &Value, questions: &[Question]) -> Result<Outcomes> {
-    let answers = response["answers"]
-        .as_array()
-        .context("answers must be an array")?;
-    ensure!(answers.len() == questions.len(), "wrong number of answers");
-    let mut by_name = BTreeMap::new();
-    for answer in answers {
-        let name = answer["name"]
-            .as_str()
-            .context("answer is missing its name")?;
-        ensure!(
-            by_name.insert(name, answer).is_none(),
-            "duplicate answer: {name}"
-        );
+    /// Asks `provider` about this file's `source` and to locate the rules it
+    /// breaks, and records the answers.
+    fn review(
+        &mut self,
+        provider: &dyn Provider,
+        model: &str,
+        questions: &[Question],
+        source: &str,
+        context: Option<&str>,
+    ) -> Result<(), ReviewError> {
+        let path = self.path.clone();
+        let review = FileReview {
+            model,
+            questions,
+            path: &path,
+            source,
+            context,
+        };
+        let evaluation = provider.review(&review)?;
+        self.record(questions, evaluation)
+            .map_err(ReviewError::Service)?;
+        let violated = self.violated(questions);
+        if violated.is_empty() {
+            return Ok(());
+        }
+        let locations = provider
+            .locate(&FileReview {
+                questions: &violated,
+                ..review
+            })
+            .inspect_err(|_| {
+                // A failed locate may have been billed for requests it made
+                // before failing, so the file's total is no longer known.
+                self.input_tokens = None;
+            })?;
+        self.place(locations).map_err(ReviewError::Service)
     }
-    let mut outcomes = Outcomes {
-        findings: Vec::new(),
-        unresolved: Vec::new(),
-        no_violation_count: 0,
-    };
-    for question in questions {
-        let answer = by_name
-            .remove(question.name.as_str())
-            .context("missing named answer")?;
-        if answer["type"] == "refusal" {
-            outcomes.unresolved.push(Unresolved {
-                rule: question.name.clone(),
-                reason: "refusal",
-                confidence: None,
-                probabilities: None,
-            });
-            continue;
-        }
-        ensure!(answer["type"] == "choice", "unexpected answer type");
-        let confidence = probability(&answer["confidence"])?;
-        let entries = answer["probabilities"]
-            .as_array()
-            .context("missing probabilities")?;
-        let mut probabilities = BTreeMap::new();
-        for entry in entries {
-            let name = entry["value"]
-                .as_str()
-                .context("invalid probability label")?;
-            ensure!(
-                question.choices.iter().any(|choice| choice.value == name),
-                "unexpected probability label"
-            );
-            ensure!(
-                probabilities
-                    .insert(name.to_owned(), probability(&entry["probability"])?)
-                    .is_none(),
-                "duplicate probability label"
-            );
-        }
-        ensure!(
-            probabilities.len() == question.choices.len(),
-            "missing choice probability"
-        );
-        match answer["choice"].as_str() {
-            Some("violation") => outcomes.findings.push(Finding {
-                rule: question.name.clone(),
-                guidance: question.instructions.clone(),
-                confidence,
-                probabilities,
-            }),
-            Some("no_violation") => outcomes.no_violation_count += 1,
-            Some("insufficient_context") => outcomes.unresolved.push(Unresolved {
-                rule: question.name.clone(),
-                reason: "insufficient_context",
-                confidence: Some(confidence),
-                probabilities: Some(probabilities),
-            }),
-            _ => bail!("invalid selected choice"),
-        }
+
+    /// The questions whose rules this file's findings break, in finding
+    /// order.
+    fn violated(&self, questions: &[Question]) -> Vec<Question> {
+        self.findings
+            .iter()
+            .filter_map(|finding| questions.iter().find(|q| q.name == finding.rule))
+            .cloned()
+            .collect()
     }
-    ensure!(by_name.is_empty(), "unexpected named answer");
-    Ok(outcomes)
+
+    /// Gives each finding the lines the provider located for it.
+    fn place(&mut self, locations: Locations) -> Result<()> {
+        self.input_tokens = self
+            .input_tokens
+            .zip(locations.input_tokens)
+            .map(|(review, locate)| review + locate);
+        ensure!(
+            locations.lines.len() == self.findings.len(),
+            "provider located {} findings of {}",
+            locations.lines.len(),
+            self.findings.len()
+        );
+        for (finding, lines) in self.findings.iter_mut().zip(locations.lines) {
+            finding.lines = lines;
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, questions: &[Question], evaluation: Evaluation) -> Result<()> {
+        ensure!(
+            evaluation.answers.len() == questions.len(),
+            "provider returned {} answers for {} questions",
+            evaluation.answers.len(),
+            questions.len()
+        );
+        for (question, answer) in questions.iter().zip(evaluation.answers) {
+            let rule = question.name.clone();
+            match answer {
+                Answer::Refusal => self.unresolved.push(Unresolved {
+                    rule,
+                    reason: UnresolvedReason::Refusal,
+                    confidence: None,
+                    probabilities: None,
+                }),
+                Answer::Choice {
+                    verdict: Verdict::Violation,
+                    confidence,
+                    probabilities,
+                } => self.findings.push(Finding {
+                    rule,
+                    lines: None,
+                    guidance: question.instructions.clone(),
+                    confidence,
+                    probabilities,
+                }),
+                Answer::Choice {
+                    verdict: Verdict::NoViolation,
+                    ..
+                } => self.no_violation_count += 1,
+                Answer::Choice {
+                    verdict: Verdict::InsufficientContext,
+                    confidence,
+                    probabilities,
+                } => self.unresolved.push(Unresolved {
+                    rule,
+                    reason: UnresolvedReason::InsufficientContext,
+                    confidence: Some(confidence),
+                    probabilities: Some(probabilities),
+                }),
+            }
+        }
+        self.status = if self.unresolved.is_empty() {
+            FileStatus::Checked
+        } else {
+            FileStatus::Incomplete
+        };
+        self.input_tokens = evaluation.input_tokens;
+        Ok(())
+    }
 }
 
-fn probability(value: &Value) -> Result<f64> {
-    let value = value.as_f64().context("missing probability")?;
-    ensure!((0.0..=1.0).contains(&value), "probability outside [0, 1]");
-    Ok(value)
+impl fmt::Display for FileStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Planned => "planned",
+            Self::Checked => "checked",
+            Self::Incomplete => "incomplete",
+            Self::Error => "error",
+            Self::NotChecked => "not_checked",
+        })
+    }
+}
+
+impl fmt::Display for ReportStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Planned => "planned",
+            Self::Incomplete => "incomplete",
+            Self::Complete => "complete",
+        })
+    }
+}
+
+impl fmt::Display for UnresolvedReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Refusal => "refusal",
+            Self::InsufficientContext => "insufficient_context",
+        })
+    }
 }
 
 #[cfg(test)]
@@ -271,81 +415,238 @@ mod tests {
     use std::fs;
 
     use adamantium::Actor;
-    use serde_json::json;
+    use anyhow::anyhow;
 
     use super::*;
     use crate::style::rules::RuleSet;
 
-    struct FakeDecisions {
-        response: Option<Value>,
-        requests: Actor<Vec<Value>>,
+    /// Answers every file with the same verdicts, or fails as configured.
+    struct FakeProvider {
+        answers: Option<Vec<Verdict>>,
+        refuse_input: bool,
+        locations: FakeLocations,
+        reviews: Actor<Vec<(String, String, Option<String>)>>,
+        /// The rules each `locate` call was asked about.
+        locates: Actor<Vec<Vec<String>>>,
     }
 
-    impl Decisions for FakeDecisions {
-        fn evaluate(&self, request: &Value) -> Result<Value> {
-            self.requests
-                .with(|requests| requests.push(request.clone()));
-            self.response.clone().context("service unavailable")
+    enum FakeLocations {
+        /// No location for any rule.
+        Unplaced,
+        /// These locations, whatever the rules.
+        Fixed(Vec<Option<LineRange>>),
+        /// A service failure.
+        Unavailable,
+    }
+
+    impl FakeProvider {
+        fn answering(verdicts: &[Verdict]) -> Self {
+            Self {
+                answers: Some(verdicts.to_vec()),
+                refuse_input: false,
+                locations: FakeLocations::Unplaced,
+                reviews: Actor::default(),
+                locates: Actor::default(),
+            }
+        }
+
+        fn unavailable() -> Self {
+            Self {
+                answers: None,
+                refuse_input: false,
+                locations: FakeLocations::Unplaced,
+                reviews: Actor::default(),
+                locates: Actor::default(),
+            }
+        }
+
+        fn review_count(&self) -> usize {
+            self.reviews.with(|reviews| reviews.len())
         }
     }
 
-    fn choice(name: &str, selected: &str) -> Value {
-        json!({
-            "type": "choice", "name": name, "choice": selected, "confidence": 0.8,
-            "probabilities": [
-                { "value": "violation", "probability": 0.7 },
-                { "value": "no_violation", "probability": 0.2 },
-                { "value": "insufficient_context", "probability": 0.1 }
-            ]
-        })
+    impl Provider for FakeProvider {
+        fn max_source_bytes(&self) -> usize {
+            64
+        }
+
+        fn review(&self, file: &FileReview<'_>) -> Result<Evaluation, ReviewError> {
+            self.reviews.with(|reviews| {
+                reviews.push((
+                    file.path.to_owned(),
+                    file.source.to_owned(),
+                    file.context.map(str::to_owned),
+                ));
+            });
+            if self.refuse_input {
+                return Err(ReviewError::Input(anyhow!("too large for this model")));
+            }
+            let verdicts = self
+                .answers
+                .clone()
+                .ok_or_else(|| ReviewError::Service(anyhow!("service unavailable")))?;
+            Ok(Evaluation {
+                answers: verdicts
+                    .into_iter()
+                    .map(|verdict| Answer::Choice {
+                        verdict,
+                        confidence: 0.8,
+                        probabilities: BTreeMap::from([
+                            ("violation".to_owned(), 0.7),
+                            ("no_violation".to_owned(), 0.2),
+                            ("insufficient_context".to_owned(), 0.1),
+                        ]),
+                    })
+                    .collect(),
+                input_tokens: Some(123),
+            })
+        }
+
+        fn locate(&self, file: &FileReview<'_>) -> Result<Locations, ReviewError> {
+            self.locates.with(|locates| {
+                locates.push(file.questions.iter().map(|q| q.name.clone()).collect());
+            });
+            let lines = match &self.locations {
+                FakeLocations::Unplaced => vec![None; file.questions.len()],
+                FakeLocations::Fixed(lines) => lines.clone(),
+                FakeLocations::Unavailable => {
+                    return Err(ReviewError::Service(anyhow!("service unavailable")));
+                }
+            };
+            Ok(Locations {
+                lines,
+                input_tokens: Some(7),
+            })
+        }
+    }
+
+    fn check(dir: &Path, questions: &[Question], provider: &FakeProvider) -> Report {
+        let scan = Scan::discover(dir).unwrap();
+        let key = ReviewKey::new(
+            ProviderKind::Decisions,
+            "test-model",
+            questions,
+            Some("library"),
+        )
+        .unwrap();
+        let mut report = Report::planned(&scan, key, questions);
+        report.check(&scan, questions, Some("library"), provider);
+        report
     }
 
     #[test]
     fn reports_file_scoped_findings_and_uncertainty() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
-        let scan = Scan::discover(dir.path()).unwrap();
         let rules = RuleSet::load().unwrap();
         let questions = &rules.questions[..2];
-        let fake = FakeDecisions {
-            response: Some(json!({ "answers": [
-                choice(&questions[0].name, "violation"),
-                choice(&questions[1].name, "insufficient_context")
-            ], "usage": { "input_tokens": 123 } })),
-            requests: Actor::default(),
-        };
-        let report = Report::check(&scan, &rules.model, questions, Some("library"), &fake);
-        assert_eq!(report.status, "incomplete");
+        let fake = FakeProvider::answering(&[Verdict::Violation, Verdict::InsufficientContext]);
+        let report = check(dir.path(), questions, &fake);
+        assert_eq!(report.status, ReportStatus::Incomplete);
         assert_eq!(report.exit_code(), 2);
-        assert_eq!(report.files[0].scope, "file");
+        assert_eq!(report.key.provider, ProviderKind::Decisions);
+        assert_eq!(report.key.model, "test-model");
         assert_eq!(report.files[0].path, "lib.rs");
         assert_eq!(report.files[0].findings[0].rule, questions[0].name);
-        assert_eq!(report.files[0].unresolved[0].reason, "insufficient_context");
-        assert_eq!(report.files[0].input_tokens, Some(123));
-        assert_eq!(fake.requests.with(|requests| requests.len()), 1);
-        let data = fake
-            .requests
-            .with(|requests| requests[0]["input"][1]["content"][0]["data"].clone());
-        assert_eq!(data["source"], "fn example() {}\n");
-        assert_eq!(data["project_context"], "library");
+        assert_eq!(
+            report.files[0].findings[0].guidance,
+            questions[0].instructions
+        );
+        assert_eq!(report.files[0].unresolved[0].rule, questions[1].name);
+        assert_eq!(
+            report.files[0].unresolved[0].reason,
+            UnresolvedReason::InsufficientContext
+        );
+        assert_eq!(report.files[0].findings[0].lines, None);
+        assert_eq!(report.files[0].input_tokens, Some(130));
+        assert_eq!(
+            fake.reviews.with(|reviews| reviews.clone()),
+            [(
+                "lib.rs".to_owned(),
+                "fn example() {}\n".to_owned(),
+                Some("library".to_owned())
+            )]
+        );
     }
 
     #[test]
-    fn refusals_are_unresolved_and_invalid_answers_are_rejected() {
+    fn records_the_hash_of_the_source_it_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
         let rules = RuleSet::load().unwrap();
-        let question = &rules.questions[..1];
-        let refusal = json!({ "answers": [{ "type": "refusal", "name": question[0].name }] });
+        let fake = FakeProvider::answering(&[Verdict::NoViolation]);
+        let report = check(dir.path(), &rules.questions[..1], &fake);
         assert_eq!(
-            interpret(&refusal, question).unwrap().unresolved[0].reason,
-            "refusal"
+            report.files[0].source_sha256.as_deref(),
+            Some(sha256_hex(b"fn example() {}\n").as_str())
         );
-        let missing = json!({ "answers": [] });
-        assert!(interpret(&missing, question).is_err());
-        let wrong_name = json!({ "answers": [choice("wrong", "no_violation")] });
-        assert!(interpret(&wrong_name, question).is_err());
-        let mut bad_probability = choice(&question[0].name, "violation");
-        bad_probability["confidence"] = json!(1.5);
-        assert!(interpret(&json!({ "answers": [bad_probability] }), question).is_err());
+        assert!(!report.files[0].cached);
+        assert_eq!(report.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn the_review_key_covers_rule_definitions_and_context() {
+        let rules = RuleSet::load().unwrap();
+        let questions = &rules.questions[..2];
+        let key = |questions: &[Question], context| {
+            ReviewKey::new(ProviderKind::Decisions, "test-model", questions, context).unwrap()
+        };
+        let base = key(questions, Some("library"));
+        assert_eq!(base, key(questions, Some("library")));
+        assert_eq!(
+            base.context_sha256.as_deref(),
+            Some(sha256_hex(b"library").as_str())
+        );
+        assert_eq!(key(questions, None).context_sha256, None);
+        assert_ne!(base, key(questions, Some("application")));
+        assert_ne!(base, key(&questions[..1], Some("library")));
+
+        let mut reworded = questions.to_vec();
+        reworded[1].instructions.push_str(" Also consider tests.");
+        assert_eq!(reworded[1].name, questions[1].name);
+        assert_ne!(base, key(&reworded, Some("library")));
+        let mut redescribed = questions.to_vec();
+        redescribed[0].choices[0].description.push('.');
+        assert_ne!(base, key(&redescribed, Some("library")));
+
+        let other_model =
+            ReviewKey::new(ProviderKind::Decisions, "other", questions, Some("library")).unwrap();
+        assert_ne!(base, other_model);
+    }
+
+    #[test]
+    fn a_written_report_reads_back_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let fake = FakeProvider::answering(&[Verdict::Violation, Verdict::InsufficientContext]);
+        let report = check(dir.path(), &rules.questions[..2], &fake);
+        let written = serde_json::to_value(&report).unwrap();
+        assert_eq!(written["provider"], "decisions");
+        assert_eq!(written["files"][0]["status"], "incomplete");
+        assert_eq!(
+            written["files"][0]["unresolved"][0]["reason"],
+            "insufficient_context"
+        );
+        let read: Report = serde_json::from_value(written.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&read).unwrap(), written);
+    }
+
+    #[test]
+    fn refusals_are_unresolved() {
+        let rules = RuleSet::load().unwrap();
+        let mut file = FileReport::new("lib.rs".into());
+        file.record(
+            &rules.questions[..1],
+            Evaluation {
+                answers: vec![Answer::Refusal],
+                input_tokens: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(file.status, FileStatus::Incomplete);
+        assert_eq!(file.unresolved[0].reason, UnresolvedReason::Refusal);
+        assert_eq!(file.unresolved[0].confidence, None);
     }
 
     #[test]
@@ -353,17 +654,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
         fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
-        let scan = Scan::discover(dir.path()).unwrap();
         let rules = RuleSet::load().unwrap();
-        let fake = FakeDecisions {
-            response: None,
-            requests: Actor::default(),
-        };
-        let report = Report::check(&scan, &rules.model, &rules.questions[..1], None, &fake);
+        let fake = FakeProvider::unavailable();
+        let report = check(dir.path(), &rules.questions[..1], &fake);
         assert_eq!(report.exit_code(), 2);
-        assert_eq!(report.files[0].status, "error");
-        assert_eq!(report.files[1].status, "not_checked");
-        assert_eq!(fake.requests.with(|requests| requests.len()), 1);
+        assert_eq!(report.files[0].status, FileStatus::Error);
+        assert_eq!(
+            report.files[0].error.as_deref(),
+            Some("service unavailable")
+        );
+        assert_eq!(report.files[1].status, FileStatus::NotChecked);
+        assert_eq!(fake.review_count(), 1);
+    }
+
+    #[test]
+    fn a_wrong_number_of_answers_stops_the_review() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let fake = FakeProvider::answering(&[Verdict::NoViolation]);
+        let report = check(dir.path(), &rules.questions[..2], &fake);
+        assert_eq!(report.files[0].status, FileStatus::Error);
+        assert_eq!(
+            report.files[0].error.as_deref(),
+            Some("provider returned 1 answers for 2 questions")
+        );
+        assert!(report.files[0].findings.is_empty());
+        assert_eq!(report.files[1].status, FileStatus::NotChecked);
+        assert_eq!(fake.review_count(), 1);
+    }
+
+    #[test]
+    fn input_errors_fail_only_their_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let fake = FakeProvider {
+            refuse_input: true,
+            ..FakeProvider::answering(&[Verdict::NoViolation])
+        };
+        let report = check(dir.path(), &rules.questions[..1], &fake);
+        assert_eq!(report.status, ReportStatus::Incomplete);
+        for file in &report.files {
+            assert_eq!(file.status, FileStatus::Error);
+            assert_eq!(file.error.as_deref(), Some("too large for this model"));
+        }
+        assert_eq!(fake.review_count(), 2);
     }
 
     #[test]
@@ -372,37 +710,24 @@ mod tests {
         let questions = &rules.questions[..1];
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
-        let scan = Scan::discover(dir.path()).unwrap();
-        let run = |selected| {
-            let fake = FakeDecisions {
-                response: Some(json!({ "answers": [choice(&questions[0].name, selected)] })),
-                requests: Actor::default(),
-            };
-            Report::check(&scan, &rules.model, questions, None, &fake)
-        };
-        assert_eq!(run("violation").exit_code(), 1);
-        let clean = run("no_violation");
+        let run = |verdict| check(dir.path(), questions, &FakeProvider::answering(&[verdict]));
+        assert_eq!(run(Verdict::Violation).exit_code(), 1);
+        let clean = run(Verdict::NoViolation);
+        assert_eq!(clean.status, ReportStatus::Complete);
         assert_eq!(clean.exit_code(), 0);
         assert_eq!(clean.files[0].no_violation_count, 1);
     }
 
     #[test]
-    fn oversized_files_are_reported_without_contacting_the_service() {
+    fn files_over_the_provider_limit_are_reported_without_contacting_it() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("large.rs"),
-            vec![b'x'; api::MAX_JSON_INPUT_BYTES + 1],
-        )
-        .unwrap();
-        let scan = Scan::discover(dir.path()).unwrap();
+        fs::write(dir.path().join("large.rs"), vec![b'x'; 65]).unwrap();
+        fs::write(dir.path().join("small.rs"), vec![b'x'; 64]).unwrap();
         let rules = RuleSet::load().unwrap();
-        let fake = FakeDecisions {
-            response: None,
-            requests: Actor::default(),
-        };
-        let report = Report::check(&scan, &rules.model, &rules.questions[..1], None, &fake);
-        assert_eq!(report.status, "incomplete");
-        assert_eq!(report.files[0].status, "error");
+        let fake = FakeProvider::answering(&[Verdict::NoViolation]);
+        let report = check(dir.path(), &rules.questions[..1], &fake);
+        assert_eq!(report.status, ReportStatus::Incomplete);
+        assert_eq!(report.files[0].status, FileStatus::Error);
         assert!(
             report.files[0]
                 .error
@@ -410,6 +735,98 @@ mod tests {
                 .unwrap()
                 .contains("input limit")
         );
-        assert!(fake.requests.with(|requests| requests.is_empty()));
+        assert_eq!(report.files[1].status, FileStatus::Checked);
+        assert_eq!(fake.review_count(), 1);
+    }
+
+    #[test]
+    fn locates_only_the_rules_a_file_breaks() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let questions = &rules.questions[..3];
+        let lines = LineRange {
+            start_line: 4,
+            end_line: 6,
+        };
+        let fake = FakeProvider {
+            locations: FakeLocations::Fixed(vec![Some(lines), None]),
+            ..FakeProvider::answering(&[
+                Verdict::Violation,
+                Verdict::NoViolation,
+                Verdict::Violation,
+            ])
+        };
+        let report = check(dir.path(), questions, &fake);
+        assert_eq!(
+            fake.locates.with(|locates| locates.clone()),
+            [vec![questions[0].name.clone(), questions[2].name.clone()]]
+        );
+        let file = &report.files[0];
+        assert_eq!(file.status, FileStatus::Checked);
+        assert_eq!(file.findings[0].lines, Some(lines));
+        assert_eq!(file.findings[1].lines, None);
+        assert_eq!(file.input_tokens, Some(130));
+
+        let written = serde_json::to_value(&report).unwrap();
+        let findings = &written["files"][0]["findings"];
+        assert_eq!(
+            findings[0]["lines"],
+            serde_json::json!({ "start_line": 4, "end_line": 6 })
+        );
+        assert!(findings[1].get("lines").is_none());
+        let read: Report = serde_json::from_value(written).unwrap();
+        assert_eq!(read.files[0].findings[0].lines, Some(lines));
+        assert_eq!(read.files[0].findings[1].lines, None);
+    }
+
+    #[test]
+    fn a_file_without_findings_is_not_located() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let fake = FakeProvider::answering(&[Verdict::NoViolation, Verdict::InsufficientContext]);
+        let report = check(dir.path(), &rules.questions[..2], &fake);
+        assert_eq!(fake.locates.with(|locates| locates.len()), 0);
+        assert_eq!(report.files[0].input_tokens, Some(123));
+    }
+
+    #[test]
+    fn a_failure_to_locate_fails_the_file_and_stops_the_review() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let fake = FakeProvider {
+            locations: FakeLocations::Unavailable,
+            ..FakeProvider::answering(&[Verdict::Violation])
+        };
+        let report = check(dir.path(), &rules.questions[..1], &fake);
+        let file = &report.files[0];
+        assert_eq!(file.status, FileStatus::Error);
+        assert_eq!(file.error.as_deref(), Some("service unavailable"));
+        assert!(file.findings.is_empty());
+        assert_eq!(file.input_tokens, None);
+        assert_eq!(report.files[1].status, FileStatus::NotChecked);
+        assert_eq!(fake.review_count(), 1);
+    }
+
+    #[test]
+    fn the_wrong_number_of_locations_fails_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let fake = FakeProvider {
+            locations: FakeLocations::Fixed(Vec::new()),
+            ..FakeProvider::answering(&[Verdict::Violation])
+        };
+        let report = check(dir.path(), &rules.questions[..1], &fake);
+        assert_eq!(report.files[0].status, FileStatus::Error);
+        assert_eq!(
+            report.files[0].error.as_deref(),
+            Some("provider located 0 findings of 1")
+        );
+        assert!(report.files[0].findings.is_empty());
+        assert_eq!(report.files[0].input_tokens, Some(130));
     }
 }

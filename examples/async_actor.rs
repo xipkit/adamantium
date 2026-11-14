@@ -1,16 +1,15 @@
 //! Drive a TCP connection through a mailbox, with explicit replies and shutdown.
 
-use adamantium::{AsyncActor, Tasks};
+use adamantium::{AsyncActor, Reply, Tasks};
 use std::io;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::oneshot,
 };
 
 struct Request {
     bytes: Vec<u8>,
-    reply: oneshot::Sender<Vec<u8>>,
+    reply: Reply<Vec<u8>>,
 }
 
 #[tokio::main]
@@ -30,14 +29,14 @@ async fn main() -> io::Result<()> {
                 connection.write_all(&request.bytes).await?;
                 let mut response = vec![0; request.bytes.len()];
                 connection.read_exact(&mut response).await?;
-                let _ = request.reply.send(response);
+                drop(request.reply.send(response));
                 Ok(())
             })
         });
 
         let mut replies = Vec::new();
         for text in ["first exchange", "second exchange", "third exchange"] {
-            let (reply, response) = oneshot::channel();
+            let (reply, response) = Reply::pair();
             actor
                 .send(Request {
                     bytes: text.as_bytes().to_vec(),
@@ -49,7 +48,10 @@ async fn main() -> io::Result<()> {
         }
         actor.close();
         for (expected, response) in replies {
-            let response = response.await.map_err(io::Error::other)?;
+            let response = response
+                .receive()
+                .await
+                .ok_or_else(|| io::Error::other("worker ended without a reply"))?;
             if response != expected.as_bytes() {
                 return Err(io::Error::other("incorrect echo response"));
             }

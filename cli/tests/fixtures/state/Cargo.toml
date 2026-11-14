@@ -1,0 +1,17 @@
+# Thread-local values beside the shared state the rules allow: atomics,
+# `OnceLock` and `LazyLock` statics, and a static `Actor`. Each line that must
+# be reported ends in a comment naming its rule. Its own workspace, so Cargo
+# does not look for a parent.
+[workspace]
+
+[package]
+name = "state"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+adamantium = { path = "../../../..", default-features = false }
+
+[profile.release]
+overflow-checks = true

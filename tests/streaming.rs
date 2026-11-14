@@ -1,5 +1,7 @@
 #![cfg(feature = "tokio")]
 
+mod support;
+
 use std::{
     future,
     pin::Pin,
@@ -17,8 +19,8 @@ use adamantium::{
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
+use support::timeout;
 use tokio::sync::{Semaphore, oneshot};
-use tokio::time::timeout;
 
 const HUNG: Duration = Duration::from_secs(30);
 
@@ -254,7 +256,7 @@ on_both_runtimes! {
             async move {
                 let _guard = guard;
                 if let Some(cancel) = cancel {
-                    let _ = cancel.send(cancellation);
+                    cancel.send(cancellation).unwrap();
                 }
                 future::pending::<Result<(), &str>>().await
             }
@@ -287,7 +289,7 @@ on_both_runtimes! {
             assert_eq!(failure.next().await, Some(Err(ScopeError::Failed("error"))));
         }
         {
-            let mut abandoned = Box::pin(concurrently_ordered_until(0..1, 1, parent.clone(), |_| future::pending::<Result<(), &str>>()));
+            let mut abandoned = std::pin::pin!(concurrently_ordered_until(0..1, 1, parent.clone(), |_| future::pending::<Result<(), &str>>()));
             pending(abandoned.as_mut()).await;
         }
         assert!(!parent.is_cancelled());
@@ -603,13 +605,13 @@ async fn cancellation_waits_for_synchronous_destructors() {
     }
     impl Drop for Cleanup {
         fn drop(&mut self) {
-            let _ = self.started.take().unwrap().send(());
+            self.started.take().unwrap().send(()).unwrap();
             self.release.recv_timeout(HUNG).unwrap();
         }
     }
     let cancel = Cancellation::new();
     let (started, cleaning) = oneshot::channel();
-    let (release, wait) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::sync_channel(1);
     let mut guard = Some(Cleanup {
         started: Some(started),
         release: wait,

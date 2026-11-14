@@ -9,13 +9,13 @@ use std::{
     task::Poll,
 };
 
-use tokio::{
-    sync::{oneshot, watch},
-    task::JoinError,
-    time::Instant,
-};
+use tokio::{task::JoinError, time::Instant};
+
+use crate::{Reply, ReplyReceiver, Watch, time};
 
 mod stream;
+#[cfg(feature = "tracing")]
+mod trace;
 pub use stream::{
     concurrently_ordered, concurrently_ordered_until, concurrently_unordered,
     concurrently_unordered_until,
@@ -26,34 +26,116 @@ pub use stream::{
 /// Cancelling any clone wakes all [`cancelled`](Self::cancelled) waiters.
 /// Dropping a clone does not cancel. Use a fresh signal for each scope: a
 /// cancelled signal cannot be reset, and scopes also cancel it on shutdown.
-#[derive(Clone, Debug)]
 pub struct Cancellation {
-    requested: watch::Sender<bool>,
+    requested: Watch<bool>,
 }
 
 impl Cancellation {
     /// Creates a signal with no shutdown requested.
     pub fn new() -> Self {
+        crate::runtime::production_only("Tasks and Cancellation");
         Self {
-            requested: watch::channel(false).0,
+            requested: Watch::new(false),
         }
     }
 
     /// Requests shutdown. Repeated requests have the same effect as one.
     pub fn cancel(&self) {
-        self.requested.send_replace(true);
+        crate::runtime::production_only("Tasks and Cancellation");
+        self.request();
+    }
+
+    /// Records the request. A scope's destructor calls this directly, since
+    /// it may run while unwinding, when `cancel`'s harness check would panic
+    /// a second time.
+    fn request(&self) {
+        // This handle keeps the watch open, so the send cannot fail.
+        self.requested.send(true).unwrap_or(());
     }
 
     /// Whether shutdown has been requested, including from a blocking thread.
     pub fn is_cancelled(&self) -> bool {
-        *self.requested.borrow()
+        crate::runtime::production_only("Tasks and Cancellation");
+        self.requested.get()
     }
 
     /// Waits for shutdown, returning immediately if already requested.
     /// Dropping this future does not lose the request.
     pub async fn cancelled(&self) {
-        let mut requested = self.requested.subscribe();
-        let _ = requested.wait_for(|requested| *requested).await;
+        crate::runtime::production_future("Tasks and Cancellation", async move {
+            let mut requested = self.requested.subscribe();
+            // Borrowing self keeps a handle alive, so the watch cannot close.
+            requested.wait_for(|requested| *requested).await;
+        })
+        .await
+    }
+
+    /// Requests shutdown on SIGINT or SIGTERM on Unix, or Ctrl-C on Windows.
+    ///
+    /// Requires the opt-in `signal` feature and a Tokio runtime with signal
+    /// handling enabled. Listening starts when this future is first polled;
+    /// registration errors are returned without requesting cancellation.
+    /// It also returns successfully if this signal is cancelled another way.
+    /// An already cancelled signal does not register process handlers.
+    ///
+    /// Await this alongside the work that observes this cancellation, for
+    /// example with `tokio::try_join!`. No background task is spawned. Dropping
+    /// the future stops listening without cancelling, but Tokio's process-wide
+    /// signal handlers remain installed, replacing the default termination
+    /// behavior even after the listener is dropped.
+    #[cfg(all(feature = "signal", any(unix, windows)))]
+    pub async fn cancel_on_signal(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        let received = async {
+            use tokio::signal::unix::{SignalKind, signal};
+
+            let mut interrupt = signal(SignalKind::interrupt())?;
+            let mut terminate = signal(SignalKind::terminate())?;
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
+            }
+            Ok::<(), std::io::Error>(())
+        };
+        #[cfg(windows)]
+        let received = tokio::signal::ctrl_c();
+
+        tokio::select! {
+            biased;
+            () = self.cancelled() => Ok(()),
+            result = received => {
+                result?;
+                self.cancel();
+                Ok(())
+            }
+        }
+    }
+}
+
+impl fmt::Debug for Cancellation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        crate::runtime::production_only("Cancellation");
+        f.debug_struct("Cancellation")
+            .field("requested", &self.requested.get())
+            .finish()
+    }
+}
+
+#[cfg(feature = "deterministic")]
+impl Drop for Cancellation {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            crate::runtime::production_only("Cancellation");
+        }
+    }
+}
+
+impl Clone for Cancellation {
+    fn clone(&self) -> Self {
+        crate::runtime::production_only("Cancellation");
+        Self {
+            requested: self.requested.clone(),
+        }
     }
 }
 
@@ -93,24 +175,43 @@ impl<E: std::error::Error + 'static> std::error::Error for ScopeError<E> {
     }
 }
 
-async fn shutdown<E>(cancellation: &Cancellation, deadline: Option<Instant>) -> ScopeError<E> {
+/// Why a wait ended before its work did: the caller requested shutdown, or
+/// the deadline elapsed.
+pub(crate) enum Shutdown {
+    Cancelled,
+    DeadlineExceeded,
+}
+
+impl Shutdown {
+    pub(crate) fn scope_error<E>(self) -> ScopeError<E> {
+        match self {
+            Self::Cancelled => ScopeError::Cancelled,
+            Self::DeadlineExceeded => ScopeError::DeadlineExceeded,
+        }
+    }
+}
+
+/// Waits for cancellation or the deadline, whichever comes first. A request
+/// already present at a poll is reported by that poll, and cancellation wins
+/// over an equally ready deadline.
+pub(crate) async fn shutdown(cancellation: &Cancellation, deadline: Option<Instant>) -> Shutdown {
     let mut cancelled = pin!(cancellation.cancelled());
     let mut elapsed = pin!(async {
         match deadline {
-            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            Some(deadline) => time::sleep_until(deadline).await,
             None => std::future::pending().await,
         }
     });
     std::future::poll_fn(|cx| {
         if cancelled.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(ScopeError::Cancelled);
+            return Poll::Ready(Shutdown::Cancelled);
         }
         // Tokio timers round up to milliseconds. Check the clock as well so an
-        // expired deadline wins before polling the body on every scope poll.
-        if deadline.is_some_and(|deadline| deadline <= Instant::now())
+        // expired deadline wins before polling the waiter's work on every poll.
+        if deadline.is_some_and(|deadline| deadline <= time::now())
             || elapsed.as_mut().poll(cx).is_ready()
         {
-            return Poll::Ready(ScopeError::DeadlineExceeded);
+            return Poll::Ready(Shutdown::DeadlineExceeded);
         }
         Poll::Pending
     })
@@ -197,6 +298,8 @@ pub struct Tasks<E> {
     set: tokio::task::JoinSet<()>,
     errors: SharedErrors<E>,
     cancellation: Option<Cancellation>,
+    #[cfg(feature = "tracing")]
+    named: Option<Shared<trace::Running>>,
 }
 
 /// The handle to a task spawned in a [`Tasks`] scope.
@@ -205,7 +308,9 @@ pub struct Tasks<E> {
 /// its result. Dropping it or keeping it is fine: the task still runs, and an
 /// error nobody took with `value` is reported when the scope joins.
 pub struct Task<T, E> {
-    rx: oneshot::Receiver<Result<T, Receipt>>,
+    #[cfg(feature = "deterministic")]
+    _runtime: crate::runtime::execution::Production,
+    rx: ReplyReceiver<Result<T, Receipt>>,
     errors: SharedErrors<E>,
 }
 
@@ -216,6 +321,7 @@ impl<E: Send + 'static> Tasks<E> {
         reason = "the scope is what makes a JoinSet structured"
     )]
     pub fn new() -> Self {
+        crate::runtime::production_only("Tasks and Cancellation");
         Self {
             set: tokio::task::JoinSet::new(),
             errors: shared(Errors {
@@ -224,6 +330,8 @@ impl<E: Send + 'static> Tasks<E> {
                 panic: None,
             }),
             cancellation: None,
+            #[cfg(feature = "tracing")]
+            named: None,
         }
     }
 
@@ -253,9 +361,12 @@ impl<E: Send + 'static> Tasks<E> {
         R: Send,
         F: AsyncFnOnce(&mut Tasks<E>) -> Result<R, E>,
     {
-        let mut tasks = Self::new();
-        let result = body(&mut tasks).await;
-        tasks.join(result).await
+        crate::runtime::production_future("Tasks and Cancellation", async move {
+            let mut tasks = Self::new();
+            let result = body(&mut tasks).await;
+            tasks.join(result).await
+        })
+        .await
     }
 
     /// Runs a scope until completion, cancellation, or an absolute deadline.
@@ -283,14 +394,14 @@ impl<E: Send + 'static> Tasks<E> {
     /// cancellation and keep awaiting this future instead of dropping it.
     ///
     /// ```
-    /// use adamantium::{Cancellation, ScopeError, Tasks};
-    /// use tokio::time::{Duration, Instant};
+    /// use adamantium::{Cancellation, ScopeError, Tasks, time};
+    /// use std::time::Duration;
     /// # #[tokio::main] async fn main() {
     /// let cancellation = Cancellation::new();
     /// let worker = cancellation.clone();
     /// let result = Tasks::<std::io::Error>::run_until(
     ///     cancellation,
-    ///     Some(Instant::now() + Duration::from_secs(1)),
+    ///     Some(time::now() + Duration::from_secs(1)),
     ///     async |tasks| {
     ///         let work = tasks.spawn_blocking(move || {
     ///             // Real blocking work checks this between bounded operations.
@@ -313,16 +424,21 @@ impl<E: Send + 'static> Tasks<E> {
         R: Send,
         F: AsyncFnOnce(&mut Tasks<E>) -> Result<R, E>,
     {
-        let mut tasks = Self::new();
-        tasks.cancellation = Some(cancellation.clone());
-        let reason = tokio::select! {
-            biased;
-            reason = shutdown(&cancellation, deadline) => reason,
-            result = body(&mut tasks) => return tasks.join_until(cancellation, deadline, result).await,
-        };
-        tasks.abort();
-        tasks.join(Ok(())).await.map_err(ScopeError::Failed)?;
-        Err(reason)
+        crate::runtime::production_future("Tasks and Cancellation", async move {
+            let mut tasks = Self::new();
+            tasks.cancellation = Some(cancellation.clone());
+            let reason = tokio::select! {
+                biased;
+                reason = shutdown(&cancellation, deadline) => reason,
+                result = body(&mut tasks) => return tasks.join_until(cancellation, deadline, result).await,
+            };
+            #[cfg(feature = "tracing")]
+            tasks.report_deadline(&reason);
+            tasks.abort();
+            tasks.join(Ok(())).await.map_err(ScopeError::Failed)?;
+            Err(reason.scope_error())
+        })
+        .await
     }
 
     /// Starts `future` as a task of this scope and returns its handle.
@@ -331,17 +447,52 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
-        let (tx, rx) = oneshot::channel();
+        crate::runtime::production_only("Tasks and Cancellation");
+        let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
         self.set.spawn(async move {
             let result = future.await.map_err(|error| record(&errors, error));
             // Without a handle to take it, a value is dropped and an error
             // stays recorded for join.
-            let _ = tx.send(result);
+            drop(tx.send(result));
         });
         Task {
+            #[cfg(feature = "deterministic")]
+            _runtime: crate::runtime::execution::Production("Task"),
             rx,
             errors: Arc::clone(&self.errors),
+        }
+    }
+
+    /// Starts a named task. With the `tracing` feature, its future is polled
+    /// inside an `adamantium.task` span with a `task.name` field, parented to
+    /// the current span. Unfinished named tasks are reported at scope deadlines.
+    /// Without `tracing`, this behaves as [`spawn`](Self::spawn) without
+    /// converting or storing the name.
+    pub fn spawn_named<T, F>(&mut self, name: impl Into<crate::Str>, future: F) -> Task<T, E>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, E>> + Send + 'static,
+    {
+        crate::runtime::production_only("Tasks and Cancellation");
+        #[cfg(feature = "tracing")]
+        {
+            use tracing::{Instrument, instrument::WithSubscriber};
+
+            let (running, span) = self.track(name.into());
+            self.spawn(
+                async move {
+                    let _running = running;
+                    future.await
+                }
+                .instrument(span)
+                .with_current_subscriber(),
+            )
+        }
+        #[cfg(not(feature = "tracing"))]
+        {
+            let _ = name;
+            self.spawn(future)
         }
     }
 
@@ -357,33 +508,70 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
-        let (tx, rx) = oneshot::channel();
+        crate::runtime::production_only("Tasks and Cancellation");
+        let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
         self.set.spawn_blocking(move || {
             let result = f().map_err(|error| record(&errors, error));
-            let _ = tx.send(result);
+            // A dropped handle discards the value; errors stay recorded for join.
+            drop(tx.send(result));
         });
         Task {
+            #[cfg(feature = "deterministic")]
+            _runtime: crate::runtime::execution::Production("Task"),
             rx,
             errors: Arc::clone(&self.errors),
+        }
+    }
+
+    /// Registers named blocking work, with the same cleanup contract as
+    /// [`spawn_blocking`](Self::spawn_blocking). With `tracing`, the closure
+    /// runs inside an `adamantium.task` span and is included in deadline reports
+    /// until it finishes. Without `tracing`, the name is not converted or stored.
+    pub fn spawn_blocking_named<T, F>(&mut self, name: impl Into<crate::Str>, f: F) -> Task<T, E>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        crate::runtime::production_only("Tasks and Cancellation");
+        #[cfg(feature = "tracing")]
+        {
+            let (running, span) = self.track(name.into());
+            let dispatch = tracing::dispatcher::get_default(Clone::clone);
+            self.spawn_blocking(move || {
+                tracing::dispatcher::with_default(&dispatch, move || {
+                    span.in_scope(move || {
+                        let _running = running;
+                        f()
+                    })
+                })
+            })
+        }
+        #[cfg(not(feature = "tracing"))]
+        {
+            let _ = name;
+            self.spawn_blocking(f)
         }
     }
 
     /// Waits for a task and returns its result. If the task panicked, the
     /// panic is resumed here.
     pub async fn value<T: Send>(&mut self, task: Task<T, E>) -> Result<T, E> {
-        let error = match task.rx.await {
-            Ok(Ok(value)) => return Ok(value),
-            Ok(Err(receipt)) => claim(&task.errors, receipt),
-            Err(_) => None,
-        };
-        match error {
-            Some(error) => Err(error),
-            // A task that ends without a result has panicked, so its join
-            // result is a panic. Find it. A result whose error is gone came
-            // from another scope, whose join has already reported it.
-            None => self.resume_first_panic().await,
-        }
+        crate::runtime::production_future("Tasks and Cancellation", async move {
+            let error = match task.rx.receive().await {
+                Some(Ok(value)) => return Ok(value),
+                Some(Err(receipt)) => claim(&task.errors, receipt),
+                None => None,
+            };
+            match error {
+                Some(error) => Err(error),
+                // A task that ends without a result has panicked, so its join
+                // result is a panic. Find it. A result whose error is gone came
+                // from another scope, whose join has already reported it.
+                None => self.resume_first_panic().await,
+            }
+        })
+        .await
     }
 
     /// Waits for every task, then returns `body`'s result unless a task
@@ -392,8 +580,11 @@ impl<E: Send + 'static> Tasks<E> {
     /// `body` already took it with [`value`](Self::value), is returned over
     /// a successful body; a failed body's error is returned over a task's.
     pub async fn join<R: Send>(mut self, body: Result<R, E>) -> Result<R, E> {
-        self.settle(body.is_err()).await;
-        self.result(body)
+        crate::runtime::production_future("Tasks and Cancellation", async move {
+            self.settle(body.is_err()).await;
+            self.result(body)
+        })
+        .await
     }
 
     /// Joins with cancellation and a deadline, using [`run_until`](Self::run_until)'s
@@ -406,23 +597,28 @@ impl<E: Send + 'static> Tasks<E> {
         deadline: Option<Instant>,
         body: Result<R, E>,
     ) -> impl Future<Output = Result<R, ScopeError<E>>> + Send {
+        crate::runtime::production_only("Tasks and Cancellation");
         self.cancellation = Some(cancellation.clone());
-        async move {
+        crate::runtime::production_future("Tasks", async move {
             let reason = tokio::select! {
                 biased;
                 reason = shutdown(&cancellation, deadline) => Some(reason),
                 () = self.settle(body.is_err()) => None,
             };
-            if reason.is_some() {
+            if let Some(reason) = &reason {
+                #[cfg(feature = "tracing")]
+                self.report_deadline(reason);
+                #[cfg(not(feature = "tracing"))]
+                let _ = reason;
                 self.abort();
                 self.drain().await;
             }
             let value = self.result(body).map_err(ScopeError::Failed)?;
             match reason {
-                Some(reason) => Err(reason),
+                Some(reason) => Err(reason.scope_error()),
                 None => Ok(value),
             }
-        }
+        })
     }
 
     async fn settle(&mut self, body_failed: bool) {
@@ -453,11 +649,13 @@ impl<E: Send + 'static> Tasks<E> {
 
     /// The number of tasks that have not been joined.
     pub fn len(&self) -> usize {
+        crate::runtime::production_only("Tasks and Cancellation");
         self.set.len()
     }
 
     /// Whether every spawned task has been joined.
     pub fn is_empty(&self) -> bool {
+        crate::runtime::production_only("Tasks and Cancellation");
         self.set.is_empty()
     }
 
@@ -514,8 +712,12 @@ impl<E: Send + 'static> Tasks<E> {
 
 impl<E> Drop for Tasks<E> {
     fn drop(&mut self) {
+        #[cfg(feature = "deterministic")]
+        if !std::thread::panicking() {
+            crate::runtime::production_only("Tasks");
+        }
         if let Some(cancellation) = &self.cancellation {
-            cancellation.cancel();
+            cancellation.request();
         }
         // JoinSet's destructor requests aborts, but cannot await their completion.
     }
@@ -529,6 +731,7 @@ impl<E: Send + 'static> Default for Tasks<E> {
 
 impl<E> fmt::Debug for Tasks<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        crate::runtime::production_only("Tasks");
         f.debug_struct("Tasks")
             .field("len", &self.set.len())
             .finish()
@@ -577,11 +780,12 @@ where
     T: Send + 'static,
     E: Send + 'static,
 {
+    crate::runtime::production_only("Tasks and Cancellation");
     // The loop comes back for another item after every join, and an iterator
     // may resume or panic if it is called again after its first `None`.
     let mut items = items.into_iter().fuse();
     let limit = limit.max(1);
-    async move {
+    crate::runtime::production_future("Tasks", async move {
         let mut tasks = Tasks::new();
         // Tasks report here rather than through handles, so items that finish
         // behind a slow one leave only their results behind.
@@ -627,7 +831,118 @@ where
         // caller would otherwise keep for as long as it keeps the results.
         values.shrink_to_fit();
         Ok(values)
-    }
+    })
+}
+
+/// What the items of a [`first_ok`] have produced so far.
+struct Outcomes<T, E> {
+    winner: Option<T>,
+    errors: Vec<(usize, E)>,
+}
+
+/// Runs `f` on items, at most `limit` at a time, and returns the first
+/// success to happen. A `limit` of zero means one. With a limit of one this
+/// tries the items in turn until one succeeds; with a limit as long as the
+/// input it races them all.
+///
+/// A failure only frees a place for the next item. The first success ends
+/// the whole operation: no further item is taken, the running items are
+/// aborted and drained, then the value is returned. A success that lands
+/// while they drain is dropped. If every item fails, all of their errors
+/// come back in input order, so the error at index `i` is item `i`'s; an
+/// empty input fails with no errors. A panic in an item's future aborts and
+/// drains the others and is resumed here, even after a success.
+///
+/// Laziness, the `Send` bounds, where the iterator and `f` run, and the need
+/// for a Tokio runtime are as for [`concurrently`].
+///
+/// ```
+/// use adamantium::first_ok;
+/// # async fn fetch(mirror: &str) -> Result<String, String> {
+/// #     if mirror == "a.example.com" { Err(format!("{mirror} is down")) } else { Ok(mirror.to_owned()) }
+/// # }
+/// # #[tokio::main] async fn main() -> Result<(), Vec<String>> {
+/// let mirrors = ["a.example.com", "b.example.com", "c.example.com"];
+/// let page = first_ok(mirrors, 1, fetch).await?;
+/// assert_eq!(page, "b.example.com");
+/// # Ok(()) }
+/// ```
+pub fn first_ok<I, F, Fut, T, E>(
+    items: I,
+    limit: usize,
+    mut f: F,
+) -> impl Future<Output = Result<T, Vec<E>>> + Send
+where
+    I: IntoIterator,
+    I::IntoIter: Send,
+    F: FnMut(I::Item) -> Fut + Send,
+    Fut: Future<Output = Result<T, E>> + Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    crate::runtime::production_only("Tasks and Cancellation");
+    let mut items = items.into_iter().fuse();
+    let limit = limit.max(1);
+    crate::runtime::production_future("Tasks", async move {
+        // Items report here rather than as task errors, which would make the
+        // scope abort the others at the first failure.
+        let mut tasks = Tasks::<std::convert::Infallible>::new();
+        let outcomes = shared(Outcomes {
+            winner: None,
+            errors: Vec::new(),
+        });
+        let mut started = 0;
+        // A task reports just before it ends, so this stops before taking
+        // another item once one has succeeded.
+        while lock(&outcomes).winner.is_none() {
+            if tasks.len() < limit
+                && let Some(item) = items.next()
+            {
+                let index = started;
+                started += 1;
+                let future = f(item);
+                let outcomes = Arc::clone(&outcomes);
+                tasks.spawn(async move {
+                    let result = future.await;
+                    let mut outcomes = lock(&outcomes);
+                    match result {
+                        Ok(value) => {
+                            if outcomes.winner.is_none() {
+                                outcomes.winner = Some(value);
+                            }
+                        }
+                        Err(error) => outcomes.errors.push((index, error)),
+                    }
+                    Ok(())
+                });
+                continue;
+            }
+            match tasks.set.join_next().await {
+                Some(Ok(())) => {}
+                Some(Err(join_error)) => {
+                    // Nothing here has aborted a task yet, so a cancellation
+                    // means its runtime shut down, and that item has no result.
+                    tasks.remember_panic(join_error);
+                    break;
+                }
+                None => break,
+            }
+        }
+        tasks.abort();
+        let Ok(()) = tasks.join(Ok(())).await;
+        let (winner, mut errors) = {
+            let mut outcomes = lock(&outcomes);
+            (outcomes.winner.take(), std::mem::take(&mut outcomes.errors))
+        };
+        if let Some(value) = winner {
+            return Ok(value);
+        }
+        if errors.len() != started {
+            no_result();
+        }
+        errors.sort_unstable_by_key(|(index, _)| *index);
+        Err(errors.into_iter().map(|(_, error)| error).collect())
+    })
 }
 
 /// Runs `f` on a thread meant for blocking work and returns its result. Use
@@ -642,15 +957,18 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "the sanctioned wrapper around spawn_blocking"
-    )]
-    let handle = tokio::task::spawn_blocking(f);
-    match handle.await {
-        Ok(value) => value,
-        Err(join_error) => {
-            panic::resume_unwind(join_error.try_into_panic().unwrap_or_else(|e| Box::new(e)))
+    crate::runtime::production_future("Tasks and Cancellation", async move {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the sanctioned wrapper around spawn_blocking"
+        )]
+        let handle = tokio::task::spawn_blocking(f);
+        match handle.await {
+            Ok(value) => value,
+            Err(join_error) => {
+                panic::resume_unwind(join_error.try_into_panic().unwrap_or_else(|e| Box::new(e)))
+            }
         }
-    }
+    })
+    .await
 }
