@@ -97,30 +97,60 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
             after.replace_range(edit.start..edit.end, &edit.replacement);
         }
         if before != after {
-            changed.push((file, before, after));
+            changed.push(Change {
+                file,
+                before,
+                after,
+            });
         }
     }
     if dry_run {
-        for (file, before, after) in &changed {
-            diff(file.strip_prefix(&root).unwrap_or(file), before, after);
+        for change in &changed {
+            diff(
+                change.file.strip_prefix(&root).unwrap_or(&change.file),
+                &change.before,
+                &change.after,
+            );
         }
     } else {
         // Read and validate every file before writing any file.
-        for (file, before, _) in &changed {
-            if fs::read_to_string(file)? != *before {
-                bail!("{} changed during fix", file.display());
+        for change in &changed {
+            if fs::read_to_string(&change.file)? != change.before {
+                bail!("{} changed during fix", change.file.display());
             }
         }
-        for (file, _, after) in &changed {
-            fs::write(file, after).with_context(|| format!("writing {}", file.display()))?;
-            eprintln!("adamantium: fixed {}", file.display());
-        }
+        write(&changed)?;
     }
     let remaining = if dry_run {
         report
     } else {
-        check::check(&root, args, false, strict, None)?
+        // Each rewrite is checked by syntax alone, so only the compiler can
+        // tell whether the rewritten project still builds. Fix runs only on a
+        // project that built, so any error now is the rewrite's, and a
+        // rewrite nothing has verified is undone too.
+        match check::check(&root, args, false, strict, None) {
+            Ok(report) if report.status != check::Status::Error => report,
+            Ok(report) => {
+                // The lines are those of the rewritten files.
+                for error in &report.errors {
+                    match (&error.file, error.line) {
+                        (Some(file), Some(line)) => {
+                            eprintln!("{file}:{line}: error: {}", error.message);
+                        }
+                        _ => eprintln!("error: {}", error.message),
+                    }
+                }
+                return restore_all(&changed, "the fixed project no longer builds");
+            }
+            Err(error) => {
+                eprintln!("error: {error:#}");
+                return restore_all(&changed, "the fixed project could not be checked");
+            }
+        }
     };
+    for change in &changed {
+        eprintln!("adamantium: fixed {}", change.file.display());
+    }
     for finding in &remaining.findings {
         eprintln!(
             "{}:{}: {}: {}\n  Review {GUIDE}#{}",
@@ -149,6 +179,90 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
         check::Status::Findings => ExitCode::from(1),
         check::Status::Error => ExitCode::from(2),
     })
+}
+
+/// One file's text before and after fix rewrites it.
+struct Change {
+    file: PathBuf,
+    before: String,
+    after: String,
+}
+
+/// Writes every change. If a write fails, the files already written, and the
+/// one that failed, get their original text back.
+fn write(changes: &[Change]) -> Result<()> {
+    for (index, change) in changes.iter().enumerate() {
+        if let Err(error) = fs::write(&change.file, &change.after) {
+            // The failed write may have truncated the file, so it is restored
+            // whatever it holds now.
+            let mut unrestored = usize::from(!restore(change, true));
+            for written in changes.get(..index).unwrap_or_default() {
+                unrestored += usize::from(!restore(written, false));
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "writing {}; {}",
+                    change.file.display(),
+                    restored_note(index + 1, unrestored)
+                )
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Restores every changed file and says why, exiting 2 when all of them have
+/// their original text again and failing otherwise.
+fn restore_all(changes: &[Change], reason: &str) -> Result<ExitCode> {
+    let mut unrestored = 0;
+    for change in changes {
+        unrestored += usize::from(!restore(change, false));
+    }
+    let note = restored_note(changes.len(), unrestored);
+    if unrestored > 0 {
+        bail!("{reason}; {note}");
+    }
+    eprintln!("adamantium: {reason}, so no fixes were applied; {note}");
+    Ok(ExitCode::from(2))
+}
+
+/// Writes a file's original text back unless it already has it, naming the
+/// file if it can't, and returns whether the file has its original text now.
+/// A file fix wrote whole that has neither fix's text nor the original was
+/// edited by something else since, so it is left as it is rather than losing
+/// that edit; `interrupted` says fix's own write failed partway, which leaves
+/// text that is neither.
+fn restore(change: &Change, interrupted: bool) -> bool {
+    let current = fs::read(&change.file);
+    let outcome = match &current {
+        Ok(text) if *text == change.before.as_bytes() => return true,
+        Ok(text) if !interrupted && *text != change.after.as_bytes() => {
+            Err("it changed after fix wrote it, so it was left as it is".to_owned())
+        }
+        _ => fs::write(&change.file, &change.before).map_err(|error| error.to_string()),
+    };
+    match outcome {
+        Ok(()) => {
+            eprintln!("adamantium: restored {}", change.file.display());
+            true
+        }
+        Err(reason) => {
+            eprintln!(
+                "adamantium: could not restore {}: {reason}",
+                change.file.display()
+            );
+            false
+        }
+    }
+}
+
+/// How many of the `changed` files fix wrote now have their original text.
+fn restored_note(changed: usize, unrestored: usize) -> String {
+    if unrestored == 0 {
+        format!("restored the {changed} file(s) it wrote")
+    } else {
+        format!("could not restore {unrestored} of the {changed} file(s) it wrote")
+    }
 }
 
 /// Adds a suggestion's edits unless any of them conflicts, returning whether
@@ -547,6 +661,76 @@ mod tests {
         assert_eq!(edits, vec![edit(2, 5)]);
         accept(&mut edits, vec![edit(10, 12), edit(20, 22)]);
         assert_eq!(edits.len(), 3);
+    }
+
+    #[test]
+    fn restoring_puts_back_only_text_fix_wrote_and_carries_on_past_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let change = |name: &str, current: Option<&str>| {
+            let file = dir.path().join(name);
+            if let Some(text) = current {
+                fs::write(&file, text).unwrap();
+            }
+            Change {
+                file,
+                before: "before\n".to_owned(),
+                after: "after\n".to_owned(),
+            }
+        };
+        let text = |change: &Change| fs::read_to_string(&change.file).unwrap();
+
+        let rewritten = change("rewritten.rs", Some("after\n"));
+        assert!(restore(&rewritten, false));
+        assert_eq!(text(&rewritten), "before\n");
+        assert!(restore(&rewritten, false));
+
+        // Something else edited the file after fix wrote it.
+        let edited = change("edited.rs", Some("edited\n"));
+        assert!(!restore(&edited, false));
+        assert_eq!(text(&edited), "edited\n");
+
+        // Fix's own write stopped partway.
+        let truncated = change("truncated.rs", Some("aft"));
+        assert!(restore(&truncated, true));
+        assert_eq!(text(&truncated), "before\n");
+
+        let unwritable = change("missing/unwritable.rs", None);
+        assert!(!restore(&unwritable, false));
+
+        let last = change("last.rs", Some("after\n"));
+        let error = restore_all(&[unwritable, last], "the fixed project no longer builds")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "the fixed project no longer builds; could not restore 1 of the 2 file(s) it wrote"
+        );
+        assert_eq!(text(&change("last.rs", None)), "before\n");
+    }
+
+    #[test]
+    fn a_failed_write_restores_the_files_written_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.rs");
+        fs::write(&first, "before\n").unwrap();
+        let changes = [
+            Change {
+                file: first.clone(),
+                before: "before\n".to_owned(),
+                after: "after\n".to_owned(),
+            },
+            Change {
+                file: dir.path().join("missing/second.rs"),
+                before: "before\n".to_owned(),
+                after: "after\n".to_owned(),
+            },
+        ];
+        let error = format!("{:#}", write(&changes).unwrap_err());
+        assert!(
+            error.contains("could not restore 1 of the 2 file(s) it wrote"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&first).unwrap(), "before\n");
     }
 
     #[test]
