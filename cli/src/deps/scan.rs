@@ -249,12 +249,14 @@ impl Binding {
 }
 
 /// The namespaces a name can be bound in. Modules and types share one,
-/// and functions, constants and statics the other, so `mod spawn;` and
-/// `pub use self::spawn::spawn;` bind different things.
+/// functions, constants and statics another, so `mod spawn;` and `pub use
+/// self::spawn::spawn;` bind different things, and macros named by path
+/// have their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Namespace {
     Types,
     Values,
+    Macros,
 }
 
 /// A name's binding in one namespace of a scope.
@@ -290,6 +292,7 @@ impl Bound {
 struct Scope {
     types: HashMap<String, Bound>,
     values: HashMap<String, Bound>,
+    macros: HashMap<String, Bound>,
     globs: bool,
 }
 
@@ -298,29 +301,21 @@ impl Scope {
         match namespace {
             Namespace::Types => &mut self.types,
             Namespace::Values => &mut self.values,
+            Namespace::Macros => &mut self.macros,
         }
     }
 
-    fn get(&self, namespace: Namespace, name: &str) -> Option<&Binding> {
+    fn bound(&self, namespace: Namespace, name: &str) -> Option<&Bound> {
         let map = match namespace {
             Namespace::Types => &self.types,
             Namespace::Values => &self.values,
+            Namespace::Macros => &self.macros,
         };
-        map.get(name).map(|bound| &bound.binding)
+        map.get(name)
     }
 
-    /// Whether a `use` may bind `name` here, as it may bind a macro.
-    fn imports(&self, name: &str) -> bool {
-        [&self.types, &self.values]
-            .into_iter()
-            .filter_map(|map| map.get(name))
-            .any(|bound| {
-                bound
-                    .binding
-                    .alternatives()
-                    .iter()
-                    .any(|binding| matches!(binding, Binding::Use { .. }))
-            })
+    fn get(&self, namespace: Namespace, name: &str) -> Option<&Binding> {
+        self.bound(namespace, name).map(|bound| &bound.binding)
     }
 
     /// Binds a local variable or a generic parameter, which hides what the
@@ -348,13 +343,13 @@ impl Scope {
         }
     }
 
-    /// Binds a `use` in both namespaces, since the audit can't tell which
+    /// Binds a `use` in every namespace, since the audit can't tell which
     /// its target is in. Where every build defines an item of the same name,
-    /// the `use` must be in the other namespace. Two `use` items of one name
+    /// the `use` must be in another namespace. Two `use` items of one name
     /// that every build has are in different namespaces, so either may be
     /// the one a path means.
     fn import(&mut self, name: String, binding: Binding, certain: bool) {
-        for map in [&mut self.types, &mut self.values] {
+        for map in [&mut self.types, &mut self.values, &mut self.macros] {
             match map.get_mut(&name) {
                 None => {
                     map.insert(
@@ -380,6 +375,7 @@ impl Scope {
         for (namespace, map) in [
             (Namespace::Types, other.types),
             (Namespace::Values, other.values),
+            (Namespace::Macros, other.macros),
         ] {
             for (name, bound) in map {
                 self.define(namespace, name, bound.binding, false);
@@ -1133,7 +1129,7 @@ impl<'a> Scanner<'a> {
             .filter(|definition| definition.name == name)
             .peekable();
         if prelude.peek().is_some() {
-            if scope.globs || scope.imports(name) {
+            if scope.globs || scope.get(Namespace::Macros, name).is_some() {
                 return None;
             }
             let mut hidden = None;
