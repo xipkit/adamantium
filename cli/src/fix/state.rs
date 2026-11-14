@@ -2282,6 +2282,17 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
             Expr::MethodCall(call) if !self.computed_from_state(&call.receiver) => {
                 self.calls = true
             }
+            // An operator calls its operands' trait implementation, such as
+            // `PartialEq` or `AddAssign`, which might use an actor too, unless
+            // both operands are the state's or literals.
+            Expr::Binary(binary)
+                if !matches!(binary.op, BinOp::And(_) | BinOp::Or(_))
+                    && [&binary.left, &binary.right].into_iter().any(|operand| {
+                        !matches!(&**operand, Expr::Lit(_)) && !self.computed_from_state(operand)
+                    }) =>
+            {
+                self.calls = true;
+            }
             Expr::Closure(_) | Expr::Async(_) => {
                 self.deferred += 1;
                 syn::visit::visit_expr(self, expr);
@@ -3195,6 +3206,22 @@ mod tests {
             &["Mutex"],
         );
         assert!(fixed.contains("::adamantium::Actor::new(1)"), "{fixed}");
+    }
+
+    #[test]
+    fn operators_on_other_values_are_refused() {
+        for body in [
+            "struct View;\nimpl PartialEq<View> for i32 { fn eq(&self, _: &View) -> bool { true } }\nfn f(view: View) -> bool { let m = Arc::new(Mutex::new(1)); let same = *m.lock().unwrap() == view; same }",
+            "fn f(n: u64) { let m = Arc::new(Mutex::new(0u64)); *m.lock().unwrap() += n; }",
+        ] {
+            refused(body, "m", Reason::Calls);
+        }
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nfn f() -> bool {\n    let m = Arc::new(Mutex::new(1));\n    *m.lock().unwrap() += 1;\n    *m.lock().unwrap() == 2\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(fixed.contains("m.read(|m| *m == 2)"), "{fixed}");
     }
 
     #[test]

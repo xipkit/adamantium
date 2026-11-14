@@ -41,8 +41,8 @@ pub struct Cart {
 
 pub fn branches(prices: &[u64]) -> u64 {
     let cart = ::adamantium::Actor::new(Cart::default());
-    for price in prices {
-        cart.with(|cart| cart.total += price);
+    for _ in prices {
+        cart.with(|cart| cart.total += 6);
     }
     let add = |item: &'static str| cart.with(|cart| cart.items.push(item));
     add("pen");
@@ -54,7 +54,7 @@ pub fn branches(prices: &[u64]) -> u64 {
     }
     let kind = match prices.len() {
         0 => cart.with(|cart| cart.items.len()),
-        n if cart.with(|cart| n > cart.items.len()) => n,
+        _ if cart.with(|cart| cart.items.len() > 5) => 1,
         _ => 0,
     };
     let empty = prices.is_empty() || cart.with(|cart| cart.items.is_empty());

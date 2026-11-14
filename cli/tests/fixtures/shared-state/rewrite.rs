@@ -45,8 +45,8 @@ pub struct Cart {
 
 pub fn branches(prices: &[u64]) -> u64 {
     let cart = Arc::new(Mutex::new(Cart::default()));
-    for price in prices {
-        cart.lock().unwrap().total += price;
+    for _ in prices {
+        cart.lock().unwrap().total += 6;
     }
     let add = |item: &'static str| cart.lock().unwrap().items.push(item);
     add("pen");
@@ -58,7 +58,7 @@ pub fn branches(prices: &[u64]) -> u64 {
     }
     let kind = match prices.len() {
         0 => cart.lock().unwrap().items.len(),
-        n if n > cart.lock().unwrap().items.len() => n,
+        _ if cart.lock().unwrap().items.len() > 5 => 1,
         _ => 0,
     };
     let empty = prices.is_empty() || cart.lock().unwrap().items.is_empty();
