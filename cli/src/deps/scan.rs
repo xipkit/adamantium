@@ -17,7 +17,7 @@ use std::{
     slice,
 };
 
-use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Spacing, Span, TokenStream, TokenTree};
 use serde::Serialize;
 use syn::{
     Arm, Attribute, Block, Expr, ExprCall, ExprClosure, ExprForLoop, ExprIf, ExprLit,
@@ -74,9 +74,13 @@ pub struct UnsafeCounts {
     /// or without the `unsafe(...)` the 2024 edition requires, including
     /// those a `cfg_attr` adds.
     pub attributes: usize,
+    /// `global_asm!` invocations, which `unsafe_code` reports, through any
+    /// path or `use` that leads to `core::arch::global_asm`.
+    pub global_asm: usize,
     /// `unsafe` in macro bodies that syn can't parse as code, such as
     /// `macro_rules!` definitions, and the attributes `unsafe_code` reports
-    /// that are written there without `unsafe(...)`.
+    /// that are written there without `unsafe(...)`, and `global_asm!`
+    /// invocations there.
     pub in_macros: usize,
 }
 
@@ -88,6 +92,7 @@ impl UnsafeCounts {
             + self.traits
             + self.extern_blocks
             + self.attributes
+            + self.global_asm
             + self.in_macros
     }
 }
@@ -217,12 +222,15 @@ impl Binding {
 }
 
 /// The namespaces a name can be bound in. Modules and types share one,
-/// and functions, constants and statics the other, so `mod spawn;` and
-/// `pub use self::spawn::spawn;` bind different things.
+/// functions, constants and statics another, and macros the third, so
+/// `mod spawn;` and `pub use self::spawn::spawn;` bind different things.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Namespace {
     Types,
     Values,
+    /// Only `use` items bind macros here: `macro_rules!` names are scoped
+    /// by where they are written, which the scan doesn't follow.
+    Macros,
 }
 
 /// A name's binding in one namespace of a scope.
@@ -258,6 +266,7 @@ impl Bound {
 struct Scope {
     types: HashMap<String, Bound>,
     values: HashMap<String, Bound>,
+    macros: HashMap<String, Bound>,
     globs: bool,
 }
 
@@ -266,6 +275,7 @@ impl Scope {
         match namespace {
             Namespace::Types => &mut self.types,
             Namespace::Values => &mut self.values,
+            Namespace::Macros => &mut self.macros,
         }
     }
 
@@ -273,6 +283,7 @@ impl Scope {
         let map = match namespace {
             Namespace::Types => &self.types,
             Namespace::Values => &self.values,
+            Namespace::Macros => &self.macros,
         };
         map.get(name).map(|bound| &bound.binding)
     }
@@ -302,13 +313,13 @@ impl Scope {
         }
     }
 
-    /// Binds a `use` in both namespaces, since the audit can't tell which
+    /// Binds a `use` in every namespace, since the audit can't tell which
     /// its target is in. Where every build defines an item of the same name,
-    /// the `use` must be in the other namespace. Two `use` items of one name
+    /// the `use` must be in another namespace. Two `use` items of one name
     /// that every build has are in different namespaces, so either may be
     /// the one a path means.
     fn import(&mut self, name: String, binding: Binding, certain: bool) {
-        for map in [&mut self.types, &mut self.values] {
+        for map in [&mut self.types, &mut self.values, &mut self.macros] {
             match map.get_mut(&name) {
                 None => {
                     map.insert(
@@ -334,6 +345,7 @@ impl Scope {
         for (namespace, map) in [
             (Namespace::Types, other.types),
             (Namespace::Values, other.values),
+            (Namespace::Macros, other.macros),
         ] {
             for (name, bound) in map {
                 self.define(namespace, name, bound.binding, false);
@@ -1031,7 +1043,7 @@ impl Scanner<'_> {
 
     /// Resolves a path written in `module` within `blocks`, for its last
     /// segment in `namespace`: values for a path in an expression, types
-    /// for the type of a qualified path.
+    /// for the type of a qualified path, macros for a macro invocation's.
     fn path(
         &self,
         module: &[String],
@@ -1309,6 +1321,9 @@ const UNSAFE_ATTRIBUTES: [&str; 8] = [
     "allow_internal_unsafe",
 ];
 
+/// `core::arch::global_asm`, as [`canonical`] names it.
+const GLOBAL_ASM: [&str; 3] = ["std", "arch", "global_asm"];
+
 /// Whether `unsafe_code` reports an attribute. rustc accepts `unsafe(...)`
 /// only around an unsafe attribute, so any attribute written that way is
 /// one.
@@ -1426,28 +1441,35 @@ impl FileVisitor<'_, '_> {
     }
 
     /// Counts what can be seen in tokens syn can't parse as code: `unsafe`,
-    /// and calls to a name some disallowed path has.
+    /// the attributes and `global_asm!` invocations that `unsafe_code`
+    /// reports, and calls to a name some disallowed path has.
     fn tokens(&mut self, stream: TokenStream) {
-        let mut previous: Option<TokenTree> = None;
-        let mut before: Option<TokenTree> = None;
-        for tree in stream {
-            match &tree {
+        let trees: Vec<TokenTree> = stream.into_iter().collect();
+        for (index, tree) in trees.iter().enumerate() {
+            let previous = index.checked_sub(1).and_then(|index| trees.get(index));
+            let before = index.checked_sub(2).and_then(|index| trees.get(index));
+            match tree {
                 TokenTree::Ident(ident) if ident == "unsafe" => {
                     self.scanner.scan.unsafe_code.in_macros += 1;
                 }
                 TokenTree::Group(group) => {
-                    if group.delimiter() == Delimiter::Bracket
-                        && is_attribute(previous.as_ref(), before.as_ref())
-                    {
+                    if group.delimiter() == Delimiter::Bracket && is_attribute(previous, before) {
                         self.scanner.scan.unsafe_code.in_macros +=
                             self.bare_unsafe_attributes(group.stream());
                     }
+                    if is_punct(previous, '!')
+                        && let Some((path, leading)) =
+                            trees.get(..index.saturating_sub(1)).and_then(trailing_path)
+                        && self.invokes_global_asm(&path, leading)
+                    {
+                        self.scanner.scan.unsafe_code.in_macros += 1;
+                    }
                     if group.delimiter() == Delimiter::Parenthesis
-                        && let Some(TokenTree::Ident(name)) = &previous
+                        && let Some(TokenTree::Ident(name)) = previous
                     {
                         let name = name.unraw().to_string();
                         let disallowed = self.scanner.disallowed;
-                        let counts = match &before {
+                        let counts = match before {
                             Some(TokenTree::Ident(ident)) if ident == "fn" => false,
                             Some(TokenTree::Punct(punct)) if punct.as_char() == '.' => {
                                 disallowed.has_method(&name)
@@ -1462,8 +1484,24 @@ impl FileVisitor<'_, '_> {
                 }
                 _ => {}
             }
-            before = previous.replace(tree);
         }
+    }
+
+    /// Whether a macro invoked here by `path` may be `global_asm!`: the path
+    /// leads to `core::arch::global_asm`, or it is named `global_asm` and
+    /// can't be resolved, as where a glob import may provide it.
+    fn invokes_global_asm(&self, path: &[String], leading: bool) -> bool {
+        let named = path.last().is_some_and(|name| name == "global_asm");
+        self.scanner
+            .path(&self.module, &self.blocks, Namespace::Macros, path, leading)
+            .alternatives()
+            .iter()
+            .any(|resolved| match resolved {
+                Resolved::Path(resolved) => canonical(resolved.clone()) == GLOBAL_ASM,
+                Resolved::Unknown => named,
+                // Alternatives are never nested, so `Either` isn't one.
+                Resolved::Local | Resolved::Either(_) => false,
+            })
     }
 
     /// The attributes that `unsafe_code` reports, written without
@@ -1619,6 +1657,35 @@ impl FileVisitor<'_, '_> {
     }
 }
 
+/// The path that ends `trees`, as the tokens before a macro invocation's
+/// `!` do, with whether it has a leading `::`. A `macro_rules!` body's
+/// `$crate::name` reads as `crate::name`, which it means there.
+fn trailing_path(mut trees: &[TokenTree]) -> Option<(Vec<String>, bool)> {
+    let mut path = Vec::new();
+    let leading = loop {
+        let [rest @ .., TokenTree::Ident(ident)] = trees else {
+            // A `::` that no segment comes before.
+            if path.is_empty() {
+                return None;
+            }
+            break true;
+        };
+        path.push(ident.unraw().to_string());
+        match rest {
+            [rest @ .., TokenTree::Punct(first), TokenTree::Punct(second)]
+                if first.as_char() == ':'
+                    && first.spacing() == Spacing::Joint
+                    && second.as_char() == ':' =>
+            {
+                trees = rest;
+            }
+            _ => break false,
+        }
+    };
+    path.reverse();
+    Some((path, leading))
+}
+
 /// Whether a bracketed group that follows these tokens is an attribute:
 /// `#[...]` or `#![...]`.
 fn is_attribute(previous: Option<&TokenTree>, before: Option<&TokenTree>) -> bool {
@@ -1697,6 +1764,14 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         }
         for attr in &item.attrs {
             self.visit_attribute(attr);
+        }
+        if item.ident.is_none()
+            && self.invokes_global_asm(
+                &segments(&item.mac.path),
+                item.mac.path.leading_colon.is_some(),
+            )
+        {
+            self.scanner.scan.unsafe_code.global_asm += 1;
         }
         // A `macro_rules!` definition, or an invocation whose body isn't
         // items.
@@ -2001,6 +2076,36 @@ mod tests {
                 panic!("{source} is one attribute");
             };
             assert_eq!(is_unsafe_attribute(&attr.meta), reported, "{source}");
+        }
+    }
+
+    /// The path that ends some tokens, as before a macro invocation's `!`.
+    #[test]
+    fn trailing_path_reads_a_path_back_from_its_end() {
+        for (source, path) in [
+            (
+                "core::arch::global_asm",
+                Some((&["core", "arch", "global_asm"][..], false)),
+            ),
+            (
+                "::std::arch::global_asm",
+                Some((&["std", "arch", "global_asm"], true)),
+            ),
+            (
+                "$crate::reexported",
+                Some((&["crate", "reexported"], false)),
+            ),
+            ("let x: ::core::name", Some((&["core", "name"], true))),
+            ("a; b::c", Some((&["b", "c"], false))),
+            ("r#global_asm", Some((&["global_asm"], false))),
+            ("x.", None),
+            ("", None),
+        ] {
+            let trees: Vec<TokenTree> =
+                source.parse::<TokenStream>().unwrap().into_iter().collect();
+            let expected =
+                path.map(|(path, leading)| (path.iter().map(|s| s.to_string()).collect(), leading));
+            assert_eq!(trailing_path(&trees), expected, "{source}");
         }
     }
 }
