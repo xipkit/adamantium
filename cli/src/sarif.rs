@@ -176,7 +176,7 @@ fn finding_path(finding: &Finding, report: &Report, roots: &Roots) -> PathBuf {
 /// Clippy lints.
 fn descriptor(rule: &str) -> Value {
     let why = if rule == OVERFLOW_RULE {
-        "the release profile must set overflow-checks = true, so integer overflow panics instead of wrapping"
+        crate::lints::OVERFLOW_WHY
     } else {
         LINTS
             .iter()
