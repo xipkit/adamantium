@@ -123,19 +123,26 @@ pub fn scan(krate: &Crate, disallowed: &Disallowed) -> Scan {
     // be followed through another module's `use` items.
     scanner.load(krate.src, vec![krate.name.to_owned()], true, None);
     scanner.definitions = scanner.definitions();
-    let files = mem::take(&mut scanner.files);
-    for loaded in &files {
-        let mut visitor = FileVisitor {
-            scanner: &mut scanner,
-            file: loaded.rel.clone(),
-            module: loaded.module.clone(),
-            blocks: Vec::new(),
-        };
-        for item in &loaded.file.items {
-            visitor.visit_item(item);
+    // Visiting can load more files: modules declared inside functions.
+    let mut visited = Vec::new();
+    while !scanner.files.is_empty() {
+        let files = mem::take(&mut scanner.files);
+        for loaded in &files {
+            let mut visitor = FileVisitor {
+                scanner: &mut scanner,
+                file: loaded.rel.clone(),
+                module: loaded.module.clone(),
+                mod_dir: loaded.mod_dir.clone(),
+                path_dir: loaded.path_dir.clone(),
+                blocks: Vec::new(),
+            };
+            for item in &loaded.file.items {
+                visitor.visit_item(item);
+            }
         }
+        visited.extend(files);
     }
-    drop(files);
+    drop(visited);
     // Spans keep every parsed file's text; nothing refers to them now.
     proc_macro2::extra::invalidate_current_thread_spans();
     scanner.scan
@@ -303,6 +310,10 @@ struct Loaded {
     /// Its name relative to the package.
     rel: String,
     module: Vec<String>,
+    /// Where its child modules' files are.
+    mod_dir: PathBuf,
+    /// What its `#[path]` attributes are relative to.
+    path_dir: PathBuf,
 }
 
 /// Where a module's code is.
@@ -379,7 +390,13 @@ impl Scanner<'_> {
             dir.join(path.file_stem().unwrap_or_default())
         };
         self.index(&file.items, &module, &mod_dir, &dir, &rel);
-        self.files.push(Loaded { file, rel, module });
+        self.files.push(Loaded {
+            file,
+            rel,
+            module,
+            mod_dir,
+            path_dir: dir,
+        });
     }
 
     /// Binds the names of the module at `module`, and loads its child
@@ -1030,6 +1047,10 @@ struct FileVisitor<'s, 'a> {
     /// The file's name relative to the package.
     file: String,
     module: Vec<String>,
+    /// Where the current module's `mod name;` files are.
+    mod_dir: PathBuf,
+    /// What the current module's `#[path]` attributes are relative to.
+    path_dir: PathBuf,
     /// The names bound by the blocks around the current place.
     blocks: Vec<Scope>,
 }
@@ -1150,6 +1171,40 @@ impl FileVisitor<'_, '_> {
         }
     }
 
+    fn module_item(&mut self, item: &ItemMod) {
+        let mut module = self.module.clone();
+        module.push(item.ident.unraw().to_string());
+        let location = self.scanner.locate(item, &self.mod_dir, &self.path_dir);
+        match (&item.content, location) {
+            (Some((_, items)), location) => {
+                let dir = match location {
+                    Location::Inline { dir } => dir,
+                    _ => self.mod_dir.join(item.ident.unraw().to_string()),
+                };
+                let outer = mem::replace(&mut self.module, module);
+                let mod_dir = mem::replace(&mut self.mod_dir, dir.clone());
+                let path_dir = mem::replace(&mut self.path_dir, dir);
+                let blocks = mem::take(&mut self.blocks);
+                for item in items {
+                    self.visit_item(item);
+                }
+                self.module = outer;
+                self.mod_dir = mod_dir;
+                self.path_dir = path_dir;
+                self.blocks = blocks;
+            }
+            // A module of a module was loaded with the module tree; one
+            // declared inside a function is loaded now.
+            (None, _) if self.blocks.is_empty() => {}
+            (None, Location::File { path, mod_rs }) => {
+                let from = (self.file.as_str(), item.ident.span());
+                self.scanner.load(&path, module, mod_rs, Some(from));
+            }
+            (None, Location::Unscannable(reason)) => self.unscanned(item.ident.span(), reason),
+            (None, Location::Inline { .. }) => {}
+        }
+    }
+
     /// Visits statements with the items among them in scope.
     fn stmts(&mut self, stmts: &[Stmt]) {
         let items = stmts.iter().filter_map(|stmt| match stmt {
@@ -1178,23 +1233,7 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
             return;
         }
         match item {
-            // A module in its own file is visited as that file.
-            Item::Mod(ItemMod {
-                ident,
-                content: Some((_, items)),
-                ..
-            }) => {
-                let mut module = self.module.clone();
-                module.push(ident.unraw().to_string());
-                let outer = mem::replace(&mut self.module, module);
-                let blocks = mem::take(&mut self.blocks);
-                for item in items {
-                    self.visit_item(item);
-                }
-                self.module = outer;
-                self.blocks = blocks;
-            }
-            Item::Mod(_) => {}
+            Item::Mod(item) => self.module_item(item),
             Item::Macro(item) => self.visit_item_macro(item),
             _ => visit::visit_item(self, item),
         }

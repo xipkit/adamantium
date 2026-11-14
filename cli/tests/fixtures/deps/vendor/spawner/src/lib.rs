@@ -108,6 +108,12 @@ pub fn nested_cfg() -> [(); 1] {
     ]
 }
 
+pub fn with_a_local_module() {
+    #[path = "local/child.rs"]
+    mod child;
+    child::run();
+}
+
 pub fn blocks() {
     unsafe { rt::task::raw() };
     println!("{:?}", task::spawn(())); // tokio::task::spawn
