@@ -1226,10 +1226,7 @@ impl<'a> Scanner<'a> {
                 return false;
             };
             Expand.fragment(&mut items);
-            let mut dollar_crates = DollarCrates(&self.dollar_crates);
-            for item in &mut items {
-                dollar_crates.visit_item_mut(item);
-            }
+            DollarCrates(&self.dollar_crates).items(&mut items);
             if !condition.is_empty() {
                 let cfg = cfg_attribute(predicate, span);
                 for item in &mut items {
@@ -2051,6 +2048,58 @@ impl<'ast> Visit<'ast> for FirstSpan {
 struct DollarCrates<'d>(&'d HashMap<(String, usize, usize), Ident>);
 
 impl DollarCrates<'_> {
+    /// Rewrites `items`, and the items and code in them.
+    fn items(&mut self, items: &mut Vec<Item>) {
+        self.split(items);
+        for item in items {
+            self.visit_item_mut(item);
+        }
+    }
+
+    /// Splits each `use` item among `items` whose root group has a branch
+    /// that starts with another crate's `$crate`, as `use {$crate::spawn as
+    /// start, other::Thing};`, into one item for each branch, which means
+    /// the same: the path to the crate can only start a `use` item.
+    fn split(&self, items: &mut Vec<Item>) {
+        *items = mem::take(items)
+            .into_iter()
+            .flat_map(|item| match item {
+                Item::Use(item) => self.branches(item).into_iter().map(Item::Use).collect(),
+                item => vec![item],
+            })
+            .collect();
+    }
+
+    fn branches(&self, item: syn::ItemUse) -> Vec<syn::ItemUse> {
+        match &item.tree {
+            UseTree::Group(group) if item.leading_colon.is_none() && self.starts(&item.tree) => {
+                group
+                    .items
+                    .iter()
+                    .flat_map(|tree| {
+                        self.branches(syn::ItemUse {
+                            tree: tree.clone(),
+                            ..item.clone()
+                        })
+                    })
+                    .collect()
+            }
+            _ => vec![item],
+        }
+    }
+
+    /// Whether a branch of a `use` tree starts with another crate's
+    /// `$crate`.
+    fn starts(&self, tree: &UseTree) -> bool {
+        match tree {
+            UseTree::Path(path) => self.name(&path.ident).is_some(),
+            UseTree::Name(name) => self.name(&name.ident).is_some(),
+            UseTree::Rename(rename) => self.name(&rename.ident).is_some(),
+            UseTree::Group(group) => group.items.iter().any(|tree| self.starts(tree)),
+            UseTree::Glob(_) => false,
+        }
+    }
+
     /// The crate `ident` stands for, if it is another crate's `$crate`,
     /// written where it is.
     fn name(&self, ident: &Ident) -> Option<Ident> {
@@ -2069,6 +2118,28 @@ impl DollarCrates<'_> {
 }
 
 impl VisitMut for DollarCrates<'_> {
+    fn visit_item_mod_mut(&mut self, item: &mut ItemMod) {
+        if let Some((_, items)) = &mut item.content {
+            self.split(items);
+        }
+        visit_mut::visit_item_mod_mut(self, item);
+    }
+
+    fn visit_block_mut(&mut self, block: &mut Block) {
+        block.stmts = mem::take(&mut block.stmts)
+            .into_iter()
+            .flat_map(|stmt| match stmt {
+                Stmt::Item(Item::Use(item)) => self
+                    .branches(item)
+                    .into_iter()
+                    .map(|item| Stmt::Item(Item::Use(item)))
+                    .collect(),
+                stmt => vec![stmt],
+            })
+            .collect();
+        visit_mut::visit_block_mut(self, block);
+    }
+
     fn visit_path_mut(&mut self, path: &mut syn::Path) {
         if path.leading_colon.is_none()
             && let Some(first) = path.segments.first_mut()
@@ -4116,7 +4187,9 @@ macro_rules! configure {
     }
 
     /// `$crate` passed on to another macro is one identifier, as in rustc,
-    /// and still names its crate once the expansion is read.
+    /// and still names its crate once the expansion is read, also in a
+    /// `use` group. What the macro writes itself, as its own `begin()`,
+    /// counts for its crate.
     #[test]
     fn crate_passed_on_names_its_crate() {
         let tokio = Library {
@@ -4133,7 +4206,12 @@ macro_rules! outer {
 
 #[macro_export]
 macro_rules! inner {
-    ($c:ident) => { mod target; pub use $c::spawn as go; };
+    ($c:ident) => {
+        mod target;
+        pub use $c::spawn as go;
+        pub use {$crate::spawn as start, std::thread::spawn as thread};
+        pub fn local() { use {$crate::spawn as begin}; begin(); }
+    };
     (::$c:ident) => { mod fallback; };
 }
 ",
@@ -4143,7 +4221,7 @@ macro_rules! inner {
             &[
                 (
                     "lib.rs",
-                    "#[macro_use]\nextern crate tokio;\n\nouter!();\n\npub fn run() {\n    go();\n}\n",
+                    "#[macro_use]\nextern crate tokio;\n\nouter!();\n\npub fn run() {\n    go();\n    start();\n}\n",
                 ),
                 ("target.rs", "pub unsafe fn a() {}\n"),
                 ("fallback.rs", "pub unsafe fn b() {}\n"),
@@ -4161,7 +4239,7 @@ macro_rules! inner {
                 (path, sites.iter().map(|site| site.line).collect::<Vec<_>>())
             })
             .collect();
-        assert_eq!(paths, [("tokio::spawn".to_owned(), vec![7])]);
+        assert_eq!(paths, [("tokio::spawn".to_owned(), vec![7, 8])]);
     }
 
     /// A call of the crate's own `macro_rules!` with input, as Tokio's
