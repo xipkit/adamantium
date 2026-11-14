@@ -208,9 +208,9 @@ fn check_applies_the_skip_list() {
     assert_eq!(
         report["skipped"],
         serde_json::json!({
+            "clippy::cast_possible_truncation": 1,
             "clippy::indexing_slicing": 1,
             "clippy::string_slice": 1,
-            "clippy::unwrap_used": 1,
         }),
         "{stderr}"
     );
