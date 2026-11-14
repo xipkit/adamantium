@@ -192,8 +192,11 @@ fn answers(response: &Value, questions: &[Question]) -> Result<Vec<Answer>> {
             let choice = by_name
                 .remove(&question.name)
                 .with_context(|| format!("missing answer: {}", question.name))?;
+            // Structured output can change the casing of an enum value.
             let verdict = choice
                 .as_str()
+                .map(str::to_ascii_lowercase)
+                .as_deref()
                 .and_then(Verdict::from_choice)
                 .with_context(|| format!("invalid choice for {}", question.name))?;
             Ok(Answer::Choice {
@@ -379,8 +382,8 @@ mod tests {
             "end_turn",
             &json!({
                 questions[2].name.clone(): "insufficient_context",
-                questions[0].name.clone(): "violation",
-                questions[1].name.clone(): "no_violation",
+                questions[0].name.clone(): "Violation",
+                questions[1].name.clone(): "NO_VIOLATION",
             }),
         );
         let Ok(evaluation) = interpret(&response, questions) else {
