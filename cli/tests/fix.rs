@@ -339,35 +339,38 @@ fn binary(main: &str) -> tempfile::TempDir {
 }
 
 #[test]
-fn shared_state_fields_build_pass_check_and_keep_behavior() {
-    let source = shared_state_fixture("fields.rs");
-    let dir = binary(&source);
-    let file = dir.path().join("src/main.rs");
+fn shared_state_fields_and_parameters_build_pass_check_and_keep_behavior() {
+    for name in ["fields", "params"] {
+        let source = shared_state_fixture(&format!("{name}.rs"));
+        let dir = binary(&source);
+        let file = dir.path().join("src/main.rs");
 
-    let fixed = run(&["fix"], dir.path());
-    assert!(
-        fixed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&fixed.stderr)
-    );
-    assert_eq!(
-        fs::read_to_string(&file).unwrap(),
-        shared_state_fixture("fields.fixed.rs")
-    );
-    let tested = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-        .args(["test", "--quiet"])
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
-    assert!(
-        tested.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&tested.stdout),
-        String::from_utf8_lossy(&tested.stderr)
-    );
-    let again = run(&["fix", "--dry-run"], dir.path());
-    assert!(again.status.success());
-    assert!(again.stdout.is_empty());
+        let fixed = run(&["fix"], dir.path());
+        assert!(
+            fixed.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&fixed.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            shared_state_fixture(&format!("{name}.fixed.rs")),
+            "{name}"
+        );
+        let tested = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args(["test", "--quiet"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            tested.status.success(),
+            "{name}: {}\n{}",
+            String::from_utf8_lossy(&tested.stdout),
+            String::from_utf8_lossy(&tested.stderr)
+        );
+        let again = run(&["fix", "--dry-run"], dir.path());
+        assert!(again.status.success(), "{name}");
+        assert!(again.stdout.is_empty(), "{name}");
+    }
 }
 
 #[test]
@@ -407,37 +410,49 @@ fn shared_state_fields_fix_cannot_follow_are_reported_and_left_unchanged() {
 }
 
 #[test]
-fn shared_state_locals_whose_function_runs_inside_a_callback_are_left_unchanged() {
+fn shared_state_whose_function_runs_inside_a_callback_is_left_unchanged() {
     // Rewriting `hits` would make `count` call an actor inside `total`'s
-    // callback, which panics.
-    let source = "use std::sync::{Arc, Mutex};\n\nfn count() -> u32 {\n    let hits = Arc::new(Mutex::new(0u32));\n    *hits.lock().unwrap() += 1;\n    let value = *hits.lock().unwrap();\n    value\n}\n\nfn main() {\n    let total = adamantium::Actor::new(0u32);\n    total.with(|total| *total += count());\n    println!(\"{}\", total.read(|total| *total));\n}\n";
-    let dir = binary(source);
-    let output = run(&["fix"], dir.path());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert_eq!(
-        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
-        source
-    );
-    let mut lines = stderr
-        .lines()
-        .skip_while(|line| !line.starts_with("src/main.rs:4: `hits` stays an `Arc<Mutex<_>>`: "));
-    assert!(lines.next().is_some(), "{stderr}");
-    assert!(
-        lines
-            .next()
-            .is_some_and(|link| link.ends_with("/docs/migrating.md#two-locks-at-once")),
-        "{stderr}"
-    );
-    let ran = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-        .args(["run", "--quiet"])
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
-    assert!(
-        ran.status.success(),
-        "{}",
-        String::from_utf8_lossy(&ran.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&ran.stdout), "1\n");
+    // callback, which panics. In the second, only `bump` locks it, through
+    // its parameter.
+    for (source, reports) in [
+        (
+            "use std::sync::{Arc, Mutex};\n\nfn count() -> u32 {\n    let hits = Arc::new(Mutex::new(0u32));\n    *hits.lock().unwrap() += 1;\n    let value = *hits.lock().unwrap();\n    value\n}\n\nfn main() {\n    let total = adamantium::Actor::new(0u32);\n    total.with(|total| *total += count());\n    println!(\"{}\", total.read(|total| *total));\n}\n",
+            &[(4, "two-locks-at-once")][..],
+        ),
+        (
+            "use std::sync::{Arc, Mutex};\n\nfn count() -> u32 {\n    let hits = Arc::new(Mutex::new(0u32));\n    bump(&hits);\n    Arc::try_unwrap(hits).unwrap().into_inner().unwrap()\n}\n\nfn bump(hits: &Arc<Mutex<u32>>) {\n    *hits.lock().unwrap() += 1;\n}\n\nfn main() {\n    let total = adamantium::Actor::new(0u32);\n    total.with(|total| *total += count());\n    println!(\"{}\", total.read(|total| *total));\n}\n",
+            &[(4, "shared-state"), (9, "two-locks-at-once")],
+        ),
+    ] {
+        let dir = binary(source);
+        let output = run(&["fix"], dir.path());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+            source
+        );
+        for (line, section) in reports {
+            let report = format!("src/main.rs:{line}: `hits` stays an `Arc<Mutex<_>>`: ");
+            let mut lines = stderr.lines().skip_while(|line| !line.starts_with(&report));
+            assert!(lines.next().is_some(), "{report}\n{stderr}");
+            assert!(
+                lines
+                    .next()
+                    .is_some_and(|link| link.ends_with(&format!("/docs/migrating.md#{section}"))),
+                "{report}\n{stderr}"
+            );
+        }
+        let ran = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            .args(["run", "--quiet"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            ran.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&ran.stdout), "1\n");
+    }
 }
