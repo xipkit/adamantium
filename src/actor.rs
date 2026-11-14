@@ -31,7 +31,9 @@ use std::{
 /// ```
 ///
 /// Work that waits, such as a network call, happens in a task; the actor
-/// records its result afterwards.
+/// records its result afterwards. With the `tokio` feature, `AsyncActor`
+/// provides a mailbox worker for state that must stay exclusively owned
+/// across an await, such as a connection with an in-flight exchange.
 pub struct Actor<S> {
     #[allow(
         clippy::disallowed_types,

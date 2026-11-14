@@ -12,14 +12,16 @@
 //! a value of any of these types can be handed to a task without ceremony.
 //!
 //! The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, the
-//! ordered and unordered concurrent streams, and `blocking`.
-//! Disable default features to use the values, actors, and channels
+//! ordered and unordered concurrent streams, `AsyncActor`, and `blocking`.
+//! Disable default features to use the values, synchronous actors, and channels
 //! without a Tokio dependency, including on WASI.
 
 #![forbid(unsafe_code)]
 
 mod actor;
 mod array;
+#[cfg(feature = "tokio")]
+mod async_actor;
 mod bytes;
 mod channel;
 mod deque;
@@ -31,6 +33,8 @@ mod tasks;
 
 pub use actor::Actor;
 pub use array::Array;
+#[cfg(feature = "tokio")]
+pub use async_actor::AsyncActor;
 pub use bytes::Bytes;
 pub use channel::{Channel, Closed, Receiver, Sender, TryReceiveError, TrySendError};
 pub use deque::Deque;

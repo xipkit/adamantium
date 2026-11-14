@@ -16,7 +16,7 @@ adamantium = { git = "https://github.com/xipkit/adamantium.git", rev = "..." }
 ```
 
 The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, the
-concurrent streams, and `blocking`. Set `default-features = false` to use `Actor`, `Str`, `Bytes`,
+concurrent streams, `AsyncActor`, and `blocking`. Set `default-features = false` to use `Actor`, `Str`, `Bytes`,
 `Array`, `Deque`, `Map`, `Set`, and `Channel` without Tokio, including on WASI. The `serde`
 feature can be enabled independently.
 
@@ -107,6 +107,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 - **`blocking`** runs a closure on the blocking pool and resumes any panic on the calling task.
 
 - **`Actor<S>`** shares state between tasks. `with` provides exclusive access and `read` provides read-only access through synchronous closures, so neither holds the lock across an await. A read-only method such as `Tally::total` can be passed to `read`. Calling `with` or `read` from inside either method on any actor panics to prevent deadlocks.
+- **`AsyncActor<M>`** sends typed messages to a single worker inside `Tasks`. The worker owns its state and awaits each handler before taking the next message, allowing exclusive access through I/O without a shared-state lock. Its bounded mailbox applies backpressure. Call `close()` before successful scope completion to reject new sends and drain accepted work; dropping mailbox handles alone does not close it.
 - **`Channel<T>`** is a bounded queue whose clones can send and receive. Consume it with `split()` to get separate clonable **`Sender<T>`** and **`Receiver<T>`** handles. Dropping the last sender closes the channel; receivers drain queued messages and then receive `None`. Dropping the last receiver wakes pending sends with `Closed(value)`. Any retained combined `Channel` clones still own both endpoints, so drop or split all of them before relying on endpoint-drop closure. Either endpoint or a combined handle can also call `close()` explicitly.
 
 `Sender::try_send` and `Channel::try_send` return `TrySendError::Full(value)` or
@@ -149,6 +150,52 @@ cannot be forcibly stopped, so cleanup can extend beyond the deadline. The free
 when an enclosing async task is aborted. Dropping a scope future or panicking in
 its body signals shutdown and requests aborts but cannot wait for cleanup. For
 that guarantee, request cancellation and continue awaiting the scope.
+
+### State that must await
+
+Use `Actor::with` for synchronous shared-state updates. Use `AsyncActor` when
+the state itself owns I/O that must not interleave, such as a connection with
+an in-flight protocol exchange:
+
+```rust
+use adamantium::{AsyncActor, Tasks};
+
+#[tokio::main]
+async fn main() -> Result<(), &'static str> {
+    Tasks::run(async |tasks| {
+        let actor = AsyncActor::new(tasks, Vec::new(), 4, |state, message: u64| {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                state.push(message);
+                Ok(())
+            })
+        });
+        actor.send(42).await.map_err(|_| "closed")?;
+        actor.close();
+        Ok(())
+    }).await
+}
+```
+
+The handler returns a boxed `Send` future borrowing `&mut state`. State and
+messages need `Send + 'static`, but not `Clone` or `Sync`. Capacity bounds
+queued messages, plus one being handled; it does not bound waiting producers.
+Zero capacity means one. Concurrent senders are ordered only by enqueue order.
+A successful `send` means accepted, not processed or durably committed.
+Closed sends return the original message. Reply channels can be fields in
+message types; the mailbox does not expose a receive operation.
+
+Handler errors close the mailbox, discard queued messages, and propagate at
+scope join through `Tasks`. They do not interrupt a pending scope body.
+Panics and cancellation also close and discard the queue, even before the
+worker's first poll and with surviving mailbox handles. Cancellation can
+interrupt I/O and cannot roll back external effects or guarantee delivery.
+Await scope shutdown to wait for cleanup; simply dropping a scope requests
+aborts without waiting. A handler must not wait on its own worker to advance,
+directly or through another mailbox: mailbox cycles can deadlock.
+
+`cargo run --example async_actor` drives a real local TCP echo connection,
+checks explicit replies, then closes and drains the mailbox and server.
 
 ### Streaming concurrent maps
 
