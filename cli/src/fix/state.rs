@@ -322,6 +322,22 @@ struct MacroArgs {
     destination: bool,
 }
 
+impl MacroArgs {
+    /// The value of a named format argument such as `width = 4`, which only
+    /// follows the format string. Any other `=` is an assignment to scan.
+    fn named<'e>(&self, position: usize, arg: &'e Expr) -> Option<&'e Expr> {
+        match arg {
+            Expr::Assign(named)
+                if position > self.format
+                    && matches!(&*named.left, Expr::Path(path) if path.path.get_ident().is_some()) =>
+            {
+                Some(&named.right)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Parses the arguments of every standard macro call, nested ones included,
 /// keyed by where the call starts.
 struct Parsed<'t> {
@@ -1718,11 +1734,8 @@ impl<'a> Walker<'a> {
                 for name in format_captures(&format.value()) {
                     self.mention(&name, Reason::Unfollowed("it is named in a format string"));
                 }
-            } else if position > parsed.format
-                && let Expr::Assign(named) = arg
-                && matches!(&*named.left, Expr::Path(path) if path.path.get_ident().is_some())
-            {
-                self.visit_expr(&named.right);
+            } else if let Some(value) = parsed.named(position, arg) {
+                self.visit_expr(value);
             } else {
                 self.visit_expr(arg);
             }
@@ -2078,10 +2091,10 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
             .and_then(|range| self.walker.macros.get(&range.start));
         match parsed {
             Some(parsed) => {
-                for arg in &parsed.args {
-                    match arg {
-                        Expr::Assign(named) => self.visit_expr(&named.right),
-                        arg => self.visit_expr(arg),
+                for (position, arg) in parsed.args.iter().enumerate() {
+                    match parsed.named(position, arg) {
+                        Some(value) => self.visit_expr(value),
+                        None => self.visit_expr(arg),
                     }
                 }
             }
@@ -2660,6 +2673,15 @@ mod tests {
         assert!(
             fixed.contains("let copy: Vec<i32> = m.read(|m| (*m).clone());"),
             "{fixed}"
+        );
+    }
+
+    #[test]
+    fn assignments_in_macro_arguments_are_scanned() {
+        refused(
+            "fn f(a: &adamantium::Actor<u8>, mut v: [u32; 1]) { let m = Arc::new(Mutex::new(1u32)); assert_eq!(v[a.read(|_| 0)] = *m.lock().unwrap(), ()); }",
+            "m",
+            Reason::TwoLocks,
         );
     }
 
