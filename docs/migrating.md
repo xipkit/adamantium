@@ -777,7 +777,13 @@ the outer signal.
 
 `t.spawn` needs the scope, and a task can't borrow the scope that runs it. A
 task that starts tasks of its own runs its own scope, which finishes before
-the task does.
+the task does when the task runs to the end.
+
+Shutdown doesn't reach through nesting. When an outer scope aborts the task,
+for example on `run_until` cancellation, the inner scope is dropped rather than
+joined: its tasks are asked to abort but not waited for, and blocking closures
+registered with it keep running. The outer scope can return while that work is
+still stopping. Register work that shutdown must wait for in the outer scope.
 
 Before:
 
