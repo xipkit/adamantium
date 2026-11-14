@@ -35,6 +35,7 @@ disallowed-types = [
 ]
 
 disallowed-methods = [
+  { path = "tokio::time::timeout", reason = "drops the future mid-await on expiry; use adamantium::Tasks::run_until with Cancellation and a deadline, or receive_until/send_until for channel operations", allow-invalid = true },
   { path = "std::vec::Vec::remove", reason = "panics on a bad index; use adamantium::Array::remove, which returns Option" },
   { path = "std::vec::Vec::insert", reason = "panics on a bad index; use adamantium::Array::insert, which returns Result" },
   { path = "std::vec::Vec::swap_remove", reason = "panics on a bad index; use adamantium::Array::remove, which returns Option and preserves order" },

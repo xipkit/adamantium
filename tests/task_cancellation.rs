@@ -1,5 +1,7 @@
 #![cfg(feature = "tokio")]
 
+mod support;
+
 use std::{
     pin::Pin,
     sync::{
@@ -11,7 +13,8 @@ use std::{
 };
 
 use adamantium::{Cancellation, ScopeError, Tasks, time};
-use tokio::{sync::oneshot, time::timeout};
+use support::timeout;
+use tokio::sync::oneshot;
 
 const HUNG: Duration = Duration::from_secs(30);
 

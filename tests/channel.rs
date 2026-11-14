@@ -1,4 +1,7 @@
 #[cfg(feature = "tokio")]
+mod support;
+
+#[cfg(feature = "tokio")]
 use adamantium::{Actor, Tasks};
 use adamantium::{Channel, Closed, TryReceiveError, TrySendError};
 use std::{
@@ -505,7 +508,7 @@ mod stream {
         use adamantium::concurrently_ordered;
         use std::time::Duration;
 
-        let result = tokio::time::timeout(
+        let result = crate::support::timeout(
             Duration::from_secs(30),
             Tasks::<&str>::run(async |tasks| {
                 let (sender, receiver) = Channel::bounded(1).split();

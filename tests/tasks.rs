@@ -1,5 +1,7 @@
 #![cfg(feature = "tokio")]
 
+mod support;
+
 use std::{
     pin::{Pin, pin},
     sync::{
@@ -12,10 +14,8 @@ use std::{
 
 use adamantium::time::sleep;
 use adamantium::{Tasks, blocking, concurrently, first_ok};
-use tokio::{
-    sync::{Barrier, Semaphore, oneshot},
-    time::timeout,
-};
+use support::timeout;
+use tokio::sync::{Barrier, Semaphore, oneshot};
 
 /// How long a test waits before calling a join hung. No test relies on it for
 /// ordering; it only turns a hang into a failure.
