@@ -2291,12 +2291,16 @@ impl<'t> Imports<'t> {
         let Some(leaf) = self.text.of(tree) else {
             return;
         };
+        // Text an edit replaces is gone, but its replacement can keep a name,
+        // as `Actor::new(Arc::new(1))` keeps `Arc`.
         let elsewhere = self.idents.get(&name).into_iter().flatten().any(|range| {
             !(leaf.start <= range.start && range.end <= leaf.end)
                 && !edits
                     .iter()
                     .any(|edit| edit.start <= range.start && range.end <= edit.end)
-        });
+        }) || edits
+            .iter()
+            .any(|edit| names_in(&edit.replacement, &name) != Some(0));
         if !elsewhere {
             removed.insert(leaf.start);
         }
@@ -2682,6 +2686,19 @@ mod tests {
             "fn f(a: &adamantium::Actor<u8>, mut v: [u32; 1]) { let m = Arc::new(Mutex::new(1u32)); assert_eq!(v[a.read(|_| 0)] = *m.lock().unwrap(), ()); }",
             "m",
             Reason::TwoLocks,
+        );
+    }
+
+    #[test]
+    fn imports_kept_by_replacement_text_stay() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nfn f() {\n    let m = Arc::new(Mutex::new(Arc::new(1)));\n    drop(m);\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert_eq!(
+            fixed,
+            "use std::sync::Arc;\nfn f() {\n    let m = ::adamantium::Actor::new(Arc::new(1));\n    drop(m);\n}\n"
         );
     }
 
