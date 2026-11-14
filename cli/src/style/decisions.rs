@@ -12,7 +12,8 @@ use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
 use crate::style::{
-    provider::{Answer, Evaluation, FileReview, Provider, ReviewError, Verdict},
+    locate::Locator,
+    provider::{Answer, Evaluation, FileReview, Locations, Provider, ReviewError, Verdict},
     rules::Question,
 };
 
@@ -170,6 +171,38 @@ impl Provider for Decisions {
             .context("invalid Decisions response")
             .map_err(ReviewError::Service)
     }
+
+    fn locate(&self, file: &FileReview<'_>) -> Result<Locations, ReviewError> {
+        let Some(locator) = Locator::new(file, MAX_JSON_INPUT_BYTES).map_err(ReviewError::Input)?
+        else {
+            return Ok(Locations {
+                lines: vec![None; file.questions.len()],
+                input_tokens: Some(0),
+            });
+        };
+        let windows = self
+            .evaluate(&locator.window_request())
+            .map_err(ReviewError::Service)?;
+        let mut tokens = input_tokens(&windows);
+        let invalid = |error: anyhow::Error| {
+            ReviewError::Service(error.context("invalid Decisions response"))
+        };
+        let candidates = locator.candidates(&windows).map_err(invalid)?;
+        let edges = match locator.edge_request(&candidates) {
+            Some(request) => {
+                let edges = self.evaluate(&request).map_err(ReviewError::Service)?;
+                tokens = tokens.zip(input_tokens(&edges)).map(|(a, b)| a + b);
+                Some(edges)
+            }
+            None => None,
+        };
+        Ok(Locations {
+            lines: locator
+                .locations(&candidates, edges.as_ref())
+                .map_err(invalid)?,
+            input_tokens: tokens,
+        })
+    }
 }
 
 struct Failure {
@@ -222,6 +255,11 @@ fn is_quota_error(body: &Value) -> bool {
         })
 }
 
+#[cfg(target_os = "macos")]
+fn keychain_disabled_value(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty() && v != "0" && v != "false")
+}
+
 #[allow(
     clippy::disallowed_methods,
     reason = "the CLI is synchronous; polling the Keychain helper is the only wait"
@@ -235,7 +273,7 @@ pub(crate) fn api_key() -> Result<String> {
     }
 
     #[cfg(target_os = "macos")]
-    {
+    if !keychain_disabled_value(env::var_os("ADAMANTIUM_NO_KEYCHAIN").as_deref()) {
         use std::{io::Read, process::Stdio, thread, time::Instant};
 
         let mut child = std::process::Command::new("security")
@@ -270,10 +308,8 @@ pub(crate) fn api_key() -> Result<String> {
         }
         bail!("set OPENAI_API_KEY or make the openai-api-key Keychain item accessible");
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        bail!("set OPENAI_API_KEY to use the Decisions API");
-    }
+
+    bail!("set OPENAI_API_KEY to use the Decisions API");
 }
 
 fn request(file: &FileReview<'_>) -> Result<Value> {
@@ -363,14 +399,18 @@ fn interpret(response: &Value, questions: &[Question]) -> Result<Evaluation> {
     ensure!(by_name.is_empty(), "unexpected named answer");
     Ok(Evaluation {
         answers: interpreted,
-        input_tokens: response
-            .get("usage")
-            .and_then(|usage| usage.get("input_tokens"))
-            .and_then(Value::as_u64),
+        input_tokens: input_tokens(response),
     })
 }
 
-fn probability(value: &Value) -> Result<f64> {
+fn input_tokens(response: &Value) -> Option<u64> {
+    response
+        .get("usage")
+        .and_then(|usage| usage.get("input_tokens"))
+        .and_then(Value::as_u64)
+}
+
+pub(super) fn probability(value: &Value) -> Result<f64> {
     let value = value.as_f64().context("missing probability")?;
     ensure!((0.0..=1.0).contains(&value), "probability outside [0, 1]");
     Ok(value)
@@ -383,7 +423,11 @@ mod tests {
     use adamantium::Actor;
 
     use super::*;
-    use crate::style::{provider::ProviderKind, rules::RuleSet};
+    use crate::style::{
+        provider::{LineRange, ProviderKind},
+        report::{Report, ReportStatus, ReviewKey},
+        rules::RuleSet,
+    };
 
     type StubResponse = (u16, Option<&'static str>, &'static str);
 
@@ -689,15 +733,20 @@ mod tests {
     }
 
     #[test]
-    fn reviews_a_file_through_the_http_client_and_produces_a_finding() {
+    fn reviews_and_locates_a_finding_through_the_http_client() {
+        let source: String = (1..=30).map(|line| format!("// line {line}\n")).collect();
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("lib.rs"), "fn example() {}\n").unwrap();
+        std::fs::write(directory.path().join("lib.rs"), &source).unwrap();
         let scan = crate::style::scan::Scan::discover(directory.path()).unwrap();
         let rules = RuleSet::load().unwrap();
+        let rule = rules.questions[0].name.clone();
+        let requests = Actor::new(Vec::<Value>::new());
+        let captured = requests.clone();
+        let expected_source = source.clone();
         let config = ureq::Agent::config_builder()
             .middleware(
-                |request: ureq::http::Request<ureq::SendBody>,
-                 _next: ureq::middleware::MiddlewareNext| {
+                move |request: ureq::http::Request<ureq::SendBody>,
+                      _next: ureq::middleware::MiddlewareNext| {
                     let mut body = String::new();
                     request
                         .into_body()
@@ -705,24 +754,60 @@ mod tests {
                         .read_to_string(&mut body)
                         .unwrap();
                     let request: Value = serde_json::from_str(&body).unwrap();
-                    assert_eq!(request["input"][1]["content"][0]["data"]["path"], "lib.rs");
-                    assert_eq!(
-                        request["input"][1]["content"][0]["data"]["source"],
-                        "fn example() {}\n"
-                    );
+                    let data = &request["input"][1]["content"][0]["data"];
+                    assert_eq!(data["path"], "lib.rs");
+                    let call = captured.with(|requests| {
+                        requests.push(request.clone());
+                        requests.len()
+                    });
+                    let answers = match call {
+                        1 => {
+                            assert_eq!(data["source"], expected_source.as_str());
+                            json!([{
+                                "type": "choice",
+                                "name": request["questions"][0]["name"],
+                                "choice": "violation",
+                                "confidence": 0.8,
+                                "probabilities": [
+                                    { "value": "violation", "probability": 0.8 },
+                                    { "value": "no_violation", "probability": 0.1 },
+                                    { "value": "insufficient_context", "probability": 0.1 }
+                                ]
+                            }])
+                        }
+                        2 => {
+                            assert!(
+                                data["numbered_source"]
+                                    .as_str()
+                                    .unwrap()
+                                    .contains("15 | // line 15")
+                            );
+                            json!([{
+                                "type": "choice",
+                                "name": request["questions"][0]["name"],
+                                "choice": "lines_11_20",
+                                "confidence": 0.9
+                            }])
+                        }
+                        _ => json!([
+                            {
+                                "type": "choice",
+                                "name": request["questions"][0]["name"],
+                                "choice": "line_15",
+                                "confidence": 0.9
+                            },
+                            {
+                                "type": "choice",
+                                "name": request["questions"][1]["name"],
+                                "choice": "line_16",
+                                "confidence": 0.7
+                            }
+                        ]),
+                    };
                     let response = json!({
                         "model": "gpt-6-luna",
-                        "answers": [{
-                            "type": "choice",
-                            "name": request["questions"][0]["name"],
-                            "choice": "violation",
-                            "confidence": 0.8,
-                            "probabilities": [
-                                { "value": "violation", "probability": 0.8 },
-                                { "value": "no_violation", "probability": 0.1 },
-                                { "value": "insufficient_context", "probability": 0.1 }
-                            ]
-                        }]
+                        "answers": answers,
+                        "usage": { "input_tokens": 100 * call }
                     });
                     let body = ureq::Body::builder()
                         .mime_type("application/json")
@@ -739,17 +824,28 @@ mod tests {
             key: "local-test-key".into(),
             url: DECISIONS_URL.into(),
         };
-        let report = crate::style::report::Report::check(
-            &scan,
-            ProviderKind::Decisions,
-            &rules.model,
-            &rules.questions[..1],
-            None,
-            &client,
-        );
-        assert_eq!(report.status, "complete");
+        let questions = &rules.questions[..1];
+        let key = ReviewKey::new(ProviderKind::Decisions, &rules.model, questions, None).unwrap();
+        let mut report = Report::planned(&scan, key, questions);
+        report.check(&scan, questions, None, &client);
+        assert_eq!(report.status, ReportStatus::Complete);
         assert_eq!(report.exit_code(), 1);
-        assert_eq!(report.files[0].findings[0].rule, rules.questions[0].name);
+        let file = &report.files[0];
+        assert_eq!(file.findings[0].rule, rule);
+        assert_eq!(
+            file.findings[0].lines,
+            Some(LineRange {
+                start_line: 15,
+                end_line: 16
+            })
+        );
+        assert_eq!(file.input_tokens, Some(600));
+        let requests = requests.with(|requests| requests.clone());
+        assert_eq!(requests.len(), 3);
+        let edges = &requests[2]["questions"];
+        assert_eq!(edges[0]["name"], format!("first_line__{rule}"));
+        assert_eq!(edges[0]["choices"][0]["value"], "line_8");
+        assert_eq!(edges[0]["choices"].as_array().unwrap().len(), 16);
     }
 
     fn choice(name: &str, selected: &str) -> Value {

@@ -37,6 +37,10 @@ enum Command {
         /// Include the strict rules, starting with arithmetic_side_effects.
         #[arg(long)]
         strict: bool,
+        /// Leave out the findings in an earlier `--format json` report, so only
+        /// new findings fail the check.
+        #[arg(long, value_name = "REPORT")]
+        baseline: Option<PathBuf>,
         /// Arguments passed on to `cargo clippy`, such as `--release` or `-p name`.
         #[arg(last = true)]
         cargo_args: Vec<String>,
@@ -174,8 +178,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             path,
             format,
             strict,
+            baseline,
             cargo_args,
-        } => check::run(&path, &cargo_args, format, strict),
+        } => check::run(&path, &cargo_args, format, strict, baseline.as_deref()),
         Command::Init {
             path,
             force,

@@ -1,9 +1,20 @@
-use std::{collections::BTreeSet, fs::File, path::Path};
+//! Reading a previous JSON report, to retry the files it could not review or
+//! to reuse the results it already has.
 
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, File},
+    path::Path,
+};
+
+use crate::style::{
+    provider::ProviderKind,
+    report::{FileReport, FileStatus, Report, ReviewKey, SCHEMA_VERSION, sha256_hex},
+    rules::Question,
+    scan::Scan,
+};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
-
-use crate::style::{provider::ProviderKind, rules::Question, scan::Scan};
 
 #[derive(Deserialize)]
 struct PreviousReport {
@@ -18,12 +29,21 @@ struct PreviousReport {
     files: Vec<PreviousFile>,
 }
 
+/// Just enough of a report to tell which schema the rest follows.
+#[derive(Deserialize)]
+struct SchemaVersion {
+    schema_version: u8,
+}
+
 #[derive(Deserialize)]
 struct PreviousFile {
     path: String,
     status: String,
 }
 
+/// Keeps only the files that `previous_path` failed to review or never sent.
+/// The previous report must have the same scan root, provider, model and
+/// rule names.
 pub(crate) fn select_pending(
     scan: &mut Scan,
     previous_path: &Path,
@@ -36,7 +56,7 @@ pub(crate) fn select_pending(
     let previous: PreviousReport =
         serde_json::from_reader(previous_file).context("invalid previous JSON report")?;
     ensure!(
-        previous.schema_version == 1,
+        (1..=SCHEMA_VERSION).contains(&previous.schema_version),
         "unsupported previous report schema"
     );
     ensure!(
@@ -98,6 +118,83 @@ pub(crate) fn select_pending(
             .is_some_and(|relative| pending.contains(relative.to_string_lossy().as_ref()))
     });
     Ok(())
+}
+
+/// Results from a previous report that can stand in for asking the provider
+/// again: each was answered under the same review key, for a source whose
+/// hash the report recorded.
+#[derive(Default)]
+pub(crate) struct Cache {
+    entries: BTreeMap<String, FileReport>,
+}
+
+impl Cache {
+    /// Reads the reusable results from `previous_path`. The report must have
+    /// the current schema and the same scan root. If its review key differs
+    /// from `key`, nothing in it is reusable and the cache is empty.
+    pub fn load(previous_path: &Path, scan: &Scan, key: &ReviewKey) -> Result<Self> {
+        let bytes = fs::read(previous_path)
+            .with_context(|| format!("cannot open cached report {}", previous_path.display()))?;
+        let version: SchemaVersion =
+            serde_json::from_slice(&bytes).context("invalid cached JSON report")?;
+        ensure!(
+            version.schema_version == SCHEMA_VERSION,
+            "a cached report needs schema version {SCHEMA_VERSION}; run once without --cache-from to write one"
+        );
+        let previous: Report =
+            serde_json::from_slice(&bytes).context("invalid cached JSON report")?;
+        ensure!(
+            previous.root == scan.root.to_string_lossy(),
+            "cached report has a different scan root"
+        );
+
+        let mut paths = BTreeSet::new();
+        for file in &previous.files {
+            ensure!(
+                paths.insert(file.path.as_str()),
+                "cached report has a duplicate file: {}",
+                file.path
+            );
+        }
+        if previous.key != *key {
+            return Ok(Self::default());
+        }
+        let entries = previous
+            .files
+            .into_iter()
+            .filter(|file| {
+                matches!(file.status, FileStatus::Checked | FileStatus::Incomplete)
+                    && file.source_sha256.is_some()
+            })
+            .map(|file| (file.path.clone(), file))
+            .collect();
+        Ok(Self { entries })
+    }
+
+    /// Replaces each planned file in `report` whose source still has the
+    /// cached hash with the cached result. `scan` must be the scan the report
+    /// was planned from. A file that can't be read is left planned, so its
+    /// review reports the error.
+    pub fn apply(&self, report: &mut Report, scan: &Scan) {
+        for (file, path) in report.files.iter_mut().zip(&scan.files) {
+            if file.status != FileStatus::Planned {
+                continue;
+            }
+            let Some(cached) = self.entries.get(&file.path) else {
+                continue;
+            };
+            let Ok(source) = fs::read(path) else {
+                continue;
+            };
+            if cached.source_sha256.as_deref() == Some(sha256_hex(&source).as_str()) {
+                *file = FileReport {
+                    cached: true,
+                    input_tokens: None,
+                    ..cached.clone()
+                };
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -247,5 +344,196 @@ mod tests {
         )
         .unwrap();
         assert_eq!(scan.files.len(), 2);
+    }
+
+    mod cache {
+        use super::*;
+        use crate::style::{
+            provider::LineRange,
+            report::{Finding, ReportStatus},
+        };
+
+        /// A scan of `a.rs`, `b.rs`, `c.rs` and `d.rs`, each with distinct
+        /// source, and the key and questions for one rule.
+        fn setup() -> (tempfile::TempDir, Scan, Vec<Question>, ReviewKey) {
+            let dir = tempfile::tempdir().unwrap();
+            for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+                fs::write(dir.path().join(name), format!("// {name}\n")).unwrap();
+            }
+            let scan = Scan::discover(dir.path()).unwrap();
+            let rules = RuleSet::load().unwrap();
+            let questions = rules.questions[..1].to_vec();
+            let key =
+                ReviewKey::new(ProviderKind::Decisions, &rules.model, &questions, None).unwrap();
+            (dir, scan, questions, key)
+        }
+
+        /// A report as a real run would leave it: `a.rs` with a finding,
+        /// `b.rs` unresolved, `c.rs` failed and `d.rs` never sent.
+        fn previous(scan: &Scan, questions: &[Question], key: &ReviewKey) -> Report {
+            let mut report = Report::planned(scan, key.clone(), questions);
+            let statuses = [
+                FileStatus::Checked,
+                FileStatus::Incomplete,
+                FileStatus::Error,
+                FileStatus::NotChecked,
+            ];
+            for ((file, path), status) in report.files.iter_mut().zip(&scan.files).zip(statuses) {
+                file.status = status;
+                if status != FileStatus::NotChecked {
+                    file.source_sha256 = Some(sha256_hex(&fs::read(path).unwrap()));
+                }
+                file.input_tokens = Some(42);
+            }
+            report.files[0].findings.push(Finding {
+                rule: questions[0].name.clone(),
+                lines: Some(LineRange {
+                    start_line: 1,
+                    end_line: 1,
+                }),
+                guidance: questions[0].instructions.clone(),
+                confidence: 0.9,
+                probabilities: BTreeMap::from([("violation".to_owned(), 0.9)]),
+            });
+            report.settle();
+            report
+        }
+
+        fn write(dir: &Path, report: &impl serde::Serialize) -> std::path::PathBuf {
+            let path = dir.join("previous.json");
+            fs::write(&path, serde_json::to_vec(report).unwrap()).unwrap();
+            path
+        }
+
+        fn statuses(report: &Report) -> Vec<(FileStatus, bool)> {
+            report
+                .files
+                .iter()
+                .map(|file| (file.status, file.cached))
+                .collect()
+        }
+
+        #[test]
+        fn reuses_answered_files_whose_source_is_unchanged() {
+            let (dir, scan, questions, key) = setup();
+            let path = write(dir.path(), &previous(&scan, &questions, &key));
+            fs::write(dir.path().join("b.rs"), "// edited\n").unwrap();
+
+            let mut report = Report::planned(&scan, key.clone(), &questions);
+            Cache::load(&path, &scan, &key)
+                .unwrap()
+                .apply(&mut report, &scan);
+            assert_eq!(
+                statuses(&report),
+                [
+                    (FileStatus::Checked, true),
+                    (FileStatus::Planned, false),
+                    (FileStatus::Planned, false),
+                    (FileStatus::Planned, false),
+                ]
+            );
+            let cached = &report.files[0];
+            assert_eq!(cached.path, "a.rs");
+            assert_eq!(cached.findings.len(), 1);
+            assert_eq!(cached.findings[0].rule, questions[0].name);
+            assert_eq!(
+                cached.findings[0].lines,
+                Some(LineRange {
+                    start_line: 1,
+                    end_line: 1
+                })
+            );
+            assert_eq!(cached.input_tokens, None);
+            assert!(report.has_planned_files());
+        }
+
+        #[test]
+        fn a_cached_report_can_serve_as_the_next_cache() {
+            let (dir, scan, questions, key) = setup();
+            let path = write(dir.path(), &previous(&scan, &questions, &key));
+            let mut report = Report::planned(&scan, key.clone(), &questions);
+            Cache::load(&path, &scan, &key)
+                .unwrap()
+                .apply(&mut report, &scan);
+            let path = write(dir.path(), &report);
+
+            let mut next = Report::planned(&scan, key.clone(), &questions);
+            Cache::load(&path, &scan, &key)
+                .unwrap()
+                .apply(&mut next, &scan);
+            assert_eq!(statuses(&next), statuses(&report));
+            assert_eq!(
+                statuses(&next)[..2],
+                [(FileStatus::Checked, true), (FileStatus::Incomplete, true)]
+            );
+            next.files.truncate(2);
+            next.settle();
+            assert_eq!(next.status, ReportStatus::Incomplete);
+        }
+
+        #[test]
+        fn a_different_key_reuses_nothing() {
+            let (dir, scan, questions, key) = setup();
+            let path = write(dir.path(), &previous(&scan, &questions, &key));
+            let rules = RuleSet::load().unwrap();
+            let mut reworded = questions.clone();
+            reworded[0].instructions.push_str(" Reworded.");
+            let other_keys = [
+                ReviewKey::new(ProviderKind::Decisions, "other", &questions, None).unwrap(),
+                ReviewKey::new(ProviderKind::Decisions, &rules.model, &reworded, None).unwrap(),
+                ReviewKey::new(
+                    ProviderKind::Decisions,
+                    &rules.model,
+                    &questions,
+                    Some("library"),
+                )
+                .unwrap(),
+            ];
+            for other in other_keys {
+                let mut report = Report::planned(&scan, other.clone(), &questions);
+                Cache::load(&path, &scan, &other)
+                    .unwrap()
+                    .apply(&mut report, &scan);
+                assert!(
+                    report
+                        .files
+                        .iter()
+                        .all(|file| file.status == FileStatus::Planned && !file.cached)
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_old_corrupt_or_foreign_reports() {
+            let (dir, scan, questions, key) = setup();
+            let valid = serde_json::to_value(previous(&scan, &questions, &key)).unwrap();
+            let load = |report: &Value| {
+                let path = write(dir.path(), report);
+                Cache::load(&path, &scan, &key).map(|_| ())
+            };
+            assert!(load(&valid).is_ok());
+
+            let old = previous_report(&scan.root, &key.model, &questions[0]);
+            assert!(
+                load(&old)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("schema version 3")
+            );
+            let mut wrong = valid.clone();
+            wrong["root"] = json!("/different/root");
+            assert!(load(&wrong).unwrap_err().to_string().contains("scan root"));
+            wrong = valid.clone();
+            wrong["files"][1]["path"] = json!("a.rs");
+            assert!(load(&wrong).unwrap_err().to_string().contains("duplicate"));
+            wrong = valid.clone();
+            wrong["files"][1]["status"] = json!("unknown");
+            assert!(
+                load(&wrong)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("invalid cached JSON report")
+            );
+        }
     }
 }

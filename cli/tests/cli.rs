@@ -259,7 +259,7 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["schema_version"], 2, "{stderr}");
+    assert_eq!(report["schema_version"], 3, "{stderr}");
     assert_eq!(report["warnings"], serde_json::json!([]), "{stderr}");
     assert_eq!(report["status"], "findings", "{stderr}");
     assert_eq!(report["errors"], serde_json::json!([]), "{stderr}");
@@ -312,6 +312,23 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
     let first = &report["findings"][0];
     assert!(first["file"].as_str().unwrap().ends_with(".rs"));
     assert!(first["line"].as_u64().is_some());
+    // Each finding carries the trimmed text of the line it starts on, so a
+    // baseline can match it after the line moves.
+    for finding in report["findings"].as_array().unwrap() {
+        let Some(line) = finding["line"].as_u64() else {
+            assert_eq!(finding["source"], serde_json::Value::Null, "{finding}");
+            continue;
+        };
+        let text =
+            fs::read_to_string(fixture("violations").join(finding["file"].as_str().unwrap()))
+                .unwrap();
+        let expected = text
+            .lines()
+            .nth(usize::try_from(line - 1).unwrap())
+            .unwrap()
+            .trim();
+        assert_eq!(finding["source"], expected, "{finding}");
+    }
     // The binary depends on the library. Its finding is only reported when
     // the library's findings do not fail the build and skip what depends on it.
     assert!(
@@ -328,12 +345,15 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
 /// of its `src` files that end in `// disallowed`, and on no others. `runtime`
 /// covers Tokio's runtime entry points; `unstable` covers `task::Builder`,
 /// which needs `--cfg tokio_unstable`; `indexing` covers panicking index methods
-/// beside their checked alternatives; `time` covers clock entry points beside
+/// beside their checked alternatives; `channels` covers unbounded constructors
+/// beside their bounded alternatives; `time` covers clock entry points beside
 /// Adamantium's wrappers and wall-clock measurements.
 /// `spawns` covers async-std and smol's spawn entry points beside runtime entry.
 #[test]
 fn check_reports_disallowed_methods() {
-    for name in ["runtime", "unstable", "indexing", "time", "spawns"] {
+    for name in [
+        "runtime", "unstable", "indexing", "channels", "time", "spawns",
+    ] {
         let root = fixture(name);
         let mut marked = Vec::new();
         let mut directories = vec![root.join("src")];
@@ -385,6 +405,102 @@ fn check_reports_disallowed_methods() {
         reported.sort();
         assert_eq!(reported, marked, "{name}: {stderr}");
     }
+}
+
+/// Checks the fixture `name` and asserts that it produces a finding on exactly
+/// the lines of `src/lib.rs` that end in `// disallowed_types` or
+/// `// disallowed_methods`, for that rule, and no other finding. Returns the
+/// findings.
+fn check_marked_rules(name: &str) -> TestResult<Vec<serde_json::Value>> {
+    let root = fixture(name);
+    let mut marked = Vec::new();
+    for (index, line) in fs::read_to_string(root.join("src/lib.rs"))?
+        .lines()
+        .enumerate()
+    {
+        for rule in ["disallowed_types", "disallowed_methods"] {
+            if line.ends_with(&format!("// {rule}")) {
+                marked.push((format!("clippy::{rule}"), u64::try_from(index + 1)?));
+            }
+        }
+    }
+    marked.sort();
+    assert!(!marked.is_empty(), "{name} marks no lines");
+
+    let output = adamantium()
+        .args(["adamantium", "check", "--format", "json"])
+        .arg(&root)
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let none = serde_json::json!([]);
+    assert_eq!(report.get("warnings"), Some(&none), "{stderr}");
+    assert_eq!(report.get("errors"), Some(&none), "{stderr}");
+    let findings = report
+        .get("findings")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("findings is not an array")?
+        .clone();
+    let mut reported = Vec::new();
+    for finding in &findings {
+        let field = |key| finding.get(key).ok_or(format!("{finding} has no {key}"));
+        assert_eq!(field("file")?, "src/lib.rs", "{finding}");
+        let rule = field("rule")?.as_str().ok_or("a rule that is not text")?;
+        let line = field("line")?
+            .as_u64()
+            .ok_or("a line that is not a number")?;
+        reported.push((rule.to_owned(), line));
+    }
+    reported.sort();
+    reported.dedup();
+    assert_eq!(reported, marked, "{name}: {stderr}");
+    Ok(findings)
+}
+
+/// Tokio's broadcast channel is reported; a `Semaphore` permit held across an
+/// await or forgotten, `watch`, and one `Channel` per receiver are not.
+#[test]
+fn check_reports_broadcast_and_allows_semaphore() {
+    for finding in check_marked_rules("sync").unwrap() {
+        assert!(
+            finding["message"]
+                .as_str()
+                .unwrap()
+                .contains("tokio::sync::broadcast::"),
+            "{finding}"
+        );
+    }
+}
+
+/// Every access method of a `thread_local!` value is reported, called on the
+/// static or through a `&LocalKey`, unless a local allow exempts it. Atomics,
+/// `OnceLock` and `LazyLock` statics, and a static `Actor` are not.
+#[test]
+fn check_reports_thread_locals_and_allows_atomics_and_statics() {
+    let mut methods: Vec<String> = check_marked_rules("state")
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["rule"] == "clippy::disallowed_methods")
+        .map(|finding| finding["message"].as_str().unwrap().to_owned())
+        .collect();
+    methods.sort();
+    methods.dedup();
+    let mut expected: Vec<String> = [
+        "get",
+        "replace",
+        "set",
+        "take",
+        "try_with",
+        "with",
+        "with_borrow",
+        "with_borrow_mut",
+    ]
+    .iter()
+    .map(|method| format!("use of a disallowed method `std::thread::LocalKey::{method}`"))
+    .collect();
+    expected.sort();
+    assert_eq!(methods, expected);
 }
 
 #[test]
@@ -478,6 +594,168 @@ fn check_applies_the_skip_list() {
     );
 }
 
+/// Runs `check` on `dir` with `args`, returning its exit code, stdout and
+/// stderr.
+fn check_with(dir: &Path, args: &[&str]) -> io::Result<(Option<i32>, Vec<u8>, String)> {
+    let output = adamantium()
+        .args(["adamantium", "check"])
+        .args(args)
+        .arg(dir)
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    Ok((output.status.code(), output.stdout, stderr))
+}
+
+#[test]
+fn check_with_a_baseline_fails_only_on_new_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("src")).unwrap();
+    // No overflow-checks, so the baseline also covers a finding without a line.
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    let lib = dir.path().join("src/lib.rs");
+    fs::write(
+        &lib,
+        "pub fn first(v: Option<i32>) -> i32 {\n    v.unwrap()\n}\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = check_with(dir.path(), &["--format", "json"]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    let baseline = dir.path().join("baseline.json");
+    fs::write(&baseline, stdout).unwrap();
+    let baseline = baseline.to_str().unwrap();
+
+    // Code added above the old finding moves and reindents it, and adds one.
+    fs::write(
+        &lib,
+        "pub fn second(v: Option<i32>) -> i32 {\n    v.expect(\"set\")\n}\n\npub mod inner {\n    pub fn first(v: Option<i32>) -> i32 {\n        v.unwrap()\n    }\n}\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) =
+        check_with(dir.path(), &["--format", "json", "--baseline", baseline]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(report["status"], "findings", "{report}");
+    let findings = report["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "{report}");
+    assert_eq!(findings[0]["rule"], "clippy::expect_used", "{report}");
+    assert_eq!(findings[0]["line"], 2, "{report}");
+    assert_eq!(
+        report["baselined"],
+        serde_json::json!({
+            "adamantium::overflow_checks": 1,
+            "clippy::unwrap_used": 1,
+        }),
+        "{report}"
+    );
+    assert_eq!(report["baseline_unmatched"], 0, "{report}");
+
+    // Text output shows only the new finding's diagnostic.
+    let (code, _, stderr) = check_with(dir.path(), &["--baseline", baseline]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("expect_used"), "{stderr}");
+    assert!(!stderr.contains("unwrap_used"), "{stderr}");
+    assert!(!stderr.contains("overflow-checks"), "{stderr}");
+    assert!(
+        stderr.contains("adamantium: 1 finding in src/lib.rs (2 in the baseline)"),
+        "{stderr}"
+    );
+
+    // Fixing both leaves the check clean and says the baseline is stale.
+    fs::write(
+        &lib,
+        "pub fn first(v: Option<i32>) -> i32 {\n    v.unwrap_or(0)\n}\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) =
+        check_with(dir.path(), &["--format", "json", "--baseline", baseline]).unwrap();
+    assert_eq!(code, Some(0), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(report["status"], "clean", "{report}");
+    assert_eq!(report["baseline_unmatched"], 1, "{report}");
+    let (code, _, stderr) = check_with(dir.path(), &["--baseline", baseline]).unwrap();
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        stderr.contains("adamantium: clean (1 in the baseline)\nadamantium: 1 finding in the baseline no longer occurs"),
+        "{stderr}"
+    );
+
+    // Without a baseline, every finding counts and none is matched.
+    let (code, stdout, stderr) = check_with(dir.path(), &["--format", "json"]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(report["baselined"], serde_json::json!({}), "{report}");
+    assert_eq!(
+        report["baseline_unmatched"],
+        serde_json::Value::Null,
+        "{report}"
+    );
+}
+
+#[test]
+fn check_with_a_baseline_keeps_the_skip_list() {
+    let (code, stdout, stderr) = check_with(&fixture("skips"), &["--format", "json"]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    let dir = tempfile::tempdir().unwrap();
+    let baseline = dir.path().join("baseline.json");
+    fs::write(&baseline, stdout).unwrap();
+    let (code, stdout, stderr) = check_with(
+        &fixture("skips"),
+        &["--format", "json", "--baseline", baseline.to_str().unwrap()],
+    )
+    .unwrap();
+    assert_eq!(code, Some(0), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(report["findings"], serde_json::json!([]), "{report}");
+    assert_eq!(
+        report["skipped"],
+        serde_json::json!({
+            "clippy::cast_possible_truncation": 1,
+            "clippy::indexing_slicing": 1,
+            "clippy::string_slice": 1,
+        }),
+        "{report}"
+    );
+    assert_eq!(
+        report["baselined"],
+        serde_json::json!({
+            "clippy::string_slice": 1,
+            "clippy::unwrap_used": 1,
+        }),
+        "{report}"
+    );
+}
+
+#[test]
+fn check_refuses_an_unusable_baseline_before_running_clippy() {
+    let dir = tempfile::tempdir().unwrap();
+    let baseline = dir.path().join("old.json");
+    fs::write(
+        &baseline,
+        r#"{"schema_version": 2, "root": "/p", "status": "findings", "findings": []}"#,
+    )
+    .unwrap();
+    let missing = dir.path().join("missing.json");
+    for (path, expected) in [
+        (&baseline, "it has schema version 2"),
+        (&missing, "reading"),
+    ] {
+        let (code, stdout, stderr) = check_with(
+            &fixture("clean"),
+            &["--format", "json", "--baseline", path.to_str().unwrap()],
+        )
+        .unwrap();
+        assert_eq!(code, Some(2), "{stderr}");
+        assert!(stdout.is_empty());
+        assert!(stderr.starts_with("error: "), "{stderr}");
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(!stderr.contains("Checking"), "{stderr}");
+    }
+}
+
 #[test]
 fn check_rejects_an_unknown_rule_in_the_skip_list() {
     let dir = tempfile::tempdir().unwrap();
@@ -540,7 +818,7 @@ fn check_passes_the_clean_fixture_and_prints_a_summary() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "{stderr}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["schema_version"], 3);
     assert_eq!(report["status"], "clean");
     assert_eq!(report["findings"], serde_json::json!([]));
     assert_eq!(report["warnings"], serde_json::json!([]));
@@ -577,7 +855,7 @@ fn check_reports_spanless_lint_warnings_once_in_json_and_text() {
         assert_eq!(output.status.code(), Some(0), "{format}: {stderr}");
         if format == "json" {
             let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(report["schema_version"], 2, "{report}");
+            assert_eq!(report["schema_version"], 3, "{report}");
             assert_eq!(report["status"], "clean", "{report}");
             assert_eq!(report["findings"], serde_json::json!([]), "{report}");
             assert_eq!(report["errors"], serde_json::json!([]), "{report}");

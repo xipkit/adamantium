@@ -10,9 +10,12 @@ exclude = [
     "cli/tests/fixtures/unstable",
     "cli/tests/fixtures/paths",
     "cli/tests/fixtures/indexing",
+    "cli/tests/fixtures/channels",
     "cli/tests/fixtures/strict",
     "cli/tests/fixtures/time",
     "cli/tests/fixtures/deps",
+    "cli/tests/fixtures/sync",
+    "cli/tests/fixtures/state",
 ]
 
 [workspace.package]
