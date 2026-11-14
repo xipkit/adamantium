@@ -17,17 +17,18 @@ use std::{
     slice,
 };
 
-use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
 use serde::Serialize;
 use syn::{
-    Arm, Attribute, Block, Expr, ExprCall, ExprClosure, ExprForLoop, ExprIf, ExprLit,
+    Arm, AttrStyle, Attribute, Block, Expr, ExprCall, ExprClosure, ExprForLoop, ExprIf, ExprLit,
     ExprMethodCall, ExprPath, ExprUnsafe, ExprWhile, Field, FieldValue, File, FnArg, GenericParam,
     Generics, ImplItem, ImplItemFn, Item, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod,
-    ItemTrait, Lit, Macro, Meta, Pat, PatIdent, Safety, Signature, Stmt, Token, TraitItem,
-    TraitItemFn, Type, UseTree, Variant,
+    ItemTrait, Lit, Macro, MacroDelimiter, Meta, MetaList, Pat, PatIdent, Safety, Signature, Stmt,
+    Token, TraitItem, TraitItemFn, Type, UseTree, Variant, braced,
     ext::IdentExt,
     parse::ParseStream,
     punctuated::Punctuated,
+    token,
     visit::{self, Visit},
     visit_mut::{self, VisitMut},
 };
@@ -1139,8 +1140,9 @@ fn bind_use(
 }
 
 /// Replaces each item macro whose body parses as items with those items, as
-/// macros such as Tokio's `cfg_rt! { ... }` expand to their input. The
-/// macro's own attributes carry over to each item, so a `cfg` on it still
+/// macros such as Tokio's `cfg_rt! { ... }` expand to their input, and each
+/// `cfg_if!` with the items of its branches, under the `cfg` it gives them.
+/// The macro's own attributes carry over to each item, so a `cfg` on it still
 /// applies.
 struct Expand;
 
@@ -1156,7 +1158,12 @@ impl Expand {
                 expanded.push(Item::Macro(item));
                 continue;
             }
-            match item.mac.parse_body_with(parse_items) {
+            let parsed = if is_cfg_if(&item.mac) {
+                item.mac.parse_body_with(parse_cfg_if)
+            } else {
+                item.mac.parse_body_with(parse_items)
+            };
+            match parsed {
                 Ok(mut inner) => {
                     self.items(&mut inner);
                     for mut inner in inner {
@@ -1195,6 +1202,109 @@ fn parse_items(input: ParseStream) -> syn::Result<Vec<Item>> {
         items.push(input.parse()?);
     }
     Ok(items)
+}
+
+/// Parses the body of a `cfg_if!`, `if #[cfg(a)] { ... } else if #[cfg(b)]
+/// { ... } else { ... }`, into the items of its branches, as the `cfg_if`
+/// crate expands it: each branch's items get a `cfg` that holds where the
+/// branch's predicate does and no earlier one does.
+fn parse_cfg_if(input: ParseStream) -> syn::Result<Vec<Item>> {
+    let mut earlier = Vec::new();
+    let mut items = Vec::new();
+    let mut otherwise = None;
+    loop {
+        let (span, predicate) = match otherwise {
+            None => {
+                input.parse::<Token![if]>()?;
+                let (span, condition) = cfg_if_condition(input)?;
+                let none_earlier = cfg_call("not", [cfg_call("any", earlier.clone(), span)], span);
+                earlier.push(condition.clone());
+                (span, cfg_call("all", [condition, none_earlier], span))
+            }
+            Some(span) => (
+                span,
+                cfg_call("not", [cfg_call("any", earlier.clone(), span)], span),
+            ),
+        };
+        let body;
+        braced!(body in input);
+        let cfg = cfg_attribute(predicate, span);
+        for mut item in parse_items(&body)? {
+            if let Some(attrs) = item_attrs_mut(&mut item) {
+                let own = mem::take(attrs);
+                attrs.push(cfg.clone());
+                attrs.extend(own);
+            }
+            items.push(item);
+        }
+        if otherwise.is_some() || input.is_empty() {
+            return Ok(items);
+        }
+        let span = input.parse::<Token![else]>()?.span;
+        if !input.peek(Token![if]) {
+            otherwise = Some(span);
+        }
+    }
+}
+
+/// The `#[cfg(...)]` of a `cfg_if!` branch, as one predicate: the `cfg_if`
+/// crate reads `#[cfg(a, b)]` as `all(a, b)`. The span is where the
+/// attribute is written.
+fn cfg_if_condition(input: ParseStream) -> syn::Result<(Span, TokenStream)> {
+    let attrs = input.call(Attribute::parse_outer)?;
+    let [attr] = &attrs[..] else {
+        return Err(input.error("expected one #[cfg(...)]"));
+    };
+    match &attr.meta {
+        Meta::List(list) if list.path.is_ident("cfg") && !list.tokens.is_empty() => {
+            let span = attr.pound_token.span;
+            Ok((span, cfg_call("all", [list.tokens.clone()], span)))
+        }
+        _ => Err(input.error("expected #[cfg(...)]")),
+    }
+}
+
+/// The predicate `name(args, ...)`.
+fn cfg_call(name: &str, args: impl IntoIterator<Item = TokenStream>, span: Span) -> TokenStream {
+    let mut list = TokenStream::new();
+    for arg in args {
+        if !list.is_empty() {
+            list.extend([TokenTree::Punct(Punct::new(',', Spacing::Alone))]);
+        }
+        list.extend(arg);
+    }
+    let mut group = Group::new(Delimiter::Parenthesis, list);
+    group.set_span(span);
+    TokenStream::from_iter([
+        TokenTree::Ident(Ident::new(name, span)),
+        TokenTree::Group(group),
+    ])
+}
+
+/// The attribute `#[cfg(predicate)]`, written at `span`. Attributes are
+/// told apart by where they are written, so `span` must be a place no other
+/// attribute starts at.
+fn cfg_attribute(predicate: TokenStream, span: Span) -> Attribute {
+    Attribute {
+        pound_token: Token![#](span),
+        style: AttrStyle::Outer,
+        bracket_token: token::Bracket(span),
+        meta: Meta::List(MetaList {
+            path: Ident::new("cfg", span).into(),
+            delimiter: MacroDelimiter::Paren(token::Paren(span)),
+            tokens: predicate,
+        }),
+    }
+}
+
+/// Whether a macro is `cfg_if!`, by its name. Crates such as `libc` define
+/// their own copy rather than depend on the `cfg_if` crate, so the name is
+/// what they share. A body that isn't `cfg_if!`'s syntax stays a macro.
+fn is_cfg_if(mac: &Macro) -> bool {
+    mac.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "cfg_if")
 }
 
 fn is_include(mac: &Macro) -> bool {
@@ -1988,7 +2098,102 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
 mod tests {
     use syn::parse::Parser;
 
-    use super::*;
+    use super::{
+        super::cfg::{Features, Target},
+        *,
+    };
+
+    /// Each `cfg_if!` branch's items are built only where its predicate
+    /// holds and no earlier one does, as the `cfg_if` crate expands it.
+    #[test]
+    fn cfg_if_gives_each_branch_the_cfg_that_selects_it() {
+        let target = Target::parse("unix\ntarget_os=\"linux\"\n");
+        let features = Features::default();
+        let cfg = Cfg {
+            target: &target,
+            features: &features,
+            proc_macro: false,
+        };
+        let mut file = syn::parse_file(
+            r#"
+            cfg_if::cfg_if! {
+                if #[cfg(windows)] { fn a() {} }
+                else if #[cfg(unix)] { fn b() {} struct B; }
+                else if #[cfg(loom)] { fn c() {} }
+                else { fn d() {} }
+            }
+            cfg_if! {
+                if #[cfg(loom)] {
+                    fn e() {}
+                    cfg_if! {
+                        if #[cfg(unix)] { fn f() {} } else { fn g() {} }
+                    }
+                } else {
+                    #[cfg(windows)]
+                    fn h() {}
+                    fn i() {}
+                }
+            }
+            cfg_if! { if #[cfg(unix, windows)] { fn j() {} } }
+            #[cfg(windows)]
+            cfg_if! { if #[cfg(unix)] { fn k() {} } }
+            "#,
+        )
+        .unwrap();
+        Expand.visit_file_mut(&mut file);
+        let built: Vec<(String, Truth)> = file
+            .items
+            .iter()
+            .map(|item| {
+                let name = match item {
+                    Item::Fn(item) => item.sig.ident.to_string(),
+                    Item::Struct(item) => item.ident.to_string(),
+                    _ => panic!("an item that isn't a function or struct"),
+                };
+                (name, cfg.enabled(item_attrs(item)))
+            })
+            .collect();
+        let expected = [
+            ("a", Truth::False),
+            ("b", Truth::True),
+            ("B", Truth::True),
+            ("c", Truth::False),
+            ("d", Truth::False),
+            ("e", Truth::Unknown),
+            ("f", Truth::Unknown),
+            ("g", Truth::False),
+            ("h", Truth::False),
+            ("i", Truth::Unknown),
+            ("j", Truth::False),
+            ("k", Truth::False),
+        ]
+        .map(|(name, truth)| (name.to_owned(), truth));
+        assert_eq!(built, expected);
+    }
+
+    /// A body that isn't `cfg_if!`'s syntax, or one with that syntax in a
+    /// macro of another name, is left as a macro.
+    #[test]
+    fn only_cfg_if_bodies_are_read_as_branches() {
+        for source in [
+            "cfg_if! { if #[cfg(unix)] { fn a() {} } else }",
+            "cfg_if! { if #[cfg(unix)] #[cfg(windows)] { fn a() {} } }",
+            "cfg_if! { if #[cfg] { fn a() {} } }",
+            "cfg_if! { if #[cfg()] { fn a() {} } }",
+            "cfg_if! { if #[cfg_attr(unix, cfg(windows))] { fn a() {} } }",
+            "cfg_if! { if #[cfg(unix)] { fn a() {} } else { fn b() {} } else { fn c() {} } }",
+            "cfg_if! { if #[cfg(unix)] { mod a; 1 + 1 } }",
+            "other! { if #[cfg(unix)] { fn a() {} } }",
+        ] {
+            let mut file = syn::parse_file(source).unwrap();
+            Expand.visit_file_mut(&mut file);
+            assert!(
+                matches!(&file.items[..], [Item::Macro(_)]),
+                "{source}: {:?}",
+                file.items.len()
+            );
+        }
+    }
 
     /// Whether `unsafe_code` reports each attribute, as rustc 1.100 does.
     #[test]

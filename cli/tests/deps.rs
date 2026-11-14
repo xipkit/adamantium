@@ -130,6 +130,7 @@ fn deps_lists_runtime_and_build_dependencies_but_not_members_or_dev_dependencies
         kinds,
         BTreeMap::from([
             ("builder", "build"),
+            ("cfg-if", "runtime"),
             ("codegen", "build"),
             ("exports", "runtime"),
             ("ffi", "runtime"),
@@ -148,7 +149,7 @@ fn deps_lists_runtime_and_build_dependencies_but_not_members_or_dev_dependencies
 fn deps_finds_each_marked_call_and_nothing_else() {
     let report = report(&[]).unwrap();
     for name in [
-        "spawner", "tokio", "old", "builder", "pool", "safe", "helper",
+        "spawner", "tokio", "old", "builder", "pool", "safe", "helper", "platform",
     ] {
         let (sites, unresolved) = marked(name).unwrap();
         let dependency = dependency(&report, name).unwrap();
@@ -253,16 +254,35 @@ fn deps_names_source_it_could_not_scan() {
 #[test]
 fn deps_names_modules_declared_in_macro_bodies_it_could_not_read() {
     let report = report(&[]).unwrap();
-    let platform = dependency(&report, "platform").unwrap();
+    // Modules in `cfg_if!` branches that can't be built aren't listed.
     assert_eq!(
-        platform["unscanned"],
+        dependency(&report, "platform").unwrap()["unscanned"],
         json!([{
             "file": "src/lib.rs",
             "line": 10,
             "reason": "module `hidden` is declared in a macro body the scan can't read",
         }])
     );
-    assert_eq!(platform["unsafe"]["functions"], 0);
+}
+
+#[test]
+fn deps_scans_each_cfg_if_branch_that_may_be_built() {
+    let report = report(&[]).unwrap();
+    // An `unsafe impl` behind a cfg that can't be known, and in the branch
+    // after it an `unsafe` block, and an `unsafe fn` in a `cfg_if!` inside
+    // a module that a `cfg_if!` declares. `hidden.rs` isn't counted.
+    assert_eq!(
+        dependency(&report, "platform").unwrap()["unsafe"],
+        json!({
+            "functions": 1,
+            "blocks": 1,
+            "impls": 1,
+            "traits": 0,
+            "extern_blocks": 0,
+            "attributes": 0,
+            "in_macros": 0,
+        })
+    );
 }
 
 #[test]
@@ -293,12 +313,13 @@ fn deps_prints_a_table_and_each_call_as_text() {
         "      1      0           0  helper 0.0.0",
         "      1      0           0  ffi 0.0.0",
         "     13      0           0  exports 0.0.0",
+        "      3      1           0  platform 0.0.0 (partly unscanned)",
         "  tokio::task::spawn: an unstructured task; spawn inside adamantium::Tasks",
         "    src/nested/deeper.rs:2:5",
         "  unresolved calls: leak 1, spawn 5",
         "  unscanned: src/lib.rs:11: module `missing` has no file: neither missing.rs nor missing/mod.rs",
         "  unscanned: src/lib.rs:10: module `hidden` is declared in a macro body the scan can't read",
-        "adamantium: 11 dependencies; 5 with unsafe code, 4 with disallowed calls, 1 with unresolved calls, 2 partly unscanned",
+        "adamantium: 12 dependencies; 6 with unsafe code, 5 with disallowed calls, 1 with unresolved calls, 2 partly unscanned",
     ] {
         assert!(
             stdout.lines().any(|printed| printed == line),
