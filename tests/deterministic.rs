@@ -578,6 +578,23 @@ fn replies_and_watches_reject_the_harness() {
     assert_eq!(carried_in(watch.clone(), drop), FailureKind::Panic);
     assert!(!watch.is_closed(), "the rejected drop left the count alone");
     assert_eq!(watch.get(), "", "nothing was sent from the harness");
+
+    // A destructor that sends while unwinding reports the first panic
+    // rather than aborting on a second.
+    struct SendOnDrop(Watch<String>);
+    impl Drop for SendOnDrop {
+        fn drop(&mut self) {
+            drop(self.0.send(String::from("unwound")));
+        }
+    }
+    assert_eq!(
+        carried_in(SendOnDrop(watch.clone()), |guard| {
+            let _held = guard;
+            std::panic::panic_any("unwinding");
+        }),
+        FailureKind::Panic
+    );
+    assert_eq!(watch.get(), "unwound");
 }
 
 #[test]

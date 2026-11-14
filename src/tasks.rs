@@ -9,13 +9,9 @@ use std::{
     task::Poll,
 };
 
-use tokio::{
-    sync::{oneshot, watch},
-    task::JoinError,
-    time::Instant,
-};
+use tokio::{task::JoinError, time::Instant};
 
-use crate::time;
+use crate::{Reply, ReplyReceiver, Watch, time};
 
 mod stream;
 #[cfg(feature = "tracing")]
@@ -31,7 +27,7 @@ pub use stream::{
 /// Dropping a clone does not cancel. Use a fresh signal for each scope: a
 /// cancelled signal cannot be reset, and scopes also cancel it on shutdown.
 pub struct Cancellation {
-    requested: watch::Sender<bool>,
+    requested: Watch<bool>,
 }
 
 impl Cancellation {
@@ -39,20 +35,28 @@ impl Cancellation {
     pub fn new() -> Self {
         crate::runtime::production_only("Tasks and Cancellation");
         Self {
-            requested: watch::channel(false).0,
+            requested: Watch::new(false),
         }
     }
 
     /// Requests shutdown. Repeated requests have the same effect as one.
     pub fn cancel(&self) {
         crate::runtime::production_only("Tasks and Cancellation");
-        self.requested.send_replace(true);
+        self.request();
+    }
+
+    /// Records the request. A scope's destructor calls this directly, since
+    /// it may run while unwinding, when `cancel`'s harness check would panic
+    /// a second time.
+    fn request(&self) {
+        // This handle keeps the watch open, so the send cannot fail.
+        self.requested.send(true).unwrap_or(());
     }
 
     /// Whether shutdown has been requested, including from a blocking thread.
     pub fn is_cancelled(&self) -> bool {
         crate::runtime::production_only("Tasks and Cancellation");
-        *self.requested.borrow()
+        self.requested.get()
     }
 
     /// Waits for shutdown, returning immediately if already requested.
@@ -60,8 +64,8 @@ impl Cancellation {
     pub async fn cancelled(&self) {
         crate::runtime::production_future("Tasks and Cancellation", async move {
             let mut requested = self.requested.subscribe();
-            // Borrowing self keeps the sender alive, so the channel cannot close.
-            drop(requested.wait_for(|requested| *requested).await);
+            // Borrowing self keeps a handle alive, so the watch cannot close.
+            requested.wait_for(|requested| *requested).await;
         })
         .await
     }
@@ -112,7 +116,7 @@ impl fmt::Debug for Cancellation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         crate::runtime::production_only("Cancellation");
         f.debug_struct("Cancellation")
-            .field("requested", &self.requested)
+            .field("requested", &self.requested.get())
             .finish()
     }
 }
@@ -306,7 +310,7 @@ pub struct Tasks<E> {
 pub struct Task<T, E> {
     #[cfg(feature = "deterministic")]
     _runtime: crate::runtime::execution::Production,
-    rx: oneshot::Receiver<Result<T, Receipt>>,
+    rx: ReplyReceiver<Result<T, Receipt>>,
     errors: SharedErrors<E>,
 }
 
@@ -444,7 +448,7 @@ impl<E: Send + 'static> Tasks<E> {
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
         crate::runtime::production_only("Tasks and Cancellation");
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
         self.set.spawn(async move {
             let result = future.await.map_err(|error| record(&errors, error));
@@ -505,7 +509,7 @@ impl<E: Send + 'static> Tasks<E> {
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
         crate::runtime::production_only("Tasks and Cancellation");
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
         self.set.spawn_blocking(move || {
             let result = f().map_err(|error| record(&errors, error));
@@ -554,10 +558,10 @@ impl<E: Send + 'static> Tasks<E> {
     /// panic is resumed here.
     pub async fn value<T: Send>(&mut self, task: Task<T, E>) -> Result<T, E> {
         crate::runtime::production_future("Tasks and Cancellation", async move {
-            let error = match task.rx.await {
-                Ok(Ok(value)) => return Ok(value),
-                Ok(Err(receipt)) => claim(&task.errors, receipt),
-                Err(_) => None,
+            let error = match task.rx.receive().await {
+                Some(Ok(value)) => return Ok(value),
+                Some(Err(receipt)) => claim(&task.errors, receipt),
+                None => None,
             };
             match error {
                 Some(error) => Err(error),
@@ -713,7 +717,7 @@ impl<E> Drop for Tasks<E> {
             crate::runtime::production_only("Tasks");
         }
         if let Some(cancellation) = &self.cancellation {
-            cancellation.requested.send_replace(true);
+            cancellation.request();
         }
         // JoinSet's destructor requests aborts, but cannot await their completion.
     }

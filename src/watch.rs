@@ -87,9 +87,15 @@ struct State<T> {
 
 impl<T> Shared<T> {
     /// Every operation locks, so this is where a handle carried into the
-    /// deterministic harness is rejected.
+    /// deterministic harness is rejected. While unwinding the check is
+    /// skipped: the execution is already failing, and a second panic would
+    /// abort the process instead of reporting the first. A destructor can
+    /// then still close the watch or send to it, as a scope dropped by a
+    /// panic cancels its signal.
     fn lock(&self) -> Guard<'_, State<T>> {
-        crate::runtime::production_only("Watch");
+        if !std::thread::panicking() {
+            crate::runtime::production_only("Watch");
+        }
         self.state.lock()
     }
 
@@ -320,13 +326,7 @@ impl<T> Clone for Watch<T> {
 
 impl<T> Drop for Watch<T> {
     fn drop(&mut self) {
-        // While unwinding, skip the harness check, which would panic again,
-        // but still close the watch so watchers don't wait forever.
-        let mut state = if std::thread::panicking() {
-            self.shared.state.lock()
-        } else {
-            self.shared.lock()
-        };
+        let mut state = self.shared.lock();
         state.watches = state.watches.saturating_sub(1);
         if state.watches == 0 {
             self.shared.close_with(state);
