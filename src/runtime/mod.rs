@@ -12,6 +12,8 @@ use std::{
 };
 
 #[cfg(feature = "deterministic")]
+pub(crate) mod clock;
+#[cfg(feature = "deterministic")]
 pub(crate) mod execution;
 
 pub(crate) mod queue;
