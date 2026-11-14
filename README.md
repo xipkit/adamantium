@@ -34,6 +34,8 @@ Adamantium requires Rust 1.88 or later. This repository uses the library and fol
 cargo adamantium check              # run Clippy with the rules
 cargo adamantium check --format json
 cargo adamantium check --format sarif  # for GitHub code scanning
+cargo adamantium fix --dry-run      # preview mechanical fixes as a unified diff
+cargo adamantium fix                # apply fixes, then check again
 cargo adamantium init               # write the rules into Cargo.toml and clippy.toml
 cargo adamantium rules              # list the rules and why each exists
 cargo adamantium explain unwrap_used # show why a rule exists and how to fix it
@@ -42,6 +44,10 @@ cargo adamantium deps               # show which dependencies use unsafe code or
 ```
 
 `check` runs `cargo clippy --all-targets` with Adamantium's rules and `clippy.toml`. It disables Clippy's default lints and runs the rules as warnings, allowing crates with findings and their dependents to be checked. It checks every workspace member unless arguments after `--` select packages; those arguments are passed to `cargo clippy`.
+
+`fix` uses the same Clippy pipeline and skip configuration. It applies `MachineApplicable` suggestions first, then rewrites immediately awaited calls that Clippy resolves to `tokio::time::sleep` and immediate `tokio::task::spawn_blocking(f).await.unwrap()` expressions (including imported aliases). Migration rewrites require a nonoptional, noninherited dependency named `adamantium`, with default features or an explicit `tokio` feature. Compound callees, stored sleep futures, and blocking calls with explicit type arguments are left for review. It leaves macro expansions, external source files, conflicting suggestions, and decisions about task scopes or lock lifetimes for review, with links to the [migration guide](docs/migrating.md). Shared-state/Actor rewrites are tracked separately in ADAM-178.
+
+`fix --dry-run` prints a unified diff to stdout and leaves source files unchanged; Cargo may still update its lockfile and build artifacts. Both forms accept `--strict` and Cargo arguments after `--`. A real fix runs `check` again: exit status is `0` when clean, `1` for remaining findings, and `2` for a build failure. Dry runs report the status before fixes. Review the diff and test the result before committing.
 
 The command prints diagnostics and a summary to stderr. With `--format json`, it prints a report to stdout with the rule, message, file, line, column, and source for each finding. The source is the text of the line the finding starts on, with leading and trailing whitespace removed; it is `null`, like the line and column, for a finding without a line. The exit status is `0` when clean, `1` for findings, and `2` when the project did not build.
 
