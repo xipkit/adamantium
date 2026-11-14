@@ -1,4 +1,7 @@
 #[cfg(feature = "tokio")]
+mod support;
+
+#[cfg(feature = "tokio")]
 use adamantium::{Actor, Tasks};
 use adamantium::{Channel, Closed, TryReceiveError, TrySendError};
 use std::{
@@ -373,4 +376,162 @@ fn endpoints_clone_without_cloning_messages_and_report_queue_state() {
     assert!(other_receiver.try_receive().is_ok());
     assert!(other_receiver.close());
     assert!(other_sender.is_closed());
+}
+
+#[cfg(feature = "tokio")]
+mod stream {
+    use super::*;
+    use futures_util::StreamExt;
+
+    #[tokio::test]
+    async fn drains_queued_messages_before_ending() {
+        struct Message(u8, std::marker::PhantomPinned);
+
+        for explicitly_close in [true, false] {
+            let (sender, receiver) = Channel::bounded(2).split();
+            assert!(
+                sender
+                    .try_send(Message(1, std::marker::PhantomPinned))
+                    .is_ok()
+            );
+            assert!(
+                sender
+                    .try_send(Message(2, std::marker::PhantomPinned))
+                    .is_ok()
+            );
+            if explicitly_close {
+                assert!(sender.close());
+            } else {
+                drop(sender);
+            }
+
+            let values: Vec<_> = receiver.map(|message| message.0).collect().await;
+            assert_eq!(values, [1, 2]);
+        }
+    }
+
+    #[test]
+    fn wakes_on_send_after_a_pending_next_is_dropped() {
+        let (sender, receiver) = Channel::bounded(1).split();
+        let counter = Arc::new(WakeCounter::default());
+        let mut receiver = pin!(receiver);
+
+        for value in 1..=2 {
+            assert!(poll_once(pin!(receiver.next()), &counter).is_pending());
+            assert_eq!(counter.0.swap(0, Ordering::SeqCst), 0);
+            sender.try_send(value).unwrap();
+            assert!(counter.0.swap(0, Ordering::SeqCst) > 0);
+            assert_eq!(
+                poll_once(pin!(receiver.next()), &counter),
+                Poll::Ready(Some(value))
+            );
+        }
+    }
+
+    #[test]
+    fn dropping_last_sender_wakes_pending_stream_clones() {
+        let (sender, receiver) = Channel::<u8>::bounded(1).split();
+        let other_sender = sender.clone();
+        let other_receiver = receiver.clone();
+        let first_wake = Arc::new(WakeCounter::default());
+        let second_wake = Arc::new(WakeCounter::default());
+        let mut first = pin!(receiver);
+        let mut second = pin!(other_receiver);
+
+        assert!(poll_once(pin!(first.next()), &first_wake).is_pending());
+        assert!(poll_once(pin!(second.next()), &second_wake).is_pending());
+        drop(sender);
+        assert_eq!(first_wake.0.load(Ordering::SeqCst), 0);
+        assert_eq!(second_wake.0.load(Ordering::SeqCst), 0);
+        drop(other_sender);
+        assert!(first_wake.0.load(Ordering::SeqCst) > 0);
+        assert!(second_wake.0.load(Ordering::SeqCst) > 0);
+        assert_eq!(
+            poll_once(pin!(first.next()), &first_wake),
+            Poll::Ready(None)
+        );
+        assert_eq!(
+            poll_once(pin!(second.next()), &second_wake),
+            Poll::Ready(None)
+        );
+    }
+
+    #[tokio::test]
+    async fn receiving_from_a_stream_wakes_pending_send_until() {
+        use adamantium::Cancellation;
+
+        let (sender, receiver) = Channel::bounded(1).split();
+        let cancellation = Cancellation::new();
+        let send_wake = Arc::new(WakeCounter::default());
+        let receive_wake = Arc::new(WakeCounter::default());
+        let mut receiver = pin!(receiver);
+        sender.try_send(0).unwrap();
+
+        for value in 1..=2 {
+            let mut send = pin!(sender.send_until(&cancellation, None, value));
+            assert!(poll_once(send.as_mut(), &send_wake).is_pending());
+            assert_eq!(
+                poll_once(pin!(receiver.next()), &receive_wake),
+                Poll::Ready(Some(value - 1))
+            );
+            assert!(send_wake.0.swap(0, Ordering::SeqCst) > 0);
+            assert_eq!(poll_once(send.as_mut(), &send_wake), Poll::Ready(Ok(())));
+        }
+    }
+
+    #[test]
+    fn explicit_close_wakes_a_pending_stream() {
+        for close_from_sender in [true, false] {
+            let (sender, receiver) = Channel::<u8>::bounded(1).split();
+            let counter = Arc::new(WakeCounter::default());
+            let mut receiver = pin!(receiver);
+            assert!(poll_once(pin!(receiver.next()), &counter).is_pending());
+            assert!(if close_from_sender {
+                sender.close()
+            } else {
+                receiver.close()
+            });
+            assert!(counter.0.load(Ordering::SeqCst) > 0);
+            assert_eq!(
+                poll_once(pin!(receiver.next()), &counter),
+                Poll::Ready(None)
+            );
+            assert_eq!(
+                poll_once(pin!(receiver.next()), &counter),
+                Poll::Ready(None)
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn composes_with_concurrent_results_under_backpressure() {
+        use adamantium::concurrently_ordered;
+        use std::time::Duration;
+
+        let result = crate::support::timeout(
+            Duration::from_secs(30),
+            Tasks::<&str>::run(async |tasks| {
+                let (sender, receiver) = Channel::bounded(1).split();
+                tasks.spawn(async move {
+                    for value in 0..20 {
+                        sender.send(value).await.map_err(|_| "closed early")?;
+                    }
+                    Ok(())
+                });
+                let results =
+                    concurrently_ordered(0..20, 3, |value| async move { Ok::<_, &str>(value * 2) });
+                let values: Vec<_> = receiver.zip(results).collect().await;
+                assert_eq!(
+                    values,
+                    (0..20)
+                        .map(|value| (value, Ok(value * 2)))
+                        .collect::<Vec<_>>()
+                );
+                Ok(())
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, Ok(()));
+    }
 }

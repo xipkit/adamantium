@@ -1,0 +1,16 @@
+# Timeout calls beside structured deadlines and scoped exceptions. Each line
+# that must be reported ends in a comment naming its rule.
+[workspace]
+
+[package]
+name = "cancellation"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+adamantium = { path = "../../../.." }
+tokio = { version = "1", default-features = false, features = ["time"] }
+
+[profile.release]
+overflow-checks = true

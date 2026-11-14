@@ -67,6 +67,10 @@ impl<T: Clone> Array<T> {
         if index > self.len() {
             return Err(value);
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the bounds check above makes Array the non-panicking alternative"
+        )]
         self.make_mut().insert(index, value);
         Ok(())
     }
@@ -76,7 +80,12 @@ impl<T: Clone> Array<T> {
         if index >= self.len() {
             return None;
         }
-        Some(self.make_mut().remove(index))
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the bounds check above makes Array the non-panicking alternative"
+        )]
+        let value = self.make_mut().remove(index);
+        Some(value)
     }
 
     /// Replaces the element at `index`. Hands the value back if there is no
