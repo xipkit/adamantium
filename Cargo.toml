@@ -8,6 +8,7 @@ exclude = [
     "cli/tests/fixtures/runtime",
     "cli/tests/fixtures/unstable",
     "cli/tests/fixtures/paths",
+    "cli/tests/fixtures/indexing",
 ]
 
 [workspace.package]
