@@ -637,6 +637,10 @@ struct Scanner<'a> {
     /// may have. The last reading of the module tree's are kept, for a path
     /// to a macro the crate defines after the call.
     macro_paths: HashMap<Vec<String>, Vec<Named>>,
+    /// The fewest definitions a call by path found at each of `macro_paths`
+    /// in this reading of the module tree. Where a path has more by the end
+    /// of it, a call didn't see them all.
+    macro_calls: HashMap<Vec<String>, usize>,
     /// The names each module bound in the last reading of the module tree,
     /// by module path, for paths through a module not yet indexed in this
     /// one.
@@ -859,6 +863,7 @@ impl<'a> Scanner<'a> {
             exports: None,
             crate_spans: Vec::new(),
             macro_paths: HashMap::new(),
+            macro_calls: HashMap::new(),
             last_pass: HashMap::new(),
             pending: false,
         }
@@ -888,6 +893,14 @@ impl<'a> Scanner<'a> {
             let known = scanner.macro_definitions();
             scanner.load(krate.src, root.clone(), true, None, &mut Textual::default());
             passes += 1;
+            // A call that saw fewer definitions than its path has now, as one
+            // before a definition, may see them all in another reading.
+            scanner.pending |= scanner.macro_calls.iter().any(|(path, seen)| {
+                scanner
+                    .macro_paths
+                    .get(path)
+                    .is_some_and(|definitions| definitions.len() > *seen)
+            });
             let settled =
                 scanner.modules == scanner.last_pass && scanner.macro_definitions() == known;
             if !scanner.pending || settled || passes == MAX_PASSES {
@@ -1507,6 +1520,10 @@ impl<'a> Scanner<'a> {
                 }
                 _ if path.first().map(String::as_str) == Some(self.krate.name) => {
                     let count = self.macro_paths.get(path)?.len();
+                    self.macro_calls
+                        .entry(path.clone())
+                        .and_modify(|seen| *seen = (*seen).min(count))
+                        .or_insert(count);
                     for definition in 0..count {
                         let own = Found::Own {
                             path: path.clone(),
@@ -5914,6 +5931,41 @@ mod user {
         )]);
         assert_eq!(scan.unscanned, []);
         assert_eq!(scan.unsafe_code.functions, 1);
+    }
+
+    /// A call by path of the crate's own macro is read as each definition
+    /// of it, also those the crate defines after the call.
+    #[test]
+    fn the_crates_own_macros_by_path_include_later_definitions() {
+        let scan = scan_files(&[(
+            "lib.rs",
+            r"#[cfg(demo_custom)]
+#[macro_export]
+macro_rules! pick {
+    () => {
+        pub fn f() {}
+    };
+}
+
+mod first {
+    crate::pick!();
+}
+
+#[cfg(not(demo_custom))]
+#[macro_export]
+macro_rules! pick {
+    () => {
+        pub unsafe fn f() {}
+    };
+}
+
+mod second {
+    crate::pick!();
+}
+",
+        )]);
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 2);
     }
 
     struct GraphCrate<'a> {
