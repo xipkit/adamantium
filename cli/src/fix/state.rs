@@ -1179,23 +1179,10 @@ fn pattern_names(pat: &Pat, names: &mut Vec<String>) {
 /// How a guard's statement becomes an actor call.
 struct Plan<'a> {
     root: Root<'a>,
-    /// A smaller expression to rewrite instead of the whole root: one whose
+    /// A smaller expression to read instead of the whole root: one whose
     /// value can't borrow the state.
-    narrow: Option<(&'a Expr, Narrow)>,
+    narrow: Option<&'a Expr>,
     mode: Mode,
-}
-
-#[derive(Clone, Copy)]
-enum Narrow {
-    /// `guard.clone()` or `guard.field.clone()`. Method lookup for the guard
-    /// starts at the state, so it can clone what a reference in the state
-    /// points to; `(*state)` keeps that lookup, where `snapshot()` would
-    /// always clone the state. The state can also have its own `clone` that
-    /// takes `&mut self`, so the call runs in `with`.
-    Clone {
-        projected: bool,
-    },
-    Read,
 }
 
 /// Whether `child` is the node `expr`.
@@ -1477,19 +1464,12 @@ impl<'a> Walker<'a> {
         }
         let root = self.root()?;
         let narrow = match parent {
-            Some(Node::Expr(expr @ Expr::MethodCall(call)))
-                if call.method == "clone" && call.args.is_empty() && call.turbofish.is_none() =>
-            {
-                Some((expr, Narrow::Clone { projected }))
-            }
             Some(Node::Expr(expr @ Expr::Binary(binary)))
                 if projected && is_comparison(&binary.op) =>
             {
-                Some((expr, Narrow::Read))
+                Some(expr)
             }
-            Some(Node::Expr(expr)) if projected && copies_out(expr, chain) => {
-                Some((chain, Narrow::Read))
-            }
+            Some(Node::Expr(expr)) if projected && copies_out(expr, chain) => Some(chain),
             _ => None,
         };
         let read = projected
@@ -1550,7 +1530,7 @@ impl<'a> Walker<'a> {
             return Err(Reason::TwoLocks);
         }
         let inside = match plan.narrow {
-            Some((expr, _)) => {
+            Some(expr) => {
                 let mut scan = Scan::new(self, guard);
                 scan.visit_expr(expr);
                 scan
@@ -1565,7 +1545,7 @@ impl<'a> Walker<'a> {
         }
         // The closure's parameter takes the binding's name, so the code that
         // moves into the closure must not name the binding anywhere else.
-        let substitute_with = |range: Range<usize>, guard: &str| -> Result<String, Reason> {
+        let substitute = |range: Range<usize>| -> Result<String, Reason> {
             let region = self.text.get(range.clone()).ok_or(UNLOCATED)?;
             if names_in(region, &name) != Some(1) {
                 return Err(Reason::Unfollowed(
@@ -1575,24 +1555,13 @@ impl<'a> Walker<'a> {
             let before = self.text.get(range.start..guard_range.start);
             let after = self.text.get(guard_range.end..range.end);
             match (before, after) {
-                (Some(before), Some(after)) => Ok(format!("{before}{guard}{after}")),
+                (Some(before), Some(after)) => Ok(format!("{before}{name}{after}")),
                 _ => Err(UNLOCATED),
             }
         };
-        let substitute = |range: Range<usize>| substitute_with(range, &name);
-        if let Some((expr, narrow)) = plan.narrow {
+        if let Some(expr) = plan.narrow {
             let range = self.text.of(expr).ok_or(UNLOCATED)?;
-            let replacement = match narrow {
-                Narrow::Clone { projected } => format!(
-                    "{name}.with(|{name}| {})",
-                    if projected {
-                        substitute(range.clone())?
-                    } else {
-                        substitute_with(range.clone(), &format!("(*{name})"))?
-                    }
-                ),
-                Narrow::Read => format!("{name}.read(|{name}| {})", substitute(range.clone())?),
-            };
+            let replacement = format!("{name}.read(|{name}| {})", substitute(range.clone())?);
             return Ok(self.edit(range, replacement));
         }
         let method = plan.mode.method();
@@ -2795,7 +2764,7 @@ mod tests {
         );
         assert_eq!(refusals, []);
         assert!(
-            fixed.contains("let copy: Vec<i32> = m.with(|m| (*m).clone());"),
+            fixed.contains("let copy: Vec<i32> = m.with(|m| m.clone());"),
             "{fixed}"
         );
     }
@@ -2849,10 +2818,7 @@ mod tests {
             &["Mutex"],
         );
         assert_eq!(refusals, []);
-        assert!(
-            fixed.contains("let n = m.with(|m| (*m).clone());"),
-            "{fixed}"
-        );
+        assert!(fixed.contains("let n = m.with(|m| m.clone());"), "{fixed}");
     }
 
     #[test]
@@ -2886,6 +2852,19 @@ mod tests {
             assert_eq!(fixed, source);
             assert_eq!(refusals, []);
         }
+    }
+
+    #[test]
+    fn a_clone_that_borrows_stays_inside_its_statement() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nstruct S;\nimpl S { fn clone(&self) -> &Self { self } }\nfn consume(_: &S) {}\nfn f() {\n    let m = Arc::new(Mutex::new(S));\n    consume(m.lock().unwrap().clone());\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(
+            fixed.contains("m.with(|m| { consume(m.clone()); });"),
+            "{fixed}"
+        );
     }
 
     #[test]
