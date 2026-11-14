@@ -1020,6 +1020,20 @@ impl<'a> Walker<'a> {
     }
 
     fn local_statement(&mut self, local: &'a Local) {
+        let mut names = Vec::new();
+        pattern_names(&local.pat, &mut names);
+        // A conditional `let` may shadow a binding in one configuration and
+        // not in another, whatever it declares.
+        if !local.attrs.is_empty() {
+            for name in &names {
+                if let Some(var) = self.lookup(name) {
+                    self.refuse(
+                        var,
+                        Reason::Unfollowed("a conditional declaration shadows it"),
+                    );
+                }
+            }
+        }
         let (pat, ty) = match &local.pat {
             Pat::Type(typed) => (&*typed.pat, Some(&*typed.ty)),
             pat => (pat, None),
@@ -1117,20 +1131,8 @@ impl<'a> Walker<'a> {
                 self.visit_expr(diverge);
             }
         }
-        let mut names = Vec::new();
-        pattern_names(&local.pat, &mut names);
         let mut declared = None;
         for name in names {
-            // A conditional `let` may shadow a binding in one configuration
-            // and not in another.
-            if !local.attrs.is_empty()
-                && let Some(var) = self.lookup(&name)
-            {
-                self.refuse(
-                    var,
-                    Reason::Unfollowed("a conditional declaration shadows it"),
-                );
-            }
             declared = Some(self.declare(name, None));
         }
         self.settle(local, ident.and(declared));
@@ -2983,6 +2985,20 @@ mod tests {
             let (fixed, refusals) = fix(source, &["Mutex"]);
             assert_eq!(fixed, source);
             assert_eq!(refusals, []);
+        }
+    }
+
+    #[test]
+    fn a_conditional_declaration_shadowing_a_binding_refuses_it() {
+        for body in [
+            "fn f() { let m = Arc::new(Mutex::new(0u32)); #[cfg(any())] let m = Arc::new(Mutex::new(1u32)); *m.lock().unwrap() += 1; }",
+            "fn f() { let m = Arc::new(Mutex::new(0u32)); let h = m.clone(); #[cfg(any())] let m = h.clone(); *m.lock().unwrap() += 1; }",
+        ] {
+            refused(
+                body,
+                "m",
+                Reason::Unfollowed("a conditional declaration shadows it"),
+            );
         }
     }
 
