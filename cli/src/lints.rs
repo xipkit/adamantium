@@ -1,6 +1,6 @@
 //! The rules `cargo adamantium` applies: lint levels passed to Clippy and the
 //! Clippy configuration file. The repository's own `Cargo.toml` carries the
-//! same levels, and a test keeps the two equal.
+//! default levels and a separate strict table, and a test keeps both in step.
 
 use std::fmt;
 
@@ -81,7 +81,7 @@ const fn clippy(name: &'static str, why: &'static str, example: Example) -> Lint
     }
 }
 
-/// Every lint, in the order the tables print them.
+/// The default lints, in the order the tables print them.
 pub const LINTS: &[Lint] = &[
     rust(
         "unsafe_code",
@@ -223,9 +223,9 @@ async fn example() {
     ),
     clippy(
         "disallowed_methods",
-        "panicking index methods, unbounded channels, unstructured spawns, blocking calls, leaks and weak references, listed in clippy.toml",
+        "panicking index methods, unbounded channels, unstructured spawns, blocking calls, clocks outside adamantium::time, leaks and weak references, listed in clippy.toml",
         example(
-            "Use adamantium::Array::remove/insert and split_at_checked for checked index operations, adamantium::Channel for bounded channels, Tasks::run and Tasks::spawn for scoped tasks, adamantium::blocking for blocking work, and tokio::time::sleep for timers. Drop resources instead of leaking them; use owned values instead of weak references.",
+            "Use adamantium::Array::remove/insert and split_at_checked for checked index operations, adamantium::Channel for bounded channels, Tasks::run and Tasks::spawn for scoped tasks, adamantium::blocking for blocking work, and adamantium::time::sleep or sleep_until for timers. Build deadlines with adamantium::time::now and periodic waits with a loop over adamantium::time::sleep_until. Drop resources instead of leaking them; use owned values instead of weak references.",
             r#"async fn example() -> Result<u32, tokio::task::JoinError> {
     let task = tokio::spawn(async { 42 });
     task.await
@@ -475,6 +475,28 @@ fn main() -> std::process::ExitCode {
     ),
 ];
 
+/// Additional lints enabled by the strict tier.
+pub const STRICT_LINTS: &[Lint] = &[clippy(
+    "arithmetic_side_effects",
+    "arithmetic can overflow or divide by zero; use checked, saturating or wrapping methods",
+    example(
+        "Use checked arithmetic to handle overflow or division by zero explicitly, or saturating or wrapping methods when those semantics are intended.",
+        r#"fn add(left: u32, right: u32) -> u32 {
+    left + right
+}"#,
+        r#"fn add(left: u32, right: u32) -> Option<u32> {
+    left.checked_add(right)
+}"#,
+    ),
+)];
+
+/// The default lints, plus the strict additions when requested.
+pub fn selected(strict: bool) -> impl Iterator<Item = &'static Lint> {
+    LINTS
+        .iter()
+        .chain(STRICT_LINTS.iter().filter(move |_| strict))
+}
+
 impl Lint {
     /// The lint's name as Clippy and rustc report it.
     pub fn qualified(&self) -> String {
@@ -505,7 +527,7 @@ impl fmt::Display for Tool {
 
 /// The lint tables as they appear in a `Cargo.toml`: under `workspace.lints`
 /// for a workspace, under `lints` for a single package.
-pub fn lints_toml(workspace: bool) -> String {
+pub fn lints_toml(workspace: bool, strict: bool) -> String {
     let prefix = if workspace { "workspace." } else { "" };
     let mut out = String::new();
     for tool in [Tool::Rust, Tool::Clippy] {
@@ -513,7 +535,7 @@ pub fn lints_toml(workspace: bool) -> String {
             out.push('\n');
         }
         out.push_str(&format!("[{prefix}lints.{tool}]\n"));
-        for lint in LINTS.iter().filter(|lint| lint.tool == tool) {
+        for lint in selected(strict).filter(|lint| lint.tool == tool) {
             out.push_str(&format!("{} = \"{}\"\n", lint.name, lint.level));
         }
     }

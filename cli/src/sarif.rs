@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::{
     check::{Finding, Problem, Report, Status, normalize},
-    lints::{LINTS, OVERFLOW_RULE},
+    lints::{self, OVERFLOW_RULE},
 };
 
 const SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
@@ -178,8 +178,7 @@ fn descriptor(rule: &str) -> Value {
     let why = if rule == OVERFLOW_RULE {
         crate::lints::OVERFLOW_WHY
     } else {
-        LINTS
-            .iter()
+        lints::selected(true)
             .find(|lint| lint.qualified() == rule)
             .map_or("a rule of the adamantium fragment", |lint| lint.why)
     };

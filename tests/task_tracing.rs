@@ -14,8 +14,8 @@ use std::{
     time::Duration,
 };
 
-use adamantium::{Cancellation, ScopeError, Tasks};
-use tokio::{sync::oneshot, time::Instant};
+use adamantium::{Cancellation, ScopeError, Tasks, time};
+use tokio::sync::oneshot;
 use tracing::{
     Event, Subscriber,
     field::{Field, Visit},
@@ -90,7 +90,7 @@ async fn deadlines_report_only_unfinished_named_tasks_in_body_and_join() {
         let capture = Capture::default();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
         async {
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = time::now() + Duration::from_secs(10);
             let (ready, started) = oneshot::channel();
             let mut scope = Box::pin(Tasks::run_until(
                 Cancellation::new(),
@@ -155,7 +155,7 @@ async fn deadline_reports_blocking_work_before_waiting_for_cleanup() {
     let subscriber = tracing_subscriber::registry().with(capture.clone());
     async {
         let cancellation = Cancellation::new();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = time::now() + Duration::from_secs(10);
         let (ready, started) = oneshot::channel();
         let (release, released) = std::sync::mpsc::sync_channel(1);
         let mut tasks = Tasks::<&str>::new();
@@ -200,7 +200,7 @@ async fn deadline_includes_named_work_that_has_not_been_polled() {
         });
         assert_eq!(
             tasks
-                .join_until(Cancellation::new(), Some(Instant::now()), Ok(()))
+                .join_until(Cancellation::new(), Some(time::now()), Ok(()))
                 .await,
             Err(ScopeError::DeadlineExceeded),
         );
@@ -223,7 +223,7 @@ async fn panicked_tasks_are_excluded_and_their_panic_still_propagates() {
     let capture = Capture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
     async {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = time::now() + Duration::from_secs(10);
         let (panicking, panicked) = oneshot::channel();
         let mut scope = Box::pin(Tasks::run_until(
             Cancellation::new(),
@@ -346,7 +346,7 @@ async fn cancellation_and_unnamed_scopes_produce_no_diagnostics() {
         cancellation.cancel();
         assert_eq!(
             tasks
-                .join_until(cancellation, Some(Instant::now()), Ok(()))
+                .join_until(cancellation, Some(time::now()), Ok(()))
                 .await,
             Err(ScopeError::Cancelled),
         );
@@ -356,7 +356,7 @@ async fn cancellation_and_unnamed_scopes_produce_no_diagnostics() {
         tasks.spawn_blocking(|| Ok(()));
         assert_eq!(
             tasks
-                .join_until(Cancellation::new(), Some(Instant::now()), Ok(()))
+                .join_until(Cancellation::new(), Some(time::now()), Ok(()))
                 .await,
             Err(ScopeError::DeadlineExceeded),
         );
