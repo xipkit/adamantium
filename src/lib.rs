@@ -33,6 +33,8 @@ pub use actor::Actor;
 pub use array::Array;
 pub use bytes::Bytes;
 pub use channel::{Channel, Closed, Receiver, Sender, TryReceiveError, TrySendError};
+#[cfg(feature = "tokio")]
+pub use channel::{ReceiveError, SendError};
 pub use deque::Deque;
 pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
 pub use set::Set;

@@ -143,6 +143,16 @@ assert_eq!(receiver.try_receive(), Ok(42));
 assert_eq!(receiver.try_receive(), Err(TryReceiveError::Closed));
 ```
 
+With the default `tokio` feature, `receive_until(&cancellation, deadline)` and
+`send_until(&cancellation, deadline, value)` wait only until the
+`Cancellation` is requested or the absolute deadline passes. Pass `None` for no
+deadline. A receive ends with `ReceiveError::Closed`, `Cancelled`, or
+`DeadlineExceeded`, and leaves queued messages in place when it ends early. A
+send ends with `SendError::Closed(value)`, `Cancelled(value)`, or
+`DeadlineExceeded(value)`, so the value comes back whichever way it fails. As
+with `Tasks::run_until`, a request already present wins over a ready channel,
+and cancellation wins over an equally ready deadline.
+
 For explicit shutdown, use `Tasks::run_until(cancellation, deadline, body)` or
 `tasks.join_until(cancellation, deadline, body_result)`. `Cancellation::new()`
 creates a cloneable signal: callers request shutdown with `cancel()`, async work
@@ -265,7 +275,7 @@ The lint levels are in this repository's `[workspace.lints]`, and the Clippy con
 
 Tests are exempt from the panic rules, so `unwrap`, indexing, and `panic!` are allowed in `#[test]` functions and `#[cfg(test)]` modules. Before Rust 1.100, Clippy does not treat helper functions in integration test files as tests, so those functions follow the rules. From Rust 1.100, they are exempt as well.
 
-The rules have limits. A receive can wait indefinitely if no message arrives and the channel remains open. Dependencies can still use unsafe code or panic, and Clippy cannot detect every call that blocks a worker thread. `Runtime::block_on` is allowed because `#[tokio::main]` and `#[tokio::test]` expand to it; called inside a runtime, it panics at run time instead of blocking. Arithmetic overflow and stack exhaustion can still panic.
+The rules have limits. A plain `receive` or `send` can wait indefinitely while the channel stays open and empty or full; use `receive_until` or `send_until` to bound the wait with a `Cancellation` or a deadline. Dependencies can still use unsafe code or panic, and Clippy cannot detect every call that blocks a worker thread. `Runtime::block_on` is allowed because `#[tokio::main]` and `#[tokio::test]` expand to it; called inside a runtime, it panics at run time instead of blocking. Arithmetic overflow and stack exhaustion can still panic.
 
 ## Style review
 
