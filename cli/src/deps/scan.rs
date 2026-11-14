@@ -592,7 +592,8 @@ impl Scanner<'_> {
     /// A mod-rs file, such as the crate root, a `mod.rs` or a file named by
     /// `#[path]`, keeps its child modules' files beside it; any other
     /// `name.rs` keeps them in `name/`. `from` is the declaration that names
-    /// the file, and `textual` the macros in scope there.
+    /// the file, and `textual` the macros in scope there. Returns the file's
+    /// inner attributes, which are its module's, or none if it isn't read.
     fn load(
         &mut self,
         path: &Path,
@@ -600,7 +601,7 @@ impl Scanner<'_> {
         mod_rs: bool,
         from: Option<(&str, Span)>,
         textual: &mut Textual,
-    ) {
+    ) -> Vec<Attribute> {
         let rel = self.relative(path);
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
@@ -618,11 +619,11 @@ impl Scanner<'_> {
                         reason,
                     },
                 });
-                return;
+                return Vec::new();
             }
         };
         if !self.visited.insert(path.to_path_buf()) {
-            return;
+            return Vec::new();
         }
         let mut file = match syn::parse_file(&text) {
             Ok(file) => file,
@@ -632,11 +633,11 @@ impl Scanner<'_> {
                     line: Some(error.span().start().line),
                     reason: format!("syn could not parse it: {error}"),
                 });
-                return;
+                return Vec::new();
             }
         };
         if self.krate.cfg.enabled(&file.attrs) == Truth::False {
-            return;
+            return Vec::new();
         }
         Expand.visit_file_mut(&mut file);
         if module.len() == 1 {
@@ -660,6 +661,7 @@ impl Scanner<'_> {
         self.index(&file.items, place, &mut scope, textual);
         textual.conditions.truncate(outer);
         self.add_scope(&module, scope);
+        let attrs = file.attrs.clone();
         self.files.push(Loaded {
             attrs: file.attrs,
             items: file.items,
@@ -668,6 +670,7 @@ impl Scanner<'_> {
             mod_dir,
             path_dir: dir,
         });
+        attrs
     }
 
     /// Binds the names `items` define in the module at `place` into
@@ -701,7 +704,7 @@ impl Scanner<'_> {
 
     /// Reads a module that the module at `place` declares. Its
     /// `macro_rules!` stay in textual scope after it if it is
-    /// `#[macro_use]`.
+    /// `#[macro_use]`, by an outer attribute or an inner one.
     fn child(&mut self, item: &ItemMod, place: Place, textual: &mut Textual) {
         if self.krate.cfg.enabled(&item.attrs) == Truth::False {
             return;
@@ -712,6 +715,7 @@ impl Scanner<'_> {
         let conditions = textual.conditions.len();
         textual.conditions.extend(cfg_predicates(&item.attrs));
         match self.locate(item, place.mod_dir, place.path_dir) {
+            // syn gives an inline module's inner attributes with its outer ones.
             Location::Inline { dir } => {
                 if let Some((_, items)) = &item.content {
                     let mut scope = Scope::default();
@@ -724,14 +728,19 @@ impl Scanner<'_> {
                     self.index(items, inner, &mut scope, textual);
                     self.add_scope(&child, scope);
                 }
+                self.keep_macros(&item.attrs, macros, textual);
             }
+            // Each file may have its own `#![macro_use]`.
             Location::Files(files) => {
                 for file in files {
                     let from = Some((place.rel, item.ident.span()));
                     let outer = textual.conditions.len();
+                    let macros = textual.macros.len();
                     textual.conditions.extend(file.condition);
-                    self.load(&file.path, child.clone(), file.mod_rs, from, textual);
+                    let mut attrs = item.attrs.clone();
+                    attrs.extend(self.load(&file.path, child.clone(), file.mod_rs, from, textual));
                     textual.conditions.truncate(outer);
+                    self.keep_macros(&attrs, macros, textual);
                 }
             }
             Location::Unscannable(reason) => self.scan.unscanned.push(Unscanned {
@@ -741,16 +750,22 @@ impl Scanner<'_> {
             }),
         }
         textual.conditions.truncate(conditions);
-        match self.macro_use(&item.attrs) {
+    }
+
+    /// Keeps the `macro_rules!` a module defined, those in `textual` from
+    /// `start` on, in textual scope after it if its attributes, outer and
+    /// inner, make it `#[macro_use]`.
+    fn keep_macros(&self, attrs: &[Attribute], start: usize, textual: &mut Textual) {
+        match self.macro_use(attrs) {
             Truth::True => {}
             // Where the module may not be `#[macro_use]`, a call its macros
             // may shadow can't be expanded.
             Truth::Unknown => {
-                for definition in textual.macros.iter_mut().skip(macros) {
+                for definition in textual.macros.iter_mut().skip(start) {
                     definition.items = None;
                 }
             }
-            Truth::False => textual.macros.truncate(macros),
+            Truth::False => textual.macros.truncate(start),
         }
     }
 
@@ -3057,6 +3072,35 @@ mod tests {
             column: 13,
         };
         assert_eq!(sites, [&site]);
+    }
+
+    /// A module's file, or an inline module, can make it `#[macro_use]`
+    /// with an inner attribute.
+    #[test]
+    fn inner_macro_use_keeps_a_modules_macros_in_scope() {
+        let scan = scan_files(&[
+            (
+                "lib.rs",
+                r"macro_rules! root { () => { mod old; }; }
+mod macros;
+root!();
+mod inline {
+    #![macro_use]
+    macro_rules! other { () => { mod inner; }; }
+}
+other!();
+",
+            ),
+            (
+                "macros.rs",
+                "#![macro_use]\nmacro_rules! root { () => { mod new; }; }\n",
+            ),
+            ("new.rs", "pub unsafe fn a() {}\n"),
+            ("inner.rs", "pub unsafe fn b() {}\n"),
+        ]);
+        let reason = "module `old` is declared in a macro body the scan can't read";
+        assert_eq!(scan.unscanned, [unscanned("src/lib.rs", 1, reason)]);
+        assert_eq!(scan.unsafe_code.functions, 2);
     }
 
     /// A call expands only a macro in textual scope: one defined before it
