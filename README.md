@@ -26,7 +26,7 @@ Install the subcommand:
 cargo install --locked --git https://github.com/xipkit/adamantium cargo-adamantium
 ```
 
-Adamantium requires Rust 1.88 or later. This repository uses the library and follows the same rules.
+Adamantium requires Rust 1.96 or later. This repository uses the library and follows the same rules.
 
 ## Check a project
 

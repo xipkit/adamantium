@@ -25,7 +25,7 @@ exclude = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.96"
 repository = "https://github.com/xipkit/adamantium"
 publish = false
 
