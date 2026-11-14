@@ -36,6 +36,8 @@ cargo adamantium check --format json
 cargo adamantium check --format sarif  # for GitHub code scanning
 cargo adamantium init               # write the rules into Cargo.toml and clippy.toml
 cargo adamantium rules              # list the rules and why each exists
+cargo adamantium explain unwrap_used # show why a rule exists and how to fix it
+cargo adamantium explain clippy::rc_buffer --format json
 ```
 
 `check` runs `cargo clippy --all-targets` with Adamantium's rules and `clippy.toml`. It disables Clippy's default lints and runs the rules as warnings, allowing crates with findings and their dependents to be checked. It checks every workspace member unless arguments after `--` select packages; those arguments are passed to `cargo clippy`.
@@ -83,6 +85,8 @@ For a single package, use `[package.metadata.adamantium]`. Paths are globs relat
 `check` summarizes skipped findings and reports counts by rule in the JSON report's `skipped` map. Remove a rule from `allow` to see its findings. Projects with a skip list should run `cargo adamantium check` in CI because a `[lints]` table cannot scope a rule to a path.
 
 For a machine-readable list of rules and their reasons, run `cargo adamantium rules --format json`.
+
+`cargo adamantium explain <rule>` prints the rule's reasoning, recommended replacement, and before-and-after example without loading a project or accessing the network. It accepts the bare or qualified rule name, including `overflow_checks` or `adamantium::overflow_checks` for the release profile check. With `--format json`, it prints an object with `schema_version: 1`, `rule` (the qualified name), `why`, `replacement`, `before`, and `after`. Successful explanations exit with `0`; unknown rule names exit with `2` and an error on stderr.
 
 ## The library
 
