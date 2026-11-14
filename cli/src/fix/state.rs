@@ -320,6 +320,10 @@ struct MacroArgs {
     /// Whether the first argument is borrowed mutably, as the destination of
     /// `write!` and `writeln!` is.
     destination: bool,
+    /// The first argument evaluated only on some paths: an assertion's
+    /// message runs only when it fails, and a debug assertion only in debug
+    /// builds.
+    conditional: usize,
 }
 
 impl MacroArgs {
@@ -376,6 +380,13 @@ impl<'ast> Visit<'ast> for Parsed<'_> {
                 args,
                 format,
                 destination: name == "write" || name == "writeln",
+                conditional: if name.starts_with("debug_assert") {
+                    0
+                } else if name.starts_with("assert") {
+                    format
+                } else {
+                    usize::MAX
+                },
             },
         );
     }
@@ -2203,10 +2214,13 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
         match parsed {
             Some(parsed) => {
                 for (position, arg) in parsed.args.iter().enumerate() {
+                    let conditional = usize::from(position >= parsed.conditional);
+                    self.branch += conditional;
                     match parsed.named(position, arg) {
                         Some(value) => self.visit_expr(value),
                         None => self.visit_expr(arg),
                     }
+                    self.branch -= conditional;
                 }
             }
             None => {
@@ -2901,6 +2915,22 @@ mod tests {
             "m",
             Reason::InsideActor,
         );
+    }
+
+    #[test]
+    fn assertion_messages_and_debug_assertions_are_conditional() {
+        for body in [
+            "struct D;\nfn f(d: D) { let m = Arc::new(Mutex::new(true)); assert!(*m.lock().unwrap(), \"{}\", { drop(d); \"bad\" }); }",
+            "struct D;\nfn f(d: D) { let m = Arc::new(Mutex::new(1)); debug_assert_eq!(*m.lock().unwrap(), { drop(d); 1 }); }",
+        ] {
+            refused(
+                body,
+                "m",
+                Reason::Unfollowed(
+                    "a statement holding its guard may move a variable on only one path",
+                ),
+            );
+        }
     }
 
     #[test]
