@@ -20,9 +20,12 @@ use syn::{
     visit::Visit,
 };
 
+mod poll;
+
 /// A function, method or associated function defined in the package.
 struct Function {
     asynchronous: bool,
+    wrapped: bool,
     /// Declared in a trait or a trait implementation, so it may run through
     /// an operator, a `Drop`, a format or dynamic dispatch, not only by name.
     trait_method: bool,
@@ -35,6 +38,9 @@ struct Function {
 /// One package's source, as a field rewrite needs it.
 #[derive(Default)]
 pub(super) struct Crate {
+    poll: poll::Poll,
+    /// Opaque code could manufacture a caller without spelling its name.
+    opaque_poll: bool,
     /// The files that name each struct field, in an access, a literal, a
     /// pattern, a declaration or a macro.
     members: HashMap<String, BTreeSet<PathBuf>>,
@@ -72,6 +78,7 @@ impl Crate {
         let manifest: toml_edit::DocumentMut =
             fs::read_to_string(package.join("Cargo.toml"))?.parse()?;
         let mut krate = Self {
+            poll: poll::Poll::new(package),
             library: manifest.contains_key("lib") || package.join("src/lib.rs").is_file(),
             ..Self::default()
         };
@@ -130,6 +137,7 @@ impl Crate {
         for item in &tree.items {
             collect_macro_names(item, &mut macros);
         }
+        self.opaque_poll |= self.poll.add(file, &tree, &macros);
         let mut scan = Scan {
             krate: self,
             file,
@@ -198,6 +206,31 @@ impl Crate {
         }
     }
 
+    /// Whether this exact function is the audited binary entry candidate.
+    pub(super) fn poll_root(&self, file: &Path, sig: &syn::Signature) -> bool {
+        self.poll.root(file, sig)
+    }
+
+    /// Proves every async caller, plus functions containing awaited blocks.
+    pub(super) fn poll_hazard(
+        &self,
+        functions: &BTreeSet<String>,
+        blocks: &BTreeSet<String>,
+    ) -> Option<String> {
+        for name in functions.union(blocks) {
+            if (blocks.contains(name)
+                || self
+                    .functions
+                    .get(name)
+                    .is_some_and(|defs| defs.iter().any(|f| f.asynchronous)))
+                && let Err(reason) = self.poll.prove(self, name)
+            {
+                return Some(reason);
+            }
+        }
+        None
+    }
+
     /// Why one of `functions` might run inside an actor's callback or out of
     /// fix's sight, if one might.
     pub(super) fn hazard(&self, functions: &BTreeSet<String>) -> Option<Hazard> {
@@ -207,9 +240,6 @@ impl Crate {
                 .filter_map(|name| self.functions.get(name))
                 .flatten()
         };
-        if definitions().any(|function| function.asynchronous) {
-            return Some(Hazard::Asynchronous);
-        }
         if definitions().any(|function| function.trait_method) {
             return Some(Hazard::Trait);
         }
@@ -233,7 +263,6 @@ impl Crate {
 /// Why code that locks a field might run where fix can't follow it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Hazard {
-    Asynchronous,
     Trait,
     Public,
     /// A closure, async block, macro or function value might run it later.
@@ -292,6 +321,20 @@ pub(super) fn macro_attribute(attrs: &[Attribute]) -> bool {
 /// The standard macros whose arguments parse as expressions.
 fn reads_as_expressions(name: &str) -> bool {
     super::state::known_macro(name).is_some() || name == "vec"
+}
+
+/// Expression arguments of an unshadowed standard macro, if readable.
+fn expression_arguments(
+    mac: &Macro,
+    shadowed: &BTreeSet<String>,
+) -> Option<Punctuated<Expr, syn::Token![,]>> {
+    let name = mac.path.get_ident()?.to_string();
+    if mac.path.leading_colon.is_some() || shadowed.contains(&name) || !reads_as_expressions(&name)
+    {
+        return None;
+    }
+    mac.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated)
+        .ok()
 }
 
 /// Every name in `tokens`, without `r#`.
@@ -526,15 +569,19 @@ impl Scan<'_> {
     ) {
         let mut mentions = BTreeSet::new();
         idents(body.clone(), &mut mentions);
-        if macro_attribute(attrs) {
+        if macro_attribute(attrs) && !self.krate.poll_root(self.file, sig) {
+            self.krate.opaque_poll = true;
             self.defer(body);
+            self.krate.deferred.insert(name.unraw().to_string());
         }
+        let wrapped = macro_attribute(attrs) && !self.krate.poll_root(self.file, sig);
         self.krate
             .functions
             .entry(name.unraw().to_string())
             .or_default()
             .push(Function {
                 asynchronous: sig.asyncness.is_some(),
+                wrapped,
                 trait_method: self.trait_depth > 0,
                 public: matches!(vis, Some(Visibility::Public(_))),
                 mentions,
@@ -551,7 +598,10 @@ impl Scan<'_> {
 
 impl<'ast> Visit<'ast> for Scan<'_> {
     fn visit_item(&mut self, item: &'ast Item) {
-        if macro_attribute(super::state::item_attributes(item)) {
+        if macro_attribute(super::state::item_attributes(item))
+            && !matches!(item, Item::Fn(f) if self.krate.poll_root(self.file, &f.sig))
+        {
+            self.krate.opaque_poll = true;
             self.defer(item.to_token_stream());
         }
         self.scoped([], true, |scan| syn::visit::visit_item(scan, item));
@@ -565,8 +615,10 @@ impl<'ast> Visit<'ast> for Scan<'_> {
             item.block.to_token_stream(),
             &item.attrs,
         );
-        for attr in &item.attrs {
-            self.visit_attribute(attr);
+        if !self.krate.poll_root(self.file, &item.sig) {
+            for attr in &item.attrs {
+                self.visit_attribute(attr);
+            }
         }
         self.body(&item.sig, &item.block);
     }
@@ -676,6 +728,17 @@ impl<'ast> Visit<'ast> for Scan<'_> {
         });
     }
 
+    fn visit_expr_await(&mut self, expr: &'ast syn::ExprAwait) {
+        if let Expr::Async(block) = &*expr.base
+            && expr.attrs.is_empty()
+            && block.attrs.is_empty()
+        {
+            self.visit_block(&block.block);
+        } else {
+            syn::visit::visit_expr_await(self, expr);
+        }
+    }
+
     fn visit_expr_async(&mut self, block: &'ast syn::ExprAsync) {
         self.defer(block.block.to_token_stream());
         syn::visit::visit_expr_async(self, block);
@@ -763,24 +826,13 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_macro(&mut self, mac: &'ast Macro) {
-        let name = mac
-            .path
-            .get_ident()
-            .map(ToString::to_string)
-            .filter(|name| {
-                mac.path.leading_colon.is_none()
-                    && !self.macros.contains(name)
-                    && reads_as_expressions(name)
-            });
-        if name.is_some()
-            && let Ok(args) =
-                mac.parse_body_with(Punctuated::<Expr, syn::Token![,]>::parse_terminated)
-        {
+        if let Some(args) = expression_arguments(mac, self.macros) {
             for arg in &args {
                 self.visit_expr(arg);
             }
             return;
         }
+        self.krate.opaque_poll = true;
         if calls_back(mac.tokens.clone()) {
             self.krate.callbacks = true;
         }

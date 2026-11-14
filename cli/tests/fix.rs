@@ -27,7 +27,7 @@ fn project(source: &str) -> tempfile::TempDir {
             r#"
 [workspace]
 [package]
-name = "fix-fixture"
+name = "fix-fixture-{}"
 version = "0.0.0"
 edition = "2024"
 [dependencies]
@@ -36,6 +36,12 @@ tokio = {{ version = "1", features = ["rt", "macros", "time"] }}
 [profile.release]
 overflow-checks = true
 "#,
+            dir.path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .trim_start_matches('.')
+                .to_ascii_lowercase(),
             library
         ),
     )
@@ -455,4 +461,411 @@ fn shared_state_whose_function_runs_inside_a_callback_is_left_unchanged() {
         );
         assert_eq!(String::from_utf8_lossy(&ran.stdout), "1\n");
     }
+}
+
+/// Runs a fixture as a user would, including actual future suspension.
+#[allow(
+    clippy::unwrap_used,
+    reason = "a failed fixture command fails the test"
+)]
+fn execute(dir: &Path) -> Vec<u8> {
+    let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["run", "--quiet"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+#[test]
+fn bounded_async_fields_and_locals_keep_behavior_and_are_idempotent() {
+    let source = shared_state_fixture("async.rs");
+    let dir = binary(&source);
+    let before = execute(dir.path());
+    assert_eq!(before, b"7 11\n");
+    let fixed = run(&["fix"], dir.path());
+    assert!(
+        fixed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    let after = fs::read_to_string(dir.path().join("src/main.rs")).unwrap();
+    assert!(!after.contains("Mutex"), "{after}");
+    assert!(after.contains("hits: ::adamantium::Actor<u64>"), "{after}");
+    assert!(
+        after.contains("let total = ::adamantium::Actor::new"),
+        "{after}"
+    );
+    assert_eq!(execute(dir.path()), before);
+    let again = run(&["fix", "--dry-run"], dir.path());
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(again.stdout.is_empty());
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        after
+    );
+}
+
+const ASYNC_COUNT: &str = r#"
+use std::sync::{Arc, Mutex};
+async fn count() -> u32 {
+    let hits = Arc::new(Mutex::new(0u32));
+    tokio::task::yield_now().await;
+    *hits.lock().unwrap() += 1;
+    let value = *hits.lock().unwrap();
+    value
+}
+"#;
+
+const ASYNC_FIELD_COUNT: &str = r#"
+use std::sync::{Arc, Mutex};
+struct Counter { hits: Arc<Mutex<u32>> }
+impl Counter {
+    async fn field_count(&self) -> u32 {
+        let copy = self.hits.clone();
+        tokio::task::yield_now().await;
+        *copy.lock().unwrap() += 1;
+        let value = *self.hits.lock().unwrap();
+        value
+    }
+}
+async fn count() -> u32 {
+    let counter = Counter { hits: Arc::new(Mutex::new(0)) };
+    counter.field_count().await
+}
+"#;
+
+const POLL_DRIVER: &str = r#"
+fn drive<F: std::future::Future>(future: F) -> F::Output {
+    let mut future = Box::pin(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    loop {
+        if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return value;
+        }
+    }
+}
+"#;
+
+#[allow(clippy::unwrap_used, reason = "a missing fixture fails the test")]
+fn assert_manual(dir: &Path, filename: &str, source: &str, boundary: Option<&str>) {
+    let fixed = run(&["fix"], dir);
+    let stderr = String::from_utf8_lossy(&fixed.stderr);
+    assert_eq!(fixed.status.code(), Some(1), "{stderr}\n{source}");
+    assert_eq!(
+        fs::read_to_string(dir.join(filename)).unwrap(),
+        source,
+        "{stderr}"
+    );
+    if let Some(boundary) = boundary {
+        assert!(stderr.contains(boundary), "{stderr}");
+        assert!(stderr.contains("rewrite remains manual"), "{stderr}");
+    }
+}
+
+#[test]
+fn bounded_async_escaping_futures_and_callback_polls_stay_byte_identical() {
+    for (name, body) in [
+        (
+            "stored",
+            "let future = count(); let value = future.await; println!(\"{value}\");",
+        ),
+        (
+            "boxed",
+            "let value = Box::pin(count()).await; println!(\"{value}\");",
+        ),
+        (
+            "argument",
+            "let value = drive(count()); println!(\"{value}\");",
+        ),
+        (
+            "closure",
+            "let value = (|| async { count().await })().await; println!(\"{value}\");",
+        ),
+        (
+            "pointer",
+            "let callback = count; let value = callback().await; println!(\"{value}\");",
+        ),
+        (
+            "block",
+            "let future = async { count().await }; let value = future.await; println!(\"{value}\");",
+        ),
+        (
+            "first poll inside with",
+            "let future = count(); let actor = adamantium::Actor::new(()); let value = actor.with(|_| drive(future)); println!(\"{value}\");",
+        ),
+        (
+            "first poll inside read",
+            "let future = count(); let actor = adamantium::Actor::new(()); let value = actor.read(|_| drive(future)); println!(\"{value}\");",
+        ),
+        (
+            "resumed inside",
+            "let mut future = Box::pin(count()); let mut context = std::task::Context::from_waker(std::task::Waker::noop()); assert!(std::future::Future::poll(future.as_mut(), &mut context).is_pending()); let actor = adamantium::Actor::new(()); let value = actor.with(|_| drive(future)); println!(\"{value}\");",
+        ),
+        (
+            "two planned actors",
+            "let future = count(); let total = Arc::new(Mutex::new(Vec::new())); total.lock().unwrap().push(drive(future)); let value = total.lock().unwrap()[0]; println!(\"{value}\");",
+        ),
+    ] {
+        for state in [ASYNC_COUNT, ASYNC_FIELD_COUNT] {
+            let source = format!(
+                "{state}\n{POLL_DRIVER}\n#[tokio::main(flavor = \"current_thread\")]\nasync fn main() {{ {body} }}\n"
+            );
+            let dir = binary(&source);
+            assert_eq!(execute(dir.path()), b"1\n", "{name}");
+            assert_manual(
+                dir.path(),
+                "src/main.rs",
+                &source,
+                Some("future boundary `count`"),
+            );
+            assert_eq!(execute(dir.path()), b"1\n", "{name}");
+        }
+    }
+}
+
+#[test]
+fn bounded_async_outer_future_and_dispatch_boundaries_stay_byte_identical() {
+    for (helpers, body, boundary) in [
+        (
+            "async fn outer() -> u32 { count().await }",
+            "let future = outer(); let value = future.await; println!(\"{value}\");",
+            "outer",
+        ),
+        (
+            "fn returned() -> impl std::future::Future<Output = u32> { count() }",
+            "let value = returned().await; println!(\"{value}\");",
+            "count",
+        ),
+        (
+            "trait Run { async fn invoke(&self) -> u32; } struct Runner; impl Run for Runner { async fn invoke(&self) -> u32 { count().await } }",
+            "let value = Runner.invoke().await; println!(\"{value}\");",
+            "invoke",
+        ),
+        (
+            "macro_rules! invoke { () => { count().await }; }",
+            "let value = invoke!(); println!(\"{value}\");",
+            "count",
+        ),
+        (
+            "fn blocking() -> u32 { tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async { count().await }) }",
+            "let _callback = blocking; println!(\"1\");",
+            "count",
+        ),
+    ] {
+        for state in [ASYNC_COUNT, ASYNC_FIELD_COUNT] {
+            let source = format!(
+                "{state}\n{helpers}\n#[tokio::main(flavor = \"current_thread\")]\nasync fn main() {{ {body} }}\n"
+            );
+            let dir = binary(&source);
+            assert_eq!(execute(dir.path()), b"1\n");
+            assert_manual(
+                dir.path(),
+                "src/main.rs",
+                &source,
+                Some(&format!("future boundary `{boundary}`")),
+            );
+        }
+    }
+}
+
+#[test]
+fn bounded_async_library_and_callable_or_fake_roots_stay_byte_identical() {
+    let library = format!("{ASYNC_COUNT}\npub async fn entry() -> u32 {{ count().await }}\n");
+    let dir = project(&library);
+    assert_manual(
+        dir.path(),
+        "src/lib.rs",
+        &library,
+        Some("future boundary `entry`"),
+    );
+
+    for extra in [
+        "fn call_entry() { main(); }",
+        "fn entry_pointer() { let _callback = main; }",
+        "#[tokio::main(flavor = \"current_thread\")] async fn callable() { let value = count().await; println!(\"{value}\"); }",
+    ] {
+        let source = format!(
+            "{ASYNC_COUNT}\n{extra}\n#[tokio::main(flavor = \"current_thread\")] async fn main() {{ let value = count().await; println!(\"{{value}}\"); }}\n"
+        );
+        let dir = binary(&source);
+        assert_manual(dir.path(), "src/main.rs", &source, Some("future boundary"));
+    }
+
+    // A re-exported real macro is still not a verified dependency/path, nor
+    // does a Tokio annotation on an ordinary function make it the entry.
+    for (extra, main) in [
+        (
+            "mod tokio { pub use real_tokio::*; }",
+            "#[tokio::main(flavor = \"current_thread\")] async fn main() { let value = count().await; println!(\"{value}\"); }",
+        ),
+        (
+            "#[real_tokio::main(crate = \"real_tokio\", flavor = \"current_thread\")] async fn entry() { let value = count().await; println!(\"{value}\"); }",
+            "fn main() { entry(); }",
+        ),
+    ] {
+        let source = format!(
+            "{}\n{extra}\n{main}\n",
+            ASYNC_COUNT.replace("tokio::task", "real_tokio::task")
+        );
+        let dir = binary(&source);
+        let manifest = dir.path().join("Cargo.toml");
+        let text = fs::read_to_string(&manifest).unwrap().replace(
+            "tokio = { version",
+            "real_tokio = { package = \"tokio\", version",
+        );
+        fs::write(manifest, text).unwrap();
+        assert_eq!(execute(dir.path()), b"1\n");
+        assert_manual(dir.path(), "src/main.rs", &source, Some("future boundary"));
+    }
+}
+
+#[test]
+fn bounded_async_path_dependency_cannot_impersonate_tokio() {
+    let source = format!(
+        "{ASYNC_COUNT}\n#[tokio::main(flavor = \"current_thread\")] async fn main() {{ let value = count().await; println!(\"{{value}}\"); }}\n"
+    );
+    let dir = binary(&source);
+    let fake = dir.path().join("fake-tokio");
+    fs::create_dir_all(fake.join("src")).unwrap();
+    fs::write(fake.join("Cargo.toml"), "[package]\nname = \"tokio\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[dependencies]\nreal_tokio = { package = \"tokio\", version = \"1\", features = [\"rt\", \"macros\"] }\n").unwrap();
+    fs::write(fake.join("src/lib.rs"), "pub use real_tokio::*;\n").unwrap();
+    let manifest = dir.path().join("Cargo.toml");
+    let text = fs::read_to_string(&manifest).unwrap().replace(
+        "tokio = { version = \"1\", features = [\"rt\", \"macros\", \"time\"] }",
+        "tokio = { path = \"fake-tokio\" }",
+    );
+    fs::write(manifest, text).unwrap();
+    assert_eq!(execute(dir.path()), b"1\n");
+    assert_manual(dir.path(), "src/main.rs", &source, Some("future boundary"));
+}
+
+#[test]
+fn bounded_async_real_nested_executors_and_planned_callbacks_stay_byte_identical() {
+    let nested = format!(
+        r#"{ASYNC_COUNT}
+fn main() {{
+    let actor = adamantium::Actor::new(());
+    let value = actor.with(|_| tokio::runtime::Builder::new_current_thread()
+        .build().unwrap().block_on(async {{ count().await }}));
+    println!("{{value}}");
+}}
+"#
+    );
+    let callable = format!(
+        r#"{ASYNC_COUNT}
+#[tokio::main(flavor = "current_thread")]
+async fn application() -> u32 {{ count().await }}
+fn main() {{
+    let actor = adamantium::Actor::new(());
+    let value = actor.read(|_| application());
+    println!("{{value}}");
+}}
+"#
+    );
+    let interacting = r#"
+use std::sync::{Arc, Mutex};
+struct Left(u32);
+struct Right(u32);
+impl Left { fn step_left(&mut self) { if self.0 > 0 { right(self.0 - 1); } } }
+impl Right { fn step_right(&mut self) { if self.0 > 0 { left(self.0 - 1); } } }
+fn left(depth: u32) {
+    let a = Arc::new(Mutex::new(Left(depth)));
+    a.lock().unwrap().step_left();
+}
+fn right(depth: u32) {
+    let b = Arc::new(Mutex::new(Right(depth)));
+    b.lock().unwrap().step_right();
+}
+async fn outer() { left(1); }
+#[tokio::main(flavor = "current_thread")]
+async fn main() { outer().await; println!("1"); }
+"#;
+    for source in [&nested, &callable, interacting] {
+        let dir = binary(source);
+        assert_eq!(execute(dir.path()), b"1\n");
+        assert_manual(dir.path(), "src/main.rs", source, None);
+        assert_eq!(execute(dir.path()), b"1\n");
+    }
+}
+
+#[test]
+fn bounded_async_one_unproved_block_refuses_every_connected_use() {
+    for state in [ASYNC_COUNT, ASYNC_FIELD_COUNT] {
+        let source = state
+            .replace(
+                "*hits.lock().unwrap() += 1;",
+                "let future = async { *hits.lock().unwrap() += 1; }; future.await;",
+            )
+            .replace(
+                "*copy.lock().unwrap() += 1;",
+                "let future = async { *copy.lock().unwrap() += 1; }; future.await;",
+            );
+        let source = format!(
+            "{source}\n#[tokio::main(flavor = \"current_thread\")] async fn main() {{ let value = count().await; println!(\"{{value}}\"); }}\n"
+        );
+        let dir = binary(&source);
+        assert_eq!(execute(dir.path()), b"1\n");
+        assert_manual(
+            dir.path(),
+            "src/main.rs",
+            &source,
+            Some("future boundary `async block`"),
+        );
+    }
+}
+
+#[test]
+fn bounded_async_cargo_target_identity_is_required() {
+    let source = shared_state_fixture("async.rs");
+    for library_only in [false, true] {
+        let dir = if library_only {
+            project(&source)
+        } else {
+            binary(&source)
+        };
+        if !library_only {
+            fs::write(dir.path().join("src/lib.rs"), "pub fn unrelated() {}\n").unwrap();
+        }
+        let filename = if library_only {
+            "src/lib.rs"
+        } else {
+            "src/main.rs"
+        };
+        assert_manual(dir.path(), filename, &source, None);
+    }
+
+    // The entry is identified by Cargo, not by a conventional filename.
+    let dir = binary(&source);
+    fs::rename(
+        dir.path().join("src/main.rs"),
+        dir.path().join("src/entry.rs"),
+    )
+    .unwrap();
+    let manifest = dir.path().join("Cargo.toml");
+    let mut text = fs::read_to_string(&manifest).unwrap();
+    text.push_str("\n[[bin]]\nname = \"custom-entry\"\npath = \"src/entry.rs\"\n");
+    fs::write(manifest, text).unwrap();
+    assert_eq!(execute(dir.path()), b"7 11\n");
+    let fixed = run(&["fix"], dir.path());
+    assert!(
+        fixed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    assert!(
+        !fs::read_to_string(dir.path().join("src/entry.rs"))
+            .unwrap()
+            .contains("Mutex")
+    );
+    assert_eq!(execute(dir.path()), b"7 11\n");
 }

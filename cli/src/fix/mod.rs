@@ -26,6 +26,12 @@ struct Edit {
     replacement: String,
 }
 
+struct StateSource {
+    file: PathBuf,
+    source: String,
+    mutexes: BTreeSet<(usize, usize)>,
+}
+
 pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<ExitCode> {
     let root = manifest::root(path)?.canonicalize()?;
     let mut diagnostics = Vec::new();
@@ -59,7 +65,7 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
     // A shared-state rewrite changes every use of a binding at once, so it
     // plans a whole file and its edits stand or fall together. A field's
     // rewrite also depends on the rest of its package.
-    let mut packages: BTreeMap<PathBuf, Vec<state::Draft>> = BTreeMap::new();
+    let mut packages: BTreeMap<PathBuf, Vec<StateSource>> = BTreeMap::new();
     for (file, mutexes) in mutexes(&diagnostics, &root) {
         if !migration_available(&file, &root, Api::Core)? {
             continue;
@@ -68,13 +74,18 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
             continue;
         };
         let source = fs::read_to_string(&file)?;
-        packages
-            .entry(package)
-            .or_default()
-            .push(state::plan(&file, &source, &mutexes));
+        packages.entry(package).or_default().push(StateSource {
+            file,
+            source,
+            mutexes,
+        });
     }
     for (package, drafts) in packages {
         let krate = scan::Crate::scan(&package)?;
+        let drafts = drafts
+            .into_iter()
+            .map(|input| state::plan(&input.file, &input.source, &input.mutexes, &krate))
+            .collect();
         for (file, outcome) in state::settle(drafts, &krate) {
             for refusal in &outcome.refusals {
                 eprintln!(
@@ -82,7 +93,10 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
                     file.strip_prefix(&root).unwrap_or(&file).display(),
                     refusal.line,
                     refusal.name,
-                    refusal.reason.describe(),
+                    refusal
+                        .boundary
+                        .as_deref()
+                        .unwrap_or(refusal.reason.describe()),
                     refusal.reason.section()
                 );
             }

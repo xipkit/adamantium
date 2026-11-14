@@ -127,6 +127,58 @@ fn cargo(root: &Path, args: &[&str], cargo_args: &[String]) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+/// The sole binary entry file, only when Cargo resolves the normal `tokio`
+/// dependency and its proc macro to the audited crates.io major versions.
+/// Path/git replacements, aliases, conditional dependencies and extra targets
+/// are deliberately not executor proofs.
+pub(crate) fn tokio_entry(root: &Path) -> Option<PathBuf> {
+    let bytes = cargo(
+        root,
+        &["metadata", "--format-version", "1", "--locked", "--offline"],
+        &[],
+    )
+    .ok()?;
+    let metadata: Metadata = serde_json::from_slice(&bytes).ok()?;
+    let manifest = root.join("Cargo.toml").canonicalize().ok()?;
+    let package = metadata
+        .packages
+        .iter()
+        .find(|p| p.manifest_path == manifest)?;
+    let [target] = package.targets.as_slice() else {
+        return None;
+    };
+    if target.kind != ["bin"] || !matches!(target.edition.as_str(), "2021" | "2024") {
+        return None;
+    }
+    let nodes = &metadata.resolve.as_ref()?.nodes;
+    let dependency = |id: &str, name: &str| {
+        let node = nodes.iter().find(|n| n.id == id)?;
+        let mut deps = node.deps.iter().filter(|d| d.name == name);
+        let dep = deps.next()?;
+        if deps.next().is_some()
+            || !dep
+                .dep_kinds
+                .iter()
+                .any(|k| k.kind.is_none() && k.target.is_none())
+        {
+            return None;
+        }
+        metadata.packages.iter().find(|p| p.id == dep.pkg)
+    };
+    let tokio = dependency(&package.id, "tokio")?;
+    let macros = dependency(&tokio.id, "tokio_macros")?;
+    for (package, name, major) in [(tokio, "tokio", "1."), (macros, "tokio-macros", "2.")] {
+        if package.name != name
+            || !package.version.starts_with(major)
+            || package.source.as_deref()
+                != Some("registry+https://github.com/rust-lang/crates.io-index")
+        {
+            return None;
+        }
+    }
+    target.src_path.canonicalize().ok()
+}
+
 /// A package as one line of `cargo tree --format '|{p}|{f}|'` shows it:
 /// `|name v1.0.0 (proc-macro) (/path/to/it)|feature,feature|`, with the
 /// location only for packages outside a registry.

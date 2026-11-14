@@ -5,7 +5,7 @@
 
 mod cfg;
 mod disallowed;
-mod metadata;
+pub(crate) mod metadata;
 mod rules;
 mod scan;
 

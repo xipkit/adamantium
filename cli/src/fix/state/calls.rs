@@ -591,7 +591,10 @@ mod tests {
             let mut krate = Crate::default();
             krate.add(Path::new("lib.rs"), &source);
             krate.add(Path::new("other.rs"), other);
-            let settled = settle(vec![plan(Path::new("lib.rs"), &source, &spans)], &krate);
+            let settled = settle(
+                vec![plan(Path::new("lib.rs"), &source, &spans, &krate)],
+                &krate,
+            );
             let refusals: Vec<_> = settled
                 .iter()
                 .flat_map(|(_, outcome)| &outcome.refusals)
