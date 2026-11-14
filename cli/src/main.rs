@@ -59,7 +59,8 @@ enum Command {
         format: ExplainFormat,
     },
     /// Review Rust files against the judgment-based parts of the Google Rust
-    /// style guide, through the OpenAI Decisions API.
+    /// style guide, through a model provider (the OpenAI Decisions API by
+    /// default).
     #[command(subcommand)]
     Style(style::Command),
 }
