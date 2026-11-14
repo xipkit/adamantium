@@ -24,6 +24,7 @@ mod bytes;
 mod channel;
 mod deque;
 mod map;
+mod reply;
 mod set;
 mod string;
 #[cfg(feature = "tokio")]
@@ -37,6 +38,7 @@ pub use channel::{Channel, Closed, Receiver, Sender, TryReceiveError, TrySendErr
 pub use channel::{ReceiveError, SendError};
 pub use deque::Deque;
 pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
+pub use reply::{Reply, ReplyReceiver};
 pub use set::Set;
 pub use string::Str;
 #[cfg(feature = "tokio")]
