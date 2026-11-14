@@ -133,6 +133,7 @@ fn deps_lists_runtime_and_build_dependencies_but_not_members_or_dev_dependencies
             ("cfg-if", "runtime"),
             ("codegen", "build"),
             ("exports", "runtime"),
+            ("facade", "runtime"),
             ("ffi", "runtime"),
             ("helper", "build"),
             ("old", "runtime"),
@@ -149,7 +150,7 @@ fn deps_lists_runtime_and_build_dependencies_but_not_members_or_dev_dependencies
 fn deps_finds_each_marked_call_and_nothing_else() {
     let report = report(&[]).unwrap();
     for name in [
-        "spawner", "tokio", "old", "builder", "pool", "safe", "helper", "platform",
+        "spawner", "tokio", "old", "builder", "pool", "safe", "helper", "platform", "facade",
     ] {
         let (sites, unresolved) = marked(name).unwrap();
         let dependency = dependency(&report, name).unwrap();
@@ -285,6 +286,27 @@ fn deps_scans_each_conditional_macro_branch_that_may_be_built() {
 }
 
 #[test]
+fn deps_reads_modules_the_crates_own_macros_declare() {
+    let report = report(&[]).unwrap();
+    let facade = dependency(&report, "facade").unwrap();
+    // The `unsafe impl` in `root!` counts where it is called, not in the
+    // definition's body, and `engine.rs` is scanned.
+    assert_eq!(
+        facade["unsafe"],
+        json!({
+            "functions": 1,
+            "blocks": 0,
+            "impls": 1,
+            "traits": 0,
+            "extern_blocks": 0,
+            "attributes": 0,
+            "in_macros": 0,
+        })
+    );
+    assert_eq!(facade["unscanned"], json!([]));
+}
+
+#[test]
 fn deps_passes_features_to_cargo_metadata() {
     let off = ("tokio::spawn".to_owned(), "src/off.rs".to_owned(), 3);
     let without = report(&[]).unwrap();
@@ -318,7 +340,9 @@ fn deps_prints_a_table_and_each_call_as_text() {
         "  unresolved calls: leak 1, spawn 5",
         "  unscanned: src/lib.rs:11: module `missing` has no file: neither missing.rs nor missing/mod.rs",
         "  unscanned: src/lib.rs:10: module `hidden` is declared in a macro body the scan can't read",
-        "adamantium: 12 dependencies; 6 with unsafe code, 5 with disallowed calls, 1 with unresolved calls, 2 partly unscanned",
+        "      2      1           0  facade 0.0.0",
+        "    src/macros.rs:10:13",
+        "adamantium: 13 dependencies; 7 with unsafe code, 6 with disallowed calls, 1 with unresolved calls, 2 partly unscanned",
     ] {
         assert!(
             stdout.lines().any(|printed| printed == line),

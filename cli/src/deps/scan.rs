@@ -6,7 +6,9 @@
 //! out. syn sees syntax, not resolved names, so paths are resolved as far as
 //! the crate's source shows them: through each module's `use` and `extern
 //! crate` items, `crate`, `self` and `super`, re-exports between the crate's
-//! modules, its dependencies' names and the standard prelude. A call that
+//! modules, its dependencies' names and the standard prelude. A call with no
+//! input of the crate's own `macro_rules!`, as `crate_root!();`, is read as
+//! its expansion where the macro has one rule whose matcher is empty. A call that
 //! this can't tie to a path, such as a method call on a value, is counted as
 //! unresolved under its name rather than guessed at.
 
@@ -26,7 +28,7 @@ use syn::{
     ItemTrait, Lit, Macro, MacroDelimiter, Meta, MetaList, Pat, PatIdent, Safety, Signature, Stmt,
     Token, TraitItem, TraitItemFn, Type, UseTree, Variant, braced,
     ext::IdentExt,
-    parse::ParseStream,
+    parse::{ParseStream, Parser},
     punctuated::Punctuated,
     token,
     visit::{self, Visit},
@@ -75,8 +77,9 @@ pub struct UnsafeCounts {
     /// or without the `unsafe(...)` the 2024 edition requires, including
     /// those a `cfg_attr` adds.
     pub attributes: usize,
-    /// `unsafe` in macro bodies that syn can't parse as code, such as
-    /// `macro_rules!` definitions, and the attributes `unsafe_code` reports
+    /// `unsafe` in macro bodies that syn can't parse as code, such as the
+    /// `macro_rules!` definitions the scan doesn't expand where they are
+    /// called, and the attributes `unsafe_code` reports
     /// that are written there without `unsafe(...)`.
     pub in_macros: usize,
 }
@@ -137,10 +140,12 @@ pub fn scan(krate: &Crate, disallowed: &Disallowed) -> Scan {
         files: Vec::new(),
         modules: HashMap::new(),
         definitions: HashMap::new(),
+        expanded: HashSet::new(),
     };
     // Every module's names are bound before any code is read, so a path can
     // be followed through another module's `use` items.
-    scanner.load(krate.src, vec![krate.name.to_owned()], true, None);
+    let root = vec![krate.name.to_owned()];
+    scanner.load(krate.src, root, true, None, &mut Textual::default());
     scanner.definitions = scanner.definitions();
     // Visiting can load more files: modules declared inside functions.
     let mut visited = Vec::new();
@@ -156,10 +161,10 @@ pub fn scan(krate: &Crate, disallowed: &Disallowed) -> Scan {
                 blocks: Vec::new(),
                 attributes: HashSet::new(),
             };
-            for attr in &loaded.file.attrs {
+            for attr in &loaded.attrs {
                 visitor.visit_attribute(attr);
             }
-            for item in &loaded.file.items {
+            for item in &loaded.items {
                 visitor.visit_item(item);
             }
         }
@@ -465,10 +470,14 @@ const PRELUDE: [(&str, &str); 37] = [
 /// The crates every crate can name without declaring them.
 const SYSROOT: [&str; 5] = ["std", "core", "alloc", "proc_macro", "test"];
 
-/// A parsed file of the module tree.
+/// A parsed file of the module tree, or the items a `macro_rules!` call
+/// expands to.
 struct Loaded {
-    file: File,
-    /// Its name relative to the package.
+    /// The file's inner attributes; an expansion has none.
+    attrs: Vec<Attribute>,
+    items: Vec<Item>,
+    /// Its name relative to the package. An expansion's is the name of the
+    /// file its macro is written in, where its spans are.
     rel: String,
     module: Vec<String>,
     /// Where its child modules' files are.
@@ -494,15 +503,92 @@ struct Scanner<'a> {
     modules: HashMap<Vec<String>, Scope>,
     /// Where the disallowed paths into this crate are defined.
     definitions: HashMap<Vec<String>, usize>,
+    /// The `macro_rules!` expanded where they are called, by file and where
+    /// their names are written.
+    expanded: HashSet<(String, usize, usize)>,
 }
+
+/// A `macro_rules!` in textual scope.
+struct MacroRules {
+    name: String,
+    /// The items it expands to, if the scan can expand it: it has one rule,
+    /// whose matcher is empty and whose transcriber is items. A macro with
+    /// any other rules isn't expanded, nor is any call it may shadow.
+    items: Option<Vec<Item>>,
+    /// The file it is written in.
+    rel: String,
+    /// Where its name is written.
+    span: Span,
+    /// The predicates of the `cfg`s it is defined under: its own, and those
+    /// of the modules around it.
+    condition: Vec<TokenStream>,
+    /// Whether every build defines it.
+    certain: bool,
+}
+
+/// The `macro_rules!` a call can name by its bare name at a place in the
+/// module tree, as rustc's textual scope has them: the ones defined before
+/// it in its module and the modules around it, and in the `#[macro_use]`
+/// modules declared before it in those, in order.
+#[derive(Default)]
+struct Textual {
+    macros: Vec<MacroRules>,
+    /// The predicates of the `cfg`s on the modules around the place.
+    conditions: Vec<TokenStream>,
+    /// How many expansions the place is inside.
+    depth: usize,
+}
+
+impl Textual {
+    /// The definitions a call of `name` may expand, the latest first: each
+    /// one back to the first that every build defines. `None` if there is
+    /// none, or one of them can't be expanded.
+    fn candidates(&self, name: &str) -> Option<Vec<(&MacroRules, &[Item])>> {
+        let mut candidates = Vec::new();
+        for definition in self.macros.iter().rev() {
+            if definition.name != name {
+                continue;
+            }
+            candidates.push((definition, definition.items.as_deref()?));
+            if definition.certain {
+                break;
+            }
+        }
+        (!candidates.is_empty()).then_some(candidates)
+    }
+}
+
+/// Where items being indexed are.
+#[derive(Clone, Copy)]
+struct Place<'p> {
+    /// The module they are in.
+    module: &'p [String],
+    /// Where the module's `mod name;` files are.
+    mod_dir: &'p Path,
+    /// What the module's `#[path]` attributes are relative to.
+    path_dir: &'p Path,
+    /// The file they are written in, relative to the package.
+    rel: &'p str,
+}
+
+/// How many `macro_rules!` expansions deep the scan follows calls, so that a
+/// macro that calls itself can't keep it going.
+const MAX_EXPANSIONS: usize = 16;
 
 impl Scanner<'_> {
     /// Loads the file of the module at `module`, and the modules it declares.
     /// A mod-rs file, such as the crate root, a `mod.rs` or a file named by
     /// `#[path]`, keeps its child modules' files beside it; any other
     /// `name.rs` keeps them in `name/`. `from` is the declaration that names
-    /// the file.
-    fn load(&mut self, path: &Path, module: Vec<String>, mod_rs: bool, from: Option<(&str, Span)>) {
+    /// the file, and `textual` the macros in scope there.
+    fn load(
+        &mut self,
+        path: &Path,
+        module: Vec<String>,
+        mod_rs: bool,
+        from: Option<(&str, Span)>,
+        textual: &mut Textual,
+    ) {
         let rel = self.relative(path);
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
@@ -550,9 +636,21 @@ impl Scanner<'_> {
         } else {
             dir.join(path.file_stem().unwrap_or_default())
         };
-        self.index(&file.items, &module, &mod_dir, &dir, &rel);
+        let outer = textual.conditions.len();
+        textual.conditions.extend(cfg_predicates(&file.attrs));
+        let mut scope = Scope::default();
+        let place = Place {
+            module: &module,
+            mod_dir: &mod_dir,
+            path_dir: &dir,
+            rel: &rel,
+        };
+        self.index(&file.items, place, &mut scope, textual);
+        textual.conditions.truncate(outer);
+        self.add_scope(&module, scope);
         self.files.push(Loaded {
-            file,
+            attrs: file.attrs,
+            items: file.items,
             rel,
             module,
             mod_dir,
@@ -560,48 +658,205 @@ impl Scanner<'_> {
         });
     }
 
-    /// Binds the names of the module at `module`, and loads its child
-    /// modules. Their `mod name;` files are in `mod_dir`, and their `#[path]`
-    /// attributes are relative to `path_dir`.
-    fn index(
-        &mut self,
-        items: &[Item],
-        module: &[String],
-        mod_dir: &Path,
-        path_dir: &Path,
-        rel: &str,
-    ) {
-        let scope = self.bind(items, Some(module));
+    /// Binds the names `items` define in the module at `place` into
+    /// `scope`, and reads what they bring into the module tree, in the order
+    /// they are written: the modules they declare, and the expansions of
+    /// their calls of `macro_rules!` in `textual`, which their own
+    /// `macro_rules!` join.
+    fn index(&mut self, items: &[Item], place: Place, scope: &mut Scope, textual: &mut Textual) {
+        self.bind(scope, items, Some(place.module));
+        for item in items {
+            match item {
+                Item::Mod(item) => self.child(item, place, textual),
+                Item::Macro(item) => match &item.ident {
+                    Some(name) => self.define(item, name, place.rel, textual),
+                    None => self.expand(item, place, scope, textual),
+                },
+                _ => {}
+            }
+        }
+    }
+
+    /// Adds the names a module binds to those already bound for its path.
+    fn add_scope(&mut self, module: &[String], scope: Scope) {
         match self.modules.get_mut(module) {
             Some(existing) => existing.merge(scope),
             None => {
                 self.modules.insert(module.to_vec(), scope);
             }
         }
-        for item in items {
-            let Item::Mod(item) = item else {
-                continue;
-            };
-            if self.krate.cfg.enabled(&item.attrs) == Truth::False {
+    }
+
+    /// Reads a module that the module at `place` declares. Its
+    /// `macro_rules!` stay in textual scope after it if it is
+    /// `#[macro_use]`.
+    fn child(&mut self, item: &ItemMod, place: Place, textual: &mut Textual) {
+        if self.krate.cfg.enabled(&item.attrs) == Truth::False {
+            return;
+        }
+        let mut child = place.module.to_vec();
+        child.push(item.ident.unraw().to_string());
+        let macros = textual.macros.len();
+        let conditions = textual.conditions.len();
+        textual.conditions.extend(cfg_predicates(&item.attrs));
+        match self.locate(item, place.mod_dir, place.path_dir) {
+            Location::Inline { dir } => {
+                if let Some((_, items)) = &item.content {
+                    let mut scope = Scope::default();
+                    let inner = Place {
+                        module: &child,
+                        mod_dir: &dir,
+                        path_dir: &dir,
+                        rel: place.rel,
+                    };
+                    self.index(items, inner, &mut scope, textual);
+                    self.add_scope(&child, scope);
+                }
+            }
+            Location::File { path, mod_rs } => {
+                let from = Some((place.rel, item.ident.span()));
+                self.load(&path, child, mod_rs, from, textual);
+            }
+            Location::Unscannable(reason) => self.scan.unscanned.push(Unscanned {
+                file: place.rel.to_owned(),
+                line: Some(item.ident.span().start().line),
+                reason,
+            }),
+        }
+        textual.conditions.truncate(conditions);
+        match self.macro_use(&item.attrs) {
+            Truth::True => {}
+            // Where the module may not be `#[macro_use]`, a call its macros
+            // may shadow can't be expanded.
+            Truth::Unknown => {
+                for definition in textual.macros.iter_mut().skip(macros) {
+                    definition.items = None;
+                }
+            }
+            Truth::False => textual.macros.truncate(macros),
+        }
+    }
+
+    /// Whether a module's attributes make it `#[macro_use]`.
+    fn macro_use(&self, attrs: &[Attribute]) -> Truth {
+        self.krate
+            .cfg
+            .effective(attrs)
+            .iter()
+            .filter(|(_, meta)| matches!(meta, Meta::Path(path) if path.is_ident("macro_use")))
+            .fold(Truth::False, |truth, (applies, _)| truth.or(*applies))
+    }
+
+    /// Brings a `macro_rules!` named `name`, written in `rel`, into textual
+    /// scope.
+    fn define(&self, item: &ItemMacro, name: &Ident, rel: &str, textual: &mut Textual) {
+        let mut condition = textual.conditions.clone();
+        condition.extend(cfg_predicates(&item.attrs));
+        let span = Span::call_site();
+        let certain = match self
+            .krate
+            .cfg
+            .holds(cfg_call("all", condition.clone(), span))
+        {
+            Truth::True => true,
+            Truth::Unknown => false,
+            Truth::False => return,
+        };
+        let items = item
+            .mac
+            .parse_body_with(parse_empty_rule)
+            .ok()
+            .map(|mut items| {
+                Expand.fragment(&mut items);
+                items
+            });
+        textual.macros.push(MacroRules {
+            name: name.unraw().to_string(),
+            items,
+            rel: rel.to_owned(),
+            span: name.span(),
+            condition,
+            certain,
+        });
+    }
+
+    /// Expands a call of a `macro_rules!` in textual scope with no input, as
+    /// `crate_root!();`, where it is written. Each definition the call may
+    /// name expands under the `cfg`s that select it: its own, and none of
+    /// the later ones'. The expansion is part of the calling module, but its
+    /// code is in the macro's file, so it is read as its own [`Loaded`].
+    fn expand(&mut self, call: &ItemMacro, place: Place, scope: &mut Scope, textual: &mut Textual) {
+        let Some(name) = call.mac.path.get_ident() else {
+            return;
+        };
+        if !call.mac.tokens.is_empty() || self.krate.cfg.enabled(&call.attrs) == Truth::False {
+            return;
+        }
+        let Some(candidates) = textual.candidates(&name.unraw().to_string()) else {
+            return;
+        };
+        if textual.depth == MAX_EXPANSIONS {
+            self.scan.unscanned.push(Unscanned {
+                file: place.rel.to_owned(),
+                line: Some(name.span().start().line),
+                reason: format!(
+                    "`{name}!` expands to more than {MAX_EXPANSIONS} nested macro calls"
+                ),
+            });
+            return;
+        }
+        let call_condition = cfg_predicates(&call.attrs);
+        let mut later = Vec::new();
+        let mut expansions = Vec::new();
+        for (candidate, items) in candidates {
+            // The expansion is visited apart from other files, and no
+            // attribute starts at a macro's name, so the `cfg` it is given
+            // is told apart from those written in it.
+            let span = candidate.span;
+            let mut condition = call_condition.clone();
+            condition.extend(candidate.condition.iter().cloned());
+            if !later.is_empty() {
+                condition.push(cfg_call(
+                    "not",
+                    [cfg_call("any", later.clone(), span)],
+                    span,
+                ));
+            }
+            later.push(cfg_call("all", candidate.condition.clone(), span));
+            let predicate = cfg_call("all", condition.clone(), span);
+            if self.krate.cfg.holds(predicate.clone()) == Truth::False {
                 continue;
             }
-            let mut child = module.to_vec();
-            child.push(item.ident.unraw().to_string());
-            match self.locate(item, mod_dir, path_dir) {
-                Location::Inline { dir } => {
-                    if let Some((_, items)) = &item.content {
-                        self.index(items, &child, &dir, &dir, rel);
+            let mut items = items.to_vec();
+            if !condition.is_empty() {
+                let cfg = cfg_attribute(predicate, span);
+                for item in &mut items {
+                    if let Some(attrs) = item_attrs_mut(item) {
+                        let own = mem::take(attrs);
+                        attrs.push(cfg.clone());
+                        attrs.extend(own);
                     }
                 }
-                Location::File { path, mod_rs } => {
-                    self.load(&path, child, mod_rs, Some((rel, item.ident.span())));
-                }
-                Location::Unscannable(reason) => self.scan.unscanned.push(Unscanned {
-                    file: rel.to_owned(),
-                    line: Some(item.ident.span().start().line),
-                    reason,
-                }),
             }
+            let start = span.start();
+            let at = (candidate.rel.clone(), start.line, start.column);
+            expansions.push((items, at));
+        }
+        for (items, at) in expansions {
+            let rel = at.0.clone();
+            self.expanded.insert(at);
+            let inner = Place { rel: &rel, ..place };
+            textual.depth += 1;
+            self.index(&items, inner, scope, textual);
+            textual.depth -= 1;
+            self.files.push(Loaded {
+                attrs: Vec::new(),
+                items,
+                rel,
+                module: place.module.to_vec(),
+                mod_dir: place.mod_dir.to_path_buf(),
+                path_dir: place.path_dir.to_path_buf(),
+            });
         }
     }
 
@@ -698,14 +953,14 @@ impl Scanner<'_> {
             })
     }
 
-    /// The names that `items` bind. Items of a module have paths under
-    /// `module`; items of a block have none.
+    /// Binds the names that `items` define in `scope`. Items of a module
+    /// have paths under `module`; items of a block have none.
     fn bind<'i>(
         &self,
+        scope: &mut Scope,
         items: impl IntoIterator<Item = &'i Item>,
         module: Option<&[String]>,
-    ) -> Scope {
-        let mut scope = Scope::default();
+    ) {
         for item in items {
             let certain = match self.krate.cfg.enabled(item_attrs(item)) {
                 Truth::True => true,
@@ -715,7 +970,7 @@ impl Scanner<'_> {
             let ident = match item {
                 Item::Use(item) => {
                     let leading = item.leading_colon.is_some();
-                    bind_use(&item.tree, &mut Vec::new(), leading, certain, &mut scope);
+                    bind_use(&item.tree, &mut Vec::new(), leading, certain, scope);
                     continue;
                 }
                 Item::ExternCrate(item) => {
@@ -764,7 +1019,6 @@ impl Scanner<'_> {
                 scope.define(*namespace, name.clone(), binding.clone(), certain);
             }
         }
-        scope
     }
 
     /// The library name of a crate this crate can name without a `use`.
@@ -1317,10 +1571,21 @@ fn bind_use(
 /// `cfg_if!` or `cfg_select!` with the items of its branches, under the
 /// `cfg` it gives them.
 /// The macro's own attributes carry over to each item, so a `cfg` on it still
-/// applies.
+/// applies. A call with an empty body, such as `crate_root!();`, is left
+/// for [`Scanner::index`] to expand, since it can only be read through the
+/// macro's definition.
 struct Expand;
 
 impl Expand {
+    /// Expands the items of a module, as in a file, and those of the modules
+    /// and functions among them.
+    fn fragment(&mut self, items: &mut Vec<Item>) {
+        self.items(items);
+        for item in items {
+            self.visit_item_mut(item);
+        }
+    }
+
     fn items(&mut self, items: &mut Vec<Item>) {
         let mut expanded = Vec::with_capacity(items.len());
         for item in mem::take(items) {
@@ -1328,7 +1593,7 @@ impl Expand {
                 expanded.push(item);
                 continue;
             };
-            if item.ident.is_some() || is_include(&item.mac) {
+            if item.ident.is_some() || is_include(&item.mac) || item.mac.tokens.is_empty() {
                 expanded.push(Item::Macro(item));
                 continue;
             }
@@ -1370,6 +1635,71 @@ impl VisitMut for Expand {
         }
         visit_mut::visit_item_mod_mut(self, item);
     }
+}
+
+/// Parses the body of a `macro_rules!` with one rule whose matcher is empty
+/// into the items of its transcriber.
+fn parse_empty_rule(input: ParseStream) -> syn::Result<Vec<Item>> {
+    let matcher: Group = input.parse()?;
+    if !matcher.stream().is_empty() {
+        return Err(syn::Error::new(matcher.span(), "expected an empty matcher"));
+    }
+    input.parse::<Token![=>]>()?;
+    let transcriber: Group = input.parse()?;
+    if input.peek(Token![;]) {
+        input.parse::<Token![;]>()?;
+    }
+    if !input.is_empty() {
+        return Err(input.error("expected one rule"));
+    }
+    parse_items.parse2(transcriber.stream())
+}
+
+/// The predicates of the `cfg`s that attributes put on code, as written. A
+/// `cfg` that `#[cfg_attr(q, cfg(p))]` adds is `any(not(q), p)`. A
+/// `cfg_attr` that doesn't parse adds none.
+fn cfg_predicates(attrs: &[Attribute]) -> Vec<TokenStream> {
+    let mut predicates = Vec::new();
+    for attr in attrs {
+        meta_predicates(&attr.meta, &mut predicates);
+    }
+    predicates
+}
+
+fn meta_predicates(meta: &Meta, predicates: &mut Vec<TokenStream>) {
+    let Meta::List(list) = meta else {
+        return;
+    };
+    if list.path.is_ident("cfg") {
+        predicates.push(list.tokens.clone());
+        return;
+    }
+    if !list.path.is_ident("cfg_attr") {
+        return;
+    }
+    let parsed = list.parse_args_with(|input: ParseStream| {
+        let mut condition = TokenStream::new();
+        while !input.peek(Token![,]) {
+            condition.extend([input.parse::<TokenTree>()?]);
+        }
+        input.parse::<Token![,]>()?;
+        let inner = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
+        Ok((condition, inner))
+    });
+    let Ok((condition, inner)) = parsed else {
+        return;
+    };
+    let mut added = Vec::new();
+    for meta in &inner {
+        meta_predicates(meta, &mut added);
+    }
+    let span = Span::call_site();
+    let unless = cfg_call("not", [condition], span);
+    predicates.extend(
+        added
+            .into_iter()
+            .map(|predicate| cfg_call("any", [unless.clone(), predicate], span)),
+    );
 }
 
 fn parse_items(input: ParseStream) -> syn::Result<Vec<Item>> {
@@ -1879,7 +2209,11 @@ impl FileVisitor<'_, '_> {
             (None, _) if self.blocks.is_empty() => {}
             (None, Location::File { path, mod_rs }) => {
                 let from = (self.file.as_str(), item.ident.span());
-                self.scanner.load(&path, module, mod_rs, Some(from));
+                // The scan doesn't keep the macros in textual scope inside
+                // functions, so none of its calls are expanded.
+                let textual = &mut Textual::default();
+                self.scanner
+                    .load(&path, module, mod_rs, Some(from), textual);
             }
             (None, Location::Unscannable(reason)) => self.unscanned(item.ident.span(), reason),
             (None, Location::Inline { .. }) => {}
@@ -1892,7 +2226,8 @@ impl FileVisitor<'_, '_> {
             Stmt::Item(item) => Some(item),
             _ => None,
         });
-        let scope = self.scanner.bind(items, None);
+        let mut scope = Scope::default();
+        self.scanner.bind(&mut scope, items, None);
         self.blocks.push(scope);
         for stmt in stmts {
             self.visit_stmt(stmt);
@@ -2047,6 +2382,14 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         }
         for attr in &item.attrs {
             self.visit_attribute(attr);
+        }
+        // A `macro_rules!` that was expanded is read where it is called.
+        if let Some(name) = &item.ident {
+            let start = name.span().start();
+            let at = (self.file.clone(), start.line, start.column);
+            if self.scanner.expanded.contains(&at) {
+                return;
+            }
         }
         // A `macro_rules!` definition, or an invocation whose body isn't
         // items.
@@ -2559,5 +2902,176 @@ mod tests {
             };
             assert_eq!(is_unsafe_attribute(&attr.meta), reported, "{source}");
         }
+    }
+
+    /// Scans a crate named `demo`, built for Linux with no features, whose
+    /// files under `src/` are `files`.
+    fn scan_files(files: &[(&str, &str)]) -> Scan {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in files {
+            let path = dir.path().join("src").join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        let target = Target::parse("unix\ntarget_os=\"linux\"\n");
+        let features = Features::default();
+        let src = dir.path().join("src/lib.rs");
+        let krate = Crate {
+            name: "demo",
+            root: dir.path(),
+            src: &src,
+            edition_2015: false,
+            externs: &BTreeMap::new(),
+            cfg: Cfg {
+                target: &target,
+                features: &features,
+                proc_macro: false,
+            },
+        };
+        scan(&krate, &Disallowed::bundled().unwrap())
+    }
+
+    fn unscanned(file: &str, line: usize, reason: &str) -> Unscanned {
+        Unscanned {
+            file: file.to_owned(),
+            line: Some(line),
+            reason: reason.to_owned(),
+        }
+    }
+
+    /// A call of the crate's own `macro_rules!` with one rule and an empty
+    /// matcher, as serde's `crate_root!();`, is read as its expansion: its
+    /// modules are the calling module's, its code counts once, and its sites
+    /// are in the macro's file.
+    #[test]
+    fn calls_of_crate_macros_without_input_are_expanded() {
+        let scan = scan_files(&[
+            ("lib.rs", "#[macro_use]\nmod macros;\n\nroot!();\n"),
+            (
+                "macros.rs",
+                r"macro_rules! root {
+    () => {
+        mod engine;
+        pub struct Handle;
+        unsafe impl Send for Handle {}
+        pub fn start() {
+            std::thread::spawn(|| ());
+        }
+    };
+}
+",
+            ),
+            ("engine.rs", "pub unsafe fn run() {}\n"),
+        ]);
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(
+            scan.unsafe_code,
+            UnsafeCounts {
+                functions: 1,
+                impls: 1,
+                ..UnsafeCounts::default()
+            }
+        );
+        let sites: Vec<_> = scan.calls.values().flatten().collect();
+        let site = Site {
+            file: "src/macros.rs".to_owned(),
+            line: 7,
+            column: 13,
+        };
+        assert_eq!(sites, [&site]);
+    }
+
+    /// A call expands only a macro in textual scope: one defined before it
+    /// in its module or a module around it, or in a `#[macro_use]` module
+    /// declared before it. A macro no call expands is read as tokens.
+    #[test]
+    fn only_macros_in_textual_scope_are_expanded() {
+        let scan = scan_files(&[
+            (
+                "lib.rs",
+                r"mod private {
+    macro_rules! private { () => { mod one; }; }
+}
+private!();
+macro_rules! early { () => { mod two; }; }
+mod outer {
+    early!();
+}
+",
+            ),
+            ("outer/two.rs", "pub unsafe fn f() {}\n"),
+            ("one.rs", "pub unsafe fn g() {}\n"),
+        ]);
+        let reason = "module `one` is declared in a macro body the scan can't read";
+        assert_eq!(scan.unscanned, [unscanned("src/lib.rs", 2, reason)]);
+        assert_eq!(scan.unsafe_code.functions, 1);
+    }
+
+    /// Each definition a call may name expands under the `cfg`s that select
+    /// it, and one every build has hides the ones before it. Those it hides,
+    /// and those out of scope, are read as tokens.
+    #[test]
+    fn calls_expand_each_definition_a_build_may_have() {
+        let scan = scan_files(&[
+            (
+                "lib.rs",
+                r"macro_rules! pick { () => { mod hidden; }; }
+macro_rules! pick { () => { mod first; }; }
+#[cfg(demo_custom)]
+macro_rules! pick { () => { mod custom; }; }
+#[cfg(windows)]
+macro_rules! pick { () => { mod never; }; }
+#[cfg_attr(windows, macro_use)]
+mod nothing {
+    macro_rules! pick { () => { mod never; }; }
+}
+pick!();
+",
+            ),
+            ("first.rs", "pub unsafe fn f() {}\n"),
+            ("custom.rs", "pub unsafe fn g() {}\n"),
+        ]);
+        let reason =
+            |name: &str| format!("module `{name}` is declared in a macro body the scan can't read");
+        let listed = [(1, "hidden"), (9, "never")]
+            .map(|(line, name)| unscanned("src/lib.rs", line, &reason(name)));
+        assert_eq!(scan.unscanned, listed);
+        assert_eq!(scan.unsafe_code.functions, 2);
+    }
+
+    /// A call that may name a macro the scan can't expand, one with input or
+    /// another rule, is left alone.
+    #[test]
+    fn calls_of_other_macros_are_not_expanded() {
+        let scan = scan_files(&[(
+            "lib.rs",
+            r"macro_rules! rules { () => { mod a; }; (more) => { mod b; }; }
+rules!();
+macro_rules! input { ($name:ident) => { mod c; }; }
+input!(x);
+macro_rules! maybe { () => { mod d; }; }
+#[cfg_attr(demo_custom, macro_use)]
+mod inner {
+    macro_rules! maybe { () => { mod e; }; }
+}
+maybe!();
+",
+        )]);
+        let reason =
+            |name: &str| format!("module `{name}` is declared in a macro body the scan can't read");
+        let listed = [(1, "a"), (1, "b"), (3, "c"), (5, "d"), (8, "e")]
+            .map(|(line, name)| unscanned("src/lib.rs", line, &reason(name)));
+        assert_eq!(scan.unscanned, listed);
+    }
+
+    /// A macro that calls itself is followed only so far.
+    #[test]
+    fn expansion_stops_at_a_macro_that_calls_itself() {
+        let scan = scan_files(&[(
+            "lib.rs",
+            "macro_rules! again { () => { again!(); }; }\nagain!();\n",
+        )]);
+        let reason = "`again!` expands to more than 16 nested macro calls";
+        assert_eq!(scan.unscanned, [unscanned("src/lib.rs", 1, reason)]);
     }
 }
