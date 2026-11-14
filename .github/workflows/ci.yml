@@ -10,16 +10,27 @@ permissions:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.toolchain == 'beta' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ['1.88.0', stable, beta]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.toolchain }}
           components: clippy, rustfmt
       - run: cargo fmt --all -- --check
+        if: matrix.toolchain == 'stable'
+      - run: cargo clippy --version
+        if: matrix.toolchain != '1.88.0'
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+        if: matrix.toolchain != '1.88.0'
       - run: cargo test --locked --workspace --all-features
       - run: cargo build --locked -p adamantium --no-default-features
       - run: cargo clippy --locked -p adamantium --all-targets --no-default-features -- -D warnings
+        if: matrix.toolchain != '1.88.0'
       - run: cargo test --locked -p adamantium --no-default-features
 
   style:
