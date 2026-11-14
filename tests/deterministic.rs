@@ -226,6 +226,23 @@ fn supported_primitives_select_the_model_and_reject_foreign_channels() {
         assert_eq!(adamantium::blocking(|| 42).await, 42);
     })
     .unwrap();
+    #[cfg(all(feature = "signal", any(unix, windows)))]
+    assert_eq!(
+        testing::check(
+            Config {
+                iterations: 1,
+                ..config()
+            },
+            || async {
+                let cancel = Cancellation::new();
+                cancel.cancel();
+                cancel.cancel_on_signal().await.unwrap();
+            },
+        )
+        .unwrap_err()
+        .kind(),
+        FailureKind::Panic
+    );
     let channel = Arc::new(Channel::bounded(1));
     assert!(
         testing::check(config(), move || {
