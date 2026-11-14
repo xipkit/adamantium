@@ -100,14 +100,18 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
             changed.push((file, before, after));
         }
     }
-    // Read and validate every file before writing any file.
-    for (file, before, after) in &changed {
-        if dry_run {
+    if dry_run {
+        for (file, before, after) in &changed {
             diff(file.strip_prefix(&root).unwrap_or(file), before, after);
-        } else {
+        }
+    } else {
+        // Read and validate every file before writing any file.
+        for (file, before, _) in &changed {
             if fs::read_to_string(file)? != *before {
                 bail!("{} changed during fix", file.display());
             }
+        }
+        for (file, _, after) in &changed {
             fs::write(file, after).with_context(|| format!("writing {}", file.display()))?;
             eprintln!("adamantium: fixed {}", file.display());
         }
