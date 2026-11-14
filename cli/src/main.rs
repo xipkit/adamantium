@@ -2,6 +2,7 @@ mod check;
 mod config;
 mod lints;
 mod manifest;
+mod sarif;
 mod style;
 
 use std::{ffi::OsString, io::Write, path::PathBuf, process::ExitCode};
@@ -62,6 +63,8 @@ enum ReportFormat {
     Text,
     /// A report on stdout.
     Json,
+    /// A SARIF 2.1.0 log on stdout, for GitHub code scanning.
+    Sarif,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -100,7 +103,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             path,
             format,
             cargo_args,
-        } => check::run(&path, &cargo_args, matches!(format, ReportFormat::Json)),
+        } => check::run(&path, &cargo_args, format),
         Command::Init { path, force } => {
             let root = manifest::root(&path)?;
             let config = config::Config::load(&root)?;

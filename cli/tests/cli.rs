@@ -354,6 +354,374 @@ fn check_reports_spanless_lint_warnings_once_in_json_and_text() {
     }
 }
 
+type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// Runs `check --format sarif` on `dir`, passing `cargo_args` on to Clippy,
+/// and returns its exit code and log, or an error if the log does not match
+/// the SARIF 2.1.0 schema.
+fn check_sarif(
+    dir: &Path,
+    env: &[(&str, &Path)],
+    cargo_args: &[&str],
+) -> TestResult<(Option<i32>, serde_json::Value)> {
+    let mut command = adamantium();
+    command
+        .args(["adamantium", "check", "--format", "sarif"])
+        .arg(dir)
+        .arg("--")
+        .args(cargo_args);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let output = command.output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let log: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|error| format!("{error}: {stderr}"))?;
+    let errors = sarif_schema_errors(&log)?;
+    if !errors.is_empty() {
+        return Err(format!("{errors:#?}\n{log:#}").into());
+    }
+    Ok((output.status.code(), log))
+}
+
+/// Where `log` breaks the SARIF 2.1.0 schema. The schema is SchemaStore's
+/// copy of the OASIS schema, which declares draft 7, so that URI formats are
+/// checked.
+fn sarif_schema_errors(log: &serde_json::Value) -> TestResult<Vec<String>> {
+    let schema: serde_json::Value = serde_json::from_str(include_str!("sarif-schema-2.1.0.json"))?;
+    let validator = jsonschema::options()
+        .should_validate_formats(true)
+        .build(&schema)?;
+    Ok(validator
+        .iter_errors(log)
+        .map(|error| format!("{}: {error}", error.instance_path()))
+        .collect())
+}
+
+/// The file a result's location names, resolved against the run's base URI.
+fn sarif_path(run: &serde_json::Value, result: &serde_json::Value) -> Option<PathBuf> {
+    let artifact = result.pointer("/locations/0/physicalLocation/artifactLocation")?;
+    let uri = artifact.get("uri")?.as_str()?;
+    let uri = match artifact.get("uriBaseId") {
+        Some(base) => {
+            let base = run
+                .get("originalUriBaseIds")?
+                .get(base.as_str()?)?
+                .get("uri")?
+                .as_str()?;
+            // A base URI must end in `/` to resolve relative references.
+            base.ends_with('/').then(|| format!("{base}{uri}"))?
+        }
+        None => uri.to_owned(),
+    };
+    let encoded = uri.strip_prefix("file://")?.as_bytes();
+    let mut bytes = Vec::new();
+    let mut index = 0;
+    while let Some(&byte) = encoded.get(index) {
+        if byte == b'%' {
+            let hex = std::str::from_utf8(encoded.get(index + 1..index + 3)?).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            bytes.push(byte);
+            index += 1;
+        }
+    }
+    String::from_utf8(bytes).ok().map(PathBuf::from)
+}
+
+/// Each result's rule and URI, sorted.
+fn sarif_artifacts(log: &serde_json::Value) -> Option<Vec<(String, String)>> {
+    let mut artifacts = Vec::new();
+    for result in log.pointer("/runs/0/results")?.as_array()? {
+        let uri = result.pointer("/locations/0/physicalLocation/artifactLocation/uri")?;
+        artifacts.push((
+            result.get("ruleId")?.as_str()?.to_owned(),
+            uri.as_str()?.to_owned(),
+        ));
+    }
+    artifacts.sort();
+    Some(artifacts)
+}
+
+#[test]
+fn sarif_schema_check_rejects_an_invalid_log() {
+    let log = serde_json::json!({
+        "version": "2.1.0",
+        "runs": [{
+            "tool": { "driver": { "name": "cargo-adamantium" } },
+            "results": [{
+                "message": { "text": "broken" },
+                "level": "fatal",
+                "locations": [{ "physicalLocation": {
+                    "artifactLocation": { "uri": "src/a file.rs" },
+                } }],
+            }],
+        }],
+    });
+    let errors = sarif_schema_errors(&log).unwrap();
+    assert!(
+        errors.iter().any(|error| error.contains("/level")),
+        "{errors:#?}"
+    );
+    assert!(
+        errors.iter().any(|error| error.contains("/uri")),
+        "{errors:#?}"
+    );
+}
+
+/// The SARIF log has one result per finding in the JSON report, at the same
+/// place and for the same rule.
+#[test]
+fn check_reports_the_violations_fixture_as_sarif() {
+    let output = adamantium()
+        .args(["adamantium", "check", "--format", "json"])
+        .arg(fixture("violations"))
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let root = PathBuf::from(report["root"].as_str().unwrap());
+    let mut expected: Vec<(String, PathBuf, u64, Option<u64>)> = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|finding| {
+            (
+                finding["rule"].as_str().unwrap().to_owned(),
+                root.join(finding["file"].as_str().unwrap()),
+                finding["line"].as_u64().unwrap_or(1),
+                finding["column"].as_u64(),
+            )
+        })
+        .collect();
+    expected.sort();
+    assert!(expected.len() > 10, "{report}");
+
+    let (code, log) = check_sarif(&fixture("violations"), &[], &[]).unwrap();
+    assert_eq!(code, Some(1), "{log:#}");
+    assert_eq!(log["version"], "2.1.0");
+    let run = &log["runs"][0];
+    assert_eq!(run["tool"]["driver"]["name"], "cargo-adamantium");
+    assert_eq!(
+        run["invocations"],
+        serde_json::json!([{ "executionSuccessful": true, "toolExecutionNotifications": [] }])
+    );
+    let rules = run["tool"]["driver"]["rules"].as_array().unwrap();
+    let results = run["results"].as_array().unwrap();
+    let mut found: Vec<(String, PathBuf, u64, Option<u64>)> = results
+        .iter()
+        .map(|result| {
+            let rule = result["ruleId"].as_str().unwrap().to_owned();
+            let index = usize::try_from(result["ruleIndex"].as_u64().unwrap()).unwrap();
+            assert_eq!(rules[index]["id"], rule.as_str());
+            assert_eq!(result["level"], "error");
+            let region = &result["locations"][0]["physicalLocation"]["region"];
+            (
+                rule,
+                sarif_path(run, result).unwrap(),
+                region["startLine"].as_u64().unwrap(),
+                region["startColumn"].as_u64(),
+            )
+        })
+        .collect();
+    found.sort();
+    assert_eq!(found, expected);
+    for (_, path, _, _) in &found {
+        assert!(path.is_file(), "{}", path.display());
+    }
+    let mut ids: Vec<&str> = rules
+        .iter()
+        .map(|rule| rule["id"].as_str().unwrap())
+        .collect();
+    ids.sort_unstable();
+    let before = ids.len();
+    ids.dedup();
+    assert_eq!(ids.len(), before, "a rule is described twice: {ids:?}");
+}
+
+fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == "target" || name == "Cargo.lock" {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &to.join(&name))?;
+        } else {
+            fs::copy(entry.path(), to.join(&name))?;
+        }
+    }
+    Ok(())
+}
+
+/// GitHub resolves relative URIs against the repository root, while Clippy
+/// names files relative to the workspace root and the overflow check names
+/// the checked package's own manifest.
+#[test]
+fn sarif_uris_are_relative_to_the_git_repository_root() {
+    let repository = tempfile::tempdir().unwrap();
+    let status = Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(repository.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let workspace = repository.path().join("nested dir/ws");
+    copy_dir(&fixture("workspace"), &workspace).unwrap();
+
+    let (code, log) = check_sarif(&workspace.join("member"), &[], &[]).unwrap();
+    assert_eq!(code, Some(1), "{log:#}");
+    let base = log["runs"][0]["originalUriBaseIds"]["%SRCROOT%"]["uri"]
+        .as_str()
+        .unwrap();
+    assert!(
+        base.ends_with('/') && !base.contains("nested"),
+        "the base is not the repository root: {base}"
+    );
+    assert_eq!(
+        sarif_artifacts(&log).unwrap(),
+        [
+            (
+                "adamantium::overflow_checks".to_owned(),
+                "nested%20dir/ws/member/Cargo.toml".to_owned()
+            ),
+            (
+                "clippy::indexing_slicing".to_owned(),
+                "nested%20dir/ws/src/lib.rs".to_owned()
+            ),
+            (
+                "clippy::string_slice".to_owned(),
+                "nested%20dir/ws/shared.rs".to_owned()
+            ),
+            (
+                "clippy::unwrap_used".to_owned(),
+                "nested%20dir/ws/member/src/lib.rs".to_owned()
+            ),
+        ]
+    );
+}
+
+/// `--manifest-path` after `--` makes Clippy check another workspace, whose
+/// root its file names are relative to.
+#[test]
+fn sarif_uris_follow_a_forwarded_manifest_path() {
+    let repository = tempfile::tempdir().unwrap();
+    let status = Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(repository.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let outer = repository.path().join("outer");
+    fs::create_dir_all(outer.join("src")).unwrap();
+    fs::write(outer.join("src/lib.rs"), "").unwrap();
+    fs::write(
+        outer.join("Cargo.toml"),
+        "[package]\nname = \"outer\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[profile.release]\noverflow-checks = true\n",
+    )
+    .unwrap();
+    copy_dir(&fixture("workspace"), &outer.join("inner")).unwrap();
+
+    for args in [
+        ["--manifest-path", "inner/Cargo.toml"].as_slice(),
+        ["--manifest-path=inner/Cargo.toml"].as_slice(),
+    ] {
+        let (code, log) = check_sarif(&outer, &[], args).unwrap();
+        assert_eq!(code, Some(1), "{args:?}: {log:#}");
+        assert_eq!(
+            sarif_artifacts(&log).unwrap(),
+            [
+                (
+                    "clippy::indexing_slicing".to_owned(),
+                    "outer/inner/src/lib.rs".to_owned()
+                ),
+                (
+                    "clippy::string_slice".to_owned(),
+                    "outer/inner/shared.rs".to_owned()
+                ),
+                (
+                    "clippy::unwrap_used".to_owned(),
+                    "outer/inner/member/src/lib.rs".to_owned()
+                ),
+            ],
+            "{args:?}"
+        );
+    }
+}
+
+/// Outside a git repository, URIs are relative to the workspace root.
+#[test]
+fn sarif_uris_outside_git_are_relative_to_the_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("ws");
+    copy_dir(&fixture("workspace"), &workspace).unwrap();
+
+    let (code, log) =
+        check_sarif(&workspace, &[("GIT_CEILING_DIRECTORIES", dir.path())], &[]).unwrap();
+    assert_eq!(code, Some(1), "{log:#}");
+    let base = log["runs"][0]["originalUriBaseIds"]["%SRCROOT%"]["uri"]
+        .as_str()
+        .unwrap();
+    assert!(base.ends_with("/ws/"), "{base}");
+    assert_eq!(
+        sarif_artifacts(&log).unwrap(),
+        [
+            (
+                "clippy::indexing_slicing".to_owned(),
+                "src/lib.rs".to_owned()
+            ),
+            ("clippy::string_slice".to_owned(), "shared.rs".to_owned()),
+            (
+                "clippy::unwrap_used".to_owned(),
+                "member/src/lib.rs".to_owned()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn check_reports_build_errors_as_sarif_notifications() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("src")).unwrap();
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        "pub fn broken() -> u8 { \"text\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[profile.release]\noverflow-checks = true\n",
+    )
+    .unwrap();
+    let (code, log) =
+        check_sarif(dir.path(), &[("GIT_CEILING_DIRECTORIES", dir.path())], &[]).unwrap();
+    assert_eq!(code, Some(2), "{log:#}");
+    let run = &log["runs"][0];
+    assert_eq!(run["results"], serde_json::json!([]));
+    let invocation = &run["invocations"][0];
+    assert_eq!(invocation["executionSuccessful"], false);
+    let notifications = invocation["toolExecutionNotifications"].as_array().unwrap();
+    assert!(!notifications.is_empty(), "{log:#}");
+    let first = &notifications[0];
+    assert_eq!(first["level"], "error");
+    assert!(
+        first["message"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("mismatched types"),
+        "{first}"
+    );
+    assert_eq!(
+        first["locations"][0]["physicalLocation"],
+        serde_json::json!({
+            "artifactLocation": { "uri": "src/lib.rs", "uriBaseId": "%SRCROOT%" },
+            "region": { "startLine": 1 },
+        })
+    );
+}
+
 #[test]
 fn check_without_a_manifest_is_an_error() {
     let dir = tempfile::tempdir().unwrap();

@@ -12,9 +12,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    ReportFormat,
     config::Config,
     lints::{CLIPPY_TOML, LINTS, OVERFLOW_RULE},
-    manifest,
+    manifest, sarif,
 };
 
 /// What a check found.
@@ -117,49 +118,59 @@ impl Status {
     }
 }
 
-/// Runs the check and prints the report, as text on stderr or as JSON on
-/// stdout. The exit status is 0 when clean, 1 with findings and 2 when the
-/// project failed to build.
-pub fn run(path: &Path, cargo_args: &[String], json: bool) -> Result<ExitCode> {
+/// Runs the check and prints the report, as text on stderr or as JSON or
+/// SARIF on stdout. The exit status is 0 when clean, 1 with findings and 2
+/// when the project failed to build.
+pub fn run(path: &Path, cargo_args: &[String], format: ReportFormat) -> Result<ExitCode> {
     let root = manifest::root(path)?;
-    let report = check(&root, cargo_args, !json)?;
-    if json {
-        let mut stdout = io::stdout().lock();
-        serde_json::to_writer_pretty(&mut stdout, &report)?;
-        writeln!(stdout)?;
-    } else {
-        let mut stderr = io::stderr().lock();
-        let skipped: usize = report.skipped.values().sum();
-        let note = if skipped == 0 {
-            String::new()
-        } else {
-            format!(" ({skipped} skipped by the skip list in Cargo.toml)")
-        };
-        match report.status {
-            Status::Clean => writeln!(stderr, "adamantium: clean{note}")?,
-            Status::Findings => {
-                let mut files: Vec<&str> = report
-                    .findings
-                    .iter()
-                    .map(|finding| finding.file.as_str())
-                    .collect();
-                files.sort_unstable();
-                files.dedup();
-                writeln!(
+    let report = check(&root, cargo_args, matches!(format, ReportFormat::Text))?;
+    match format {
+        ReportFormat::Json => print_json(&report)?,
+        ReportFormat::Sarif => print_json(&sarif::log(
+            &report,
+            &sarif::Roots::locate(&root, cargo_args)?,
+        ))?,
+        ReportFormat::Text => {
+            let mut stderr = io::stderr().lock();
+            let skipped: usize = report.skipped.values().sum();
+            let note = if skipped == 0 {
+                String::new()
+            } else {
+                format!(" ({skipped} skipped by the skip list in Cargo.toml)")
+            };
+            match report.status {
+                Status::Clean => writeln!(stderr, "adamantium: clean{note}")?,
+                Status::Findings => {
+                    let mut files: Vec<&str> = report
+                        .findings
+                        .iter()
+                        .map(|finding| finding.file.as_str())
+                        .collect();
+                    files.sort_unstable();
+                    files.dedup();
+                    writeln!(
+                        stderr,
+                        "adamantium: {} finding{} in {}{note}",
+                        report.findings.len(),
+                        if report.findings.len() == 1 { "" } else { "s" },
+                        files.join(", ")
+                    )?;
+                }
+                Status::Error => writeln!(
                     stderr,
-                    "adamantium: {} finding{} in {}{note}",
-                    report.findings.len(),
-                    if report.findings.len() == 1 { "" } else { "s" },
-                    files.join(", ")
-                )?;
+                    "adamantium: the project did not build, so the rules were not all checked"
+                )?,
             }
-            Status::Error => writeln!(
-                stderr,
-                "adamantium: the project did not build, so the rules were not all checked"
-            )?,
         }
     }
     Ok(report.status.exit_code())
+}
+
+fn print_json(value: &impl Serialize) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer_pretty(&mut stdout, value)?;
+    writeln!(stdout)?;
+    Ok(())
 }
 
 /// Writes Adamantium's `clippy.toml` into `dir`, which becomes
@@ -412,7 +423,7 @@ fn relative<'a>(root: &Path, file: &'a str) -> &'a str {
 /// Resolves `.` and `..` segments without touching the file system, so a
 /// file that two targets include under different spellings, such as
 /// `tests/../examples/shared.rs`, is reported once under one name.
-fn normalize(path: &str) -> String {
+pub fn normalize(path: &str) -> String {
     let mut parts: Vec<Component<'_>> = Vec::new();
     for component in Path::new(path).components() {
         match component {

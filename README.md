@@ -33,6 +33,7 @@ Adamantium requires Rust 1.88 or later. This repository uses the library and fol
 ```sh
 cargo adamantium check              # run Clippy with the rules
 cargo adamantium check --format json
+cargo adamantium check --format sarif  # for GitHub code scanning
 cargo adamantium init               # write the rules into Cargo.toml and clippy.toml
 cargo adamantium rules              # list the rules and why each exists
 ```
@@ -42,6 +43,23 @@ cargo adamantium rules              # list the rules and why each exists
 The command prints diagnostics and a summary to stderr. With `--format json`, it prints a report to stdout with the rule, message, file, line, and column for each finding. The exit status is `0` when clean, `1` for findings, and `2` when the project did not build.
 
 The JSON check report uses `schema_version: 2`. Its `warnings` array contains warnings about Adamantium's Clippy configuration and unknown, renamed, or removed lints, each with a message, file, and line. Warnings do not change the status or exit code. Configuration warnings and errors name the file `clippy.toml`; their lines refer to Adamantium's bundled configuration, which `cargo adamantium rules` prints. Lint warnings without a primary span (`E0602` and `renamed_and_removed_lints`) have `file: null` and `line: null` and appear once per code and message across targets. Compiler summaries are omitted. Other compiler warnings appear only in text output.
+
+With `--format sarif`, it prints a [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) log to stdout, which GitHub code scanning shows as annotations on pull requests. Each finding is an `error` result for its rule. Build errors and warnings are tool notifications rather than results, so they raise no alerts. File URIs are relative to the root of the git repository holding the workspace, or to the workspace root outside git. A finding without a line, such as a missing `overflow-checks`, points at the first line of its file. The exit status is the same as for the other formats.
+
+```yaml
+permissions:
+  security-events: write
+steps:
+  - uses: actions/checkout@v4
+  - run: cargo install --locked --git https://github.com/xipkit/adamantium cargo-adamantium
+  # Findings exit with 1; let them through so code scanning can show them.
+  - run: cargo adamantium check --format sarif > adamantium.sarif || [ $? -eq 1 ]
+  - uses: github/codeql-action/upload-sarif@v4
+    if: always()
+    with:
+      sarif_file: adamantium.sarif
+      category: adamantium
+```
 
 The rules also require `overflow-checks = true` in the release profile. Integer overflow then panics in release builds, as it does in debug builds.
 
