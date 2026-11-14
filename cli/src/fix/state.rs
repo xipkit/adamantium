@@ -2098,6 +2098,13 @@ impl<'t> Imports<'t> {
                 uses.0.iter().filter_map(|item| text.of(*item)).collect();
             imports.collect(tokens, &paths);
         }
+        // A `use` path's first name can refer to another import, as `Arc`
+        // does in `use Arc as Shared;`.
+        for item in &uses.0 {
+            if item.leading_colon.is_none() {
+                imports.roots(&item.tree);
+            }
+        }
         let mut pruned = Vec::new();
         let mut lines = Vec::new();
         for item in uses.0 {
@@ -2172,6 +2179,27 @@ impl<'t> Imports<'t> {
                 TokenTree::Punct(_) | TokenTree::Literal(_) => {}
             }
             colons = 0;
+        }
+    }
+
+    fn roots(&mut self, tree: &UseTree) {
+        let ident = match tree {
+            UseTree::Path(path) => &path.ident,
+            UseTree::Name(name) => &name.ident,
+            UseTree::Rename(rename) => &rename.ident,
+            UseTree::Glob(_) => return,
+            UseTree::Group(group) => {
+                for tree in &group.items {
+                    self.roots(tree);
+                }
+                return;
+            }
+        };
+        if let Some(range) = self.text.range(ident.span()) {
+            self.idents
+                .entry(ident.to_string())
+                .or_default()
+                .push(range);
         }
     }
 
@@ -2553,6 +2581,19 @@ mod tests {
             );
             assert_eq!(fixed, source);
         }
+    }
+
+    #[test]
+    fn imports_that_other_imports_name_are_kept() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nuse Arc as Shared;\nfn f() -> Shared<u8> {\n    let m = Arc::new(Mutex::new(1));\n    drop(m);\n    Shared::new(1)\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(
+            fixed.starts_with("use std::sync::Arc;\nuse Arc as Shared;\n"),
+            "{fixed}"
+        );
     }
 
     #[test]
