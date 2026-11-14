@@ -1,4 +1,13 @@
 use std::fmt;
+#[cfg(feature = "tokio")]
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+#[cfg(feature = "tokio")]
+use futures_core::Stream;
+use pin_project_lite::pin_project;
 
 /// A bounded channel that any number of tasks can send on and receive from.
 ///
@@ -55,14 +64,41 @@ pub struct Sender<T> {
     inner: async_channel::Sender<T>,
 }
 
-/// The receiving half of a bounded channel, created by [`Channel::split`].
-///
-/// Clones compete for messages: each message goes to exactly one receiver.
-/// Dropping the last receiver closes the channel and wakes pending sends
-/// with [`Closed`]. A combined [`Channel`] also owns a receiver and keeps
-/// the receiving side alive.
-pub struct Receiver<T> {
-    inner: async_channel::Receiver<T>,
+pin_project! {
+    /// The receiving half of a bounded channel, created by [`Channel::split`].
+    ///
+    /// Clones compete for messages: each message goes to exactly one receiver.
+    /// Dropping the last receiver closes the channel and wakes pending sends
+    /// with [`Closed`]. A combined [`Channel`] also owns a receiver and keeps
+    /// the receiving side alive.
+    ///
+    /// With the `tokio` feature, receivers implement `futures_core::Stream`,
+    /// yielding queued messages until the channel is closed and drained.
+    /// Pin the receiver before using `StreamExt::next`, as it is not `Unpin`.
+    ///
+    /// ```
+    /// # #[cfg(feature = "tokio")]
+    /// # #[tokio::main] async fn main() {
+    /// use adamantium::Channel;
+    /// use futures_util::StreamExt;
+    ///
+    /// let (sender, receiver) = Channel::bounded(2).split();
+    /// sender.send(1).await.unwrap();
+    /// sender.send(2).await.unwrap();
+    /// drop(sender);
+    ///
+    /// let mut receiver = std::pin::pin!(receiver);
+    /// assert_eq!(receiver.next().await, Some(1));
+    /// assert_eq!(receiver.next().await, Some(2));
+    /// assert_eq!(receiver.next().await, None);
+    /// # }
+    /// # #[cfg(not(feature = "tokio"))]
+    /// # fn main() {}
+    /// ```
+    pub struct Receiver<T> {
+        #[pin]
+        inner: async_channel::Receiver<T>,
+    }
 }
 
 /// Returned by [`Sender::try_send`] or [`Channel::try_send`].
@@ -303,6 +339,15 @@ impl<T> Clone for Sender<T> {
         Self {
             inner: self.inner.clone(),
         }
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl<T> Stream for Receiver<T> {
+    type Item = T;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.project().inner.poll_next(cx)
     }
 }
 
