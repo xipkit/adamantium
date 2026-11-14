@@ -178,6 +178,20 @@ when an enclosing async task is aborted. Dropping a scope future or panicking in
 its body signals shutdown and requests aborts but cannot wait for cleanup. For
 that guarantee, request cancellation and continue awaiting the scope.
 
+Enable the optional `tracing` feature and use `tasks.spawn_named("fetch", future)`
+or `tasks.spawn_blocking_named("parse", closure)` to diagnose stuck work. Each
+named task runs inside an `adamantium.task` tracing span with a `task.name` field
+and the current span as its parent. On deadline expiry, the scope emits a warning
+with `running_tasks`, a snapshot of unfinished named tasks in spawn order, before
+requesting cancellation or waiting for cleanup. This includes queued work and
+started blocking closures; completed tasks are excluded even if their handles
+were never awaited. Duplicate names are retained. Install a tracing subscriber
+in the application to collect the spans and warnings.
+
+Unnamed tasks create no spans or diagnostic bookkeeping. Without `tracing`, the
+named methods behave like their unnamed equivalents and do not convert or store
+names; the library has no tracing dependency in that configuration.
+
 ### Streaming concurrent maps
 
 Use `concurrently_ordered(items, limit, f)` to consume results in input order,
