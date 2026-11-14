@@ -2,7 +2,7 @@
 //! Clippy configuration file. The repository's own `Cargo.toml` carries the
 //! same levels, and a test keeps the two equal.
 
-use std::fmt::{self, Write};
+use std::fmt;
 
 use serde::Serialize;
 
@@ -62,6 +62,11 @@ pub const LINTS: &[Lint] = &[
         Level::Forbid,
         "every guarantee below rests on safe Rust",
     ),
+    rust(
+        "unused_must_use",
+        Level::Deny,
+        "a result or future was left unused; handle the result or await the future",
+    ),
     clippy(
         "await_holding_invalid_type",
         "a type listed in clippy.toml is held across an await",
@@ -108,6 +113,14 @@ pub const LINTS: &[Lint] = &[
         "every future must be Send so any task can run on any worker thread",
     ),
     clippy("indexing_slicing", "indexing can panic; use `get`"),
+    clippy(
+        "let_underscore_future",
+        "a future assigned to `_` is dropped without being awaited",
+    ),
+    clippy(
+        "let_underscore_must_use",
+        "a must-use value assigned to `_` is silently discarded; handle it or explicitly drop it",
+    ),
     clippy("mem_forget", "leaks"),
     clippy("panic", "an explicit panic; return an error"),
     clippy(
@@ -168,10 +181,9 @@ pub fn lints_toml(workspace: bool) -> String {
         if !out.is_empty() {
             out.push('\n');
         }
-        // Writing to a String cannot fail.
-        let _ = writeln!(out, "[{prefix}lints.{tool}]");
+        out.push_str(&format!("[{prefix}lints.{tool}]\n"));
         for lint in LINTS.iter().filter(|lint| lint.tool == tool) {
-            let _ = writeln!(out, "{} = \"{}\"", lint.name, lint.level);
+            out.push_str(&format!("{} = \"{}\"\n", lint.name, lint.level));
         }
     }
     out

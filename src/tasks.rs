@@ -55,7 +55,8 @@ impl Cancellation {
     /// Dropping this future does not lose the request.
     pub async fn cancelled(&self) {
         let mut requested = self.requested.subscribe();
-        let _ = requested.wait_for(|requested| *requested).await;
+        // Borrowing self keeps the sender alive, so the channel cannot close.
+        drop(requested.wait_for(|requested| *requested).await);
     }
 }
 
@@ -364,7 +365,7 @@ impl<E: Send + 'static> Tasks<E> {
             let result = future.await.map_err(|error| record(&errors, error));
             // Without a handle to take it, a value is dropped and an error
             // stays recorded for join.
-            let _ = tx.send(result);
+            drop(tx.send(result));
         });
         Task {
             rx,
@@ -419,7 +420,8 @@ impl<E: Send + 'static> Tasks<E> {
         let errors = Arc::clone(&self.errors);
         self.set.spawn_blocking(move || {
             let result = f().map_err(|error| record(&errors, error));
-            let _ = tx.send(result);
+            // A dropped handle discards the value; errors stay recorded for join.
+            drop(tx.send(result));
         });
         Task {
             rx,
