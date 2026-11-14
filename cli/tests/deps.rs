@@ -131,6 +131,7 @@ fn deps_lists_runtime_and_build_dependencies_but_not_members_or_dev_dependencies
         BTreeMap::from([
             ("builder", "build"),
             ("codegen", "build"),
+            ("ffi", "runtime"),
             ("helper", "build"),
             ("old", "runtime"),
             ("pool", "runtime"),
@@ -174,7 +175,14 @@ fn deps_counts_each_kind_of_unsafe_and_notes_forbidding_crates() {
     let spawner = dependency(&report, "spawner").unwrap();
     assert_eq!(
         spawner["unsafe"],
-        json!({"functions": 1, "blocks": 1, "impls": 1, "traits": 1, "in_macros": 1})
+        json!({
+            "functions": 1,
+            "blocks": 1,
+            "impls": 1,
+            "traits": 1,
+            "extern_blocks": 0,
+            "in_macros": 1,
+        })
     );
     assert_eq!(spawner["forbids_unsafe"], false);
     assert_eq!(
@@ -184,6 +192,18 @@ fn deps_counts_each_kind_of_unsafe_and_notes_forbidding_crates() {
     assert_eq!(
         dependency(&report, "helper").unwrap()["unsafe"]["blocks"],
         1
+    );
+    // An `unsafe extern` block, but not a plain `extern` one.
+    assert_eq!(
+        dependency(&report, "ffi").unwrap()["unsafe"],
+        json!({
+            "functions": 0,
+            "blocks": 0,
+            "impls": 0,
+            "traits": 0,
+            "extern_blocks": 1,
+            "in_macros": 0,
+        })
     );
     // By attribute, by a lint level string, and by a lint level table.
     for name in ["safe", "old", "codegen"] {
@@ -238,11 +258,12 @@ fn deps_prints_a_table_and_each_call_as_text() {
         "      5     22           6  spawner 0.1.0 (partly unscanned)",
         "      0      0           0  safe 0.0.0 (forbids unsafe)",
         "      1      0           0  helper 0.0.0",
+        "      1      0           0  ffi 0.0.0",
         "  tokio::task::spawn: an unstructured task; spawn inside adamantium::Tasks",
         "    src/nested/deeper.rs:2:5",
         "  unresolved calls: leak 1, spawn 5",
         "  unscanned: src/lib.rs:11: module `missing` has no file: neither missing.rs nor missing/mod.rs",
-        "adamantium: 8 dependencies; 3 with unsafe code, 4 with disallowed calls, 1 with unresolved calls, 1 partly unscanned",
+        "adamantium: 9 dependencies; 4 with unsafe code, 4 with disallowed calls, 1 with unresolved calls, 1 partly unscanned",
     ] {
         assert!(
             stdout.lines().any(|printed| printed == line),

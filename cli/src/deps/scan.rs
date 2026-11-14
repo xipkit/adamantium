@@ -21,9 +21,9 @@ use serde::Serialize;
 use syn::{
     Arm, Attribute, Block, Expr, ExprCall, ExprClosure, ExprForLoop, ExprIf, ExprLit,
     ExprMethodCall, ExprPath, ExprUnsafe, ExprWhile, Field, FieldValue, File, FnArg, GenericParam,
-    Generics, ImplItem, ImplItemFn, Item, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemTrait, Lit,
-    Macro, Meta, Pat, PatIdent, Safety, Signature, Stmt, Token, TraitItem, TraitItemFn, Type,
-    UseTree, Variant,
+    Generics, ImplItem, ImplItemFn, Item, ItemFn, ItemForeignMod, ItemImpl, ItemMacro, ItemMod,
+    ItemTrait, Lit, Macro, Meta, Pat, PatIdent, Safety, Signature, Stmt, Token, TraitItem,
+    TraitItemFn, Type, UseTree, Variant,
     ext::IdentExt,
     parse::ParseStream,
     punctuated::Punctuated,
@@ -65,6 +65,10 @@ pub struct UnsafeCounts {
     pub impls: usize,
     /// `unsafe trait`.
     pub traits: usize,
+    /// `unsafe extern` blocks. A plain `extern` block, which editions before
+    /// 2024 allow, isn't counted: its functions can only be called in
+    /// `unsafe` blocks, which are.
+    pub extern_blocks: usize,
     /// `unsafe` in macro bodies that syn can't parse as code, such as
     /// `macro_rules!` definitions.
     pub in_macros: usize,
@@ -72,7 +76,12 @@ pub struct UnsafeCounts {
 
 impl UnsafeCounts {
     pub fn total(&self) -> usize {
-        self.functions + self.blocks + self.impls + self.traits + self.in_macros
+        self.functions
+            + self.blocks
+            + self.impls
+            + self.traits
+            + self.extern_blocks
+            + self.in_macros
     }
 }
 
@@ -1394,6 +1403,13 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
             self.scanner.scan.unsafe_code.traits += 1;
         }
         self.with_generics(&item.generics, |this| visit::visit_item_trait(this, item));
+    }
+
+    fn visit_item_foreign_mod(&mut self, item: &'ast ItemForeignMod) {
+        if item.unsafety.is_some() {
+            self.scanner.scan.unsafe_code.extern_blocks += 1;
+        }
+        visit::visit_item_foreign_mod(self, item);
     }
 
     fn visit_impl_item(&mut self, item: &'ast ImplItem) {
