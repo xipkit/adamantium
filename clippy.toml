@@ -43,6 +43,11 @@ disallowed-methods = [
   { path = "tokio::task::spawn_local", reason = "every task must be Send; spawn inside adamantium::Tasks", allow-invalid = true },
   { path = "tokio::task::spawn_blocking", reason = "use adamantium::blocking, which propagates panics", allow-invalid = true },
   { path = "tokio::task::block_in_place", reason = "blocks a worker thread; use adamantium::blocking", allow-invalid = true },
+  { path = "tokio::time::sleep", reason = "use adamantium::time::sleep so waits go through Adamantium's clock", allow-invalid = true },
+  { path = "tokio::time::sleep_until", reason = "use adamantium::time::sleep_until so waits go through Adamantium's clock", allow-invalid = true },
+  { path = "tokio::time::interval", reason = "use a loop over adamantium::time::sleep_until with deadlines from adamantium::time::now", allow-invalid = true },
+  { path = "tokio::time::interval_at", reason = "use a loop over adamantium::time::sleep_until with deadlines from adamantium::time::now", allow-invalid = true },
+  { path = "tokio::time::Instant::now", reason = "build deadlines from adamantium::time::now; std::time::Instant::now is allowed for measuring elapsed time", allow-invalid = true },
   # A runtime's own entry points start the same tasks as the functions above.
   # `Runtime::block_on` is left out: `#[tokio::main]` and `#[tokio::test]`
   # expand to it, and it is how a program without them enters the runtime.
@@ -66,7 +71,7 @@ disallowed-methods = [
   { path = "std::thread::spawn", reason = "an unstructured thread; use adamantium::Tasks or adamantium::blocking" },
   { path = "std::thread::Builder::spawn", reason = "an unstructured thread; use adamantium::Tasks or adamantium::blocking" },
   { path = "std::thread::scope", reason = "blocks the async runtime; use adamantium::blocking" },
-  { path = "std::thread::sleep", reason = "blocks a worker thread; use tokio::time::sleep" },
+  { path = "std::thread::sleep", reason = "blocks a worker thread; use adamantium::time::sleep" },
   { path = "std::process::abort", reason = "skips every scope's cleanup; return an exit code from main" },
   { path = "std::mem::forget", reason = "leaks" },
   { path = "std::boxed::Box::leak", reason = "leaks" },

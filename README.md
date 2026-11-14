@@ -165,8 +165,33 @@ For explicit shutdown, use `Tasks::run_until(cancellation, deadline, body)` or
 `tasks.join_until(cancellation, deadline, body_result)`. `Cancellation::new()`
 creates a cloneable signal: callers request shutdown with `cancel()`, async work
 can await `cancelled()`, and blocking work can check `is_cancelled()`. The deadline
-is an optional `tokio::time::Instant`; `None` needs no timer. Use a fresh signal
-per scope. The scope also signals it on failure, deadline, completion, or drop.
+is an optional `tokio::time::Instant`, built from `adamantium::time::now()`;
+`None` needs no timer. Use a fresh signal per scope. The scope also signals it
+on failure, deadline, completion, or drop.
+
+Enable the opt-in `signal` feature to use
+`cancellation.cancel_on_signal().await`: it requests cancellation on SIGINT or
+SIGTERM on Unix, or Ctrl-C alone on Windows. Await it alongside your scope with
+`tokio::try_join!`; it also finishes when the scope cancels the signal on normal
+completion. Registration errors are returned as `std::io::Error`. No background
+task is spawned. Listening starts on the first poll, and dropping the future
+stops listening without cancelling. Tokio's installed process handlers persist
+afterward, so the default signal termination behavior is not restored.
+
+```rust
+use adamantium::{Cancellation, Tasks};
+
+let cancellation = Cancellation::new();
+let (_, outcome) = tokio::try_join!(
+    cancellation.cancel_on_signal(),
+    async {
+        Ok::<_, std::io::Error>(Tasks::run_until(
+            cancellation.clone(), None, async |_| serve().await,
+        ).await)
+    },
+)?;
+// `outcome` is the scope's result, including `ScopeError::Cancelled` on a signal.
+```
 
 These methods return `ScopeError::Failed(error)`, `Cancelled`, or
 `DeadlineExceeded`. A completed body error wins over an unclaimed child error,
@@ -185,6 +210,12 @@ cannot be forcibly stopped, so cleanup can extend beyond the deadline. The free
 when an enclosing async task is aborted. Dropping a scope future or panicking in
 its body signals shutdown and requests aborts but cannot wait for cleanup. For
 that guarantee, request cancellation and continue awaiting the scope.
+
+With the `tokio` feature, use `adamantium::time::sleep(duration)` and
+`adamantium::time::sleep_until(deadline)` for waits. These functions and
+`time::now()` currently use Tokio's clock, including its paused test clock.
+Build periodic waits with a loop over `time::sleep_until`. For measuring elapsed
+wall-clock time, `std::time::Instant::now()` remains allowed.
 
 Enable the optional `tracing` feature and use `tasks.spawn_named("fetch", future)`
 or `tasks.spawn_blocking_named("parse", closure)` to diagnose stuck work. Each

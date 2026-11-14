@@ -385,13 +385,13 @@ impl<T> Sender<T> {
     /// returned future drops the value without sending it.
     ///
     /// ```
-    /// use adamantium::{Cancellation, Channel, SendError};
-    /// use tokio::time::{Duration, Instant};
+    /// use adamantium::{Cancellation, Channel, SendError, time};
+    /// use std::time::Duration;
     /// # #[tokio::main] async fn main() {
     /// let (sender, receiver) = Channel::bounded(1).split();
     /// let cancellation = Cancellation::new();
     /// sender.send_until(&cancellation, None, 1).await.unwrap();
-    /// let soon = Some(Instant::now() + Duration::from_millis(10));
+    /// let soon = Some(time::now() + Duration::from_millis(10));
     /// assert_eq!(
     ///     sender.send_until(&cancellation, soon, 2).await,
     ///     Err(SendError::DeadlineExceeded(2)),
@@ -517,12 +517,12 @@ impl<T> Receiver<T> {
     /// early, or dropping the returned future, loses nothing.
     ///
     /// ```
-    /// use adamantium::{Cancellation, Channel, ReceiveError};
-    /// use tokio::time::{Duration, Instant};
+    /// use adamantium::{Cancellation, Channel, ReceiveError, time};
+    /// use std::time::Duration;
     /// # #[tokio::main] async fn main() {
     /// let (sender, receiver) = Channel::<u32>::bounded(1).split();
     /// let cancellation = Cancellation::new();
-    /// let soon = Some(Instant::now() + Duration::from_millis(10));
+    /// let soon = Some(time::now() + Duration::from_millis(10));
     /// assert_eq!(
     ///     receiver.receive_until(&cancellation, soon).await,
     ///     Err(ReceiveError::DeadlineExceeded),
