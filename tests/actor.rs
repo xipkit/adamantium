@@ -1,6 +1,10 @@
 use adamantium::Actor;
 #[cfg(feature = "tokio")]
 use adamantium::Tasks;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 #[derive(Default, Clone, Debug, PartialEq)]
 struct Tally {
@@ -15,6 +19,73 @@ impl Tally {
     fn total(&self) -> u64 {
         self.hits
     }
+}
+
+struct LinkedState {
+    next: Option<Actor<Self>>,
+    drops: Arc<AtomicUsize>,
+}
+
+impl LinkedState {
+    fn new(drops: &Arc<AtomicUsize>) -> Self {
+        Self {
+            next: None,
+            drops: Arc::clone(drops),
+        }
+    }
+}
+
+impl Drop for LinkedState {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn acyclic_actor_links_drop_after_the_last_external_handle() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let first = Actor::new(LinkedState::new(&drops));
+    let second = Actor::new(LinkedState::new(&drops));
+    first.with(|state| state.next = Some(second.clone()));
+
+    drop(second);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    drop(first);
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn a_self_reference_keeps_actor_state_alive_without_external_handles() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let actor = Actor::new(LinkedState::new(&drops));
+    actor.with(|state| state.next = Some(actor.clone()));
+
+    drop(actor);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn an_indirect_cycle_keeps_actor_states_alive_without_external_handles() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let first = Actor::new(LinkedState::new(&drops));
+    let second = Actor::new(LinkedState::new(&drops));
+    first.with(|state| state.next = Some(second.clone()));
+    second.with(|state| state.next = Some(first.clone()));
+
+    drop(first);
+    drop(second);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn breaking_a_self_reference_allows_actor_state_to_drop() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let actor = Actor::new(LinkedState::new(&drops));
+    actor.with(|state| state.next = Some(actor.clone()));
+    actor.with(|state| state.next = None);
+
+    drop(actor);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
 #[cfg(feature = "tokio")]
