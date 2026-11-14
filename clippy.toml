@@ -15,6 +15,7 @@ allow-dbg-in-tests = true
 # fails it.
 
 disallowed-types = [
+  { path = "std::mem::ManuallyDrop", reason = "suppresses automatic cleanup and can leak; let values drop normally" },
   { path = "std::rc::Rc", reason = "shared identity; use a value, or adamantium::Actor for state that tasks share" },
   { path = "std::rc::Weak", reason = "weak references are outside Adamantium's ownership model" },
   { path = "std::sync::Weak", reason = "weak references are outside Adamantium's ownership model" },
@@ -71,6 +72,7 @@ disallowed-methods = [
   { path = "std::thread::Builder::spawn", reason = "an unstructured thread; use adamantium::Tasks or adamantium::blocking" },
   { path = "std::thread::scope", reason = "blocks the async runtime; use adamantium::blocking" },
   { path = "std::thread::sleep", reason = "blocks a worker thread; use adamantium::time::sleep" },
+  { path = "std::process::abort", reason = "skips every scope's cleanup; return an exit code from main" },
   { path = "std::mem::forget", reason = "leaks" },
   { path = "std::boxed::Box::leak", reason = "leaks" },
   { path = "std::sync::Arc::downgrade", reason = "weak references are outside Adamantium's ownership model" },

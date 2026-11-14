@@ -64,6 +64,21 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
             "no finding for {expected} in {rules:?}"
         );
     }
+    for (rule, path) in [
+        ("clippy::disallowed_methods", "std::process::abort"),
+        ("clippy::disallowed_types", "std::mem::ManuallyDrop"),
+    ] {
+        assert!(
+            report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| {
+                    finding["rule"] == rule && finding["message"].as_str().unwrap().contains(path)
+                }),
+            "no {rule} finding for {path}: {report}"
+        );
+    }
     let first = &report["findings"][0];
     assert!(first["file"].as_str().unwrap().ends_with(".rs"));
     assert!(first["line"].as_u64().is_some());
