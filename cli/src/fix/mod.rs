@@ -228,18 +228,21 @@ fn restore_all(changes: &[Change], reason: &str) -> Result<ExitCode> {
 
 /// Writes a file's original text back unless it already has it, naming the
 /// file if it can't, and returns whether the file has its original text now.
-/// A file fix wrote whole that has neither fix's text nor the original was
-/// edited by something else since, so it is left as it is rather than losing
-/// that edit; `interrupted` says fix's own write failed partway, which leaves
-/// text that is neither.
+/// Only a file that still has the text fix wrote is written: one with other
+/// text, or one that is gone or can't be read, was changed by something else
+/// since, so it is left as it is rather than undoing that change.
+/// `interrupted` says fix's own write failed partway, which leaves text that
+/// is neither the original nor fix's.
 fn restore(change: &Change, interrupted: bool) -> bool {
-    let current = fs::read(&change.file);
-    let outcome = match &current {
-        Ok(text) if *text == change.before.as_bytes() => return true,
-        Ok(text) if !interrupted && *text != change.after.as_bytes() => {
-            Err("it changed after fix wrote it, so it was left as it is".to_owned())
+    let outcome = match fs::read(&change.file) {
+        Ok(text) if text == change.before.as_bytes() => return true,
+        Ok(text) if interrupted || text == change.after.as_bytes() => {
+            fs::write(&change.file, &change.before).map_err(|error| error.to_string())
         }
-        _ => fs::write(&change.file, &change.before).map_err(|error| error.to_string()),
+        Ok(_) => Err("it changed after fix wrote it, so it was left as it is".to_owned()),
+        Err(error) => Err(format!(
+            "it can't be read ({error}), so it was left as it is"
+        )),
     };
     match outcome {
         Ok(()) => {
@@ -693,6 +696,15 @@ mod tests {
         let truncated = change("truncated.rs", Some("aft"));
         assert!(restore(&truncated, true));
         assert_eq!(text(&truncated), "before\n");
+
+        // Something else moved the file away after fix wrote it.
+        let moved = change("moved.rs", Some("after\n"));
+        let elsewhere = dir.path().join("elsewhere.rs");
+        fs::rename(&moved.file, &elsewhere).unwrap();
+        assert!(!restore(&moved, false));
+        assert!(!restore(&moved, true));
+        assert!(!moved.file.exists());
+        assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "after\n");
 
         let unwritable = change("missing/unwritable.rs", None);
         assert!(!restore(&unwritable, false));
