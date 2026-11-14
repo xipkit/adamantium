@@ -1206,8 +1206,9 @@ fn parse_items(input: ParseStream) -> syn::Result<Vec<Item>> {
 
 /// Parses the body of a `cfg_if!`, `if #[cfg(a)] { ... } else if #[cfg(b)]
 /// { ... } else { ... }`, into the items of its branches, as the `cfg_if`
-/// crate expands it: each branch's items get a `cfg` that holds where the
-/// branch's predicate does and no earlier one does.
+/// crate expands it: each branch's items get
+/// `#[cfg(all(<own>, not(any(<earlier>, ...))))]`, and the `else` branch's
+/// `#[cfg(not(any(<earlier>, ...)))]`.
 fn parse_cfg_if(input: ParseStream) -> syn::Result<Vec<Item>> {
     let mut earlier = Vec::new();
     let mut items = Vec::new();
@@ -1247,9 +1248,10 @@ fn parse_cfg_if(input: ParseStream) -> syn::Result<Vec<Item>> {
     }
 }
 
-/// The `#[cfg(...)]` of a `cfg_if!` branch, as one predicate: the `cfg_if`
-/// crate reads `#[cfg(a, b)]` as `all(a, b)`. The span is where the
-/// attribute is written.
+/// What a `cfg_if!` branch's `#[cfg(...)]` holds, as written, and where the
+/// attribute is written. The `cfg_if` crate splices it into other
+/// predicates as it is, so `#[cfg(a, b)]` is `all(a, b, ...)` for its own
+/// branch and `any(a, b, ...)` for the branches after it.
 fn cfg_if_condition(input: ParseStream) -> syn::Result<(Span, TokenStream)> {
     let attrs = input.call(Attribute::parse_outer)?;
     let [attr] = &attrs[..] else {
@@ -1258,7 +1260,7 @@ fn cfg_if_condition(input: ParseStream) -> syn::Result<(Span, TokenStream)> {
     match &attr.meta {
         Meta::List(list) if list.path.is_ident("cfg") && !list.tokens.is_empty() => {
             let span = attr.pound_token.span;
-            Ok((span, cfg_call("all", [list.tokens.clone()], span)))
+            Ok((span, list.tokens.clone()))
         }
         _ => Err(input.error("expected #[cfg(...)]")),
     }
@@ -2134,7 +2136,7 @@ mod tests {
                     fn i() {}
                 }
             }
-            cfg_if! { if #[cfg(unix, windows)] { fn j() {} } }
+            cfg_if! { if #[cfg(unix, windows)] { fn j() {} } else { fn l() {} } }
             #[cfg(windows)]
             cfg_if! { if #[cfg(unix)] { fn k() {} } }
             "#,
@@ -2165,6 +2167,7 @@ mod tests {
             ("h", Truth::False),
             ("i", Truth::Unknown),
             ("j", Truth::False),
+            ("l", Truth::False),
             ("k", Truth::False),
         ]
         .map(|(name, truth)| (name.to_owned(), truth));
