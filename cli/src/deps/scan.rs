@@ -19,7 +19,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry},
     fs, mem,
     path::{Component, Path, PathBuf},
     slice,
@@ -87,10 +87,14 @@ pub struct UnsafeCounts {
     /// or without the `unsafe(...)` the 2024 edition requires, including
     /// those a `cfg_attr` adds.
     pub attributes: usize,
+    /// `global_asm!` calls, which `unsafe_code` reports, through any path or
+    /// `use` that leads to `core::arch::global_asm`.
+    pub global_asm: usize,
     /// `unsafe` in macro bodies that syn can't parse as code, such as the
     /// `macro_rules!` definitions the scan doesn't expand where they are
     /// called, and the attributes `unsafe_code` reports
-    /// that are written there without `unsafe(...)`.
+    /// that are written there without `unsafe(...)`, and `global_asm!`
+    /// calls there.
     pub in_macros: usize,
 }
 
@@ -102,6 +106,7 @@ impl UnsafeCounts {
             + self.traits
             + self.extern_blocks
             + self.attributes
+            + self.global_asm
             + self.in_macros
     }
 }
@@ -160,6 +165,7 @@ pub fn scan(crates: &[Crate], entry: usize, disallowed: &Disallowed) -> Scan {
                 path_dir: loaded.path_dir.clone(),
                 blocks: Vec::new(),
                 attributes: HashSet::new(),
+                hidden: HashSet::new(),
             };
             for attr in &loaded.attrs {
                 visitor.visit_attribute(attr);
@@ -195,6 +201,7 @@ pub fn scan(crates: &[Crate], entry: usize, disallowed: &Disallowed) -> Scan {
                 path_dir: deferred.path_dir,
                 blocks: Vec::new(),
                 attributes: HashSet::new(),
+                hidden: deferred.hidden,
             };
             visitor.tokens(deferred.tokens);
         }
@@ -653,6 +660,11 @@ struct Scanner<'a> {
     /// How many definitions were read at each place in this reading of the
     /// module tree.
     read_at: HashMap<(String, usize, usize), usize>,
+    /// The names that a `macro_rules!` in textual scope, which every build
+    /// has, hides at each macro call or definition left among a module's
+    /// items, by [`call_site`]: those it hides everywhere the item is read,
+    /// as in each expansion of a macro it is written in.
+    hidden: HashMap<(String, usize, usize), HashSet<String>>,
 }
 
 /// A call of a macro by path, or by a bare name a `use` may bind, as the
@@ -687,6 +699,8 @@ struct Deferred {
     mod_dir: PathBuf,
     path_dir: PathBuf,
     tokens: TokenStream,
+    /// The names a `macro_rules!` in textual scope hides where it is written.
+    hidden: HashSet<String>,
 }
 
 /// A `macro_rules!` in textual scope.
@@ -832,6 +846,15 @@ impl Textual {
             .iter()
             .any(|definition| definition.name == name && definition.certain)
     }
+
+    /// The names every build has a macro of here, which [`Textual::hides`].
+    fn hidden(&self) -> HashSet<String> {
+        self.macros
+            .iter()
+            .filter(|definition| definition.certain)
+            .map(|definition| definition.name.clone())
+            .collect()
+    }
 }
 
 /// Where items being indexed are.
@@ -895,6 +918,7 @@ impl<'a> Scanner<'a> {
             path_calls: Vec::new(),
             instances: HashMap::new(),
             read_at: HashMap::new(),
+            hidden: HashMap::new(),
         }
     }
 
@@ -1132,14 +1156,25 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 Item::Use(item) => self.use_macros(item, place, scope, textual),
-                Item::Macro(call) => match &call.ident {
-                    Some(name) => self.define(call, name, place, scope, textual),
-                    None => {
-                        if self.expand(call, place, scope, textual) {
-                            continue;
+                Item::Macro(call) => {
+                    match &call.ident {
+                        Some(name) => self.define(call, name, place, scope, textual),
+                        None => {
+                            if !reads_input(&call.mac) && self.expand(call, place, scope, textual) {
+                                continue;
+                            }
                         }
                     }
-                },
+                    let hidden = textual.hidden();
+                    match self.hidden.entry(call_site(&call.mac)) {
+                        Entry::Occupied(mut known) => {
+                            known.get_mut().retain(|name| hidden.contains(name));
+                        }
+                        Entry::Vacant(place) => {
+                            place.insert(hidden);
+                        }
+                    }
+                }
                 _ => {}
             }
             indexed.push(item);
@@ -2903,6 +2938,14 @@ impl Scanner<'_> {
 }
 
 /// Whether a macro path is a bare name, which textual scope may have.
+/// Where a macro call is written, by its `!`: the source, as [`Span::file`]
+/// names it, line and column.
+fn call_site(mac: &Macro) -> (String, usize, usize) {
+    let span = mac.bang_token.span;
+    let start = span.start();
+    (span.file(), start.line, start.column)
+}
+
 fn is_bare(path: &syn::Path) -> bool {
     path.leading_colon.is_none() && path.segments.len() == 1
 }
@@ -2961,6 +3004,11 @@ impl<'ast> Visit<'ast> for FirstSpan {
 /// applies. A call with an empty body, such as `crate_root!();`, is left
 /// for [`Scanner::index`] to expand, since it can only be read through the
 /// macro's definition.
+///
+/// The call stays before its items, since its path may name a macro that
+/// doesn't expand to its input: `global_asm!` takes a template, and
+/// `global_asm!(concat! { ... })` parses as items. [`reads_input`] tells
+/// such a call apart from one that is read as its expansion or as tokens.
 struct Expand;
 
 impl Expand {
@@ -2980,34 +3028,53 @@ impl Expand {
                 expanded.push(item);
                 continue;
             };
-            if item.ident.is_some() || is_include(&item.mac) || item.mac.tokens.is_empty() {
-                expanded.push(Item::Macro(item));
-                continue;
-            }
-            let parsed = if is_cfg_if(&item.mac) {
-                item.mac.parse_body_with(parse_cfg_if)
-            } else if is_cfg_select(&item.mac) {
-                item.mac.parse_body_with(parse_cfg_select)
-            } else {
-                item.mac.parse_body_with(parse_items)
+            let input = match item.ident {
+                Some(_) => None,
+                None => input_items(&item.mac),
             };
-            match parsed {
-                Ok(mut inner) => {
+            match input {
+                Some(mut inner) => {
                     self.items(&mut inner);
+                    let outer = item.attrs.clone();
+                    expanded.push(Item::Macro(item));
                     for mut inner in inner {
                         if let Some(attrs) = item_attrs_mut(&mut inner) {
                             let own = mem::take(attrs);
-                            attrs.extend(item.attrs.iter().cloned());
+                            attrs.extend(outer.iter().cloned());
                             attrs.extend(own);
                         }
                         expanded.push(inner);
                     }
                 }
-                Err(_) => expanded.push(Item::Macro(item)),
+                None => expanded.push(Item::Macro(item)),
             }
         }
         *items = expanded;
     }
+}
+
+/// The items a call is read as by [`Expand`]: its input, where it parses as
+/// items, or the branches of a `cfg_if!` or `cfg_select!`. A call with an
+/// empty body, or of `include!`, has none.
+fn input_items(mac: &Macro) -> Option<Vec<Item>> {
+    if is_include(mac) || mac.tokens.is_empty() {
+        return None;
+    }
+    let parsed = if is_cfg_if(mac) {
+        mac.parse_body_with(parse_cfg_if)
+    } else if is_cfg_select(mac) {
+        mac.parse_body_with(parse_cfg_select)
+    } else {
+        mac.parse_body_with(parse_items)
+    };
+    parsed.ok()
+}
+
+/// Whether [`Expand`] reads a call as its input, which follows it among the
+/// items. It decides by the call's tokens alone, so each copy of a call that
+/// a macro writes more than once is read the same way.
+fn reads_input(mac: &Macro) -> bool {
+    input_items(mac).is_some()
 }
 
 impl VisitMut for Expand {
@@ -3364,6 +3431,9 @@ const UNSAFE_ATTRIBUTES: [&str; 8] = [
     "allow_internal_unsafe",
 ];
 
+/// `core::arch::global_asm`, as [`canonical`] names it.
+const GLOBAL_ASM: [&str; 3] = ["std", "arch", "global_asm"];
+
 /// Whether `unsafe_code` reports an attribute. rustc accepts `unsafe(...)`
 /// only around an unsafe attribute, so any attribute written that way is
 /// one.
@@ -3386,6 +3456,9 @@ struct FileVisitor<'s, 'a> {
     blocks: Vec<Scope>,
     /// Where the attributes already visited are written.
     attributes: HashSet<Site>,
+    /// The names a `macro_rules!` in textual scope hides where the macro
+    /// body being read as tokens is, as [`Scanner::hidden`] has them.
+    hidden: HashSet<String>,
 }
 
 impl FileVisitor<'_, '_> {
@@ -3456,6 +3529,51 @@ impl FileVisitor<'_, '_> {
         }
     }
 
+    /// Whether a call of a macro by `path` here may be `global_asm!`: the
+    /// path leads to `core::arch::global_asm`, or it is named `global_asm`
+    /// and can't be resolved. A bare name that nothing binds names a
+    /// `macro_rules!` unless a glob import may provide it, and with
+    /// a `macro_rules!` in textual scope hides any other, where its name is
+    /// among `hidden`.
+    fn calls_global_asm(&self, path: &[String], leading: bool, hidden: &HashSet<String>) -> bool {
+        let bare = !leading && path.len() == 1;
+        if bare && path.first().is_some_and(|name| hidden.contains(name)) {
+            return false;
+        }
+        let named = path.last().is_some_and(|name| name == "global_asm");
+        let mut resolver = Resolver::new(self.scanner, &self.blocks);
+        let resolved = resolver.path(&self.module, Namespace::Macros, path, leading);
+        let globs = || {
+            self.blocks
+                .iter()
+                .chain(resolver.module(&self.module))
+                .any(|scope| scope.globs)
+        };
+        resolved
+            .alternatives()
+            .iter()
+            .any(|resolved| match resolved {
+                Resolved::Path { krate: None, path } => canonical(path.clone()) == GLOBAL_ASM,
+                Resolved::Unknown => named && (!bare || globs()),
+                // Alternatives are never nested, so `Either` isn't one.
+                Resolved::Path { .. } | Resolved::Local | Resolved::Either(_) => false,
+            })
+    }
+
+    /// Counts a call among the items as `global_asm!` if it may be one and
+    /// is written here.
+    fn item_call(&mut self, mac: &Macro, hidden: &HashSet<String>) {
+        if self.here(mac.bang_token.span)
+            && self.calls_global_asm(
+                &segments(&mac.path),
+                mac.path.leading_colon.is_some(),
+                hidden,
+            )
+        {
+            self.scanner.scan.unsafe_code.global_asm += 1;
+        }
+    }
+
     fn unresolved(&mut self, name: &str) {
         *self
             .scanner
@@ -3507,20 +3625,22 @@ impl FileVisitor<'_, '_> {
     }
 
     /// Counts what can be seen in tokens syn can't parse as code: `unsafe`,
-    /// and calls to a name some disallowed path has. A `mod name;` there
-    /// names a file the scan doesn't load, so it is listed as unscanned. The
-    /// macros called there aren't expanded.
+    /// the attributes and `global_asm!` calls `unsafe_code` reports, and
+    /// calls to a name some disallowed path has. A `mod name;` there names a
+    /// file the scan doesn't load, so it is listed as unscanned. The macros
+    /// called there aren't expanded.
     fn tokens(&mut self, stream: TokenStream) {
-        let mut previous: Option<TokenTree> = None;
-        let mut before: Option<TokenTree> = None;
-        for tree in stream {
-            match &tree {
+        let trees: Vec<TokenTree> = stream.into_iter().collect();
+        for (index, tree) in trees.iter().enumerate() {
+            let previous = index.checked_sub(1).and_then(|index| trees.get(index));
+            let before = index.checked_sub(2).and_then(|index| trees.get(index));
+            match tree {
                 TokenTree::Ident(ident) if ident == "unsafe" && self.here(ident.span()) => {
                     self.scanner.scan.unsafe_code.in_macros += 1;
                 }
                 TokenTree::Punct(punct) if punct.as_char() == ';' => {
                     if let (Some(TokenTree::Ident(name)), Some(TokenTree::Ident(keyword))) =
-                        (&previous, &before)
+                        (previous, before)
                         && keyword == "mod"
                     {
                         self.unscanned(
@@ -3534,26 +3654,33 @@ impl FileVisitor<'_, '_> {
                 }
                 TokenTree::Group(group) => {
                     if let (Some(TokenTree::Punct(bang)), Some(TokenTree::Ident(name))) =
-                        (&previous, &before)
+                        (previous, before)
                         && bang.as_char() == '!'
                         && name != "macro_rules"
                     {
                         self.scanner.unexpanded.insert(name.unraw().to_string());
+                        if self.here(name.span())
+                            && let Some((path, leading)) =
+                                trees.get(..index.saturating_sub(1)).and_then(trailing_path)
+                            && self.calls_global_asm(&path, leading, &self.hidden)
+                        {
+                            self.scanner.scan.unsafe_code.in_macros += 1;
+                        }
                     }
                     if group.delimiter() == Delimiter::Bracket
-                        && is_attribute(previous.as_ref(), before.as_ref())
+                        && is_attribute(previous, before)
                         && self.here(group.span())
                     {
                         self.scanner.scan.unsafe_code.in_macros +=
                             self.bare_unsafe_attributes(group.stream());
                     }
                     if group.delimiter() == Delimiter::Parenthesis
-                        && let Some(TokenTree::Ident(name)) = &previous
+                        && let Some(TokenTree::Ident(name)) = previous
                         && self.here(name.span())
                     {
                         let name = name.unraw().to_string();
                         let disallowed = self.scanner.disallowed;
-                        let counts = match &before {
+                        let counts = match before {
                             Some(TokenTree::Ident(ident)) if ident == "fn" => false,
                             Some(TokenTree::Punct(punct)) if punct.as_char() == '.' => {
                                 disallowed.has_method(&name)
@@ -3568,7 +3695,6 @@ impl FileVisitor<'_, '_> {
                 }
                 _ => {}
             }
-            before = previous.replace(tree);
         }
     }
 
@@ -3733,6 +3859,35 @@ impl FileVisitor<'_, '_> {
     }
 }
 
+/// The path that ends `trees`, as the tokens before a macro call's `!` do,
+/// with whether it has a leading `::`. A `macro_rules!` body's
+/// `$crate::name` reads as `crate::name`, which it means there.
+fn trailing_path(mut trees: &[TokenTree]) -> Option<(Vec<String>, bool)> {
+    let mut path = Vec::new();
+    let leading = loop {
+        let [rest @ .., TokenTree::Ident(ident)] = trees else {
+            // A `::` that no segment comes before.
+            if path.is_empty() {
+                return None;
+            }
+            break true;
+        };
+        path.push(ident.unraw().to_string());
+        match rest {
+            [rest @ .., TokenTree::Punct(first), TokenTree::Punct(second)]
+                if first.as_char() == ':'
+                    && first.spacing() == Spacing::Joint
+                    && second.as_char() == ':' =>
+            {
+                trees = rest;
+            }
+            _ => break false,
+        }
+    };
+    path.reverse();
+    Some((path, leading))
+}
+
 /// Whether a bracketed group that follows these tokens is an attribute:
 /// `#[...]` or `#![...]`.
 fn is_attribute(previous: Option<&TokenTree>, before: Option<&TokenTree>) -> bool {
@@ -3809,6 +3964,19 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
             );
             return;
         }
+        let hidden = self
+            .scanner
+            .hidden
+            .get(&call_site(&item.mac))
+            .cloned()
+            .unwrap_or_default();
+        if item.ident.is_none() {
+            self.item_call(&item.mac, &hidden);
+            // Its input is among the items after it, with its attributes.
+            if reads_input(&item.mac) {
+                return;
+            }
+        }
         for attr in &item.attrs {
             self.visit_attribute(attr);
         }
@@ -3825,6 +3993,7 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
                         mod_dir: self.mod_dir.clone(),
                         path_dir: self.path_dir.clone(),
                         tokens: item.mac.tokens.clone(),
+                        hidden,
                     };
                     self.scanner.deferred.insert(at, deferred);
                     return;
@@ -3835,7 +4004,9 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         }
         // A `macro_rules!` definition, or an invocation whose body isn't
         // items.
+        let outer = mem::replace(&mut self.hidden, hidden);
         self.tokens(item.mac.tokens.clone());
+        self.hidden = outer;
     }
 
     fn visit_item_fn(&mut self, item: &'ast ItemFn) {
@@ -4159,16 +4330,20 @@ mod tests {
         )
         .unwrap();
         Expand.visit_file_mut(&mut file);
+        // Each call read as its input stays before its items.
         let built: Vec<(String, Truth)> = file
             .items
             .iter()
-            .map(|item| {
+            .filter_map(|item| {
                 let name = match item {
                     Item::Fn(item) => item.sig.ident.to_string(),
                     Item::Struct(item) => item.ident.to_string(),
-                    _ => panic!("an item that isn't a function or struct"),
+                    Item::Macro(call) if reads_input(&call.mac) => {
+                        return None;
+                    }
+                    _ => panic!("an item that isn't a function, struct or flattened call"),
                 };
-                (name, cfg.enabled(item_attrs(item)))
+                Some((name, cfg.enabled(item_attrs(item))))
             })
             .collect();
         let expected = [
@@ -4263,16 +4438,20 @@ mod tests {
         )
         .unwrap();
         Expand.visit_file_mut(&mut file);
+        // Each call read as its input stays before its items.
         let built: Vec<_> = file
             .items
             .iter()
-            .map(|item| {
+            .filter_map(|item| {
                 let name = match item {
                     Item::Fn(item) => item.sig.ident.to_string(),
                     Item::Struct(item) => item.ident.to_string(),
-                    _ => panic!("an item that isn't a function or struct"),
+                    Item::Macro(call) if reads_input(&call.mac) => {
+                        return None;
+                    }
+                    _ => panic!("an item that isn't a function, struct or flattened call"),
                 };
-                (name, cfg.enabled(item_attrs(item)))
+                Some((name, cfg.enabled(item_attrs(item))))
             })
             .collect();
         let expected = [
@@ -4322,6 +4501,40 @@ mod tests {
                 "{source}: {:?}",
                 file.items.len()
             );
+        }
+    }
+
+    /// The path that ends some tokens, as before a macro call's `!`.
+    #[test]
+    fn trailing_path_reads_a_path_back_from_its_end() {
+        for (source, path) in [
+            (
+                "core::arch::global_asm",
+                Some((&["core", "arch", "global_asm"][..], false)),
+            ),
+            (
+                "::std::arch::global_asm",
+                Some((&["std", "arch", "global_asm"], true)),
+            ),
+            (
+                "$crate::reexported",
+                Some((&["crate", "reexported"], false)),
+            ),
+            ("let x: ::core::name", Some((&["core", "name"], true))),
+            ("a; b::c", Some((&["b", "c"], false))),
+            ("r#global_asm", Some((&["global_asm"], false))),
+            ("x.", None),
+            ("", None),
+        ] {
+            let trees: Vec<TokenTree> =
+                source.parse::<TokenStream>().unwrap().into_iter().collect();
+            let expected = path.map(|(path, leading)| {
+                (
+                    path.iter().map(|segment| segment.to_string()).collect(),
+                    leading,
+                )
+            });
+            assert_eq!(trailing_path(&trees), expected, "{source}");
         }
     }
 
