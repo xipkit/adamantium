@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ReportFormat,
     config::Config,
-    lints::{self, CLIPPY_TOML, OVERFLOW_RULE},
+    lints::{self, CLIPPY_TOML, EXPERIMENTAL_LINTS, OVERFLOW_RULE},
     manifest, sarif,
 };
 
@@ -269,15 +269,18 @@ pub fn run(
     format: ReportFormat,
     strict: bool,
     baseline: Option<&Path>,
+    dylint_library: Option<&Path>,
 ) -> Result<ExitCode> {
     let root = manifest::root(path)?;
     let baseline = baseline.map(Baseline::load).transpose()?;
-    let report = check(
+    let report = check_selected(
         &root,
         cargo_args,
         matches!(format, ReportFormat::Text),
         strict,
         baseline,
+        None,
+        dylint_library,
     )?;
     match format {
         ReportFormat::Json => print_json(&report)?,
@@ -287,6 +290,11 @@ pub fn run(
         ))?,
         ReportFormat::Text => {
             let mut stderr = io::stderr().lock();
+            for error in &report.errors {
+                if error.file.is_none() {
+                    writeln!(stderr, "error: {}", error.message)?;
+                }
+            }
             let note = left_out_note(&report);
             match report.status {
                 Status::Clean => writeln!(stderr, "adamantium: clean{note}")?,
@@ -383,7 +391,19 @@ pub(crate) fn check_with_suggestions(
     echo: bool,
     strict: bool,
     baseline: Option<Baseline>,
+    diagnostics: Option<&mut Vec<serde_json::Value>>,
+) -> Result<Report> {
+    check_selected(root, cargo_args, echo, strict, baseline, diagnostics, None)
+}
+
+fn check_selected(
+    root: &Path,
+    cargo_args: &[String],
+    echo: bool,
+    strict: bool,
+    baseline: Option<Baseline>,
     mut diagnostics: Option<&mut Vec<serde_json::Value>>,
+    dylint_library: Option<&Path>,
 ) -> Result<Report> {
     let config = Config::load(root)?;
     let conf = tempfile::tempdir().context("creating a directory for clippy.toml")?;
@@ -393,7 +413,10 @@ pub(crate) fn check_with_suggestions(
     command
         .current_dir(root)
         .env("CLIPPY_CONF_DIR", conf.path())
-        .args(["clippy", "--all-targets", "--message-format=json"]);
+        .args(["clippy", "--message-format=json"]);
+    if !selects_targets(cargo_args) {
+        command.arg("--all-targets");
+    }
     // Cargo checks only the root package unless told otherwise, which would
     // skip every other workspace member.
     if !selects_packages(cargo_args) {
@@ -410,16 +433,27 @@ pub(crate) fn check_with_suggestions(
     for lint in lints::selected(strict) {
         command.args(["-W", &lint.qualified()]);
     }
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    let mut child = command.spawn().context("running cargo clippy")?;
-    let stdout = child.stdout.take().context("capturing cargo's output")?;
-
-    let rules: HashSet<String> = lints::selected(strict)
+    let mut commands = vec![command];
+    let mut sorted = Sorted {
+        baseline,
+        ..Sorted::default()
+    };
+    if let Some(library) = dylint_library {
+        match dylint_command(root, cargo_args, library) {
+            Ok(command) => commands.push(command),
+            Err(error) => sorted.errors.push(Problem {
+                message: format!("experimental check incomplete: {error:#}"),
+                file: None,
+                line: None,
+            }),
+        }
+    }
+    let mut rules: HashSet<String> = lints::selected(strict)
         .map(lints::Lint::qualified)
         .collect();
+    if dylint_library.is_some() {
+        rules.extend(EXPERIMENTAL_LINTS.iter().map(|name| (*name).to_owned()));
+    }
     let setting = Setting {
         root,
         clippy_config: &clippy_config,
@@ -427,37 +461,63 @@ pub(crate) fn check_with_suggestions(
         rules: &rules,
         echo,
     };
-    let mut sorted = Sorted {
-        baseline,
-        ..Sorted::default()
-    };
-    let mut built = false;
-    for line in BufReader::new(stdout).lines() {
-        let line = line.context("reading cargo's output")?;
-        let Ok(parsed) = parse_cargo_line(&line) else {
-            continue;
+    let mut complete = true;
+    for mut command in commands {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                sorted.errors.push(Problem {
+                    message: format!("check incomplete: {error}"),
+                    file: None,
+                    line: None,
+                });
+                complete = false;
+                continue;
+            }
         };
-        match parsed.reason.as_str() {
-            "compiler-message" => {
-                if let Some(diagnostic) = parsed.message {
-                    let before = sorted.findings.len();
-                    classify(diagnostic, &setting, &mut sorted);
-                    if sorted.findings.len() > before
+        let stdout = child.stdout.take().context("capturing cargo's output")?;
+        let mut built = false;
+        for line in BufReader::new(stdout).lines() {
+            let line = line.context("reading cargo's output")?;
+            let Ok(parsed) = parse_cargo_line(&line) else {
+                continue;
+            };
+            match parsed.reason.as_str() {
+                "compiler-message" => {
+                    if let Some(diagnostic) = parsed.message {
+                        let before = sorted.findings.len();
+                        classify(diagnostic, &setting, &mut sorted);
+                        if sorted.findings.len() > before
                         && let Some(diagnostics) = diagnostics.as_mut()
                         // Deep macro diagnostics are still reported by check,
                         // but are never candidates for source fixes.
                         && let Ok(raw) = serde_json::from_str::<serde_json::Value>(&line)
                         && let Some(message) = raw.get("message")
-                    {
-                        diagnostics.push(message.clone());
+                        {
+                            diagnostics.push(message.clone());
+                        }
                     }
                 }
+                "build-finished" => built = parsed.success.unwrap_or(false),
+                _ => {}
             }
-            "build-finished" => built = parsed.success.unwrap_or(false),
-            _ => {}
+        }
+        let exit = child.wait().context("waiting for checker")?;
+        if !built || !exit.success() {
+            complete = false;
+            sorted.errors.push(Problem {
+                message: format!(
+                    "check incomplete: compiler or lint driver did not finish successfully ({exit})"
+                ),
+                file: None,
+                line: None,
+            });
         }
     }
-    let exit = child.wait().context("waiting for cargo clippy")?;
 
     let overflow_unchecked = !manifest::release_checks_overflow(root)?;
     if overflow_unchecked && config.skips(OVERFLOW_RULE, "Cargo.toml") {
@@ -489,7 +549,7 @@ pub(crate) fn check_with_suggestions(
         errors,
         ..
     } = sorted;
-    let status = if !errors.is_empty() || (findings.is_empty() && (!built || !exit.success())) {
+    let status = if !errors.is_empty() || !complete {
         Status::Error
     } else if findings.is_empty() {
         Status::Clean
@@ -517,6 +577,56 @@ fn parse_cargo_line(line: &str) -> serde_json::Result<CargoLine> {
     let parsed = CargoLine::deserialize(serde_stacker::Deserializer::new(&mut deserializer))?;
     deserializer.end()?;
     Ok(parsed)
+}
+
+/// Uses only the library explicitly selected by the caller, ignoring consumer
+/// Dylint metadata. Setup failures never turn into a Clippy-only clean result.
+fn dylint_command(root: &Path, cargo_args: &[String], library: &Path) -> Result<Command> {
+    let library = library
+        .canonicalize()
+        .context("resolving the Dylint library; build lints/ first")?;
+    anyhow::ensure!(library.is_file(), "Dylint library is not a file");
+    let listed = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .current_dir(root)
+        .args(["dylint", "list", "--no-metadata", "--lib-path"])
+        .arg(&library)
+        .stdin(Stdio::null())
+        .output()
+        .context("loading the experimental lints; install cargo-dylint 6.4.0 first")?;
+    anyhow::ensure!(
+        listed.status.success(),
+        "loading the experimental lints: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listing = String::from_utf8_lossy(&listed.stdout);
+    for lint in EXPERIMENTAL_LINTS {
+        anyhow::ensure!(
+            listing.split_whitespace().any(|word| word == *lint),
+            "Dylint library does not register {lint}"
+        );
+    }
+    let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    command
+        .current_dir(root)
+        .args(["dylint", "--no-metadata", "--lib-path"])
+        .arg(library)
+        .args(["--", "--message-format=json"]);
+    if !selects_targets(cargo_args) {
+        command.arg("--all-targets");
+    }
+    if !selects_packages(cargo_args) {
+        command.arg("--workspace");
+    }
+    command.args(cargo_args);
+    // Dylint passes these to rustc, not Cargo. Keep consumer RUSTFLAGS for
+    // target/cfg selection; force our warnings even under crate-level denies.
+    let mut flags = String::from("--cap-lints warn");
+    for lint in EXPERIMENTAL_LINTS {
+        flags.push_str(" -W ");
+        flags.push_str(lint);
+    }
+    command.env("DYLINT_RUSTFLAGS", flags);
+    Ok(command)
 }
 
 /// What `classify` needs to know about the run.
@@ -564,6 +674,27 @@ fn selects_packages(cargo_args: &[String]) -> bool {
             arg.as_str(),
             "-p" | "--package" | "--workspace" | "--all" | "--exclude"
         ) || arg.starts_with("--package=")
+            || (arg.starts_with("-p") && arg.len() > 2)
+    })
+}
+
+fn selects_targets(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--all-targets"
+                | "--lib"
+                | "--bin"
+                | "--bins"
+                | "--example"
+                | "--examples"
+                | "--test"
+                | "--tests"
+                | "--bench"
+                | "--benches"
+        ) || ["--bin=", "--example=", "--test=", "--bench="]
+            .iter()
+            .any(|prefix| arg.starts_with(prefix))
     })
 }
 

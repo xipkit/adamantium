@@ -219,31 +219,13 @@ fn rejects_actor_reused_between_iterations() {
 }
 
 #[test]
-fn unsupported_primitives_cannot_silently_use_production_backends() {
-    assert!(
-        testing::check(config(), || async {
-            let _channel = Channel::<u8>::bounded(1);
-        })
-        .is_err()
-    );
-    assert!(
-        testing::check(config(), || async {
-            let _tasks = Tasks::<()>::new();
-        })
-        .is_err()
-    );
-    assert!(
-        testing::check(config(), || async {
-            let _cancel = Cancellation::new();
-        })
-        .is_err()
-    );
-    assert!(
-        testing::check(config(), || async {
-            adamantium::blocking(|| ()).await;
-        })
-        .is_err()
-    );
+fn supported_primitives_select_the_model_and_reject_foreign_channels() {
+    testing::check(config(), || async {
+        let _tasks = Tasks::<()>::new();
+        let _cancel = Cancellation::new();
+        assert_eq!(adamantium::blocking(|| 42).await, 42);
+    })
+    .unwrap();
     let channel = Arc::new(Channel::bounded(1));
     assert!(
         testing::check(config(), move || {
@@ -504,7 +486,7 @@ fn foreign_receiver_stream_cannot_bypass_the_harness_boundary() {
 }
 
 #[test]
-fn replies_and_watches_reject_the_harness() {
+fn replies_and_watches_support_the_model_and_reject_foreign_handles() {
     /// Runs `body` once in the harness with a value made outside it, and
     /// returns how the execution failed.
     fn carried_in<V: Send + 'static>(value: V, body: fn(V)) -> FailureKind {
@@ -523,18 +505,16 @@ fn replies_and_watches_reject_the_harness() {
         .kind()
     }
 
-    assert!(
-        testing::check(config(), || async {
-            let _reply = Reply::<u8>::pair();
-        })
-        .is_err()
-    );
-    assert!(
-        testing::check(config(), || async {
-            let _watch = Watch::new(0);
-        })
-        .is_err()
-    );
+    testing::check(config(), || async {
+        let (reply, answer) = Reply::pair();
+        reply.send(42).unwrap();
+        assert_eq!(answer.receive().await, Some(42));
+        let watch = Watch::new(0);
+        let mut watcher = watch.subscribe();
+        watch.send(7).unwrap();
+        assert_eq!(watcher.receive().await, Some(7));
+    })
+    .unwrap();
 
     let (reply, answer) = Reply::<String>::pair();
     assert_eq!(
@@ -543,7 +523,7 @@ fn replies_and_watches_reject_the_harness() {
     );
     assert_eq!(
         answer.try_receive(),
-        Err(TryReceiveError::Closed),
+        Err(TryReceiveError::Empty),
         "nothing was sent from the harness"
     );
     assert_eq!(

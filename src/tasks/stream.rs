@@ -204,7 +204,8 @@ where
 {
     let mut items = items.into_iter().fuse();
     let limit = limit.max(1);
-    async_stream::stream! {
+    let world = crate::runtime::World::current();
+    let stream = async_stream::stream! {
         let mut tasks = Tasks::new();
         let results = shared(results);
         let mut started = 0usize;
@@ -281,5 +282,6 @@ where
         if let Some(error) = terminal {
             yield Err(error);
         }
-    }
+    };
+    crate::runtime::in_world_stream(world, stream)
 }

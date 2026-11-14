@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use event_listener::Event;
+use crate::runtime::wait::WaitQueue;
 #[cfg(feature = "tokio")]
 use tokio::time::Instant;
 
@@ -10,7 +10,7 @@ use crate::ReceiveError;
 use crate::tasks::{Cancellation, Shutdown, shutdown};
 use crate::{
     Closed, TryReceiveError,
-    runtime::{Guard, Lock},
+    runtime::{Guard, Lock, World},
 };
 
 /// The latest value of some state, such as configuration, that tasks can
@@ -61,8 +61,6 @@ pub struct Watch<T> {
 /// never returns the same one twice. A clone starts having seen what the
 /// original has seen, and from then on keeps its own place.
 pub struct Watcher<T> {
-    #[cfg(feature = "deterministic")]
-    _runtime: crate::runtime::execution::Production,
     shared: Arc<Shared<T>>,
     seen: u64,
 }
@@ -71,8 +69,9 @@ struct Shared<T> {
     /// Held only inside this module's synchronous methods, which run no
     /// caller code but `T::clone` and `T::fmt`.
     state: Lock<State<T>>,
+    world: World,
     /// Notified on every send and on close.
-    changed: Event,
+    changed: WaitQueue,
 }
 
 struct State<T> {
@@ -94,7 +93,7 @@ impl<T> Shared<T> {
     /// panic cancels its signal.
     fn lock(&self) -> Guard<'_, State<T>> {
         if !std::thread::panicking() {
-            crate::runtime::production_only("Watch");
+            self.world.check();
         }
         self.state.lock()
     }
@@ -107,7 +106,7 @@ impl<T> Shared<T> {
         let was_open = !std::mem::replace(&mut state.closed, true);
         drop(state);
         if was_open {
-            self.changed.notify(usize::MAX);
+            self.changed.notify_all();
         }
         was_open
     }
@@ -116,16 +115,16 @@ impl<T> Shared<T> {
 impl<T> Watch<T> {
     /// A watch holding `value`.
     pub fn new(value: T) -> Self {
-        crate::runtime::production_only("Watch");
         Self {
             shared: Arc::new(Shared {
+                world: World::current(),
                 state: Lock::new(State {
                     value,
                     version: 0,
                     closed: false,
                     watches: 1,
                 }),
-                changed: Event::new(),
+                changed: WaitQueue::new(),
             }),
         }
     }
@@ -143,7 +142,7 @@ impl<T> Watch<T> {
             state.version = state.version.wrapping_add(1);
             std::mem::replace(&mut state.value, value)
         };
-        self.shared.changed.notify(usize::MAX);
+        self.shared.changed.notify_all();
         // The old value's destructor is the caller's code, so it runs after
         // the lock is released, and after the wake in case it panics.
         drop(old);
@@ -154,8 +153,6 @@ impl<T> Watch<T> {
     /// [`receive`](Watcher::receive) waits for the next send.
     pub fn subscribe(&self) -> Watcher<T> {
         Watcher {
-            #[cfg(feature = "deterministic")]
-            _runtime: crate::runtime::execution::Production("Watch"),
             shared: Arc::clone(&self.shared),
             seen: self.shared.lock().version,
         }
@@ -210,7 +207,7 @@ impl<T: Clone> Watcher<T> {
     ///
     /// Dropping the returned future loses nothing: the value stays unseen.
     pub async fn receive(&mut self) -> Option<T> {
-        crate::runtime::production_future("Watch", async move {
+        crate::runtime::in_world(self.shared.world, async move {
             loop {
                 if let Some(received) = self.check() {
                     return received;
@@ -282,7 +279,7 @@ impl<T: Clone> Watcher<T> {
         cancellation: &Cancellation,
         deadline: Option<Instant>,
     ) -> Result<T, ReceiveError> {
-        crate::runtime::production_future("Watch", async move {
+        crate::runtime::in_world(self.shared.world, async move {
             let reason = tokio::select! {
                 biased;
                 reason = shutdown(cancellation, deadline) => reason,
@@ -326,6 +323,12 @@ impl<T> Clone for Watch<T> {
 
 impl<T> Drop for Watch<T> {
     fn drop(&mut self) {
+        if std::thread::panicking()
+            && self.shared.world.is_model()
+            && self.shared.world != World::current()
+        {
+            return;
+        }
         let mut state = self.shared.lock();
         state.watches = state.watches.saturating_sub(1);
         if state.watches == 0 {
@@ -336,10 +339,8 @@ impl<T> Drop for Watch<T> {
 
 impl<T> Clone for Watcher<T> {
     fn clone(&self) -> Self {
-        crate::runtime::production_only("Watch");
+        self.shared.world.step();
         Self {
-            #[cfg(feature = "deterministic")]
-            _runtime: crate::runtime::execution::Production("Watch"),
             shared: Arc::clone(&self.shared),
             seen: self.seen,
         }
@@ -366,7 +367,7 @@ fn debug_state<T: fmt::Debug>(
 ) -> fmt::Result {
     // `try_lock`, as in `Actor`'s `Debug`, so formatting from inside
     // `T::clone` or `T::fmt` can't deadlock.
-    crate::runtime::production_only("Watch");
+    shared.world.check();
     let Some(state) = shared.state.try_lock() else {
         return write!(f, "{name}(<in use>)");
     };
@@ -376,4 +377,10 @@ fn debug_state<T: fmt::Debug>(
         debug.field("changed", &(state.version != seen));
     }
     debug.field("closed", &state.closed).finish()
+}
+
+impl<T> Drop for Watcher<T> {
+    fn drop(&mut self) {
+        self.shared.world.step_unless_panicking();
+    }
 }

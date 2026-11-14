@@ -30,7 +30,9 @@ use crate::runtime::{Lock, Shared};
 /// ```
 ///
 /// Work that waits, such as a network call, happens in a task; the actor
-/// records its result afterwards.
+/// records its result afterwards. With the `tokio` feature, `AsyncActor`
+/// provides a mailbox worker for state that must stay exclusively owned
+/// across an await, such as a connection with an in-flight exchange.
 ///
 /// Clones share ownership of the state. Storing a clone in its own state,
 /// directly or through other actors, creates a strong reference cycle that

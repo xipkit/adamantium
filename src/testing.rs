@@ -1,8 +1,12 @@
 //! Deterministic interleaving tests, enabled by the `deterministic` feature.
 //!
-//! This first stage models [`crate::Actor`]. [`parallel`] supplies independent
-//! workers while Channel, Reply, Watch, Tasks, Cancellation and virtual time
-//! are implemented in follow-up work. Those production primitives reject use in this harness.
+//! Models [`crate::Actor`], [`crate::Channel`], [`crate::Reply`], [`crate::Watch`],
+//! [`crate::Tasks`] and [`crate::Cancellation`], including concurrent maps and
+//! streams, result claiming, panic transport, scope abort and draining.
+//! [`parallel`] also supplies independent workers. Blocking closures model the
+//! queued/started boundary: abort can prevent entry, but started work finishes.
+//! Replace actual blocking I/O with fixtures using modeled primitives.
+//! Virtual time and OS signals remain unsupported; pass `None` for deadlines.
 //! Outside a harness execution, enabling the feature leaves production behavior
 //! intact, including ordinary `#[tokio::test]` tests in the same build.
 //!
@@ -256,7 +260,7 @@ where
 
 /// Runs independent test workers and joins their results in input order.
 ///
-/// Only usable inside this harness. This is an Actor test fixture, not a model
+/// Only usable inside this harness. This is a primitive test fixture, not a model
 /// of Tasks' error/cancellation semantics. A worker panic fails the execution.
 /// Each worker must own its inputs, as a spawned production task does.
 pub async fn parallel<I, F>(workers: I) -> Vec<F::Output>
@@ -357,6 +361,9 @@ where
         replaying: original.is_some(),
     };
     let mut engine = shuttle::Config::default();
+    // Nested scope/select/cleanup polls exceed Shuttle's 60 KiB default in
+    // Rust 1.88 debug builds. Match an ordinary worker's 2 MiB stack budget.
+    engine.stack_size = 2 * 1024 * 1024;
     engine.max_steps = shuttle::MaxSteps::FailAfter(config.max_steps);
     engine.failure_persistence = shuttle::FailurePersistence::None;
     engine

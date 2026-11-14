@@ -1,6 +1,8 @@
 [workspace]
 members = ["cli"]
 exclude = [
+    "lints",
+    "lints/fixtures",
     "cli/tests/fixtures/violations",
     "cli/tests/fixtures/clean",
     "cli/tests/fixtures/workspace",
@@ -82,7 +84,7 @@ deterministic = ["tokio", "dep:shuttle", "dep:shuttle-engine", "dep:shuttle-std"
 tracing = ["dep:tracing"]
 
 [dependencies]
-async-channel = "2"
+concurrent-queue = "2"
 event-listener = "5"
 async-stream = { version = "0.3", optional = true }
 futures-core = { version = "0.3", optional = true }
@@ -105,7 +107,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 im = "=15.1.0"
 serde_json = "1"
 serde_yaml = "0.9"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time", "test-util"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt"] }
 
 [[bench]]
@@ -120,8 +122,17 @@ required-features = ["tokio"]
 name = "task_diagnostics"
 required-features = ["tokio", "tracing"]
 
+[[example]]
+name = "async_actor"
+required-features = ["tokio"]
+
 [profile.release]
 overflow-checks = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "channel"
+harness = false
+required-features = ["tokio"]
