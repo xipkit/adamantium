@@ -179,7 +179,7 @@ on_both_runtimes! {
         let cancel = Cancellation::new();
         let token = cancel.clone();
         let (started, running) = oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::sync_channel(1);
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = Dropped(dropped.clone());
         let mut tasks = Tasks::new();
@@ -222,7 +222,7 @@ on_both_runtimes! {
     async fn blocking_panic_during_cleanup_wins_and_drains_siblings() {
         let cancel = Cancellation::new();
         let (started, running) = oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::sync_channel(1);
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = Dropped(dropped.clone());
         let mut tasks = Tasks::<&str>::new();
@@ -254,7 +254,7 @@ on_both_runtimes! {
         let cancel = Cancellation::new();
         let token = cancel.clone();
         let (started, running) = oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::sync_channel(1);
         let (finished, complete) = oneshot::channel();
         let mut scope = Box::pin(Tasks::<&str>::run_until(cancel.clone(), None, async |t| {
             t.spawn_blocking(move || {
@@ -305,7 +305,7 @@ on_both_runtimes! {
         for use_value in [false, true] {
             let cancel = Cancellation::new();
             let (started, running) = oneshot::channel();
-            let (release, released) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::sync_channel(1);
             let (fail, failure) = oneshot::channel();
             let mut scope = Box::pin(Tasks::<&str>::run_until(cancel.clone(), None, async move |t| {
                 t.spawn_blocking(move || {
@@ -345,7 +345,7 @@ on_both_runtimes! {
     async fn body_panic_signals_shutdown_without_waiting_for_blocking_work() {
         let cancel = Cancellation::new();
         let (started, running) = oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::sync_channel(1);
         let (finished, complete) = oneshot::channel();
         let scope = Tasks::<&str>::run_until(cancel.clone(), None, async move |t| {
             t.spawn_blocking(move || {
@@ -379,7 +379,7 @@ fn cancellation_prevents_queued_blocking_work_from_starting() {
     runtime.block_on(async {
         let cancel = Cancellation::new();
         let (started, running) = oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::sync_channel(1);
         let queued_ran = Arc::new(AtomicBool::new(false));
         let ran = queued_ran.clone();
         let mut tasks = Tasks::<&str>::new();
@@ -435,7 +435,7 @@ async fn deadline_interrupts_body_and_drains_children() {
 async fn deadline_during_join_waits_for_blocking_cleanup_and_keeps_its_reason() {
     let cancel = Cancellation::new();
     let (started, running) = oneshot::channel();
-    let (release, released) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::sync_channel(1);
     let deadline = time::now() + Duration::from_secs(10);
     let mut tasks = Tasks::<&str>::new();
     tasks.spawn_blocking(move || {

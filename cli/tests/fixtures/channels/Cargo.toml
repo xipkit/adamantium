@@ -1,0 +1,20 @@
+# Unbounded constructors beside their bounded alternatives. Each line that
+# must be reported ends in `// disallowed`. Its own workspace, so Cargo does
+# not look for a parent.
+[workspace]
+
+[package]
+name = "channels"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+adamantium = { path = "../../../..", default-features = false }
+async-channel = "2"
+crossbeam-channel = "0.5"
+flume = "0.12"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[profile.release]
+overflow-checks = true

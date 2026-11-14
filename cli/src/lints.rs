@@ -223,9 +223,9 @@ async fn example() {
     ),
     clippy(
         "disallowed_methods",
-        "panicking index methods, broadcast channels, unstructured spawns, blocking calls, clocks outside adamantium::time, leaks and weak references, listed in clippy.toml",
+        "panicking index methods, unbounded and broadcast channels, unstructured spawns, blocking calls, clocks outside adamantium::time, leaks and weak references, listed in clippy.toml",
         example(
-            "Use adamantium::Array::remove/insert and split_at_checked for checked index operations, one adamantium::Channel per receiver to broadcast, Tasks::run and Tasks::spawn for scoped tasks, adamantium::blocking for blocking work, and adamantium::time::sleep or sleep_until for timers. Build deadlines with adamantium::time::now and periodic waits with a loop over adamantium::time::sleep_until. Drop resources instead of leaking them; use owned values instead of weak references.",
+            "Use adamantium::Array::remove/insert and split_at_checked for checked index operations, adamantium::Channel for bounded channels and one Channel per receiver to broadcast, Tasks::run and Tasks::spawn for scoped tasks, adamantium::blocking for blocking work, and adamantium::time::sleep or sleep_until for timers. Build deadlines with adamantium::time::now and periodic waits with a loop over adamantium::time::sleep_until. Drop resources instead of leaking them; use owned values instead of weak references.",
             r#"async fn example() -> Result<u32, tokio::task::JoinError> {
     let task = tokio::spawn(async { 42 });
     task.await
