@@ -20,17 +20,17 @@ use syn::{
 };
 
 /// The rules of a `macro_rules!`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Rules(Vec<Rule>);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Rule {
     matcher: Vec<Matcher>,
     transcriber: Vec<Transcribed>,
 }
 
 /// A part of a rule's matcher.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Matcher {
     /// A token the input must have there.
     Token(Token),
