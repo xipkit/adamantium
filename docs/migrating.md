@@ -352,11 +352,20 @@ checking.with(|from| {
 
 ## Tasks
 
-A task spawned in a `Tasks` scope can't outlive the scope: the scope's future
-finishes only after every task in it has. A task returns `Result<T, E>`. The
-first error aborts the other tasks and is returned from the scope, and a
-panic in a task resumes in the scope. The `JoinError` that a Tokio
-`JoinHandle` returns, and the `unwrap` that usually follows it, go away.
+A task spawned in a `Tasks` scope can't outlive the scope: when the scope's
+future finishes, every task in it has finished too. A task returns
+`Result<T, E>`, and a panic in a task resumes in the scope. The `JoinError`
+that a Tokio `JoinHandle` returns, and the `unwrap` that usually follows it,
+go away.
+
+A task's error ends the scope, aborting the other tasks, once the scope sees
+it: when `value` returns it to the body and the body passes it on, or when the
+body has returned and the scope joins. Until then a failed task doesn't
+interrupt the body. A body waiting on `value` for a task that never finishes
+keeps waiting after a sibling fails, so bound such waits with `run_until`.
+
+Dropping a scope's future before it finishes, such as by aborting the task that
+awaits it, requests aborts of its tasks but can't wait for them.
 
 ### Spawning and awaiting the handle
 
@@ -403,9 +412,9 @@ async fn main() -> Result<(), std::io::Error> {
 Wrap the code that spawns and awaits in `Tasks::run`, change `tokio::spawn(f)`
 to `t.spawn(f)`, and change `handle.await` to `t.value(handle).await`. One
 behavior changes: when `profile` fails, `feed` is aborted, where before it ran
-on detached. If a handle was returned or stored
-instead of awaited, the rewrite has to move the scope up to where the task
-should end.
+on detached. A failure of `feed` is seen only once `profile` finishes and the
+body asks for `feed`, as before. If a handle was returned or stored instead of
+awaited, the rewrite has to move the scope up to where the task should end.
 
 A task's future must return a `Result`. For work that can't fail, name the
 error type `Infallible` and destructure the result:
