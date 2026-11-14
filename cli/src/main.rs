@@ -1,5 +1,6 @@
 mod check;
 mod config;
+mod deps;
 mod lints;
 mod manifest;
 mod sarif;
@@ -55,6 +56,19 @@ enum Command {
         /// Include the strict rules, starting with arithmetic_side_effects.
         #[arg(long)]
         strict: bool,
+    },
+    /// Report which dependencies use unsafe code or call the paths that
+    /// clippy.toml disallows, such as task spawns.
+    Deps {
+        /// The project directory, or its Cargo.toml.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = deps::Format::Text)]
+        format: deps::Format,
+        /// Arguments passed on to `cargo metadata` and `cargo tree`, such as `--features` or
+        /// `--all-features`.
+        #[arg(last = true)]
+        cargo_args: Vec<String>,
     },
     /// Print the rules.
     Rules {
@@ -188,6 +202,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Command::Deps {
+            path,
+            format,
+            cargo_args,
+        } => deps::run(&path, format, &cargo_args),
         Command::Style(command) => style::run(command),
         Command::Explain { rule, format } => {
             let explanation = Explanation::for_rule(&rule)?;

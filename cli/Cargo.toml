@@ -18,9 +18,11 @@ fastrand = "2"
 globset = "0.4"
 httpdate = "1"
 ignore = "0.4"
+proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
+syn = { version = "3", default-features = false, features = ["clone-impls", "full", "parsing", "visit", "visit-mut"] }
 tempfile = "3"
 toml_edit = "0.25"
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }

@@ -38,6 +38,7 @@ cargo adamantium init               # write the rules into Cargo.toml and clippy
 cargo adamantium rules              # list the rules and why each exists
 cargo adamantium explain unwrap_used # show why a rule exists and how to fix it
 cargo adamantium explain clippy::rc_buffer --format json
+cargo adamantium deps               # show which dependencies use unsafe code or spawn tasks
 ```
 
 `check` runs `cargo clippy --all-targets` with Adamantium's rules and `clippy.toml`. It disables Clippy's default lints and runs the rules as warnings, allowing crates with findings and their dependents to be checked. It checks every workspace member unless arguments after `--` select packages; those arguments are passed to `cargo clippy`.
@@ -80,6 +81,23 @@ cargo adamantium rules --strict              # also supports --format json or to
 The strict tier starts with [`arithmetic_side_effects`](https://clippy.rust-lang.org/master/index.html#arithmetic_side_effects). It flags arithmetic operators that can overflow or panic, including integer division and negation. Use methods such as `checked_add`, `checked_div`, `saturating_add`, or `wrapping_add` to make the intended behavior explicit. Clippy recognizes some safe operations, but cannot prove every application's arithmetic bounds, so this tier is opt-in.
 
 `init --strict` adds the strict lint levels to the project's tables so plain `cargo clippy` applies them. Keep passing `--strict` to `check` in CI to include those rules in Adamantium's reports. Repeating `init --strict` makes no changes; running `init` afterward preserves previously added strict lint levels. The same skip lists apply to both tiers.
+
+### Dependencies
+
+The rules stop at the crate boundary. `deps` shows what a project's guarantees rest on beyond it: which dependencies use `unsafe` code, and which call the paths that `clippy.toml` disallows, such as `tokio::spawn`, `std::thread::spawn`, `std::thread::sleep` and `std::mem::forget`.
+
+```sh
+cargo adamantium deps
+cargo adamantium deps --format json -- --all-features
+```
+
+It reads the paths from the same `clippy.toml` that `check` applies, so the report and the rules cover the same calls. It takes the dependencies from `cargo metadata` for the host target, leaving out workspace members and dev-dependencies, and reads each library's source with syn, without building it. Arguments after `--` go to `cargo metadata` and `cargo tree`, to choose features. Features come from a normal build: features that only dev-dependencies turn on, and the packages they pull in, are left out, and a feature that is on in only some of the builds of a package, such as its build for a build script, is treated as unknown. Runtime dependencies are listed apart from the ones that only run while compiling: build dependencies, procedural macros, and what only they depend on.
+
+For each dependency, the report counts `unsafe` functions, blocks, impls and traits, and `unsafe` in macro bodies that syn can't parse, such as `macro_rules!` definitions. It notes a library that forbids `unsafe_code`, by attribute or in its manifest's `[lints]`. It lists each disallowed path the dependency uses, with the file, line and column of each use.
+
+The scan follows the library's module tree, so tests, examples and benches are left out. It evaluates `cfg` with the resolved features and the host target. Code behind a configuration that can't be known before building, such as `debug_assertions` or a `--cfg` that a build script sets, is counted. Paths are resolved through `use` items, re-exports within the crate, and macro bodies that parse as items, statements or expressions. A call that can't be tied to a path is counted by name as unresolved instead: a method call on a value, a name that a glob import may provide, a call in a macro body that doesn't parse, or a path into a crate that no entry names, which may re-export a disallowed item. Unresolved counts therefore include method calls such as `insert` and `remove` on any type. Source that can't be read is listed as unscanned with the reason, such as an `include!` of generated code, a missing module file, or a `#[path]` that depends on an unknown `cfg`. Code that a procedural macro generates is not seen.
+
+The text report prints a table and then each dependency's calls on stdout. With `--format json`, it prints an object with `schema_version: 1`, `root`, `target`, and a `dependencies` array. Each dependency has `name`, `version`, `source`, `kind` (`runtime` or `build`), `forbids_unsafe`, the `unsafe` counts, `calls` with each path's `reason` and `sites`, `unresolved` counts by name, and `unscanned`. The exit status is `0` when the report is printed and `2` on an error.
 
 ## Skipping rules and paths
 
@@ -454,7 +472,7 @@ Tokio's `Semaphore` is allowed, and so is holding a permit across an await, beca
 
 Tests are exempt from the panic rules, so `unwrap`, indexing, and `panic!` are allowed in `#[test]` functions and `#[cfg(test)]` modules. Before Rust 1.100, Clippy does not treat helper functions in integration test files as tests, so those functions follow the rules. From Rust 1.100, they are exempt as well.
 
-The rules have limits. A plain `receive` or `send` can wait indefinitely while the channel stays open and empty or full; use `receive_until` or `send_until` to bound the wait with a `Cancellation` or a deadline. Dependencies can still use unsafe code or panic, and Clippy cannot detect every call that blocks a worker thread. `Runtime::block_on` is allowed because `#[tokio::main]` and `#[tokio::test]` expand to it; called inside a runtime, it panics at run time instead of blocking. The default tier permits arithmetic that can panic; the strict tier lints potentially panicking arithmetic operators. Neither tier prevents stack exhaustion or panics inside called methods.
+The rules have limits. A plain `receive` or `send` can wait indefinitely while the channel stays open and empty or full; use `receive_until` or `send_until` to bound the wait with a `Cancellation` or a deadline. Dependencies can still use unsafe code or panic; [`cargo adamantium deps`](#dependencies) shows which use `unsafe` or call disallowed paths. Clippy cannot detect every call that blocks a worker thread. `Runtime::block_on` is allowed because `#[tokio::main]` and `#[tokio::test]` expand to it; called inside a runtime, it panics at run time instead of blocking. The default tier permits arithmetic that can panic; the strict tier lints potentially panicking arithmetic operators. Neither tier prevents stack exhaustion or panics inside called methods.
 
 Atomics and `OnceLock` and `LazyLock` statics are allowed. An atomic holds no guard across an await and can't deadlock, so it suits a single counter or flag; Clippy can't see a check-then-act spread over two atomics, so state whose parts must agree belongs in one `Actor`. A `OnceLock` or `LazyLock` static is set once, but whatever in it can still change, such as an `Actor`, is outside every scope and shared by every task and every test in the binary. Prefer passing an `Actor` to the tasks that use it.
 

@@ -1,0 +1,32 @@
+# Path dependencies that stand in for real crates, for `cargo adamantium deps`.
+# Its own workspace, so Cargo does not look for a parent, and the crates
+# under vendor/ are dependencies rather than members.
+[workspace]
+exclude = ["vendor"]
+
+[package]
+name = "app"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[features]
+off = ["spawner/off"]
+
+[dependencies]
+codegen = { path = "vendor/codegen" }
+old = { path = "vendor/old" }
+safe = { path = "vendor/safe" }
+spawner = { path = "vendor/spawner", features = ["on"] }
+
+[build-dependencies]
+builder = { path = "vendor/builder" }
+
+# Inactive on the hosts the tests run on, so builder stays build-only.
+[target.'cfg(any(windows, target_pointer_width = "8"))'.dependencies]
+builder = { path = "vendor/builder" }
+
+[dev-dependencies]
+devonly = { path = "vendor/devonly" }
+# Only tests turn on `dev`, so a normal build leaves it and `testonly` out.
+spawner = { path = "vendor/spawner", features = ["on", "dev"] }
