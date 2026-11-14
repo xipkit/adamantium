@@ -221,7 +221,7 @@ fn shared_state_fixture(name: &str) -> String {
 #[test]
 fn shared_state_rewrites_build_pass_check_and_keep_behavior() {
     let source = shared_state_fixture("rewrite.rs");
-    let dir = project(&source);
+    let dir = binary(&source);
     // An actor needs no runtime, so the rewrite works without the `tokio`
     // feature.
     let manifest = dir.path().join("Cargo.toml");
@@ -241,7 +241,7 @@ fn shared_state_rewrites_build_pass_check_and_keep_behavior() {
         .collect::<Vec<_>>()
         .join("\n");
     fs::write(manifest, text).unwrap();
-    let file = dir.path().join("src/lib.rs");
+    let file = dir.path().join("src/main.rs");
 
     let preview = run(&["fix", "--dry-run"], dir.path());
     assert_eq!(
@@ -252,7 +252,7 @@ fn shared_state_rewrites_build_pass_check_and_keep_behavior() {
     );
     let diff = String::from_utf8(preview.stdout).unwrap();
     assert!(
-        diff.starts_with("--- a/src/lib.rs\n+++ b/src/lib.rs\n@@"),
+        diff.starts_with("--- a/src/main.rs\n+++ b/src/main.rs\n@@"),
         "{diff}"
     );
     assert!(
@@ -306,6 +306,9 @@ fn shared_state_fix_cannot_follow_is_reported_and_left_unchanged() {
         ("calls", "two-locks-at-once"),
         ("escapes", "shared-state"),
         ("macro_use", "shared-state"),
+        ("deferred", "two-locks-at-once"),
+        ("pending", "shared-state"),
+        ("public", "two-locks-at-once"),
     ] {
         let line = source
             .lines()
@@ -401,4 +404,40 @@ fn shared_state_fields_fix_cannot_follow_are_reported_and_left_unchanged() {
             "{name}: {stderr}"
         );
     }
+}
+
+#[test]
+fn shared_state_locals_whose_function_runs_inside_a_callback_are_left_unchanged() {
+    // Rewriting `hits` would make `count` call an actor inside `total`'s
+    // callback, which panics.
+    let source = "use std::sync::{Arc, Mutex};\n\nfn count() -> u32 {\n    let hits = Arc::new(Mutex::new(0u32));\n    *hits.lock().unwrap() += 1;\n    let value = *hits.lock().unwrap();\n    value\n}\n\nfn main() {\n    let total = adamantium::Actor::new(0u32);\n    total.with(|total| *total += count());\n    println!(\"{}\", total.read(|total| *total));\n}\n";
+    let dir = binary(source);
+    let output = run(&["fix"], dir.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        source
+    );
+    let mut lines = stderr
+        .lines()
+        .skip_while(|line| !line.starts_with("src/main.rs:4: `hits` stays an `Arc<Mutex<_>>`: "));
+    assert!(lines.next().is_some(), "{stderr}");
+    assert!(
+        lines
+            .next()
+            .is_some_and(|link| link.ends_with("/docs/migrating.md#two-locks-at-once")),
+        "{stderr}"
+    );
+    let ran = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["run", "--quiet"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "1\n");
 }
