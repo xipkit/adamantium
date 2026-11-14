@@ -38,6 +38,18 @@ pub fn transfer() -> u64 {
     total
 }
 
+/// `other` might call an actor, which panics inside an actor's callback.
+pub fn calls() -> u32 {
+    let calls = Arc::new(Mutex::new(1u32));
+    *calls.lock().unwrap() += other();
+    let value = *calls.lock().unwrap();
+    value
+}
+
+fn other() -> u32 {
+    1
+}
+
 pub fn escapes() -> usize {
     let escapes = Arc::new(Mutex::new(vec![1]));
     let shared = Arc::clone(&escapes);

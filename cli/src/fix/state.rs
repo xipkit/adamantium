@@ -16,7 +16,8 @@ use std::{
 use proc_macro2::{Span, TokenStream, TokenTree};
 use syn::{
     BinOp, Block, Expr, GenericArgument, Item, ItemUse, Lit, Local, Macro, Pat, PathArguments,
-    Stmt, Type, UnOp, UseTree, punctuated::Punctuated, spanned::Spanned, visit::Visit,
+    Stmt, Type, UnOp, UseTree, ext::IdentExt, punctuated::Punctuated, spanned::Spanned,
+    visit::Visit,
 };
 
 use super::Edit;
@@ -35,6 +36,10 @@ pub(super) enum Reason {
     /// The guard is taken inside another actor's `with` or `read` callback,
     /// where calling an actor panics.
     InsideActor,
+    /// The statement that takes the guard calls a function, or a method on
+    /// a value other than the state, which might call an actor and would
+    /// then panic inside the callback.
+    Calls,
     /// Any other use that the rewrite can't follow.
     Unfollowed(&'static str),
 }
@@ -45,7 +50,7 @@ impl Reason {
         match self {
             Self::AcrossStatements => "a-guard-held-across-statements",
             Self::AcrossAwait => "a-lock-held-across-an-await",
-            Self::TwoLocks | Self::InsideActor => "two-locks-at-once",
+            Self::TwoLocks | Self::InsideActor | Self::Calls => "two-locks-at-once",
             Self::ControlFlow | Self::Unfollowed(_) => "shared-state",
         }
     }
@@ -57,6 +62,9 @@ impl Reason {
             Self::TwoLocks => "a statement holding its guard takes another lock",
             Self::ControlFlow => "a statement holding its guard can return, break or use `?`",
             Self::InsideActor => "it is locked inside another actor's `with` or `read` callback",
+            Self::Calls => {
+                "a statement holding its guard calls a function or another value's method, which might use an actor"
+            }
             Self::Unfollowed(detail) => detail,
         }
     }
@@ -320,6 +328,10 @@ struct MacroArgs {
     /// Whether the first argument is borrowed mutably, as the destination of
     /// `write!` and `writeln!` is.
     destination: bool,
+    /// The first argument evaluated only on some paths: an assertion's
+    /// message runs only when it fails, and a debug assertion only in debug
+    /// builds.
+    conditional: usize,
 }
 
 impl MacroArgs {
@@ -376,6 +388,13 @@ impl<'ast> Visit<'ast> for Parsed<'_> {
                 args,
                 format,
                 destination: name == "write" || name == "writeln",
+                conditional: if name.starts_with("debug_assert") {
+                    0
+                } else if name.starts_with("assert") {
+                    format
+                } else {
+                    usize::MAX
+                },
             },
         );
     }
@@ -586,7 +605,10 @@ enum Resolved {
 
 /// A local variable.
 struct Var {
+    /// The name without `r#`, under which `m` and `r#m` are one variable.
     name: String,
+    /// The name as the declaration spells it, for generated code.
+    spelling: String,
     /// The shared-state binding this variable holds, if it holds one.
     group: Option<usize>,
     used: bool,
@@ -727,6 +749,7 @@ impl<'a> Walker<'a> {
     fn declare(&mut self, name: String, group: Option<usize>) -> usize {
         let index = self.vars.len();
         self.vars.push(Var {
+            spelling: name.clone(),
             name,
             group,
             used: false,
@@ -778,7 +801,7 @@ impl<'a> Walker<'a> {
         if path.qself.is_some() || !path.attrs.is_empty() {
             return None;
         }
-        self.lookup(&path.path.get_ident()?.to_string())
+        self.lookup(&bare(path.path.get_ident()?))
     }
 
     /// A tracked variable named by `expr`.
@@ -989,7 +1012,7 @@ impl<'a> Walker<'a> {
                     return None;
                 }
                 let var = self.tracked(&reference.expr)?;
-                let name = &self.vars.get(var)?.name;
+                let name = &self.vars.get(var)?.spelling;
                 Some((var, Some(format!("{name}.clone()"))))
             }
             _ => None,
@@ -1012,7 +1035,8 @@ impl<'a> Walker<'a> {
             .map(|init| &*init.expr);
         let line = self.text.line(local.let_token.span);
         if let (Some(ident), Some(init)) = (ident, init) {
-            let name = ident.ident.to_string();
+            let name = bare(&ident.ident);
+            let spelling = ident.ident.to_string();
             let ty_edit = match ty {
                 None => Some(None),
                 Some(ty) => self
@@ -1042,6 +1066,9 @@ impl<'a> Walker<'a> {
                 }
                 self.groups.push(group_state);
                 let var = self.declare(name, Some(group));
+                if let Some(entry) = self.vars.get_mut(var) {
+                    entry.spelling = spelling;
+                }
                 self.settle(local, Some(var));
                 return;
             }
@@ -1077,6 +1104,9 @@ impl<'a> Walker<'a> {
                     );
                 }
                 let var = self.declare(name, group);
+                if let Some(entry) = self.vars.get_mut(var) {
+                    entry.spelling = spelling;
+                }
                 self.settle(local, Some(var));
                 return;
             }
@@ -1151,7 +1181,7 @@ fn is_unsized(ty: &Type, aliases: &BTreeSet<String>) -> bool {
 fn pattern_names(pat: &Pat, names: &mut Vec<String>) {
     match pat {
         Pat::Ident(ident) => {
-            names.push(ident.ident.to_string());
+            names.push(bare(&ident.ident));
             if let Some((_, subpat)) = &ident.subpat {
                 pattern_names(subpat, names);
             }
@@ -1179,23 +1209,13 @@ fn pattern_names(pat: &Pat, names: &mut Vec<String>) {
 /// How a guard's statement becomes an actor call.
 struct Plan<'a> {
     root: Root<'a>,
-    /// A smaller expression to rewrite instead of the whole root: one whose
+    /// A smaller expression to read instead of the whole root: one whose
     /// value can't borrow the state.
-    narrow: Option<(&'a Expr, Narrow)>,
+    narrow: Option<&'a Expr>,
     mode: Mode,
-}
-
-#[derive(Clone, Copy)]
-enum Narrow {
-    /// `guard.clone()` or `guard.field.clone()`. Method lookup for the guard
-    /// starts at the state, so it can clone what a reference in the state
-    /// points to; `(*state)` keeps that lookup, where `snapshot()` would
-    /// always clone the state. The state can also have its own `clone` that
-    /// takes `&mut self`, so the call runs in `with`.
-    Clone {
-        projected: bool,
-    },
-    Read,
+    /// What replaces the guard: the callback's parameter, or for a method
+    /// receiver, the state it points to.
+    receiver: bool,
 }
 
 /// Whether `child` is the node `expr`.
@@ -1298,7 +1318,7 @@ impl<'a> Walker<'a> {
         let start = self.text.range(first.method.span())?.start;
         let end = self.text.range(first.paren_token.span.close())?.end;
         let unwrap = self.text.get(start..end)?;
-        let name = &self.vars.get(var)?.name;
+        let name = &self.vars.get(var)?.spelling;
         Some((var, format!("{name}.into_inner(){ok}.{unwrap}")))
     }
 
@@ -1477,19 +1497,12 @@ impl<'a> Walker<'a> {
         }
         let root = self.root()?;
         let narrow = match parent {
-            Some(Node::Expr(expr @ Expr::MethodCall(call)))
-                if call.method == "clone" && call.args.is_empty() && call.turbofish.is_none() =>
-            {
-                Some((expr, Narrow::Clone { projected }))
-            }
             Some(Node::Expr(expr @ Expr::Binary(binary)))
                 if projected && is_comparison(&binary.op) =>
             {
-                Some((expr, Narrow::Read))
+                Some(expr)
             }
-            Some(Node::Expr(expr)) if projected && copies_out(expr, chain) => {
-                Some((chain, Narrow::Read))
-            }
+            Some(Node::Expr(expr)) if projected && copies_out(expr, chain) => Some(chain),
             _ => None,
         };
         let read = projected
@@ -1516,6 +1529,7 @@ impl<'a> Walker<'a> {
             root,
             narrow,
             mode: if read { Mode::Read } else { Mode::With },
+            receiver: !projected,
         })
     }
 
@@ -1534,10 +1548,10 @@ impl<'a> Walker<'a> {
             return Err(Reason::InsideActor);
         }
         let plan = self.plan(guard)?;
-        let name = self
+        let (bare_name, name) = self
             .vars
             .get(var)
-            .map(|var| var.name.clone())
+            .map(|var| (var.name.clone(), var.spelling.clone()))
             .ok_or(UNLOCATED)?;
         let guard_range = self.text.of(guard).ok_or(UNLOCATED)?;
         let full = plan.root.full();
@@ -1550,7 +1564,7 @@ impl<'a> Walker<'a> {
             return Err(Reason::TwoLocks);
         }
         let inside = match plan.narrow {
-            Some((expr, _)) => {
+            Some(expr) => {
                 let mut scan = Scan::new(self, guard);
                 scan.visit_expr(expr);
                 scan
@@ -1563,11 +1577,23 @@ impl<'a> Walker<'a> {
         if let Some(reason) = inside.unfollowed {
             return Err(Reason::Unfollowed(reason));
         }
+        if inside.calls {
+            return Err(Reason::Calls);
+        }
+        // Method lookup on a guard starts at the guard and reaches the state
+        // through `Deref`; on the callback's `&mut T` it would start at the
+        // reference and could pick another trait's method. Starting at `*m`
+        // keeps the state's lookup.
+        let state = if plan.receiver {
+            format!("(*{name})")
+        } else {
+            name.clone()
+        };
         // The closure's parameter takes the binding's name, so the code that
         // moves into the closure must not name the binding anywhere else.
-        let substitute_with = |range: Range<usize>, guard: &str| -> Result<String, Reason> {
+        let substitute = |range: Range<usize>| -> Result<String, Reason> {
             let region = self.text.get(range.clone()).ok_or(UNLOCATED)?;
-            if names_in(region, &name) != Some(1) {
+            if names_in(region, &bare_name) != Some(1) {
                 return Err(Reason::Unfollowed(
                     "a statement holding its guard names it again",
                 ));
@@ -1575,24 +1601,13 @@ impl<'a> Walker<'a> {
             let before = self.text.get(range.start..guard_range.start);
             let after = self.text.get(guard_range.end..range.end);
             match (before, after) {
-                (Some(before), Some(after)) => Ok(format!("{before}{guard}{after}")),
+                (Some(before), Some(after)) => Ok(format!("{before}{state}{after}")),
                 _ => Err(UNLOCATED),
             }
         };
-        let substitute = |range: Range<usize>| substitute_with(range, &name);
-        if let Some((expr, narrow)) = plan.narrow {
+        if let Some(expr) = plan.narrow {
             let range = self.text.of(expr).ok_or(UNLOCATED)?;
-            let replacement = match narrow {
-                Narrow::Clone { projected } => format!(
-                    "{name}.with(|{name}| {})",
-                    if projected {
-                        substitute(range.clone())?
-                    } else {
-                        substitute_with(range.clone(), &format!("(*{name})"))?
-                    }
-                ),
-                Narrow::Read => format!("{name}.read(|{name}| {})", substitute(range.clone())?),
-            };
+            let replacement = format!("{name}.read(|{name}| {})", substitute(range.clone())?);
             return Ok(self.edit(range, replacement));
         }
         let method = plan.mode.method();
@@ -1672,6 +1687,10 @@ impl<'a> Walker<'a> {
             .any(|(node, below)| match (node, below) {
                 (Node::Expr(Expr::MethodCall(call)), Node::Expr(arg)) => {
                     (call.method == "with" || call.method == "read")
+                        && call.args.iter().any(|candidate| is(candidate, arg))
+                }
+                (Node::Expr(Expr::Call(call)), Node::Expr(arg)) => {
+                    callee_name(&call.func).is_some_and(|name| name == "with" || name == "read")
                         && call.args.iter().any(|candidate| is(candidate, arg))
                 }
                 _ => false,
@@ -1813,10 +1832,7 @@ impl<'a> Walker<'a> {
             match token {
                 TokenTree::Group(group) => self.mentions(group.stream()),
                 TokenTree::Ident(ident) => {
-                    self.mention(
-                        &ident.to_string(),
-                        Reason::Unfollowed("it is used in a macro"),
-                    );
+                    self.mention(&bare(&ident), Reason::Unfollowed("it is used in a macro"));
                 }
                 TokenTree::Literal(literal) => {
                     if let Ok(Lit::Str(string)) =
@@ -1833,6 +1849,23 @@ impl<'a> Walker<'a> {
     }
 }
 
+/// The last segment of a call's path, as `read` in `Actor::read(&a, f)`.
+fn callee_name(func: &Expr) -> Option<String> {
+    match func {
+        Expr::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string()),
+        _ => None,
+    }
+}
+
+/// An identifier's name without `r#`, which Rust resolves as the same name.
+fn bare(ident: &proc_macro2::Ident) -> String {
+    ident.unraw().to_string()
+}
+
 /// How many times `text` names `name`, as an identifier or as a variable
 /// that a string captures, or `None` if it doesn't tokenize.
 fn names_in(text: &str, name: &str) -> Option<usize> {
@@ -1841,7 +1874,7 @@ fn names_in(text: &str, name: &str) -> Option<usize> {
             .into_iter()
             .map(|token| match token {
                 TokenTree::Group(group) => count(group.stream(), name),
-                TokenTree::Ident(ident) => usize::from(ident == name),
+                TokenTree::Ident(ident) => usize::from(bare(&ident) == name),
                 TokenTree::Literal(literal) => {
                     match syn::parse2::<Lit>(TokenTree::Literal(literal).into()) {
                         Ok(Lit::Str(string)) => format_captures(&string.value())
@@ -2021,7 +2054,7 @@ impl<'a> Visit<'a> for Walker<'a> {
                     && let Some(name) = path.path.get_ident()
                 {
                     self.mention(
-                        &name.to_string(),
+                        &bare(name),
                         Reason::Unfollowed(
                             "it is passed, returned or stored where fix can't follow it",
                         ),
@@ -2101,6 +2134,7 @@ struct Scan<'w, 'a> {
     awaits: bool,
     locks: bool,
     leaves: bool,
+    calls: bool,
     unfollowed: Option<&'static str>,
 }
 
@@ -2114,6 +2148,7 @@ impl<'w, 'a> Scan<'w, 'a> {
             awaits: false,
             locks: false,
             leaves: false,
+            calls: false,
             unfollowed: None,
         }
     }
@@ -2122,6 +2157,34 @@ impl<'w, 'a> Scan<'w, 'a> {
         match full {
             Full::Expr(expr) => self.visit_expr(expr),
             Full::Macro(mac) => self.visit_macro(mac),
+        }
+    }
+
+    /// Whether `expr` is the state or a value computed from it alone: the
+    /// guard reached through fields, indexes, unary operators, borrows,
+    /// casts and method calls, or a macro, such as `write!`, given the guard.
+    fn computed_from_state(&self, mut expr: &Expr) -> bool {
+        loop {
+            if is(expr, self.guard) {
+                return true;
+            }
+            expr =
+                match expr {
+                    Expr::Field(field) => &field.base,
+                    Expr::Index(index) => &index.expr,
+                    Expr::Unary(unary) => &unary.expr,
+                    Expr::Reference(reference) => &reference.expr,
+                    Expr::Paren(paren) => &paren.expr,
+                    Expr::Cast(cast) => &cast.expr,
+                    Expr::MethodCall(call) => &call.receiver,
+                    Expr::Macro(_) => {
+                        let text = &self.walker.text;
+                        return text.of(expr).zip(text.of(self.guard)).is_some_and(
+                            |(outer, guard)| outer.start <= guard.start && guard.end <= outer.end,
+                        );
+                    }
+                    _ => return false,
+                };
         }
     }
 }
@@ -2145,10 +2208,18 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
             Expr::MethodCall(call) if LOCKS.contains(&call.method.to_string().as_str()) => {
                 self.locks = true;
             }
-            Expr::Call(call) if self.walker.local(&call.func).is_some() => {
-                // A local closure might use this or another actor.
-                self.unfollowed
-                    .get_or_insert("a statement holding its guard calls a local closure");
+            // `Actor::read(&a, f)` and `Mutex::lock(&m)` take locks too.
+            Expr::Call(call)
+                if callee_name(&call.func).is_some_and(|name| LOCKS.contains(&name.as_str())) =>
+            {
+                self.locks = true;
+            }
+            // An actor's callback can't use any actor, and a function or a
+            // method on another value might. Only methods on the state, or
+            // on a value computed from it, are called under the guard.
+            Expr::Call(_) => self.calls = true,
+            Expr::MethodCall(call) if !self.computed_from_state(&call.receiver) => {
+                self.calls = true
             }
             Expr::Closure(_) | Expr::Async(_) => {
                 self.deferred += 1;
@@ -2212,10 +2283,13 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
         match parsed {
             Some(parsed) => {
                 for (position, arg) in parsed.args.iter().enumerate() {
+                    let conditional = usize::from(position >= parsed.conditional);
+                    self.branch += conditional;
                     match parsed.named(position, arg) {
                         Some(value) => self.visit_expr(value),
                         None => self.visit_expr(arg),
                     }
+                    self.branch -= conditional;
                 }
             }
             None => {
@@ -2652,7 +2726,6 @@ mod tests {
             "fn f() { let m = Arc::new(Mutex::new(0)); println!(\"{m:?}\"); }",
             "fn f() { let m = Arc::new(Mutex::new(0)); other!(m); }",
             "fn f() { let m = Arc::new(Mutex::new(0)); let h = m.clone(); *m.lock().unwrap() += 1; consume(h); }",
-            "fn f() { let m = Arc::new(Mutex::new(0)); let g = || 1; *m.lock().unwrap() += g(); }",
             "fn f() { let m = Arc::new(Mutex::new(vec![1])); let n = m.lock().unwrap().len(); }",
             "fn f() { let m = Arc::new(Mutex::new(0)); if let Ok(mut g) = m.lock() { *g += 1; } }",
             "fn f() { #[cfg(test)] let m = Arc::new(Mutex::new(0)); *m.lock().unwrap() += 1; }",
@@ -2692,8 +2765,8 @@ mod tests {
     #[test]
     fn a_statement_naming_the_binding_again_is_refused() {
         for body in [
-            "fn f() { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().push({ let h = m.clone(); drop(h); 1 }); }",
-            "fn f() { let m = Arc::new(Mutex::new(vec![1])); m.lock().unwrap().push(format!(\"{m:?}\").len()); }",
+            "fn f() { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().push({ let h = &m; 1 }); }",
+            "fn f() { let m = Arc::new(Mutex::new(Vec::new())); m.lock().unwrap().push(format!(\"{m:?}\")); }",
         ] {
             let source = format!("use std::sync::{{Arc, Mutex}};\n{body}\n");
             let (fixed, refusals) = fix(&source, &["Mutex"]);
@@ -2717,13 +2790,38 @@ mod tests {
     }
 
     #[test]
-    fn call_arguments_are_reborrowed_not_copied() {
+    fn coercion_site_operands_are_reborrowed_not_copied() {
         let (fixed, refusals) = fix(
-            "use std::sync::{Arc, Mutex};\nfn bump(x: &mut i32) { *x += 1; }\nfn f(mut x: i32) {\n    let m = Arc::new(Mutex::new(&mut x));\n    bump(*m.lock().unwrap());\n}\n",
+            "use std::sync::{Arc, Mutex};\nstruct S<'a> { x: &'a mut i32 }\nfn f(mut x: i32) {\n    let m = Arc::new(Mutex::new(&mut x));\n    S { x: *m.lock().unwrap() };\n}\n",
             &["Mutex"],
         );
         assert_eq!(refusals, []);
-        assert!(fixed.contains("m.with(|m| { bump(*m); });"), "{fixed}");
+        assert!(fixed.contains("m.with(|m| { S { x: *m }; });"), "{fixed}");
+    }
+
+    #[test]
+    fn calls_that_might_use_an_actor_are_refused() {
+        for body in [
+            "fn other() -> u32 { 1 }\nfn f() { let m = Arc::new(Mutex::new(0u32)); *m.lock().unwrap() += other(); }",
+            "fn f() { let m = Arc::new(Mutex::new(0u32)); let other = || 1; *m.lock().unwrap() += other(); }",
+            "fn bump(x: &mut u32) { *x += 1; }\nfn f() { let m = Arc::new(Mutex::new(0u32)); bump(&mut *m.lock().unwrap()); }",
+        ] {
+            refused(body, "m", Reason::Calls);
+        }
+        for body in [
+            "fn f(other: &[u32]) { let m = Arc::new(Mutex::new(0usize)); *m.lock().unwrap() += other.len(); }",
+            "fn f(other: &[u32]) { let m = Arc::new(Mutex::new(0usize)); *m.lock().unwrap() += (other, 1).0.len(); }",
+            "fn f(other: &[u32]) { let m = Arc::new(Mutex::new(0usize)); let _n = (other, m.lock().unwrap().len()).0.len(); }",
+        ] {
+            refused(body, "m", Reason::Calls);
+        }
+        // A copy read out of the state leaves the call outside the callback.
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nfn other() -> u32 { 1 }\nfn f() -> u32 {\n    let m = Arc::new(Mutex::new(0u32));\n    *m.lock().unwrap() + other()\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(fixed.contains("m.read(|m| *m) + other()"), "{fixed}");
     }
 
     #[test]
@@ -2763,7 +2861,7 @@ mod tests {
     #[test]
     fn a_write_destination_is_borrowed_mutably() {
         let (fixed, refusals) = fix(
-            "use std::fmt::Write;\nuse std::sync::{Arc, Mutex};\nfn f() -> std::fmt::Result {\n    let m = Arc::new(Mutex::new(String::new()));\n    write!(*m.lock().unwrap(), \"hello\").unwrap();\n    writeln!(String::new(), \"{}\", *m.lock().unwrap())\n}\n",
+            "use std::fmt::Write;\nuse std::sync::{Arc, Mutex};\nfn f(mut out: String) -> std::fmt::Result {\n    let m = Arc::new(Mutex::new(String::new()));\n    write!(*m.lock().unwrap(), \"hello\").unwrap();\n    writeln!(out, \"{}\", *m.lock().unwrap())\n}\n",
             &["Mutex"],
         );
         assert_eq!(refusals, []);
@@ -2772,7 +2870,7 @@ mod tests {
             "{fixed}"
         );
         assert!(
-            fixed.contains("m.read(|m| writeln!(String::new(), \"{}\", *m))"),
+            fixed.contains("m.read(|m| writeln!(out, \"{}\", *m))"),
             "{fixed}"
         );
     }
@@ -2825,7 +2923,7 @@ mod tests {
     #[test]
     fn values_moved_on_one_path_are_refused() {
         refused(
-            "struct D;\nfn f(flag: bool, d: D) { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().extend(if flag { Some(d) } else { None }); }",
+            "struct D;\nfn f(flag: bool, d: D) { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().extend(if flag { [d] } else { [D] }); }",
             "m",
             Reason::Unfollowed(
                 "a statement holding its guard may move a variable on only one path",
@@ -2886,6 +2984,62 @@ mod tests {
             assert_eq!(fixed, source);
             assert_eq!(refusals, []);
         }
+    }
+
+    #[test]
+    fn a_clone_that_borrows_stays_inside_its_statement() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nstruct S;\nimpl S { fn clone(&self) -> &Self { self } fn touch(&self) {} }\nfn f() {\n    let m = Arc::new(Mutex::new(S));\n    m.lock().unwrap().clone().touch();\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(
+            fixed.contains("m.with(|m| { (*m).clone().touch(); });"),
+            "{fixed}"
+        );
+    }
+
+    #[test]
+    fn associated_function_lock_calls_count() {
+        refused(
+            "fn f(a: &adamantium::Actor<u8>) { let m = Arc::new(Mutex::new(0u8)); *m.lock().unwrap() += adamantium::Actor::read(a, |v| *v); }",
+            "m",
+            Reason::TwoLocks,
+        );
+        refused(
+            "fn f(a: &adamantium::Actor<u8>) { adamantium::Actor::with(a, |_| { let m = Arc::new(Mutex::new(0)); *m.lock().unwrap() += 1; }); }",
+            "m",
+            Reason::InsideActor,
+        );
+    }
+
+    #[test]
+    fn assertion_messages_and_debug_assertions_are_conditional() {
+        for body in [
+            "struct D;\nfn f(d: D) { let m = Arc::new(Mutex::new(true)); assert!(*m.lock().unwrap(), \"{}\", { let _d = d; \"bad\" }); }",
+            "struct D;\nfn f(d: D) { let m = Arc::new(Mutex::new(1)); debug_assert_eq!(*m.lock().unwrap(), { let _d = d; 1 }); }",
+        ] {
+            refused(
+                body,
+                "m",
+                Reason::Unfollowed(
+                    "a statement holding its guard may move a variable on only one path",
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn raw_identifiers_name_the_same_variable() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nfn f() {\n    let r#m = Arc::new(Mutex::new(0));\n    *m.lock().unwrap() += 1;\n    let h = r#m.clone();\n    drop(h);\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert_eq!(
+            fixed,
+            "fn f() {\n    let r#m = ::adamantium::Actor::new(0);\n    r#m.with(|r#m| *r#m += 1);\n    let h = r#m.clone();\n    drop(h);\n}\n"
+        );
     }
 
     #[test]
