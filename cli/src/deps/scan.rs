@@ -647,19 +647,24 @@ impl Scanner<'_> {
     }
 
     /// The binding of `name` in `namespace`, in the blocks around a place in
-    /// `module` or in the module itself.
+    /// `module` or in the module itself, with the blocks around the scope
+    /// that binds it: a `use` resolves there, not where its name is used.
     fn lookup<'s>(
         &'s self,
         module: &[String],
         blocks: &'s [Scope],
         namespace: Namespace,
         name: &str,
-    ) -> Option<&'s Binding> {
-        blocks
-            .iter()
-            .rev()
-            .chain(self.modules.get(module))
-            .find_map(|scope| scope.get(namespace, name))
+    ) -> Option<(&'s Binding, &'s [Scope])> {
+        for (index, scope) in blocks.iter().enumerate().rev() {
+            if let Some(binding) = scope.get(namespace, name) {
+                return Some((binding, blocks.get(..=index).unwrap_or_default()));
+            }
+        }
+        self.modules
+            .get(module)
+            .and_then(|scope| scope.get(namespace, name))
+            .map(|binding| (binding, &[][..]))
     }
 
     /// Resolves a binding in `namespace`, found in `module`.
@@ -705,11 +710,11 @@ impl Scanner<'_> {
         }
         let first_namespace = self::namespace(path, 0, namespace);
         if !leading
-            && let Some(binding) = self.lookup(module, blocks, first_namespace, first)
+            && let Some((binding, scope)) = self.lookup(module, blocks, first_namespace, first)
             && !is_use_of(binding, path)
         {
             let resolved = self
-                .binding(module, blocks, first_namespace, binding, depth)
+                .binding(module, scope, first_namespace, binding, depth)
                 .join(rest);
             return self.followed(resolved, namespace, depth);
         }
@@ -726,7 +731,7 @@ impl Scanner<'_> {
         };
         let root = [self.krate.name.to_owned()];
         let first_namespace = self::namespace(path, 0, namespace);
-        if let Some(binding) = self.lookup(&root, &[], first_namespace, first)
+        if let Some((binding, _)) = self.lookup(&root, &[], first_namespace, first)
             && !is_use_of(binding, path)
         {
             let resolved = self
@@ -845,9 +850,9 @@ impl Scanner<'_> {
             };
         }
         let first_namespace = self::namespace(path, 0, namespace);
-        if let Some(binding) = self.lookup(module, blocks, first_namespace, first) {
+        if let Some((binding, scope)) = self.lookup(module, blocks, first_namespace, first) {
             let resolved = self
-                .binding(module, blocks, first_namespace, binding, 0)
+                .binding(module, scope, first_namespace, binding, 0)
                 .join(rest);
             return self.followed(resolved, namespace, 0);
         }

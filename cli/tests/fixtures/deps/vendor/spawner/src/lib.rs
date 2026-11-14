@@ -17,6 +17,7 @@ mod off;
 mod tiny;
 #[cfg(spawner_custom)]
 mod custom;
+mod declared;
 
 pub mod shim {
     pub use std::thread;
