@@ -233,11 +233,14 @@ fn check(root: &Path, cargo_args: &[String], echo: bool, strict: bool) -> Result
     let rules: HashSet<String> = lints::selected(strict)
         .map(lints::Lint::qualified)
         .collect();
-    let mut findings = Vec::new();
-    let mut skipped = BTreeMap::new();
-    let mut warnings = Vec::new();
-    let mut errors = Vec::new();
-    let mut seen = HashSet::new();
+    let setting = Setting {
+        root,
+        clippy_config: &clippy_config,
+        config: &config,
+        rules: &rules,
+        echo,
+    };
+    let mut sorted = Sorted::default();
     let mut built = false;
     for line in BufReader::new(stdout).lines() {
         let line = line.context("reading cargo's output")?;
@@ -247,21 +250,7 @@ fn check(root: &Path, cargo_args: &[String], echo: bool, strict: bool) -> Result
         match parsed.reason.as_str() {
             "compiler-message" => {
                 if let Some(diagnostic) = parsed.message {
-                    classify(
-                        diagnostic,
-                        &Setting {
-                            root,
-                            clippy_config: &clippy_config,
-                            config: &config,
-                            rules: &rules,
-                            echo,
-                        },
-                        &mut seen,
-                        &mut findings,
-                        &mut skipped,
-                        &mut errors,
-                        &mut warnings,
-                    );
+                    classify(diagnostic, &setting, &mut sorted);
                 }
             }
             "build-finished" => built = parsed.success.unwrap_or(false),
@@ -271,7 +260,7 @@ fn check(root: &Path, cargo_args: &[String], echo: bool, strict: bool) -> Result
     let exit = child.wait().context("waiting for cargo clippy")?;
 
     if !manifest::release_checks_overflow(root)? && config.skips(OVERFLOW_RULE, "Cargo.toml") {
-        *skipped.entry(OVERFLOW_RULE.to_owned()).or_insert(0) += 1;
+        *sorted.skipped.entry(OVERFLOW_RULE.to_owned()).or_insert(0) += 1;
     } else if !manifest::release_checks_overflow(root)? {
         let finding = Finding {
             rule: OVERFLOW_RULE.to_owned(),
@@ -286,9 +275,16 @@ fn check(root: &Path, cargo_args: &[String], echo: bool, strict: bool) -> Result
                 finding.message, finding.rule
             );
         }
-        findings.push(finding);
+        sorted.findings.push(finding);
     }
 
+    let Sorted {
+        findings,
+        skipped,
+        warnings,
+        errors,
+        ..
+    } = sorted;
     let status = if !errors.is_empty() || (findings.is_empty() && (!built || !exit.success())) {
         Status::Error
     } else if findings.is_empty() {
@@ -316,6 +312,17 @@ struct Setting<'a> {
     echo: bool,
 }
 
+/// The diagnostics `classify` has sorted so far.
+#[derive(Default)]
+struct Sorted {
+    /// Diagnostics already sorted, since Clippy repeats them across targets.
+    seen: HashSet<DiagnosticKey>,
+    findings: Vec<Finding>,
+    skipped: BTreeMap<String, usize>,
+    warnings: Vec<Problem>,
+    errors: Vec<Problem>,
+}
+
 /// Whether the arguments for `cargo clippy` already choose which packages to
 /// check, in which case adding `--workspace` would override that choice.
 fn selects_packages(cargo_args: &[String]) -> bool {
@@ -331,15 +338,7 @@ fn selects_packages(cargo_args: &[String]) -> bool {
 /// configuration or unavailable-lint warning, or noise, echoing diagnostics
 /// when `echo` is set. Without a primary span, only unknown or removed lint
 /// warnings are kept; compiler summaries are dropped.
-fn classify(
-    diagnostic: Diagnostic,
-    setting: &Setting<'_>,
-    seen: &mut HashSet<DiagnosticKey>,
-    findings: &mut Vec<Finding>,
-    skipped: &mut BTreeMap<String, usize>,
-    errors: &mut Vec<Problem>,
-    warnings: &mut Vec<Problem>,
-) {
+fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted) {
     let Some(span) = diagnostic.spans.iter().find(|span| span.is_primary) else {
         let Some(code) = diagnostic.code else {
             return;
@@ -349,7 +348,7 @@ fn classify(
         {
             return;
         }
-        if !seen.insert(DiagnosticKey::Spanless {
+        if !sorted.seen.insert(DiagnosticKey::Spanless {
             code: code.code,
             message: diagnostic.message.clone(),
         }) {
@@ -360,7 +359,7 @@ fn classify(
         {
             eprint!("{rendered}");
         }
-        warnings.push(Problem {
+        sorted.warnings.push(Problem {
             message: diagnostic.message,
             file: None,
             line: None,
@@ -380,14 +379,14 @@ fn classify(
     };
     // Clippy reports a lint once per target, so a library and its tests
     // repeat each other.
-    if !seen.insert(key) {
+    if !sorted.seen.insert(key) {
         return;
     }
     if let Some(rule) = &code
         && setting.rules.contains(rule)
         && setting.config.skips(rule, relative(setting.root, &file))
     {
-        *skipped.entry(rule.clone()).or_insert(0) += 1;
+        *sorted.skipped.entry(rule.clone()).or_insert(0) += 1;
         return;
     }
     if setting.echo
@@ -401,19 +400,19 @@ fn classify(
         file
     };
     match code {
-        Some(rule) if setting.rules.contains(&rule) => findings.push(Finding {
+        Some(rule) if setting.rules.contains(&rule) => sorted.findings.push(Finding {
             rule,
             message: diagnostic.message,
             file,
             line: Some(span.line_start),
             column: Some(span.column_start),
         }),
-        _ if diagnostic.level == "error" => errors.push(Problem {
+        _ if diagnostic.level == "error" => sorted.errors.push(Problem {
             message: diagnostic.message,
             file: Some(file),
             line: Some(span.line_start),
         }),
-        _ if about_config && diagnostic.level == "warning" => warnings.push(Problem {
+        _ if about_config && diagnostic.level == "warning" => sorted.warnings.push(Problem {
             message: diagnostic.message,
             file: Some(file),
             line: Some(span.line_start),
@@ -486,28 +485,19 @@ mod tests {
             rules: &rules,
             echo: false,
         };
-        let mut report = Report {
+        let mut sorted = Sorted::default();
+        for diagnostic in diagnostics {
+            classify(diagnostic, &setting, &mut sorted);
+        }
+        Report {
             schema_version: 2,
             root: root.to_path_buf(),
             status: Status::Clean,
-            findings: Vec::new(),
-            skipped: BTreeMap::new(),
-            warnings: Vec::new(),
-            errors: Vec::new(),
-        };
-        let mut seen = HashSet::new();
-        for diagnostic in diagnostics {
-            classify(
-                diagnostic,
-                &setting,
-                &mut seen,
-                &mut report.findings,
-                &mut report.skipped,
-                &mut report.errors,
-                &mut report.warnings,
-            );
+            findings: sorted.findings,
+            skipped: sorted.skipped,
+            warnings: sorted.warnings,
+            errors: sorted.errors,
         }
-        report
     }
 
     #[test]
