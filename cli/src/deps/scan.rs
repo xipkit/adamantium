@@ -1225,8 +1225,10 @@ impl<'a> Scanner<'a> {
     /// The other crates' `#[macro_export]` macros that a macro path that
     /// resolves to `resolved` may name, following the `use` items of the
     /// crate that has them, as `pub use crate::m as renamed;`, to its root,
-    /// where they are. `None` if a way it may resolve doesn't lead to one
-    /// whose crate the scan can read, as into a crate that isn't a
+    /// where they are. A way that leads to a module of such a crate that
+    /// has no macro of the name, as to a function a `use` of the name
+    /// brings in, names none. `None` if a way it may resolve doesn't lead
+    /// to one whose crate the scan can read, as into a crate that isn't a
     /// dependency, or this one, whose macros it doesn't follow by path.
     fn foreign_macros(&mut self, resolved: &Resolved) -> Option<Vec<Found>> {
         let mut found = Vec::new();
@@ -1242,11 +1244,19 @@ impl<'a> Scanner<'a> {
                 let Resolved::Path(target) = target else {
                     return None;
                 };
-                let [krate, name] = &target[..] else {
+                let (name, module) = target.split_last()?;
+                if module.first().map(String::as_str) != Some(reader.krate.name) {
                     return None;
-                };
-                if krate != reader.krate.name {
-                    return None;
+                }
+                // A `use` binds its name in each namespace that has it, so
+                // a way that leads to no macro, in a module whose names are
+                // all known, isn't one the call can mean.
+                let scope = reader.modules.get(module)?;
+                match scope.get(Namespace::Macros, name) {
+                    None if !scope.globs => continue,
+                    // Only the crate's exports are bound at its root.
+                    Some(_) if module.len() == 1 => {}
+                    _ => return None,
                 }
                 let mut any = false;
                 for (export, _) in exports
@@ -1417,7 +1427,8 @@ impl<'a> Scanner<'a> {
                     let Some(found) = self.foreign_macros(&resolved) else {
                         return false;
                     };
-                    Some((found, bound.certain))
+                    // A `use` that brings in no macro doesn't hide any.
+                    (!found.is_empty()).then_some((found, bound.certain))
                 }
                 None => None,
             }
@@ -1428,7 +1439,10 @@ impl<'a> Scanner<'a> {
                 &segments(path),
                 path.leading_colon.is_some(),
             );
-            let Some(found) = self.foreign_macros(&resolved) else {
+            let Some(found) = self
+                .foreign_macros(&resolved)
+                .filter(|found| !found.is_empty())
+            else {
                 return false;
             };
             Some((found, true))
@@ -4865,6 +4879,51 @@ crate::own! { yes { mod own; } }
             ],
             false,
             &[picks],
+        );
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 2);
+    }
+
+    /// Of the `use` items of one name, those that bring in no macro, as one
+    /// of a function, don't keep a call of the name from the macro another
+    /// brings in, nor, where none does, from the prelude's.
+    #[test]
+    fn uses_of_other_items_do_not_hide_macros() {
+        let picks = Library {
+            name: "picks",
+            features: &[],
+            files: &[(
+                "lib.rs",
+                "#[macro_export]\nmacro_rules! pick { (yes { $($yes:tt)* }) => { $($yes)* }; }\n\npub fn spawn() {}\n",
+            )],
+        };
+        let prelude = Library {
+            name: "prelude",
+            features: &[],
+            files: &[(
+                "lib.rs",
+                "#[macro_export]\nmacro_rules! spawn { (yes { $($yes:tt)* }) => { $($yes)* }; }\n",
+            )],
+        };
+        let scan = scan_with(
+            &[
+                (
+                    "lib.rs",
+                    "#[macro_use]\nextern crate prelude;\n\nmod both;\nmod function;\n",
+                ),
+                (
+                    "both.rs",
+                    "use picks::pick;\nuse picks::spawn as pick;\npick! { yes { mod body; } }\n",
+                ),
+                ("both/body.rs", "pub unsafe fn a() {}\n"),
+                (
+                    "function.rs",
+                    "use picks::spawn;\nspawn! { yes { mod body; } }\n",
+                ),
+                ("function/body.rs", "pub unsafe fn b() {}\n"),
+            ],
+            false,
+            &[picks, prelude],
         );
         assert_eq!(scan.unscanned, []);
         assert_eq!(scan.unsafe_code.functions, 2);
