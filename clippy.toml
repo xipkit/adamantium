@@ -8,16 +8,17 @@ allow-indexing-slicing-in-tests = true
 allow-panic-in-tests = true
 allow-dbg-in-tests = true
 
-# Every entry outside std has `allow-invalid`, because Clippy warns about each
+# Every external-crate entry has `allow-invalid`, because Clippy warns about each
 # path it can't resolve in a crate the project uses, and most of these items
 # exist only behind a crate feature the project may leave off. A test resolves
 # every path with all of the crates' features on, so a misspelled path still
 # fails it.
 
 disallowed-types = [
+  { path = "std::mem::ManuallyDrop", reason = "suppresses automatic cleanup and can leak; let values drop normally" },
   { path = "std::rc::Rc", reason = "shared identity; use a value, or adamantium::Actor for state that tasks share" },
-  { path = "std::rc::Weak", reason = "a weak reference implies a cycle, and values can't form one" },
-  { path = "std::sync::Weak", reason = "a weak reference implies a cycle, and values can't form one" },
+  { path = "std::rc::Weak", reason = "weak references are outside Adamantium's ownership model" },
+  { path = "std::sync::Weak", reason = "weak references are outside Adamantium's ownership model" },
   { path = "std::cell::RefCell", reason = "borrow checking at runtime panics; use a value" },
   { path = "std::cell::Cell", reason = "interior mutability without a lock; use a value" },
   { path = "std::sync::Mutex", reason = "use adamantium::Actor, which never holds its lock across an await or inside another actor" },
@@ -32,11 +33,21 @@ disallowed-types = [
 ]
 
 disallowed-methods = [
+  { path = "std::vec::Vec::remove", reason = "panics on a bad index; use adamantium::Array::remove, which returns Option" },
+  { path = "std::vec::Vec::insert", reason = "panics on a bad index; use adamantium::Array::insert, which returns Result" },
+  { path = "std::vec::Vec::swap_remove", reason = "panics on a bad index; use adamantium::Array::remove, which returns Option and preserves order" },
+  { path = "slice::split_at", reason = "panics on a bad index; use split_at_checked, which returns Option" },
+  { path = "slice::copy_from_slice", reason = "panics on unequal lengths; return an error on a length mismatch, then copy with iter_mut().zip(source)" },
   { path = "tokio::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks", allow-invalid = true },
   { path = "tokio::task::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks", allow-invalid = true },
   { path = "tokio::task::spawn_local", reason = "every task must be Send; spawn inside adamantium::Tasks", allow-invalid = true },
   { path = "tokio::task::spawn_blocking", reason = "use adamantium::blocking, which propagates panics", allow-invalid = true },
   { path = "tokio::task::block_in_place", reason = "blocks a worker thread; use adamantium::blocking", allow-invalid = true },
+  { path = "tokio::time::sleep", reason = "use adamantium::time::sleep so waits go through Adamantium's clock", allow-invalid = true },
+  { path = "tokio::time::sleep_until", reason = "use adamantium::time::sleep_until so waits go through Adamantium's clock", allow-invalid = true },
+  { path = "tokio::time::interval", reason = "use a loop over adamantium::time::sleep_until with deadlines from adamantium::time::now", allow-invalid = true },
+  { path = "tokio::time::interval_at", reason = "use a loop over adamantium::time::sleep_until with deadlines from adamantium::time::now", allow-invalid = true },
+  { path = "tokio::time::Instant::now", reason = "build deadlines from adamantium::time::now; std::time::Instant::now is allowed for measuring elapsed time", allow-invalid = true },
   # A runtime's own entry points start the same tasks as the functions above.
   # `Runtime::block_on` is left out: `#[tokio::main]` and `#[tokio::test]`
   # expand to it, and it is how a program without them enters the runtime.
@@ -57,12 +68,24 @@ disallowed-methods = [
   { path = "tokio::task::Builder::spawn_local_on", reason = "every task must be Send; spawn inside adamantium::Tasks", allow-invalid = true },
   { path = "tokio::task::Builder::spawn_blocking", reason = "use adamantium::blocking, which propagates panics", allow-invalid = true },
   { path = "tokio::task::Builder::spawn_blocking_on", reason = "use adamantium::blocking, which propagates panics", allow-invalid = true },
+  { path = "async_std::task::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "async_std::task::spawn_local", reason = "every task must be Send; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "async_std::task::spawn_blocking", reason = "use adamantium::blocking, which propagates panics", allow-invalid = true },
+  { path = "async_std::task::Builder::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "async_std::task::Builder::local", reason = "every task must be Send; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "smol::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "smol::Executor::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "smol::Executor::spawn_many", reason = "unstructured tasks; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "smol::LocalExecutor::spawn", reason = "every task must be Send; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "smol::LocalExecutor::spawn_many", reason = "every task must be Send; spawn inside adamantium::Tasks", allow-invalid = true },
+  { path = "smol::unblock", reason = "use adamantium::blocking, which propagates panics", allow-invalid = true },
   { path = "std::thread::spawn", reason = "an unstructured thread; use adamantium::Tasks or adamantium::blocking" },
   { path = "std::thread::Builder::spawn", reason = "an unstructured thread; use adamantium::Tasks or adamantium::blocking" },
   { path = "std::thread::scope", reason = "blocks the async runtime; use adamantium::blocking" },
-  { path = "std::thread::sleep", reason = "blocks a worker thread; use tokio::time::sleep" },
+  { path = "std::thread::sleep", reason = "blocks a worker thread; use adamantium::time::sleep" },
+  { path = "std::process::abort", reason = "skips every scope's cleanup; return an exit code from main" },
   { path = "std::mem::forget", reason = "leaks" },
   { path = "std::boxed::Box::leak", reason = "leaks" },
-  { path = "std::sync::Arc::downgrade", reason = "a weak reference implies a cycle, and values can't form one" },
+  { path = "std::sync::Arc::downgrade", reason = "weak references are outside Adamantium's ownership model" },
   { path = "futures::executor::block_on", reason = "blocks a worker thread", allow-invalid = true },
 ]
