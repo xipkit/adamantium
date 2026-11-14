@@ -44,7 +44,7 @@ enum Matcher {
 }
 
 /// A part of a rule's transcriber.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Transcribed {
     /// A token other than a group, copied as it is.
     Token(TokenTree),
@@ -63,7 +63,7 @@ enum Transcribed {
 }
 
 /// `$( ... ) separator? operator`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Repetition<T> {
     body: Vec<T>,
     separator: Option<Vec<TokenTree>>,
@@ -204,6 +204,16 @@ impl Rules {
         Some(Self(rules))
     }
 
+    /// Reads the rules as `#[macro_export(local_inner_macros)]` makes rustc
+    /// read them: a call of a macro by a bare name, written in a
+    /// transcriber, as `helper!(...)`, calls `$crate::helper!(...)`, the
+    /// macro of the crate that defines these rules.
+    pub fn local_inner_macros(&mut self) {
+        for rule in &mut self.0 {
+            local_inner_macros(&mut rule.transcriber);
+        }
+    }
+
     /// Where `$crate` is written in the rules' transcribers.
     pub fn crate_spans(&self) -> Vec<Span> {
         let mut spans = Vec::new();
@@ -239,6 +249,42 @@ impl Rules {
             }
         }
         None
+    }
+}
+
+fn local_inner_macros(transcriber: &mut Vec<Transcribed>) {
+    let parts = std::mem::take(transcriber);
+    for (at, mut part) in parts.iter().cloned().enumerate() {
+        match &mut part {
+            Transcribed::Group(_, inner) => local_inner_macros(inner),
+            Transcribed::Repetition(repetition) => local_inner_macros(&mut repetition.body),
+            Transcribed::Token(TokenTree::Ident(name))
+                if name != "macro_rules"
+                    && matches!(
+                        parts.get(at + 1),
+                        Some(Transcribed::Token(TokenTree::Punct(bang))) if bang.as_char() == '!'
+                    )
+                    && matches!(parts.get(at + 2), Some(Transcribed::Group(..)))
+                    && !matches!(
+                        transcriber.last(),
+                        Some(Transcribed::Token(TokenTree::Punct(colon))) if colon.as_char() == ':'
+                    ) =>
+            {
+                let span = name.span();
+                let colon = |spacing| {
+                    let mut punct = Punct::new(':', spacing);
+                    punct.set_span(span);
+                    Transcribed::Token(TokenTree::Punct(punct))
+                };
+                transcriber.extend([
+                    Transcribed::Crate(span),
+                    colon(Spacing::Joint),
+                    colon(Spacing::Alone),
+                ]);
+            }
+            _ => {}
+        }
+        transcriber.push(part);
     }
 }
 
@@ -941,6 +987,24 @@ mod tests {
             .map(TokenTree::span)
             .unwrap();
         assert_eq!(crate_span.start().column, 16);
+    }
+
+    /// With `local_inner_macros`, a call by a bare name in a transcriber
+    /// calls the defining crate's macro, by path; other calls stay.
+    #[test]
+    fn local_inner_macros_call_the_crates_macros() {
+        let mut local = rules(
+            "($($x:ident)*) => { helper!(); other::m!(); $crate::n![]; macro_rules! x { () => {} } $($x != b; { inner!{} })* };",
+        );
+        local.local_inner_macros();
+        assert_eq!(
+            local
+                .expand("a".parse().unwrap())
+                .map(|tokens| tokens.to_string()),
+            Some(text(
+                "crate::helper!(); other::m!(); crate::n![]; macro_rules! x { () => {} } a != b; { crate::inner!{} }"
+            ))
+        );
     }
 
     /// An operator is one token, as rustc lexes it: `=>` is not `=` `>`, and

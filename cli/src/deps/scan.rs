@@ -587,6 +587,9 @@ struct Scanner<'a> {
     /// The `#[macro_export]` macros defined so far, where the crate is read
     /// for another crate that brings them in.
     exports: Option<Vec<Export>>,
+    /// Where `$crate` is written in the crate's macros, where the crate is
+    /// read for another crate that brings them in.
+    crate_spans: Vec<Span>,
 }
 
 /// A `#[macro_export]` macro of a crate, as another crate brings it in.
@@ -695,6 +698,7 @@ impl<'a> Scanner<'a> {
             foreign: HashSet::new(),
             dollar_crates: HashMap::new(),
             exports: None,
+            crate_spans: Vec::new(),
         }
     }
 
@@ -943,18 +947,35 @@ impl<'a> Scanner<'a> {
             return;
         }
         let rel = self.file_of(name.span(), rel);
+        let rules = Rules::parse(item.mac.tokens.clone());
         if let Some(exports) = &mut self.exports {
-            let exported = self
-                .krate
-                .cfg
-                .effective(&item.attrs)
+            // A `$crate` the crate's macros write may end up in an exported
+            // macro another one defines, as `crate`.
+            self.crate_spans
+                .extend(rules.iter().flat_map(Rules::crate_spans));
+            let effective = self.krate.cfg.effective(&item.attrs);
+            let export = effective
                 .iter()
-                .filter(|(_, meta)| meta.path().is_ident("macro_export"))
+                .filter(|(_, meta)| meta.path().is_ident("macro_export"));
+            let exported = export
+                .clone()
                 .fold(Truth::False, |truth, (applies, _)| truth.or(*applies));
+            // Where it may be, the calls its rules write by bare names are
+            // read as calls of the crate's macros, which aren't expanded.
+            let local_inner_macros = export.clone().any(|(_, meta)| {
+                matches!(meta, Meta::List(list) if list
+                    .parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)
+                    .is_ok_and(|args| args.iter().any(|arg| arg == "local_inner_macros")))
+            });
             if exported != Truth::False {
+                let mut rules = Rules::parse(item.mac.tokens.clone());
+                if local_inner_macros && let Some(rules) = &mut rules {
+                    rules.local_inner_macros();
+                    self.crate_spans.extend(rules.crate_spans());
+                }
                 exports.push(Export {
                     name: name.unraw().to_string(),
-                    rules: Rules::parse(item.mac.tokens.clone()),
+                    rules,
                     rel: rel.clone(),
                     span: name.span(),
                     defined: holds.and(exported),
@@ -963,7 +984,7 @@ impl<'a> Scanner<'a> {
         }
         textual.macros.push(MacroRules {
             name: name.unraw().to_string(),
-            rules: Rules::parse(item.mac.tokens.clone()),
+            rules,
             rel,
             span: name.span(),
             condition,
@@ -1009,15 +1030,16 @@ impl<'a> Scanner<'a> {
             if holds == Truth::False || !macro_use {
                 continue;
             }
-            for export in self.exports_of(dependency) {
+            let (exports, crate_spans) = self.exports_of(dependency);
+            for span in crate_spans {
+                let start = span.start();
+                self.dollar_crates
+                    .insert((span.file(), start.line, start.column), item.ident.clone());
+            }
+            for export in exports {
                 let imported = self.imported(&item.attrs, &export.name);
                 if imported == Truth::False || export.defined == Truth::False {
                     continue;
-                }
-                for span in export.rules.iter().flat_map(Rules::crate_spans) {
-                    let start = span.start();
-                    self.dollar_crates
-                        .insert((span.file(), start.line, start.column), item.ident.clone());
                 }
                 let defined = export.defined.and(imported);
                 self.prelude.push(MacroRules {
@@ -1056,11 +1078,12 @@ impl<'a> Scanner<'a> {
     }
 
     /// The `#[macro_export]` macros of a dependency, read from its module
-    /// tree with the `cfg`s of its own build. A procedural macro crate can't
-    /// export any. The dependency's files are noted as other crates'.
-    fn exports_of(&mut self, krate: &Crate) -> Vec<Export> {
+    /// tree with the `cfg`s of its own build, and where `$crate` is written
+    /// in its macros. A procedural macro crate can't export any. The
+    /// dependency's files are noted as other crates'.
+    fn exports_of(&mut self, krate: &Crate) -> (Vec<Export>, Vec<Span>) {
         if krate.cfg.proc_macro {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         let mut reader = Scanner::new(krate, self.disallowed);
         reader.exports = Some(Vec::new());
@@ -1075,7 +1098,7 @@ impl<'a> Scanner<'a> {
         for export in &mut exports {
             export.rel = self.relative(&krate.root.join(&export.rel));
         }
-        exports
+        (exports, reader.crate_spans)
     }
 
     /// The definitions a call of `name` may expand, the latest first: those
@@ -4240,6 +4263,84 @@ macro_rules! inner {
             })
             .collect();
         assert_eq!(paths, [("tokio::spawn".to_owned(), vec![7, 8])]);
+    }
+
+    /// In a `#[macro_export(local_inner_macros)]` macro, a call by a bare
+    /// name is a call of its crate's macro, by path, which isn't expanded,
+    /// rather than of a macro of that name here.
+    #[test]
+    fn local_inner_macros_do_not_call_macros_here() {
+        let outer = Library {
+            name: "outer",
+            features: &[],
+            files: &[(
+                "lib.rs",
+                r"#[macro_export(local_inner_macros)]
+macro_rules! outer { () => { helper!(); }; }
+
+#[macro_export]
+macro_rules! helper { () => { mod theirs; }; }
+",
+            )],
+        };
+        let scan = scan_with(
+            &[
+                (
+                    "lib.rs",
+                    "#[macro_use]\nextern crate outer;\n\nmacro_rules! helper { () => { mod mine; }; }\nouter!();\n",
+                ),
+                ("mine.rs", "pub unsafe fn a() {}\n"),
+                ("theirs.rs", "pub unsafe fn b() {}\n"),
+            ],
+            false,
+            &[outer],
+        );
+        // The crate's own `helper!` is called nowhere, so it is read as tokens.
+        let reason = "module `mine` is declared in a macro body the scan can't read";
+        assert_eq!(scan.unscanned, [unscanned("src/lib.rs", 4, reason)]);
+        assert_eq!(scan.unsafe_code.functions, 0);
+    }
+
+    /// An exported macro that another of its crate's macros defines names
+    /// that crate with the `$crate` the other one wrote.
+    #[test]
+    fn crate_in_generated_exports_names_its_crate() {
+        let tokio = Library {
+            name: "tokio",
+            features: &[],
+            files: &[(
+                "lib.rs",
+                r"pub fn spawn() {}
+
+macro_rules! define {
+    () => {
+        #[macro_export]
+        macro_rules! runtime { () => { pub use $crate::spawn as start; }; }
+    };
+}
+
+define!();
+",
+            )],
+        };
+        let scan = scan_with(
+            &[(
+                "lib.rs",
+                "#[macro_use]\nextern crate tokio;\n\nruntime!();\n\npub fn run() {\n    start();\n}\n",
+            )],
+            false,
+            &[tokio],
+        );
+        assert_eq!(scan.unscanned, []);
+        let paths: Vec<_> = scan
+            .calls
+            .iter()
+            .map(|(entry, sites)| {
+                let path = Disallowed::bundled().unwrap().entries[*entry].path.clone();
+                (path, sites.iter().map(|site| site.line).collect::<Vec<_>>())
+            })
+            .collect();
+        assert_eq!(paths, [("tokio::spawn".to_owned(), vec![7])]);
     }
 
     /// A call of the crate's own `macro_rules!` with input, as Tokio's
