@@ -12,7 +12,7 @@
 //! a value of any of these types can be handed to a task without ceremony.
 //!
 //! The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, the
-//! ordered and unordered concurrent streams, and `blocking`.
+//! ordered and unordered concurrent streams, `blocking`, and the `time` module.
 //! Disable default features to use the values, actors, and channels
 //! without a Tokio dependency, including on WASI.
 //! The opt-in `signal` feature adds `Cancellation::cancel_on_signal` on Unix
@@ -35,6 +35,8 @@ mod string;
 mod tasks;
 #[cfg(feature = "deterministic")]
 pub mod testing;
+#[cfg(feature = "tokio")]
+pub mod time;
 
 pub use actor::Actor;
 pub use array::Array;
