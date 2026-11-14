@@ -62,9 +62,8 @@ pub struct Crate<'a> {
     /// library names.
     pub externs: &'a BTreeMap<String, String>,
     /// The dependencies whose source the scan can read, by the name the
-    /// crate's code uses, for the macros a `#[macro_use] extern crate`
-    /// brings in from them.
-    pub dependencies: &'a BTreeMap<String, &'a Crate<'a>>,
+    /// crate's code uses, mapped to their indices in the shared crate table.
+    pub dependencies: BTreeMap<String, usize>,
     pub cfg: Cfg<'a>,
 }
 
@@ -137,11 +136,14 @@ pub struct Scan {
     pub unscanned: Vec<Unscanned>,
 }
 
-/// Scans a library's module tree.
-pub fn scan(krate: &Crate, disallowed: &Disallowed) -> Scan {
+/// Scans a library's module tree. `entry` is its index in `crates`.
+pub fn scan(crates: &[Crate], entry: usize, disallowed: &Disallowed) -> Scan {
+    let Some(krate) = crates.get(entry) else {
+        return Scan::default();
+    };
     // Every module's names are bound before any code is read, so a path can
     // be followed through another module's `use` items.
-    let mut scanner = Scanner::read(krate, disallowed, false);
+    let mut scanner = Scanner::read(crates, entry, krate, disallowed, false);
     scanner.scan.forbids_unsafe |= manifest_forbids_unsafe(krate.root);
     scanner.definitions = scanner.definitions();
     // Visiting can load more files: modules declared inside functions.
@@ -227,10 +229,16 @@ fn manifest_forbids_unsafe(root: &Path) -> bool {
 /// What a name is bound to in a scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Binding {
-    /// An item with a known path.
-    Item(Vec<String>),
-    /// A `use` path, resolved in the module that has it.
-    Use { path: Vec<String>, leading: bool },
+    /// An item with a known path, optionally in a specific crate of the shared
+    /// table.
+    Item(Option<usize>, Vec<String>),
+    /// A `use` path, resolved in the module that has it, or directly in a
+    /// crate of the shared table when it started with `$crate`.
+    Use {
+        krate: Option<usize>,
+        path: Vec<String>,
+        leading: bool,
+    },
     /// An item local to a block, which has no path.
     Opaque,
     /// Bindings of one name that any build may have, such as two `use`
@@ -363,7 +371,7 @@ impl Scope {
                 Some(bound)
                     if certain
                         && bound.certain
-                        && matches!(bound.binding, Binding::Item(_) | Binding::Opaque) => {}
+                        && matches!(bound.binding, Binding::Item(..) | Binding::Opaque) => {}
                 Some(bound) => bound.add(binding.clone()),
             }
         }
@@ -423,7 +431,11 @@ fn namespace(path: &[String], index: usize, last: Namespace) -> Namespace {
 /// What a path resolved to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Resolved {
-    Path(Vec<String>),
+    Path {
+        /// The crate in the shared table the path starts in, when known.
+        krate: Option<usize>,
+        path: Vec<String>,
+    },
     /// A local variable or an item local to a block.
     Local,
     Unknown,
@@ -465,21 +477,21 @@ impl Resolved {
     }
 
     /// Applies `f` to each path the resolution may be.
-    fn map_paths(self, mut f: impl FnMut(Vec<String>) -> Self) -> Self {
+    fn map_paths(self, mut f: impl FnMut(Option<usize>, Vec<String>) -> Self) -> Self {
         Self::either(
             self.into_alternatives()
                 .into_iter()
                 .map(|resolved| match resolved {
-                    Self::Path(path) => f(path),
+                    Self::Path { krate, path } => f(krate, path),
                     other => other,
                 }),
         )
     }
 
     fn join(self, rest: &[String]) -> Self {
-        self.map_paths(|mut path| {
+        self.map_paths(|krate, mut path| {
             path.extend(rest.iter().cloned());
-            Self::Path(path)
+            Self::Path { krate, path }
         })
     }
 }
@@ -569,6 +581,8 @@ enum Location {
 }
 
 struct Scanner<'a> {
+    crates: &'a [Crate<'a>],
+    id: usize,
     krate: &'a Crate<'a>,
     disallowed: &'a Disallowed,
     scan: Scan,
@@ -597,9 +611,9 @@ struct Scanner<'a> {
     /// other crates, which a call names where no other macro of its name is
     /// in scope.
     prelude: Vec<Imported>,
-    /// The dependencies read for the macros they export, by the names the
-    /// crate's code uses.
-    libraries: HashMap<String, Scanner<'a>>,
+    /// The dependencies read for the macros they export, by their indices
+    /// in `crates`.
+    libraries: HashMap<usize, Scanner<'a>>,
     /// The modules around the one being indexed, outermost first, with the
     /// names bound in them so far, which `modules` doesn't have yet.
     around: Vec<(Vec<String>, Scope)>,
@@ -608,9 +622,9 @@ struct Scanner<'a> {
     /// wrote it, not for this one, where the macros are called.
     foreign: HashSet<String>,
     /// Where `$crate` is written in other crates' macros, by source, as
-    /// [`Span::file`] names it, line and column, mapped to the name the
-    /// crate goes by here.
-    dollar_crates: HashMap<(String, usize, usize), Ident>,
+    /// [`Span::file`] names it, line and column, mapped to the crate's index
+    /// in `crates`.
+    dollar_crates: HashMap<(String, usize, usize), usize>,
     /// The `#[macro_export]` macros defined so far, where the crate is read
     /// for another crate that calls them.
     exports: Option<Vec<Export>>,
@@ -680,8 +694,8 @@ struct MacroRules {
 /// crate` item brings into the prelude.
 struct Imported {
     name: String,
-    /// The library it is read from, by the name the crate's code uses.
-    library: String,
+    /// The library it is read from, by its index in `crates`.
+    library: usize,
     /// Which of the library's exports it is.
     export: usize,
     /// The predicates of the `cfg`s the `extern crate` item is under.
@@ -714,8 +728,8 @@ enum Origin {
 enum Found {
     /// Another crate's `#[macro_export]` macro.
     Export {
-        /// The library it is read from, by the name the crate's code uses.
-        library: String,
+        /// The library it is read from, by its index in `crates`.
+        library: usize,
         /// Which of the library's exports it is.
         export: usize,
     },
@@ -808,8 +822,15 @@ const MAX_EXPANDED_CALLS: usize = 10_000;
 const MAX_PASSES: usize = 8;
 
 impl<'a> Scanner<'a> {
-    fn new(krate: &'a Crate<'a>, disallowed: &'a Disallowed) -> Self {
+    fn new(
+        crates: &'a [Crate<'a>],
+        id: usize,
+        krate: &'a Crate<'a>,
+        disallowed: &'a Disallowed,
+    ) -> Self {
         Self {
+            crates,
+            id,
             krate,
             disallowed,
             scan: Scan::default(),
@@ -841,11 +862,18 @@ impl<'a> Scanner<'a> {
     /// can't be followed while the tree is read, so where such a call isn't
     /// expanded, the tree is read again with the names and macros the last
     /// reading found, until one finds no more, as rustc expands calls until
-    /// nothing changes. `exports` is whether the crate is read for another
-    /// crate that calls its macros.
-    fn read(krate: &'a Crate<'a>, disallowed: &'a Disallowed, exports: bool) -> Self {
+    /// nothing changes. `krate` is the crate at `id` in `crates`, and
+    /// `exports` is whether it is read for another crate that calls its
+    /// macros.
+    fn read(
+        crates: &'a [Crate<'a>],
+        id: usize,
+        krate: &'a Crate<'a>,
+        disallowed: &'a Disallowed,
+        exports: bool,
+    ) -> Self {
         let root = vec![krate.name.to_owned()];
-        let mut scanner = Self::new(krate, disallowed);
+        let mut scanner = Self::new(crates, id, krate, disallowed);
         let mut passes = 0;
         loop {
             scanner.exports = exports.then(Vec::new);
@@ -857,7 +885,7 @@ impl<'a> Scanner<'a> {
             if !scanner.pending || settled || passes == MAX_PASSES {
                 break;
             }
-            let mut next = Self::new(krate, disallowed);
+            let mut next = Self::new(crates, id, krate, disallowed);
             // The last reading's macros keep their spans, so the names of
             // the files they are in stay known.
             next.libraries = mem::take(&mut scanner.libraries);
@@ -1228,7 +1256,7 @@ impl<'a> Scanner<'a> {
                 root.define(
                     Namespace::Macros,
                     unraw,
-                    Binding::Item(path.clone()),
+                    Binding::Item(None, path.clone()),
                     certain,
                 );
             }
@@ -1301,10 +1329,11 @@ impl<'a> Scanner<'a> {
                 );
             }
             let used = Binding::Use {
+                krate: None,
                 path: vec![name],
                 leading: false,
             };
-            scope.bring_in(&binds, &used, &Binding::Item(path), !hidden);
+            scope.bring_in(&binds, &used, &Binding::Item(None, path), !hidden);
         }
     }
 
@@ -1336,9 +1365,12 @@ impl<'a> Scanner<'a> {
             if holds == Truth::False || !macro_use {
                 continue;
             }
-            let library = item.ident.unraw().to_string();
+            let extern_name = item.ident.unraw().to_string();
+            let Some(&library) = self.krate.dependencies.get(&extern_name) else {
+                continue;
+            };
             let Some(exports) = self
-                .library(&library)
+                .library(library)
                 .and_then(|library| library.exports.as_ref())
             else {
                 continue;
@@ -1355,7 +1387,7 @@ impl<'a> Scanner<'a> {
                 let defined = exported.and(imported);
                 self.prelude.push(Imported {
                     name,
-                    library: library.clone(),
+                    library,
                     export: index,
                     condition: condition.clone(),
                     certain: holds == Truth::True && defined == Truth::True,
@@ -1387,25 +1419,21 @@ impl<'a> Scanner<'a> {
             .fold(Truth::False, |truth, (applies, _)| truth.or(*applies))
     }
 
-    /// The dependency that the crate's code calls `name`, if its source can
-    /// be read. It is read for the macros it exports the first time they are
-    /// needed: its module tree with the `cfg`s of its own build, and its
-    /// `#[macro_export]` macros bound at its root, where paths name them.
-    /// Its files are noted as other crates', and the `$crate` its macros
-    /// write as `name`. A procedural macro crate can't export any.
-    fn library(&mut self, name: &str) -> Option<&Scanner<'a>> {
-        if !self.libraries.contains_key(name) {
-            let krate = *self.krate.dependencies.get(name)?;
-            // A dependency named like a keyword, as `r#async`, is written raw.
-            let ident = syn::parse_str::<Ident>(name)
-                .or_else(|_| syn::parse_str::<Ident>(&format!("r#{name}")))
-                .ok()?;
+    /// The crate at `id` in `crates`, if its source can be read. It is read
+    /// for the macros it exports the first time they are needed: its module
+    /// tree with the `cfg`s of its own build, and its `#[macro_export]`
+    /// macros bound at its root, where paths name them. Its files are noted as
+    /// other crates', and the `$crate` its macros write as `id`. A procedural
+    /// macro crate can't export any.
+    fn library(&mut self, id: usize) -> Option<&Scanner<'a>> {
+        if !self.libraries.contains_key(&id) {
+            let krate = self.crates.get(id)?;
             let mut reader = if krate.cfg.proc_macro {
-                let mut reader = Scanner::new(krate, self.disallowed);
+                let mut reader = Scanner::new(self.crates, id, krate, self.disallowed);
                 reader.exports = Some(Vec::new());
                 reader
             } else {
-                Scanner::read(krate, self.disallowed, true)
+                Scanner::read(self.crates, id, krate, self.disallowed, true)
             };
             // Only the names are needed.
             reader.files.clear();
@@ -1417,34 +1445,23 @@ impl<'a> Scanner<'a> {
             for export in reader.exports.iter_mut().flatten() {
                 export.rel = self.relative(&krate.root.join(&export.rel));
             }
+            for (key, dollar_id) in mem::take(&mut reader.dollar_crates) {
+                self.dollar_crates.entry(key).or_insert(dollar_id);
+            }
             for span in mem::take(&mut reader.crate_spans) {
                 let start = span.start();
                 self.dollar_crates
-                    .insert((span.file(), start.line, start.column), ident.clone());
+                    .entry((span.file(), start.line, start.column))
+                    .or_insert(id);
             }
-            self.libraries.insert(name.to_owned(), reader);
+            self.libraries.insert(id, reader);
         }
-        self.libraries.get(name)
+        self.libraries.get(&id)
     }
 
-    /// The export of the library the crate's code calls `library` that has
-    /// the index `export`.
-    fn export(&self, library: &str, export: usize) -> Option<&Export> {
-        self.libraries.get(library)?.exports.as_ref()?.get(export)
-    }
-
-    /// The name the crate's code calls the dependency whose library is
-    /// `lib`, if its source can be read. Paths name a crate by its library,
-    /// so where two dependencies have one, as two versions of a crate may,
-    /// a path to it can't be followed.
-    fn dependency_of(&self, lib: &str) -> Option<&'a str> {
-        let krate = self.krate;
-        let mut names = krate.externs.iter().filter_map(|(name, extern_lib)| {
-            let dependency = krate.dependencies.get(name)?;
-            (extern_lib == lib).then_some((name.as_str(), dependency.src))
-        });
-        let (name, src) = names.next()?;
-        names.all(|(_, other)| other == src).then_some(name)
+    /// The export of the library at `library` that has the index `export`.
+    fn export(&self, library: usize, export: usize) -> Option<&Export> {
+        self.libraries.get(&library)?.exports.as_ref()?.get(export)
     }
 
     /// The macros that a macro path that resolves to `resolved` may name:
@@ -1458,68 +1475,101 @@ impl<'a> Scanner<'a> {
     /// item of this crate that isn't one of its macros.
     fn path_macros(&mut self, resolved: &Resolved) -> Option<Vec<Found>> {
         let mut found = Vec::new();
+        let mut seen = HashSet::new();
         for alternative in resolved.alternatives() {
-            let Resolved::Path(path) = alternative else {
+            let Resolved::Path { krate, path } = alternative else {
                 return None;
             };
-            if path.first().map(String::as_str) == Some(self.krate.name) {
-                let definitions = self.macro_paths.get(path)?;
-                for definition in 0..definitions.len() {
-                    let own = Found::Own {
-                        path: path.clone(),
-                        definition,
-                    };
-                    if !found.contains(&own) {
-                        found.push(own);
+            match krate {
+                Some(id) if *id != self.id => {
+                    self.collect_foreign_macros(*id, path.clone(), 0, &mut seen, &mut found)?;
+                }
+                _ if path.first().map(String::as_str) == Some(self.krate.name) => {
+                    let definitions = self.macro_paths.get(path)?;
+                    for definition in 0..definitions.len() {
+                        let own = Found::Own {
+                            path: path.clone(),
+                            definition,
+                        };
+                        if !found.contains(&own) {
+                            found.push(own);
+                        }
                     }
                 }
-                continue;
-            }
-            let library = self.dependency_of(path.first()?)?;
-            let reader = self.library(library)?;
-            let exports = reader.exports.as_ref()?;
-            let targets = Resolver::new(reader, &[]).step(path.clone(), Namespace::Macros, 0);
-            for target in targets.alternatives() {
-                let Resolved::Path(target) = target else {
-                    return None;
-                };
-                let (name, module) = target.split_last()?;
-                if module.first().map(String::as_str) != Some(reader.krate.name) {
-                    return None;
-                }
-                // A `use` binds its name in each namespace that has it, so
-                // a way that leads to no macro, in a module whose names are
-                // all known, isn't one the call can mean.
-                let scope = reader.modules.get(module)?;
-                match scope.get(Namespace::Macros, name) {
-                    None if !scope.globs => continue,
-                    // Only the crate's exports are bound at its root.
-                    Some(_) if module.len() == 1 => {}
-                    _ => return None,
-                }
-                let mut any = false;
-                for (export, _) in exports
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, export)| export.name == *name)
-                {
-                    any = true;
-                    // Ways that reach one macro, as a name and a re-export
-                    // of it, name it once.
-                    let export = Found::Export {
-                        library: library.to_owned(),
-                        export,
-                    };
-                    if !found.contains(&export) {
-                        found.push(export);
-                    }
-                }
-                if !any {
-                    return None;
-                }
+                _ => return None,
             }
         }
         Some(found)
+    }
+
+    fn collect_foreign_macros(
+        &mut self,
+        id: usize,
+        path: Vec<String>,
+        depth: usize,
+        seen: &mut HashSet<(usize, Vec<String>)>,
+        found: &mut Vec<Found>,
+    ) -> Option<()> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        if !seen.insert((id, path.clone())) {
+            return Some(());
+        }
+        let reader = self.library(id)?;
+        let targets = Resolver::new(reader, &[]).step(path, Namespace::Macros, 0);
+        for target in targets.into_alternatives() {
+            let Resolved::Path {
+                krate: target_krate,
+                path: target_path,
+            } = target
+            else {
+                return None;
+            };
+            if let Some(next_id) = target_krate
+                && next_id != id
+            {
+                self.collect_foreign_macros(next_id, target_path, depth + 1, seen, found)?;
+                continue;
+            }
+            let (name, module) = target_path.split_last()?;
+            let reader = self.libraries.get(&id)?;
+            if module.first().map(String::as_str) != Some(reader.krate.name) {
+                return None;
+            }
+            // A `use` binds its name in each namespace that has it, so
+            // a way that leads to no macro, in a module whose names are
+            // all known, isn't one the call can mean.
+            let scope = reader.modules.get(module)?;
+            match scope.get(Namespace::Macros, name) {
+                None if !scope.globs => continue,
+                // Only the crate's exports are bound at its root.
+                Some(_) if module.len() == 1 => {}
+                _ => return None,
+            }
+            let exports = reader.exports.as_ref()?;
+            let mut any = false;
+            for (export, _) in exports
+                .iter()
+                .enumerate()
+                .filter(|(_, export)| export.name == *name)
+            {
+                any = true;
+                // Ways that reach one macro, as a name and a re-export
+                // of it, name it once.
+                let export = Found::Export {
+                    library: id,
+                    export,
+                };
+                if !found.contains(&export) {
+                    found.push(export);
+                }
+            }
+            if !any {
+                return None;
+            }
+        }
+        Some(())
     }
 
     /// The definitions a call of `name` may expand, the latest first: those
@@ -1594,7 +1644,7 @@ impl<'a> Scanner<'a> {
                         if *library == imported.library && *export == imported.export)
                 });
                 if !read {
-                    let export = self.export(&imported.library, imported.export)?;
+                    let export = self.export(imported.library, imported.export)?;
                     candidates.push(Candidate {
                         rules: export.rules.as_ref()?,
                         rel: &export.rel,
@@ -1624,8 +1674,8 @@ impl<'a> Scanner<'a> {
         for found in found {
             let definition = match found {
                 Found::Export { library, export } => {
-                    let export = self.export(library, *export)?;
-                    places.insert(vec![library.clone(), export.name.clone()]);
+                    let export = self.export(*library, *export)?;
+                    places.insert((Some(*library), vec![export.name.clone()]));
                     Candidate {
                         rules: export.rules.as_ref()?,
                         rel: &export.rel,
@@ -1638,7 +1688,7 @@ impl<'a> Scanner<'a> {
                 }
                 Found::Own { path, definition } => {
                     let definition = self.macro_paths.get(path)?.get(*definition)?;
-                    places.insert(path.clone());
+                    places.insert((None, path.clone()));
                     Candidate {
                         rules: definition.rules.as_ref()?,
                         rel: &definition.rel,
@@ -1720,12 +1770,7 @@ impl<'a> Scanner<'a> {
             }
         } else {
             let mut resolver = Resolver::new(self, &[]).indexing(place.module, scope);
-            let resolved = resolver.path(
-                place.module,
-                Namespace::Macros,
-                &segments(path),
-                path.leading_colon.is_some(),
-            );
+            let resolved = resolver.syn_path(place.module, Namespace::Macros, path);
             let incomplete = resolver.incomplete;
             let Some(found) = self
                 .path_macros(&resolved)
@@ -1823,7 +1868,6 @@ impl<'a> Scanner<'a> {
                 return false;
             };
             Expand.fragment(&mut items);
-            DollarCrates(&self.dollar_crates).items(&mut items);
             if !condition.is_empty() {
                 let cfg = cfg_attribute(predicate, span);
                 for item in &mut items {
@@ -1873,7 +1917,10 @@ impl<'a> Scanner<'a> {
             .alternatives()
             .iter()
             .any(|alternative| match alternative {
-                Resolved::Path(path) => path.first().map(String::as_str) == Some(self.krate.name),
+                Resolved::Path { krate, path } => {
+                    krate.is_none_or(|id| id == self.id)
+                        && path.first().map(String::as_str) == Some(self.krate.name)
+                }
                 Resolved::Unknown => true,
                 Resolved::Local | Resolved::Either(_) => false,
             })
@@ -2032,7 +2079,7 @@ impl<'a> Scanner<'a> {
             let ident = match item {
                 Item::Use(item) => {
                     let leading = item.leading_colon.is_some();
-                    bind_use(&item.tree, &mut Vec::new(), leading, certain, scope);
+                    self.bind_use(&item.tree, None, &mut Vec::new(), leading, certain, scope);
                     continue;
                 }
                 Item::ExternCrate(item) => {
@@ -2041,15 +2088,15 @@ impl<'a> Scanner<'a> {
                         .as_ref()
                         .map_or(&item.ident, |(_, rename)| rename);
                     let target = item.ident.unraw().to_string();
-                    let target = if target == "self" {
-                        self.krate.name.to_owned()
+                    let (krate, target) = if target == "self" {
+                        (None, self.krate.name.to_owned())
                     } else {
-                        self.extern_crate(&target).unwrap_or(target)
+                        self.extern_crate(&target).unwrap_or((None, target))
                     };
                     scope.define(
                         Namespace::Types,
                         name.unraw().to_string(),
-                        Binding::Item(vec![target]),
+                        Binding::Item(krate, vec![target]),
                         certain,
                     );
                     continue;
@@ -2073,7 +2120,7 @@ impl<'a> Scanner<'a> {
                 Some(module) => {
                     let mut path = module.to_vec();
                     path.push(name.clone());
-                    Binding::Item(path)
+                    Binding::Item(None, path)
                 }
                 None => Binding::Opaque,
             };
@@ -2083,12 +2130,27 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// The library name of a crate this crate can name without a `use`.
-    fn extern_crate(&self, name: &str) -> Option<String> {
+    /// The crate index (when readable) and library name of a crate this crate
+    /// can name without a `use`.
+    fn extern_crate(&self, name: &str) -> Option<(Option<usize>, String)> {
         if let Some(lib) = self.krate.externs.get(name) {
-            return Some(lib.clone());
+            let id = self.krate.dependencies.get(name).copied();
+            return Some((id, lib.clone()));
         }
-        SYSROOT.contains(&name).then(|| name.to_owned())
+        SYSROOT.contains(&name).then(|| (None, name.to_owned()))
+    }
+
+    /// The crate in `crates` that `ident` stands for, if it is another
+    /// crate's `$crate`.
+    fn dollar_crate(&self, ident: &Ident) -> Option<usize> {
+        if ident != "crate" {
+            return None;
+        }
+        let span = ident.span();
+        let start = span.start();
+        self.dollar_crates
+            .get(&(span.file(), start.line, start.column))
+            .copied()
     }
 
     /// The path that a leading `crate`, `self` or `super` leads to, with the
@@ -2130,7 +2192,9 @@ impl<'a> Scanner<'a> {
                 .step(path.to_vec(), Namespace::Values, 0)
                 .into_alternatives()
             {
-                if let Resolved::Path(definition) = definition
+                if let Resolved::Path {
+                    path: definition, ..
+                } = definition
                     && definition != path
                 {
                     definitions.insert(definition, entry);
@@ -2309,6 +2373,24 @@ impl<'s, 'a> Resolver<'s, 'a> {
         (resolved, reached.is_none())
     }
 
+    /// Resolves a `syn::Path` written in `module` within the blocks, for its
+    /// last segment in `namespace`. If the path starts with another crate's
+    /// `$crate`, it resolves directly in that crate.
+    fn syn_path(&mut self, module: &[String], namespace: Namespace, path: &syn::Path) -> Resolved {
+        let names = segments(path);
+        let leading = path.leading_colon.is_some();
+        if !leading
+            && let Some(first) = path.segments.first()
+            && let Some(id) = self.scanner.dollar_crate(&first.ident)
+            && let Some(krate) = self.scanner.crates.get(id)
+        {
+            let mut full = vec![krate.name.to_owned()];
+            full.extend(names.into_iter().skip(1));
+            return self.follow(Some(id), full, namespace, 0);
+        }
+        self.path(module, namespace, &names, leading)
+    }
+
     /// Resolves a path written in `module` within the blocks, for its last
     /// segment in `namespace`: values for a path in an expression, types
     /// for the type of a qualified path. A path whose every way leads back
@@ -2342,14 +2424,18 @@ impl<'s, 'a> Resolver<'s, 'a> {
         }
         let scanner = self.scanner;
         if let Some(path) = scanner.relative_path(module, path) {
-            return self.follow(path, namespace, 0);
+            return self.follow(None, path, namespace, 0);
         }
         if leading {
             if scanner.krate.edition_2015 {
                 return self.root_path(path, namespace, 0);
             }
             return match scanner.extern_crate(first) {
-                Some(krate) => Resolved::Path(vec![krate]).join(rest),
+                Some((krate, lib)) => Resolved::Path {
+                    krate,
+                    path: vec![lib],
+                }
+                .join(rest),
                 None => Resolved::Unknown,
             };
         }
@@ -2362,15 +2448,23 @@ impl<'s, 'a> Resolver<'s, 'a> {
                 .join(rest);
             return self.followed(resolved, namespace, 0);
         }
-        if let Some(krate) = scanner.extern_crate(first) {
-            return Resolved::Path(vec![krate]).join(rest);
+        if let Some((krate, lib)) = scanner.extern_crate(first) {
+            return Resolved::Path {
+                krate,
+                path: vec![lib],
+            }
+            .join(rest);
         }
         // A glob import shadows the prelude and may provide any name. It
         // could shadow a crate name too, but no crate exports an item named
         // like another crate, while a `Vec` or `Box` of its own is common.
         let globs = self.blocks.iter().any(|scope| scope.globs) || self.globs(module);
         if !globs && let Some((_, prelude)) = PRELUDE.iter().find(|(name, _)| name == first) {
-            return Resolved::Path(prelude.split("::").map(str::to_owned).collect()).join(rest);
+            return Resolved::Path {
+                krate: None,
+                path: prelude.split("::").map(str::to_owned).collect(),
+            }
+            .join(rest);
         }
         Resolved::Unknown
     }
@@ -2407,11 +2501,24 @@ impl<'s, 'a> Resolver<'s, 'a> {
         depth: usize,
     ) -> Resolved {
         match binding {
-            Binding::Item(path) => Resolved::Path(path.clone()),
+            Binding::Item(krate, path) => Resolved::Path {
+                krate: *krate,
+                path: path.clone(),
+            },
             Binding::Opaque => Resolved::Local,
-            Binding::Use { path, leading } => {
-                self.use_path(module, blocks, namespace, path, *leading, depth + 1)
-            }
+            Binding::Use {
+                krate: Some(id),
+                path,
+                ..
+            } => Resolved::Path {
+                krate: Some(*id),
+                path: path.clone(),
+            },
+            Binding::Use {
+                krate: None,
+                path,
+                leading,
+            } => self.use_path(module, blocks, namespace, path, *leading, depth + 1),
             Binding::Either(alternatives) => Resolved::either(
                 alternatives
                     .iter()
@@ -2477,13 +2584,17 @@ impl<'s, 'a> Resolver<'s, 'a> {
         }
         let scanner = self.scanner;
         if let Some(path) = scanner.relative_path(module, path) {
-            return self.follow(path, namespace, depth);
+            return self.follow(None, path, namespace, depth);
         }
         if scanner.krate.edition_2015 {
             return self.root_path(path, namespace, depth);
         }
         let unbound = |_: &mut Self| match scanner.extern_crate(first) {
-            Some(krate) => Resolved::Path(vec![krate]).join(rest),
+            Some((krate, lib)) => Resolved::Path {
+                krate,
+                path: vec![lib],
+            }
+            .join(rest),
             None => Resolved::Unknown,
         };
         let first_namespace = self::namespace(path, 0, namespace);
@@ -2542,12 +2653,16 @@ impl<'s, 'a> Resolver<'s, 'a> {
         let scanner = self.scanner;
         let root = [scanner.krate.name.to_owned()];
         let unbound = |resolver: &mut Self| {
-            if let Some(krate) = scanner.extern_crate(first) {
-                return Resolved::Path(vec![krate]).join(rest);
+            if let Some((krate, lib)) = scanner.extern_crate(first) {
+                return Resolved::Path {
+                    krate,
+                    path: vec![lib],
+                }
+                .join(rest);
             }
             let mut full = root.to_vec();
             full.extend(path.iter().cloned());
-            resolver.follow(full, namespace, depth)
+            resolver.follow(None, full, namespace, depth)
         };
         let first_namespace = self::namespace(path, 0, namespace);
         if let Some((binding, _)) = self.lookup(&root, 0, first_namespace, first) {
@@ -2557,16 +2672,25 @@ impl<'s, 'a> Resolver<'s, 'a> {
     }
 
     fn followed(&mut self, resolved: Resolved, namespace: Namespace, depth: usize) -> Resolved {
-        resolved.map_paths(|path| self.follow(path, namespace, depth))
+        resolved.map_paths(|krate, path| self.follow(krate, path, namespace, depth))
     }
 
     /// Follows a path into this crate through the `use` items of the modules
     /// it passes, as `crate::sync::Mutex` reaches `std::sync::Mutex` through
     /// `mod sync { pub use std::sync::Mutex; }`. It stops at a disallowed
     /// path, which names a re-export as often as a definition.
-    fn follow(&mut self, path: Vec<String>, namespace: Namespace, depth: usize) -> Resolved {
+    fn follow(
+        &mut self,
+        krate: Option<usize>,
+        path: Vec<String>,
+        namespace: Namespace,
+        depth: usize,
+    ) -> Resolved {
+        if krate.is_some_and(|id| id != self.scanner.id) {
+            return Resolved::Path { krate, path };
+        }
         if self.scanner.disallowed.entry(&path).is_some() {
-            return Resolved::Path(path);
+            return Resolved::Path { krate, path };
         }
         self.step(path, namespace, depth)
     }
@@ -2610,7 +2734,10 @@ impl<'s, 'a> Resolver<'s, 'a> {
     ) -> Resolved {
         let scanner = self.scanner;
         if path.first().map(String::as_str) != Some(scanner.krate.name) || depth > MAX_DEPTH {
-            return Resolved::Path(path.to_vec());
+            return Resolved::Path {
+                krate: None,
+                path: path.to_vec(),
+            };
         }
         for end in start..path.len() {
             let (Some(module), Some(name)) = (path.get(..end), path.get(end)) else {
@@ -2640,60 +2767,102 @@ impl<'s, 'a> Resolver<'s, 'a> {
                 None => break,
             }
         }
-        Resolved::Path(path.to_vec())
+        Resolved::Path {
+            krate: None,
+            path: path.to_vec(),
+        }
     }
 }
 
 /// Whether `binding` is the `use` of `path`, which the path itself can't
 /// refer to: in `use tokio;`, `tokio` is the crate.
 fn is_use_of(binding: &Binding, path: &[String]) -> bool {
-    matches!(binding, Binding::Use { path: used, .. } if used == path)
+    matches!(binding, Binding::Use { krate: None, path: used, .. } if used == path)
 }
 
-/// Records the names a `use` tree binds, under the path `prefix` leads to.
-/// `certain` is whether every build has the `use`.
-fn bind_use(
-    tree: &UseTree,
-    prefix: &mut Vec<String>,
-    leading: bool,
-    certain: bool,
-    scope: &mut Scope,
-) {
-    let mut bind = |name: String, path: Vec<String>| {
-        if name != "_" {
-            scope.import(name, Binding::Use { path, leading }, certain);
-        }
-    };
-    match tree {
-        UseTree::Path(tree) => {
-            prefix.push(tree.ident.unraw().to_string());
-            bind_use(&tree.tree, prefix, leading, certain, scope);
-            prefix.pop();
-        }
-        UseTree::Name(name) => {
-            let ident = name.ident.unraw().to_string();
-            if ident == "self" {
-                if let Some(last) = prefix.last() {
-                    bind(last.clone(), prefix.clone());
+impl Scanner<'_> {
+    /// Records the names a `use` tree binds, under the path `prefix` leads
+    /// to. `certain` is whether every build has the `use`. If a branch starts
+    /// with another crate's `$crate`, it binds directly to that crate.
+    fn bind_use(
+        &self,
+        tree: &UseTree,
+        krate: Option<usize>,
+        prefix: &mut Vec<String>,
+        leading: bool,
+        certain: bool,
+        scope: &mut Scope,
+    ) {
+        let mut bind = |name: String, krate: Option<usize>, path: Vec<String>| {
+            if name != "_" {
+                scope.import(
+                    name,
+                    Binding::Use {
+                        krate,
+                        path,
+                        leading,
+                    },
+                    certain,
+                );
+            }
+        };
+        let dollar = |ident: &Ident| {
+            (krate.is_none() && prefix.is_empty() && !leading)
+                .then(|| self.dollar_crate(ident))
+                .flatten()
+        };
+        match tree {
+            UseTree::Path(tree) => {
+                if let Some(id) = dollar(&tree.ident)
+                    && let Some(krate) = self.crates.get(id)
+                {
+                    prefix.push(krate.name.to_owned());
+                    self.bind_use(&tree.tree, Some(id), prefix, leading, certain, scope);
+                } else {
+                    prefix.push(tree.ident.unraw().to_string());
+                    self.bind_use(&tree.tree, krate, prefix, leading, certain, scope);
                 }
-            } else {
-                let mut path = prefix.clone();
-                path.push(ident.clone());
-                bind(ident, path);
+                prefix.pop();
             }
-        }
-        UseTree::Rename(rename) => {
-            let ident = rename.ident.unraw().to_string();
-            let mut path = prefix.clone();
-            if ident != "self" {
-                path.push(ident);
+            UseTree::Name(name) => {
+                if let Some(id) = dollar(&name.ident)
+                    && let Some(krate) = self.crates.get(id)
+                {
+                    let lib = krate.name.to_owned();
+                    bind(lib.clone(), Some(id), vec![lib]);
+                } else {
+                    let ident = name.ident.unraw().to_string();
+                    if ident == "self" {
+                        if let Some(last) = prefix.last() {
+                            bind(last.clone(), krate, prefix.clone());
+                        }
+                    } else {
+                        let mut path = prefix.clone();
+                        path.push(ident.clone());
+                        bind(ident, krate, path);
+                    }
+                }
             }
-            bind(rename.rename.unraw().to_string(), path);
-        }
-        UseTree::Glob(_) => scope.globs = true,
-        UseTree::Group(group) => {
-            for tree in &group.items {
-                bind_use(tree, prefix, leading, certain, scope);
+            UseTree::Rename(rename) => {
+                if let Some(id) = dollar(&rename.ident)
+                    && let Some(krate) = self.crates.get(id)
+                {
+                    let lib = krate.name.to_owned();
+                    bind(rename.rename.unraw().to_string(), Some(id), vec![lib]);
+                } else {
+                    let ident = rename.ident.unraw().to_string();
+                    let mut path = prefix.clone();
+                    if ident != "self" {
+                        path.push(ident);
+                    }
+                    bind(rename.rename.unraw().to_string(), krate, path);
+                }
+            }
+            UseTree::Glob(_) => scope.globs = true,
+            UseTree::Group(group) => {
+                for tree in &group.items {
+                    self.bind_use(tree, krate, prefix, leading, certain, scope);
+                }
             }
         }
     }
@@ -2742,137 +2911,6 @@ impl<'ast> Visit<'ast> for FirstSpan {
 
     fn visit_ident(&mut self, ident: &'ast Ident) {
         self.0.get_or_insert(ident.span());
-    }
-}
-
-/// Writes each `crate` that another crate's macro wrote for `$crate` as a
-/// path to that crate, `::name`, by the name the crate goes by here: in
-/// every edition, such a path can start at the crates the build is given.
-/// Until the expansion is read as code, `$crate` stays one token, as in
-/// rustc, so that a macro it is passed to matches it as an identifier. A
-/// `crate` the macro writes itself means the calling crate, and stays.
-struct DollarCrates<'d>(&'d HashMap<(String, usize, usize), Ident>);
-
-impl DollarCrates<'_> {
-    /// Rewrites `items`, and the items and code in them.
-    fn items(&mut self, items: &mut Vec<Item>) {
-        self.split(items);
-        for item in items {
-            self.visit_item_mut(item);
-        }
-    }
-
-    /// Splits each `use` item among `items` whose root group has a branch
-    /// that starts with another crate's `$crate`, as `use {$crate::spawn as
-    /// start, other::Thing};`, into one item for each branch, which means
-    /// the same: the path to the crate can only start a `use` item.
-    fn split(&self, items: &mut Vec<Item>) {
-        *items = mem::take(items)
-            .into_iter()
-            .flat_map(|item| match item {
-                Item::Use(item) => self.branches(item).into_iter().map(Item::Use).collect(),
-                item => vec![item],
-            })
-            .collect();
-    }
-
-    fn branches(&self, item: syn::ItemUse) -> Vec<syn::ItemUse> {
-        match &item.tree {
-            UseTree::Group(group) if item.leading_colon.is_none() && self.starts(&item.tree) => {
-                group
-                    .items
-                    .iter()
-                    .flat_map(|tree| {
-                        self.branches(syn::ItemUse {
-                            tree: tree.clone(),
-                            ..item.clone()
-                        })
-                    })
-                    .collect()
-            }
-            _ => vec![item],
-        }
-    }
-
-    /// Whether a branch of a `use` tree starts with another crate's
-    /// `$crate`.
-    fn starts(&self, tree: &UseTree) -> bool {
-        match tree {
-            UseTree::Path(path) => self.name(&path.ident).is_some(),
-            UseTree::Name(name) => self.name(&name.ident).is_some(),
-            UseTree::Rename(rename) => self.name(&rename.ident).is_some(),
-            UseTree::Group(group) => group.items.iter().any(|tree| self.starts(tree)),
-            UseTree::Glob(_) => false,
-        }
-    }
-
-    /// The crate `ident` stands for, if it is another crate's `$crate`,
-    /// written where it is.
-    fn name(&self, ident: &Ident) -> Option<Ident> {
-        if ident != "crate" {
-            return None;
-        }
-        let span = ident.span();
-        let start = span.start();
-        let mut name = self
-            .0
-            .get(&(span.file(), start.line, start.column))?
-            .clone();
-        name.set_span(span);
-        Some(name)
-    }
-}
-
-impl VisitMut for DollarCrates<'_> {
-    fn visit_item_mod_mut(&mut self, item: &mut ItemMod) {
-        if let Some((_, items)) = &mut item.content {
-            self.split(items);
-        }
-        visit_mut::visit_item_mod_mut(self, item);
-    }
-
-    fn visit_block_mut(&mut self, block: &mut Block) {
-        block.stmts = mem::take(&mut block.stmts)
-            .into_iter()
-            .flat_map(|stmt| match stmt {
-                Stmt::Item(Item::Use(item)) => self
-                    .branches(item)
-                    .into_iter()
-                    .map(|item| Stmt::Item(Item::Use(item)))
-                    .collect(),
-                stmt => vec![stmt],
-            })
-            .collect();
-        visit_mut::visit_block_mut(self, block);
-    }
-
-    fn visit_path_mut(&mut self, path: &mut syn::Path) {
-        if path.leading_colon.is_none()
-            && let Some(first) = path.segments.first_mut()
-            && let Some(name) = self.name(&first.ident)
-        {
-            path.leading_colon = Some(Token![::](name.span()));
-            first.ident = name;
-        }
-        visit_mut::visit_path_mut(self, path);
-    }
-
-    fn visit_item_use_mut(&mut self, item: &mut syn::ItemUse) {
-        if item.leading_colon.is_none() {
-            let first = match &mut item.tree {
-                UseTree::Path(path) => Some(&mut path.ident),
-                UseTree::Name(name) => Some(&mut name.ident),
-                UseTree::Rename(rename) => Some(&mut rename.ident),
-                UseTree::Glob(_) | UseTree::Group(_) => None,
-            };
-            if let Some(first) = first
-                && let Some(name) = self.name(first)
-            {
-                item.leading_colon = Some(Token![::](name.span()));
-                *first = name;
-            }
-        }
-        visit_mut::visit_item_use_mut(self, item);
     }
 }
 
@@ -3391,26 +3429,28 @@ impl FileVisitor<'_, '_> {
     fn resolve(&self, expr: &ExprPath) -> Resolved {
         let mut resolver = Resolver::new(self.scanner, &self.blocks);
         let names = segments(&expr.path);
-        let leading = expr.path.leading_colon.is_some();
         let resolved = match &expr.qself {
             // `<[T]>::split_at` and `<Vec<T>>::insert` name the type's items.
             Some(qself) if qself.position == 0 => {
                 let base = match &*qself.ty {
-                    Type::Slice(_) => Resolved::Path(vec!["slice".to_owned()]),
-                    Type::Path(ty) if ty.qself.is_none() => resolver.path(
-                        &self.module,
-                        Namespace::Types,
-                        &segments(&ty.path),
-                        ty.path.leading_colon.is_some(),
-                    ),
+                    Type::Slice(_) => Resolved::Path {
+                        krate: None,
+                        path: vec!["slice".to_owned()],
+                    },
+                    Type::Path(ty) if ty.qself.is_none() => {
+                        resolver.syn_path(&self.module, Namespace::Types, &ty.path)
+                    }
                     _ => Resolved::Unknown,
                 };
                 base.join(&names)
             }
             // `<T as Trait>::method` names the trait's item.
-            _ => resolver.path(&self.module, Namespace::Values, &names, leading),
+            _ => resolver.syn_path(&self.module, Namespace::Values, &expr.path),
         };
-        resolved.map_paths(|path| Resolved::Path(canonical(path)))
+        resolved.map_paths(|krate, path| Resolved::Path {
+            krate,
+            path: canonical(path),
+        })
     }
 
     fn start(expr: &ExprPath) -> Span {
@@ -3952,7 +3992,7 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
             .alternatives()
             .iter()
             .filter_map(|resolved| match resolved {
-                Resolved::Path(path) => self.scanner.entry(path),
+                Resolved::Path { path, .. } => self.scanner.entry(path),
                 _ => None,
             })
             .collect();
@@ -3985,7 +4025,7 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
                     // A path into a crate no entry names may be a re-export of
                     // a disallowed item, as `smol::Executor` is
                     // `async_executor::Executor`.
-                    Resolved::Path(path) => {
+                    Resolved::Path { path, .. } => {
                         self.scanner.entry(path).is_none()
                             && path
                                 .first()
@@ -4309,7 +4349,6 @@ mod tests {
     fn scan_with(files: &[(&str, &str)], edition_2015: bool, libraries: &[Library]) -> Scan {
         let target = Target::parse("unix\ntarget_os=\"linux\"\n");
         let no_externs = BTreeMap::new();
-        let no_dependencies = BTreeMap::new();
         let dirs: Vec<_> = libraries
             .iter()
             .map(|library| package(library.files))
@@ -4324,7 +4363,7 @@ mod tests {
                 Features::from_sets(&[library.features.iter().map(|f| (*f).to_owned()).collect()])
             })
             .collect();
-        let crates: Vec<_> = libraries
+        let mut crates: Vec<_> = libraries
             .iter()
             .zip(&dirs)
             .zip(&srcs)
@@ -4335,7 +4374,7 @@ mod tests {
                 src,
                 edition_2015: false,
                 externs: &no_externs,
-                dependencies: &no_dependencies,
+                dependencies: BTreeMap::new(),
                 cfg: Cfg {
                     target: &target,
                     features,
@@ -4349,26 +4388,27 @@ mod tests {
             .collect();
         let dependencies = libraries
             .iter()
-            .zip(&crates)
-            .map(|(library, krate)| (library.name.to_owned(), krate))
+            .enumerate()
+            .map(|(index, library)| (library.name.to_owned(), index))
             .collect();
         let dir = package(files);
         let features = Features::default();
         let src = dir.path().join("src/lib.rs");
-        let krate = Crate {
+        let entry = crates.len();
+        crates.push(Crate {
             name: "demo",
             root: dir.path(),
             src: &src,
             edition_2015,
             externs: &externs,
-            dependencies: &dependencies,
+            dependencies,
             cfg: Cfg {
                 target: &target,
                 features: &features,
                 proc_macro: false,
             },
-        };
-        scan(&krate, &Disallowed::bundled().unwrap())
+        });
+        scan(&crates, entry, &Disallowed::bundled().unwrap())
     }
 
     fn unscanned(file: &str, line: usize, reason: &str) -> Unscanned {
@@ -5821,5 +5861,216 @@ pick!(by_name);
                 ..UnsafeCounts::default()
             }
         );
+    }
+
+    struct GraphCrate<'a> {
+        name: &'a str,
+        deps: &'a [(&'a str, usize)],
+        files: &'a [(&'a str, &'a str)],
+    }
+
+    /// Scans `demo` against `others`, where each entry's `deps` maps its
+    /// local extern name to an index in `others`. `demo` depends on the
+    /// crates in `demo_deps` by their library names.
+    fn scan_graph(files: &[(&str, &str)], demo_deps: &[usize], others: &[GraphCrate]) -> Scan {
+        let target = Target::parse("unix\ntarget_os=\"linux\"\n");
+        let dirs: Vec<_> = others.iter().map(|krate| package(krate.files)).collect();
+        let srcs: Vec<_> = dirs
+            .iter()
+            .map(|dir| dir.path().join("src/lib.rs"))
+            .collect();
+        let features = Features::default();
+        let extern_maps: Vec<BTreeMap<String, String>> = others
+            .iter()
+            .map(|krate| {
+                krate
+                    .deps
+                    .iter()
+                    .map(|(alias, target)| ((*alias).to_owned(), others[*target].name.to_owned()))
+                    .collect()
+            })
+            .collect();
+        let mut crates: Vec<Crate> = others
+            .iter()
+            .enumerate()
+            .map(|(index, krate)| Crate {
+                name: krate.name,
+                root: dirs[index].path(),
+                src: &srcs[index],
+                edition_2015: false,
+                externs: &extern_maps[index],
+                dependencies: krate
+                    .deps
+                    .iter()
+                    .map(|(alias, target)| ((*alias).to_owned(), *target))
+                    .collect(),
+                cfg: Cfg {
+                    target: &target,
+                    features: &features,
+                    proc_macro: false,
+                },
+            })
+            .collect();
+        let demo_externs: BTreeMap<String, String> = demo_deps
+            .iter()
+            .map(|&index| (others[index].name.to_owned(), others[index].name.to_owned()))
+            .collect();
+        let demo_dependencies: BTreeMap<String, usize> = demo_deps
+            .iter()
+            .map(|&index| (others[index].name.to_owned(), index))
+            .collect();
+        let dir = package(files);
+        let src = dir.path().join("src/lib.rs");
+        let entry = crates.len();
+        crates.push(Crate {
+            name: "demo",
+            root: dir.path(),
+            src: &src,
+            edition_2015: false,
+            externs: &demo_externs,
+            dependencies: demo_dependencies,
+            cfg: Cfg {
+                target: &target,
+                features: &features,
+                proc_macro: false,
+            },
+        });
+        scan(&crates, entry, &Disallowed::bundled().unwrap())
+    }
+
+    #[test]
+    fn reexported_macros_from_another_crate_are_expanded() {
+        let inner_files = [(
+            "lib.rs",
+            r"#[macro_export]
+macro_rules! outer {
+    ($name:ident) => { $crate::helper! { mod $name; } };
+}
+
+#[macro_export]
+macro_rules! helper {
+    ($($body:tt)*) => { $($body)* pub unsafe fn theirs() {} };
+}
+",
+        )];
+        let facade_files = [("lib.rs", "pub use aliased_inner::outer as select;\n")];
+        let scan = scan_graph(
+            &[
+                (
+                    "lib.rs",
+                    "facade::select! { direct }\nuse facade::select;\nselect! { imported }\n",
+                ),
+                ("direct.rs", "pub unsafe fn a() {}\n"),
+                ("imported.rs", "pub unsafe fn b() {}\n"),
+            ],
+            &[1],
+            &[
+                GraphCrate {
+                    name: "inner",
+                    deps: &[],
+                    files: &inner_files,
+                },
+                GraphCrate {
+                    name: "facade",
+                    deps: &[("aliased_inner", 0)],
+                    files: &facade_files,
+                },
+            ],
+        );
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 2);
+    }
+
+    #[test]
+    fn use_dollar_crate_in_reexported_macro_resolves_to_defining_crate() {
+        let inner_files = [(
+            "lib.rs",
+            r"#[macro_export]
+macro_rules! make {
+    ($name:ident, $body:block) => {
+        use {$crate::helper, std::mem::forget};
+        helper! { mod $name; }
+        fn check() $body
+    };
+}
+
+#[macro_export]
+macro_rules! helper {
+    ($($body:tt)*) => { $($body)* };
+}
+",
+        )];
+        let facade_files = [("lib.rs", "pub use inner::make;\n")];
+        let scan = scan_graph(
+            &[
+                ("lib.rs", "facade::make! { generated, { forget(()); } }\n"),
+                ("generated.rs", "pub unsafe fn a() {}\n"),
+            ],
+            &[1],
+            &[
+                GraphCrate {
+                    name: "inner",
+                    deps: &[],
+                    files: &inner_files,
+                },
+                GraphCrate {
+                    name: "facade",
+                    deps: &[("inner", 0)],
+                    files: &facade_files,
+                },
+            ],
+        );
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 1);
+        assert_eq!(scan.calls.len(), 1);
+    }
+
+    #[test]
+    fn reexported_module_macros_follow_into_third_crate() {
+        let inner_files = [(
+            "lib.rs",
+            r"#[macro_export]
+macro_rules! leaf {
+    ($name:ident) => { mod $name; };
+}
+",
+        )];
+        let facade_files = [(
+            "lib.rs",
+            r"pub mod sub {
+    pub use inner::leaf;
+}
+
+#[macro_export]
+macro_rules! wrapper {
+    ($name:ident) => { $crate::sub::leaf!($name); };
+}
+",
+        )];
+        let scan = scan_graph(
+            &[
+                (
+                    "lib.rs",
+                    "facade::wrapper!(wrapped);\nfacade::sub::leaf!(direct_sub);\n",
+                ),
+                ("wrapped.rs", "pub unsafe fn a() {}\n"),
+                ("direct_sub.rs", "pub unsafe fn b() {}\n"),
+            ],
+            &[1],
+            &[
+                GraphCrate {
+                    name: "inner",
+                    deps: &[],
+                    files: &inner_files,
+                },
+                GraphCrate {
+                    name: "facade",
+                    deps: &[("inner", 0)],
+                    files: &facade_files,
+                },
+            ],
+        );
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 2);
     }
 }
