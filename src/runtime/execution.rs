@@ -10,6 +10,10 @@ thread_local! {
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the harness runs every modeled task on the OS thread that entered it"
+)]
 pub(crate) fn current() -> Option<u64> {
     CURRENT.get()
 }
@@ -30,6 +34,10 @@ impl Execution {
         Self
     }
 
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the harness runs every modeled task on the OS thread that entered it"
+    )]
     pub(crate) fn next() {
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
         assert_ne!(id, 0, "adamantium::testing execution identity exhausted");
@@ -38,6 +46,10 @@ impl Execution {
 }
 
 impl Drop for Execution {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the harness runs every modeled task on the OS thread that entered it"
+    )]
     fn drop(&mut self) {
         CURRENT.set(None);
     }

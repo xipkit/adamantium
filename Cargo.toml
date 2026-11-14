@@ -14,6 +14,7 @@ exclude = [
     "cli/tests/fixtures/strict",
     "cli/tests/fixtures/time",
     "cli/tests/fixtures/sync",
+    "cli/tests/fixtures/state",
 ]
 
 [workspace.package]

@@ -417,7 +417,7 @@ The default lint levels are in this repository's `[workspace.lints]`, and the Cl
 | Property | Enforced by |
 | --- | --- |
 | No `unsafe` code | `unsafe_code = "forbid"` |
-| Every value can cross a task | `future_not_send`; `Rc`, `RefCell`, `Cell`, and `LocalSet` disallowed, and so are `LocalRuntime`'s entry points |
+| Every value can cross a task | `future_not_send`; `Rc`, `RefCell`, `Cell`, and `LocalSet` disallowed, and so are `LocalRuntime`'s entry points and the methods that read or write a `thread_local!` value, since a task can move to another thread at any await |
 | No task outlives its scope | `tokio::spawn`, `spawn_local`, `JoinSet`, the spawn methods of Tokio's `Handle`, `Runtime`, `LocalRuntime`, and `task::Builder`, async-std's task and builder spawns, `smol::spawn`, smol's executor spawns, `std::thread::spawn`, and `scope` disallowed; tasks use `Tasks` |
 | No lock is held across an await or inside another lock | `await_holding_lock`; `Mutex` and `RwLock` from std, tokio, parking_lot, and futures disallowed; `Actor::with` is synchronous and rejects nesting |
 | Unbounded channel constructors restricted | Unbounded channel constructors from std, Tokio, async-channel, flume, and crossbeam-channel disallowed; use `Channel` |
@@ -434,6 +434,8 @@ Tokio's `Semaphore` is allowed, and so is holding a permit across an await, beca
 Tests are exempt from the panic rules, so `unwrap`, indexing, and `panic!` are allowed in `#[test]` functions and `#[cfg(test)]` modules. Before Rust 1.100, Clippy does not treat helper functions in integration test files as tests, so those functions follow the rules. From Rust 1.100, they are exempt as well.
 
 The rules have limits. A plain `receive` or `send` can wait indefinitely while the channel stays open and empty or full; use `receive_until` or `send_until` to bound the wait with a `Cancellation` or a deadline. Dependencies can still use unsafe code or panic, and Clippy cannot detect every call that blocks a worker thread. `Runtime::block_on` is allowed because `#[tokio::main]` and `#[tokio::test]` expand to it; called inside a runtime, it panics at run time instead of blocking. The default tier permits arithmetic that can panic; the strict tier lints potentially panicking arithmetic operators. Neither tier prevents stack exhaustion or panics inside called methods.
+
+Atomics and `OnceLock` and `LazyLock` statics are allowed. An atomic holds no guard across an await and can't deadlock, so it suits a single counter or flag; Clippy can't see a check-then-act spread over two atomics, so state whose parts must agree belongs in one `Actor`. A `OnceLock` or `LazyLock` static is set once, but whatever in it can still change, such as an `Actor`, is outside every scope and shared by every task and every test in the binary. Prefer passing an `Actor` to the tasks that use it.
 
 Strong reference cycles are not detected or collected. An `Actor` whose state owns a clone of itself, directly or through other actors, keeps every state in the cycle alive after the last external handle is dropped. Banning `Weak` and `Arc::downgrade` does not prevent strong cycles; keep actor ownership acyclic or explicitly remove cycle-forming handles before releasing the last external handle.
 
