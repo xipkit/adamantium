@@ -141,6 +141,9 @@ pub fn scan(krate: &Crate, disallowed: &Disallowed) -> Scan {
         modules: HashMap::new(),
         definitions: HashMap::new(),
         expanded: HashSet::new(),
+        expanded_calls: HashSet::new(),
+        unexpanded: HashSet::new(),
+        deferred: BTreeMap::new(),
     };
     // Every module's names are bound before any code is read, so a path can
     // be followed through another module's `use` items.
@@ -169,6 +172,35 @@ pub fn scan(krate: &Crate, disallowed: &Disallowed) -> Scan {
             }
         }
         visited.extend(files);
+    }
+    // A macro expanded where some calls are may have calls the scan can't
+    // expand, such as in functions, whose code it can't otherwise see: its
+    // body is read as tokens then, as a macro's that isn't expanded is.
+    loop {
+        let ready: Vec<_> = scanner
+            .deferred
+            .iter()
+            .filter(|(_, deferred)| scanner.unexpanded.contains(&deferred.name))
+            .map(|(at, _)| at.clone())
+            .collect();
+        if ready.is_empty() {
+            break;
+        }
+        for at in ready {
+            let Some(deferred) = scanner.deferred.remove(&at) else {
+                continue;
+            };
+            let mut visitor = FileVisitor {
+                scanner: &mut scanner,
+                file: at.0,
+                module: deferred.module,
+                mod_dir: deferred.mod_dir,
+                path_dir: deferred.path_dir,
+                blocks: Vec::new(),
+                attributes: HashSet::new(),
+            };
+            visitor.tokens(deferred.tokens);
+        }
     }
     drop(visited);
     // Spans keep every parsed file's text; nothing refers to them now.
@@ -518,6 +550,24 @@ struct Scanner<'a> {
     /// The `macro_rules!` expanded where they are called, by file and where
     /// their names are written.
     expanded: HashSet<(String, usize, usize)>,
+    /// The calls read as their expansions, by file and where their macros'
+    /// names are written.
+    expanded_calls: HashSet<(String, usize, usize)>,
+    /// The names of the macros called where the scan doesn't expand them.
+    unexpanded: HashSet<String>,
+    /// The bodies of the expanded `macro_rules!` that are read as tokens
+    /// only if a call of their name isn't expanded, by file and where their
+    /// names are written.
+    deferred: BTreeMap<(String, usize, usize), Deferred>,
+}
+
+/// The body of an expanded `macro_rules!`, and the module it is written in.
+struct Deferred {
+    name: String,
+    module: Vec<String>,
+    mod_dir: PathBuf,
+    path_dir: PathBuf,
+    tokens: TokenStream,
 }
 
 /// A `macro_rules!` in textual scope.
@@ -827,6 +877,9 @@ impl Scanner<'_> {
         let Some(candidates) = textual.candidates(&name.unraw().to_string()) else {
             return;
         };
+        let start = name.span().start();
+        self.expanded_calls
+            .insert((place.rel.to_owned(), start.line, start.column));
         if textual.depth == MAX_EXPANSIONS {
             self.scan.unscanned.push(Unscanned {
                 file: place.rel.to_owned(),
@@ -2133,6 +2186,15 @@ impl FileVisitor<'_, '_> {
             .collect()
     }
 
+    /// Notes a call of a macro that isn't read as its expansion.
+    fn unexpanded(&mut self, mac: &Macro) {
+        if let Some(segment) = mac.path.segments.last() {
+            self.scanner
+                .unexpanded
+                .insert(segment.ident.unraw().to_string());
+        }
+    }
+
     fn unresolved(&mut self, name: &str) {
         *self
             .scanner
@@ -2183,7 +2245,8 @@ impl FileVisitor<'_, '_> {
 
     /// Counts what can be seen in tokens syn can't parse as code: `unsafe`,
     /// and calls to a name some disallowed path has. A `mod name;` there
-    /// names a file the scan doesn't load, so it is listed as unscanned.
+    /// names a file the scan doesn't load, so it is listed as unscanned. The
+    /// macros called there aren't expanded.
     fn tokens(&mut self, stream: TokenStream) {
         let mut previous: Option<TokenTree> = None;
         let mut before: Option<TokenTree> = None;
@@ -2207,6 +2270,13 @@ impl FileVisitor<'_, '_> {
                     }
                 }
                 TokenTree::Group(group) => {
+                    if let (Some(TokenTree::Punct(bang)), Some(TokenTree::Ident(name))) =
+                        (&previous, &before)
+                        && bang.as_char() == '!'
+                        && name != "macro_rules"
+                    {
+                        self.scanner.unexpanded.insert(name.unraw().to_string());
+                    }
                     if group.delimiter() == Delimiter::Bracket
                         && is_attribute(previous.as_ref(), before.as_ref())
                     {
@@ -2476,12 +2546,33 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         for attr in &item.attrs {
             self.visit_attribute(attr);
         }
-        // A `macro_rules!` that was expanded is read where it is called.
-        if let Some(name) = &item.ident {
-            let start = name.span().start();
-            let at = (self.file.clone(), start.line, start.column);
-            if self.scanner.expanded.contains(&at) {
-                return;
+        match &item.ident {
+            // A `macro_rules!` that was expanded is read where it is called,
+            // and as tokens only if some call of it isn't expanded.
+            Some(name) => {
+                let start = name.span().start();
+                let at = (self.file.clone(), start.line, start.column);
+                if self.scanner.expanded.contains(&at) {
+                    let deferred = Deferred {
+                        name: name.unraw().to_string(),
+                        module: self.module.clone(),
+                        mod_dir: self.mod_dir.clone(),
+                        path_dir: self.path_dir.clone(),
+                        tokens: item.mac.tokens.clone(),
+                    };
+                    self.scanner.deferred.insert(at, deferred);
+                    return;
+                }
+            }
+            None => {
+                let expanded = item.mac.path.segments.last().is_some_and(|segment| {
+                    let start = segment.ident.span().start();
+                    let at = (self.file.clone(), start.line, start.column);
+                    self.scanner.expanded_calls.contains(&at)
+                });
+                if !expanded {
+                    self.unexpanded(&item.mac);
+                }
             }
         }
         // A `macro_rules!` definition, or an invocation whose body isn't
@@ -2743,6 +2834,7 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
             );
             return;
         }
+        self.unexpanded(mac);
         if let Ok(exprs) = mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated) {
             for expr in &exprs {
                 self.visit_expr(expr);
@@ -3101,6 +3193,31 @@ other!();
         let reason = "module `old` is declared in a macro body the scan can't read";
         assert_eq!(scan.unscanned, [unscanned("src/lib.rs", 1, reason)]);
         assert_eq!(scan.unsafe_code.functions, 2);
+    }
+
+    /// A macro some of whose calls aren't expanded, as in a function, is
+    /// read as tokens too, so what those calls may reach still counts.
+    #[test]
+    fn macros_with_calls_that_are_not_expanded_are_read_as_tokens() {
+        let scan = scan_files(&[(
+            "lib.rs",
+            r"macro_rules! runner {
+    () => {
+        pub fn run() {
+            fn spawn(_: fn()) {}
+            spawn(|| ());
+        }
+    };
+}
+runner!();
+pub fn outer() {
+    use std::thread::spawn;
+    runner!();
+}
+",
+        )]);
+        assert_eq!(scan.unresolved, BTreeMap::from([("spawn".to_owned(), 1)]));
+        assert_eq!(scan.calls, BTreeMap::new());
     }
 
     /// A call expands only a macro in textual scope: one defined before it
