@@ -178,6 +178,35 @@ when an enclosing async task is aborted. Dropping a scope future or panicking in
 its body signals shutdown and requests aborts but cannot wait for cleanup. For
 that guarantee, request cancellation and continue awaiting the scope.
 
+### Retries and rate limits
+
+`retry(&cancellation, deadline, backoff, attempt)` calls `attempt` until its
+future succeeds, waiting between failures as a `Backoff` says:
+`Backoff::exponential(first, max)` doubles the wait up to `max`, and
+`Backoff::constant(delay)` keeps it fixed. `.attempts(n)` caps the attempts;
+otherwise the cancellation and deadline are what end it. `retry_if` takes a
+predicate that says which errors are worth another attempt.
+
+`RateLimit::new(permits, per)` lets at most `permits` calls start in any
+window of length `per`. Clones share the limit, so a clone per task bounds
+the whole of a `concurrently` map:
+
+```rust
+let limit = RateLimit::new(10, Duration::from_secs(1));
+let pages = concurrently(urls, 8, |url| {
+    let (limit, cancellation) = (limit.clone(), cancellation.clone());
+    async move { limit.run_until(&cancellation, None, || fetch(url)).await }
+})
+.await?;
+```
+
+Both return `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExceeded`.
+Every wait inside them, between attempts or for room under the limit, ends as
+soon as the `Cancellation` is requested or the deadline passes, and an attempt
+or call still running is dropped. As with `Tasks::run_until`, a request already
+present wins, so a cancelled call never starts its work or takes room under the
+limit, and cancellation wins over an equally ready deadline.
+
 ### Streaming concurrent maps
 
 Use `concurrently_ordered(items, limit, f)` to consume results in input order,
