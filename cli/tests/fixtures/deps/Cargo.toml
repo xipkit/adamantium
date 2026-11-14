@@ -20,6 +20,7 @@ facade = { path = "vendor/facade" }
 ffi = { path = "vendor/ffi" }
 old = { path = "vendor/old" }
 platform = { path = "vendor/platform" }
+runner = { path = "vendor/runner" }
 safe = { path = "vendor/safe" }
 spawner = { path = "vendor/spawner", features = ["on"] }
 

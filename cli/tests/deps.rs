@@ -139,6 +139,7 @@ fn deps_lists_runtime_and_build_dependencies_but_not_members_or_dev_dependencies
             ("old", "runtime"),
             ("platform", "runtime"),
             ("pool", "runtime"),
+            ("runner", "runtime"),
             ("safe", "runtime"),
             ("spawner", "runtime"),
             ("tokio", "runtime"),
@@ -150,7 +151,8 @@ fn deps_lists_runtime_and_build_dependencies_but_not_members_or_dev_dependencies
 fn deps_finds_each_marked_call_and_nothing_else() {
     let report = report(&[]).unwrap();
     for name in [
-        "spawner", "tokio", "old", "builder", "pool", "safe", "helper", "platform", "facade",
+        "spawner", "tokio", "old", "runner", "builder", "pool", "safe", "helper", "platform",
+        "facade",
     ] {
         let (sites, unresolved) = marked(name).unwrap();
         let dependency = dependency(&report, name).unwrap();
@@ -309,6 +311,30 @@ fn deps_reads_modules_the_crates_own_macros_declare() {
 }
 
 #[test]
+fn deps_reads_modules_other_crates_macros_declare_where_called_by_path_or_use() {
+    let report = report(&[]).unwrap();
+    let runner = dependency(&report, "runner").unwrap();
+    assert_eq!(runner["unscanned"], json!([]));
+    let files: BTreeSet<String> = reported(runner)
+        .unwrap()
+        .into_iter()
+        .map(|(_, file, _)| file)
+        .collect();
+    assert_eq!(
+        files,
+        BTreeSet::from(
+            [
+                "src/fast.rs",
+                "src/slow.rs",
+                "src/imported/fast.rs",
+                "src/imported/slow.rs"
+            ]
+            .map(str::to_owned)
+        )
+    );
+}
+
+#[test]
 fn deps_passes_features_to_cargo_metadata() {
     let off = ("tokio::spawn".to_owned(), "src/off.rs".to_owned(), 3);
     let without = report(&[]).unwrap();
@@ -344,7 +370,7 @@ fn deps_prints_a_table_and_each_call_as_text() {
         "  unscanned: src/lib.rs:22: module `hidden` is declared in a macro body the scan can't read",
         "      3      1           0  facade 0.0.0",
         "    src/macros.rs:15:13",
-        "adamantium: 13 dependencies; 7 with unsafe code, 6 with disallowed calls, 1 with unresolved calls, 2 partly unscanned",
+        "adamantium: 14 dependencies; 7 with unsafe code, 7 with disallowed calls, 1 with unresolved calls, 2 partly unscanned",
     ] {
         assert!(
             stdout.lines().any(|printed| printed == line),
