@@ -82,6 +82,16 @@ disallowed-methods = [
   { path = "smol::LocalExecutor::spawn", reason = "every task must be Send; spawn inside adamantium::Tasks", allow-invalid = true },
   { path = "smol::LocalExecutor::spawn_many", reason = "every task must be Send; spawn inside adamantium::Tasks", allow-invalid = true },
   { path = "smol::unblock", reason = "use adamantium::blocking, which propagates panics", allow-invalid = true },
+  # A `thread_local!` value is reached only through these methods. Banning the
+  # macro itself would need a crate-level allow for the library's own uses.
+  { path = "std::thread::LocalKey::with", reason = "a thread-local belongs to an OS thread, and a task can move to another thread at any await; pass the value in, or share it through adamantium::Actor" },
+  { path = "std::thread::LocalKey::try_with", reason = "a thread-local belongs to an OS thread, and a task can move to another thread at any await; pass the value in, or share it through adamantium::Actor" },
+  { path = "std::thread::LocalKey::get", reason = "a thread-local belongs to an OS thread, and a task can move to another thread at any await; pass the value in, or share it through adamantium::Actor" },
+  { path = "std::thread::LocalKey::set", reason = "a thread-local belongs to an OS thread, and a task can move to another thread at any await; pass the value in, or share it through adamantium::Actor" },
+  { path = "std::thread::LocalKey::take", reason = "a thread-local belongs to an OS thread, and a task can move to another thread at any await; pass the value in, or share it through adamantium::Actor" },
+  { path = "std::thread::LocalKey::replace", reason = "a thread-local belongs to an OS thread, and a task can move to another thread at any await; pass the value in, or share it through adamantium::Actor" },
+  { path = "std::thread::LocalKey::with_borrow", reason = "a thread-local belongs to an OS thread, and a task can move to another thread at any await; pass the value in, or share it through adamantium::Actor" },
+  { path = "std::thread::LocalKey::with_borrow_mut", reason = "a thread-local belongs to an OS thread, and a task can move to another thread at any await; pass the value in, or share it through adamantium::Actor" },
   { path = "std::thread::spawn", reason = "an unstructured thread; use adamantium::Tasks or adamantium::blocking" },
   { path = "std::thread::Builder::spawn", reason = "an unstructured thread; use adamantium::Tasks or adamantium::blocking" },
   { path = "std::thread::scope", reason = "blocks the async runtime; use adamantium::blocking" },

@@ -373,7 +373,7 @@ The default lint levels are in this repository's `[workspace.lints]`, and the Cl
 | Property | Enforced by |
 | --- | --- |
 | No `unsafe` code | `unsafe_code = "forbid"` |
-| Every value can cross a task | `future_not_send`; `Rc`, `RefCell`, `Cell`, and `LocalSet` disallowed, and so are `LocalRuntime`'s entry points |
+| Every value can cross a task | `future_not_send`; `Rc`, `RefCell`, `Cell`, and `LocalSet` disallowed, and so are `LocalRuntime`'s entry points and the methods that read or write a `thread_local!` value, since a task can move to another thread at any await |
 | No task outlives its scope | `tokio::spawn`, `spawn_local`, `JoinSet`, the spawn methods of Tokio's `Handle`, `Runtime`, `LocalRuntime`, and `task::Builder`, async-std's task and builder spawns, `smol::spawn`, smol's executor spawns, `std::thread::spawn`, and `scope` disallowed; tasks use `Tasks` |
 | No lock is held across an await or inside another lock | `await_holding_lock`; `Mutex` and `RwLock` from std, tokio, parking_lot, and futures disallowed; `Actor::with` is synchronous and rejects nesting |
 | No channel drops messages for a receiver that falls behind | Tokio's `broadcast` channel disallowed; send a clone to one `Channel` per receiver, or use `tokio::sync::watch` when only the latest value matters |

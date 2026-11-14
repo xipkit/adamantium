@@ -54,6 +54,10 @@ shuttle::thread_local! {
     static MODEL_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "an actor method is synchronous, so the task can't change threads while the count is held"
+)]
 fn depth() -> usize {
     #[cfg(feature = "deterministic")]
     if crate::runtime::execution::current().is_some() {
@@ -62,6 +66,10 @@ fn depth() -> usize {
     DEPTH.get()
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "an actor method is synchronous, so the task can't change threads while the count is held"
+)]
 fn set_depth(depth: usize) {
     #[cfg(feature = "deterministic")]
     if crate::runtime::execution::current().is_some() {
