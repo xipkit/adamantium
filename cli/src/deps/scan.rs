@@ -9,7 +9,9 @@
 //! modules, its dependencies' names and the standard prelude. A module-level
 //! call of the crate's own `macro_rules!`, as `crate_root!();` or Tokio's
 //! `feature! { #![unix] ... }`, is read as its expansion where its rules can
-//! be matched without compiling the crate. A call that this can't tie to a
+//! be matched without compiling the crate, and so is a call of a dependency's
+//! `#[macro_export]` macro that a `#[macro_use] extern crate` brings in, as
+//! stacker's `psm_stack_manipulation!`. A call that this can't tie to a
 //! path, such as a method call on a value, is counted as unresolved under
 //! its name rather than guessed at.
 
@@ -57,6 +59,10 @@ pub struct Crate<'a> {
     /// The crate's dependencies by the name its code uses, mapped to their
     /// library names.
     pub externs: &'a BTreeMap<String, String>,
+    /// The dependencies whose source the scan can read, by the name the
+    /// crate's code uses, for the macros a `#[macro_use] extern crate`
+    /// brings in from them.
+    pub dependencies: &'a BTreeMap<String, &'a Crate<'a>>,
     pub cfg: Cfg<'a>,
 }
 
@@ -131,23 +137,8 @@ pub struct Scan {
 
 /// Scans a library's module tree.
 pub fn scan(krate: &Crate, disallowed: &Disallowed) -> Scan {
-    let mut scanner = Scanner {
-        krate,
-        disallowed,
-        scan: Scan {
-            forbids_unsafe: manifest_forbids_unsafe(krate.root),
-            ..Scan::default()
-        },
-        visited: HashSet::new(),
-        files: Vec::new(),
-        modules: HashMap::new(),
-        definitions: HashMap::new(),
-        expanded: HashSet::new(),
-        unexpanded: HashSet::new(),
-        deferred: BTreeMap::new(),
-        sources: HashMap::new(),
-        expansions: 0,
-    };
+    let mut scanner = Scanner::new(krate, disallowed);
+    scanner.scan.forbids_unsafe = manifest_forbids_unsafe(krate.root);
     // Every module's names are bound before any code is read, so a path can
     // be followed through another module's `use` items.
     let root = vec![krate.name.to_owned()];
@@ -316,6 +307,20 @@ impl Scope {
             Namespace::Values => &self.values,
         };
         map.get(name).map(|bound| &bound.binding)
+    }
+
+    /// Whether a `use` may bind `name` here, as it may bind a macro.
+    fn imports(&self, name: &str) -> bool {
+        [&self.types, &self.values]
+            .into_iter()
+            .filter_map(|map| map.get(name))
+            .any(|bound| {
+                bound
+                    .binding
+                    .alternatives()
+                    .iter()
+                    .any(|binding| matches!(binding, Binding::Use { .. }))
+            })
     }
 
     /// Binds a local variable or a generic parameter, which hides what the
@@ -567,6 +572,31 @@ struct Scanner<'a> {
     sources: HashMap<String, String>,
     /// How many calls of `macro_rules!` have been expanded.
     expansions: usize,
+    /// The macros that `#[macro_use] extern crate` items bring in from
+    /// other crates, which a call names where no other macro of its name is
+    /// in scope.
+    prelude: Vec<MacroRules>,
+    /// The sources, as [`Span::file`] names them, of the files read for
+    /// other crates' macros. Code written there counts for the crate that
+    /// wrote it, not for this one, where the macros are called.
+    foreign: HashSet<String>,
+    /// The `#[macro_export]` macros defined so far, where the crate is read
+    /// for another crate that brings them in.
+    exports: Option<Vec<Export>>,
+}
+
+/// A `#[macro_export]` macro of a crate, as another crate brings it in.
+struct Export {
+    name: String,
+    rules: Option<Rules>,
+    /// The file it is written in, relative to the package of the scanner
+    /// that has it.
+    rel: String,
+    /// Where its name is written.
+    span: Span,
+    /// Whether the crate's build defines and exports it, by the `cfg`s of
+    /// that build.
+    defined: Truth,
 }
 
 /// The body of an expanded `macro_rules!`, and the module it is written in.
@@ -593,6 +623,18 @@ struct MacroRules {
     condition: Vec<TokenStream>,
     /// Whether every build defines it.
     certain: bool,
+    /// The crate that exports it, where it is another crate's.
+    from: Option<Exporter>,
+}
+
+/// The crate that defines a macro another crate brings in.
+struct Exporter {
+    /// What `$crate` stands for where the macro is called: a path that
+    /// names the crate there.
+    path: Vec<TokenTree>,
+    /// Whether the crate's build defines and exports the macro, by the
+    /// `cfg`s of that build, which the calling crate's can't decide.
+    defined: Truth,
 }
 
 /// The `macro_rules!` a call can name by its bare name at a place in the
@@ -606,25 +648,10 @@ struct Textual {
     conditions: Vec<TokenStream>,
     /// How many expansions the place is inside.
     depth: usize,
-}
-
-impl Textual {
-    /// The definitions a call of `name` may expand, the latest first: each
-    /// one back to the first that every build defines. `None` if there is
-    /// none, or the rules of one of them can't be read.
-    fn candidates(&self, name: &str) -> Option<Vec<(&MacroRules, &Rules)>> {
-        let mut candidates = Vec::new();
-        for definition in self.macros.iter().rev() {
-            if definition.name != name {
-                continue;
-            }
-            candidates.push((definition, definition.rules.as_ref()?));
-            if definition.certain {
-                break;
-            }
-        }
-        (!candidates.is_empty()).then_some(candidates)
-    }
+    /// Whether a build may not have the place for a reason its conditions
+    /// don't show: it is in the expansion of another crate's macro, which
+    /// that crate's build may not define.
+    uncertain: bool,
 }
 
 /// Where items being indexed are.
@@ -649,7 +676,27 @@ const MAX_EXPANSIONS: usize = 128;
 /// a macro whose expansion calls it more than once can't keep it going.
 const MAX_EXPANDED_CALLS: usize = 10_000;
 
-impl Scanner<'_> {
+impl<'a> Scanner<'a> {
+    fn new(krate: &'a Crate<'a>, disallowed: &'a Disallowed) -> Self {
+        Self {
+            krate,
+            disallowed,
+            scan: Scan::default(),
+            visited: HashSet::new(),
+            files: Vec::new(),
+            modules: HashMap::new(),
+            definitions: HashMap::new(),
+            expanded: HashSet::new(),
+            unexpanded: HashSet::new(),
+            deferred: BTreeMap::new(),
+            sources: HashMap::new(),
+            expansions: 0,
+            prelude: Vec::new(),
+            foreign: HashSet::new(),
+            exports: None,
+        }
+    }
+
     /// Loads the file of the module at `module`, and the modules it declares.
     /// A mod-rs file, such as the crate root, a `mod.rs` or a file named by
     /// `#[path]`, keeps its child modules' files beside it; any other
@@ -718,6 +765,9 @@ impl Scanner<'_> {
         };
         let outer = textual.conditions.len();
         textual.conditions.extend(cfg_predicates(&file.attrs));
+        if module.len() == 1 {
+            self.import_macros(&file.items, textual);
+        }
         let mut scope = Scope::default();
         let place = Place {
             module: &module,
@@ -753,7 +803,7 @@ impl Scanner<'_> {
         scope: &mut Scope,
         textual: &mut Textual,
     ) {
-        self.bind(scope, items.iter(), Some(place.module));
+        self.bind(scope, items.iter(), Some(place.module), textual.uncertain);
         let mut indexed = Vec::with_capacity(items.len());
         for mut item in mem::take(items) {
             match &mut item {
@@ -878,28 +928,192 @@ impl Scanner<'_> {
     }
 
     /// Brings a `macro_rules!` named `name`, read from the code of `rel`,
-    /// into textual scope.
-    fn define(&self, item: &ItemMacro, name: &Ident, rel: &str, textual: &mut Textual) {
+    /// into textual scope, and notes it if the crate is read for its
+    /// exports and it is `#[macro_export]`.
+    fn define(&mut self, item: &ItemMacro, name: &Ident, rel: &str, textual: &mut Textual) {
         let mut condition = textual.conditions.clone();
         condition.extend(cfg_predicates(&item.attrs));
         let span = Span::call_site();
-        let certain = match self
+        let holds = self
             .krate
             .cfg
-            .holds(cfg_call("all", condition.clone(), span))
-        {
-            Truth::True => true,
-            Truth::Unknown => false,
-            Truth::False => return,
-        };
+            .holds(cfg_call("all", condition.clone(), span));
+        if holds == Truth::False {
+            return;
+        }
+        let rel = self.file_of(name.span(), rel);
+        if let Some(exports) = &mut self.exports {
+            let exported = self
+                .krate
+                .cfg
+                .effective(&item.attrs)
+                .iter()
+                .filter(|(_, meta)| meta.path().is_ident("macro_export"))
+                .fold(Truth::False, |truth, (applies, _)| truth.or(*applies));
+            if exported != Truth::False {
+                exports.push(Export {
+                    name: name.unraw().to_string(),
+                    rules: Rules::parse(item.mac.tokens.clone()),
+                    rel: rel.clone(),
+                    span: name.span(),
+                    defined: holds.and(exported),
+                });
+            }
+        }
         textual.macros.push(MacroRules {
             name: name.unraw().to_string(),
             rules: Rules::parse(item.mac.tokens.clone()),
-            rel: self.file_of(name.span(), rel),
+            rel,
             span: name.span(),
             condition,
-            certain,
+            certain: holds == Truth::True && !textual.uncertain,
+            from: None,
         });
+    }
+
+    /// Brings into the prelude the macros that the `#[macro_use] extern
+    /// crate` items among the crate root's `items` bring in from the
+    /// dependencies whose source can be read: their `#[macro_export]`
+    /// macros, or the ones a `#[macro_use(...)]` names. rustc takes such an
+    /// item only at the crate root, and its macros for the whole crate,
+    /// before and after it. `textual` has the root's conditions.
+    fn import_macros(&mut self, items: &[Item], textual: &Textual) {
+        for item in items {
+            let Item::ExternCrate(item) = item else {
+                continue;
+            };
+            let Some(dependency) = self.krate.dependencies.get(&item.ident.unraw().to_string())
+            else {
+                continue;
+            };
+            let mut condition = textual.conditions.clone();
+            condition.extend(cfg_predicates(&item.attrs));
+            let holds = self
+                .krate
+                .cfg
+                .holds(cfg_call("all", condition.clone(), Span::call_site()));
+            let macro_use = self
+                .krate
+                .cfg
+                .effective(&item.attrs)
+                .iter()
+                .any(|(applies, meta)| {
+                    *applies != Truth::False && meta.path().is_ident("macro_use")
+                });
+            if holds == Truth::False || !macro_use {
+                continue;
+            }
+            // `$crate` names the crate from anywhere in this one by the name
+            // Cargo gives it, after `::`: in every edition, such a path can
+            // start at the crates the build is given.
+            let path = vec![
+                TokenTree::Punct(Punct::new(':', Spacing::Joint)),
+                TokenTree::Punct(Punct::new(':', Spacing::Alone)),
+                TokenTree::Ident(item.ident.clone()),
+            ];
+            for export in self.exports_of(dependency) {
+                let imported = self.imported(&item.attrs, &export.name);
+                if imported == Truth::False || export.defined == Truth::False {
+                    continue;
+                }
+                let defined = export.defined.and(imported);
+                self.prelude.push(MacroRules {
+                    name: export.name,
+                    rules: export.rules,
+                    rel: export.rel,
+                    span: export.span,
+                    condition: condition.clone(),
+                    certain: holds == Truth::True && defined == Truth::True,
+                    from: Some(Exporter {
+                        path: path.clone(),
+                        defined,
+                    }),
+                });
+            }
+        }
+    }
+
+    /// Whether an `extern crate` item with these attributes brings in the
+    /// macro `name`: whether it is `#[macro_use]`, or a `#[macro_use(...)]`
+    /// that names it.
+    fn imported(&self, attrs: &[Attribute], name: &str) -> Truth {
+        self.krate
+            .cfg
+            .effective(attrs)
+            .iter()
+            .filter(|(_, meta)| match meta {
+                Meta::Path(path) => path.is_ident("macro_use"),
+                Meta::List(list) => {
+                    list.path.is_ident("macro_use")
+                        && list
+                            .parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)
+                            .is_ok_and(|names| names.iter().any(|named| named.unraw() == name))
+                }
+                Meta::NameValue(_) => false,
+            })
+            .fold(Truth::False, |truth, (applies, _)| truth.or(*applies))
+    }
+
+    /// The `#[macro_export]` macros of a dependency, read from its module
+    /// tree with the `cfg`s of its own build. A procedural macro crate can't
+    /// export any. The dependency's files are noted as other crates'.
+    fn exports_of(&mut self, krate: &Crate) -> Vec<Export> {
+        if krate.cfg.proc_macro {
+            return Vec::new();
+        }
+        let mut reader = Scanner::new(krate, self.disallowed);
+        reader.exports = Some(Vec::new());
+        let root = vec![krate.name.to_owned()];
+        reader.load(krate.src, root, true, None, &mut Textual::default());
+        for (source, rel) in reader.sources {
+            self.foreign.insert(source.clone());
+            self.sources
+                .insert(source, self.relative(&krate.root.join(rel)));
+        }
+        let mut exports = reader.exports.unwrap_or_default();
+        for export in &mut exports {
+            export.rel = self.relative(&krate.root.join(&export.rel));
+        }
+        exports
+    }
+
+    /// The definitions a call of `name` may expand, the latest first: those
+    /// in textual scope back to the first that every build defines, then,
+    /// where a build may define none of them, those in the prelude. A macro
+    /// that a `use` in the calling module brings in would come before the
+    /// prelude's, so a call that a `use` or glob import there may name
+    /// isn't given them. `None` if there is no definition, or the rules of
+    /// one of them can't be read.
+    fn candidates<'t>(
+        &'t self,
+        textual: &'t Textual,
+        scope: &Scope,
+        name: &str,
+    ) -> Option<Vec<(&'t MacroRules, &'t Rules)>> {
+        let mut candidates = Vec::new();
+        for definition in textual.macros.iter().rev() {
+            if definition.name != name {
+                continue;
+            }
+            candidates.push((definition, definition.rules.as_ref()?));
+            if definition.certain {
+                return Some(candidates);
+            }
+        }
+        let mut prelude = self
+            .prelude
+            .iter()
+            .filter(|definition| definition.name == name)
+            .peekable();
+        if prelude.peek().is_some() {
+            if scope.globs || scope.imports(name) {
+                return None;
+            }
+            for definition in prelude {
+                candidates.push((definition, definition.rules.as_ref()?));
+            }
+        }
+        (!candidates.is_empty()).then_some(candidates)
     }
 
     /// Expands a call of a `macro_rules!` in textual scope where it is
@@ -923,7 +1137,7 @@ impl Scanner<'_> {
         if self.krate.cfg.enabled(&call.attrs) == Truth::False {
             return false;
         }
-        let Some(candidates) = textual.candidates(&name.unraw().to_string()) else {
+        let Some(candidates) = self.candidates(textual, scope, &name.unraw().to_string()) else {
             return false;
         };
         let file = self.file_of(name.span(), place.rel);
@@ -965,13 +1179,25 @@ impl Scanner<'_> {
                     span,
                 ));
             }
-            later.push(cfg_call("all", candidate.condition.clone(), span));
+            // Another crate's definitions of one name can't both be in its
+            // build, so they don't shadow each other: each is what a call
+            // names where its crate defines it.
+            let (krate, defined) = match &candidate.from {
+                None => {
+                    later.push(cfg_call("all", candidate.condition.clone(), span));
+                    (
+                        vec![TokenTree::Ident(Ident::new("crate", span))],
+                        Truth::True,
+                    )
+                }
+                Some(exporter) => (exporter.path.clone(), exporter.defined),
+            };
             let predicate = cfg_call("all", condition.clone(), span);
-            if self.krate.cfg.holds(predicate.clone()) == Truth::False {
+            if self.krate.cfg.holds(predicate.clone()).and(defined) == Truth::False {
                 continue;
             }
             let Some(mut items) = rules
-                .expand(call.mac.tokens.clone())
+                .expand(call.mac.tokens.clone(), &krate)
                 .and_then(|tokens| parse_items.parse2(tokens).ok())
             else {
                 return false;
@@ -989,15 +1215,21 @@ impl Scanner<'_> {
             }
             let start = span.start();
             let at = (candidate.rel.clone(), start.line, start.column);
-            expansions.push((items, at));
+            expansions.push((items, at, candidate.from.is_some(), defined));
         }
         self.expansions += 1;
-        for (mut items, at) in expansions {
+        for (mut items, at, foreign, defined) in expansions {
             let rel = at.0.clone();
-            self.expanded.insert(at);
+            // Another crate's macro isn't read as tokens here in any case.
+            if !foreign {
+                self.expanded.insert(at);
+            }
             let inner = Place { rel: &rel, ..place };
             textual.depth += 1;
+            let uncertain = textual.uncertain;
+            textual.uncertain |= defined != Truth::True;
             self.index(&mut items, inner, scope, textual);
+            textual.uncertain = uncertain;
             textual.depth -= 1;
             self.files.push(Loaded {
                 attrs: Vec::new(),
@@ -1146,16 +1378,18 @@ impl Scanner<'_> {
     }
 
     /// Binds the names that `items` define in `scope`. Items of a module
-    /// have paths under `module`; items of a block have none.
+    /// have paths under `module`; items of a block have none. `uncertain` is
+    /// whether a build may not have the items whatever their `cfg`s say.
     fn bind<'i>(
         &self,
         scope: &mut Scope,
         items: impl IntoIterator<Item = &'i Item>,
         module: Option<&[String]>,
+        uncertain: bool,
     ) {
         for item in items {
             let certain = match self.krate.cfg.enabled(item_attrs(item)) {
-                Truth::True => true,
+                Truth::True => !uncertain,
                 Truth::Unknown => false,
                 Truth::False => continue,
             };
@@ -2178,10 +2412,6 @@ fn expr_attrs(expr: &Expr) -> &[Attribute] {
     }
 }
 
-fn is_unsafe(safety: &Safety) -> bool {
-    matches!(safety, Safety::Unsafe(_))
-}
-
 /// The attributes that the `unsafe_code` lint reports when they are written
 /// without `unsafe(...)`, as editions before 2024 allow: rustc's unsafe
 /// attributes, stable and unstable, and `allow_internal_unsafe`.
@@ -2233,6 +2463,27 @@ impl FileVisitor<'_, '_> {
             file: self.scanner.file_of(span, &self.file),
             line: start.line,
             column: start.column + 1,
+        }
+    }
+
+    /// Whether the token at `span` is written in this crate, not in another
+    /// crate's macro that it calls. Code counts for the crate that writes
+    /// it, as rustc's `unsafe_code` lint leaves out what another crate's
+    /// macro writes.
+    fn here(&self, span: Span) -> bool {
+        !self.scanner.foreign.contains(&span.file())
+    }
+
+    /// Whether `unsafe` is written here, if it is written at all.
+    fn writes(&self, unsafety: Option<&Token![unsafe]>) -> bool {
+        unsafety.is_some_and(|token| self.here(token.span))
+    }
+
+    /// Whether an item is `unsafe` here.
+    fn writes_unsafe(&self, safety: &Safety) -> bool {
+        match safety {
+            Safety::Unsafe(token) => self.writes(Some(token)),
+            _ => false,
         }
     }
 
@@ -2324,7 +2575,7 @@ impl FileVisitor<'_, '_> {
         let mut before: Option<TokenTree> = None;
         for tree in stream {
             match &tree {
-                TokenTree::Ident(ident) if ident == "unsafe" => {
+                TokenTree::Ident(ident) if ident == "unsafe" && self.here(ident.span()) => {
                     self.scanner.scan.unsafe_code.in_macros += 1;
                 }
                 TokenTree::Punct(punct) if punct.as_char() == ';' => {
@@ -2351,12 +2602,14 @@ impl FileVisitor<'_, '_> {
                     }
                     if group.delimiter() == Delimiter::Bracket
                         && is_attribute(previous.as_ref(), before.as_ref())
+                        && self.here(group.span())
                     {
                         self.scanner.scan.unsafe_code.in_macros +=
                             self.bare_unsafe_attributes(group.stream());
                     }
                     if group.delimiter() == Delimiter::Parenthesis
                         && let Some(TokenTree::Ident(name)) = &previous
+                        && self.here(name.span())
                     {
                         let name = name.unraw().to_string();
                         let disallowed = self.scanner.disallowed;
@@ -2463,7 +2716,7 @@ impl FileVisitor<'_, '_> {
             _ => None,
         });
         let mut scope = Scope::default();
-        self.scanner.bind(&mut scope, items, None);
+        self.scanner.bind(&mut scope, items, None, false);
         self.blocks.push(scope);
         for stmt in stmts {
             self.visit_stmt(stmt);
@@ -2646,7 +2899,7 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
     }
 
     fn visit_item_fn(&mut self, item: &'ast ItemFn) {
-        if is_unsafe(&item.sig.safety) {
+        if self.writes_unsafe(&item.sig.safety) {
             self.scanner.scan.unsafe_code.functions += 1;
         }
         self.with_generics(&item.sig.generics, |this| {
@@ -2657,21 +2910,21 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
     }
 
     fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
-        if item.unsafety.is_some() {
+        if self.writes(item.unsafety.as_ref()) {
             self.scanner.scan.unsafe_code.impls += 1;
         }
         self.with_generics(&item.generics, |this| visit::visit_item_impl(this, item));
     }
 
     fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
-        if item.unsafety.is_some() {
+        if self.writes(item.unsafety.as_ref()) {
             self.scanner.scan.unsafe_code.traits += 1;
         }
         self.with_generics(&item.generics, |this| visit::visit_item_trait(this, item));
     }
 
     fn visit_item_foreign_mod(&mut self, item: &'ast ItemForeignMod) {
-        if item.unsafety.is_some() {
+        if self.writes(item.unsafety.as_ref()) {
             self.scanner.scan.unsafe_code.extern_blocks += 1;
         }
         visit::visit_item_foreign_mod(self, item);
@@ -2691,7 +2944,7 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
     }
 
     fn visit_impl_item_fn(&mut self, item: &'ast ImplItemFn) {
-        if is_unsafe(&item.sig.safety) {
+        if self.writes_unsafe(&item.sig.safety) {
             self.scanner.scan.unsafe_code.functions += 1;
         }
         self.with_generics(&item.sig.generics, |this| {
@@ -2715,7 +2968,7 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
     }
 
     fn visit_trait_item_fn(&mut self, item: &'ast TraitItemFn) {
-        if is_unsafe(&item.sig.safety) {
+        if self.writes_unsafe(&item.sig.safety) {
             self.scanner.scan.unsafe_code.functions += 1;
         }
         self.with_generics(&item.sig.generics, |this| {
@@ -2729,7 +2982,9 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
     /// invocation's attributes, so an attribute counts only the first time
     /// it is seen where it is written.
     fn visit_attribute(&mut self, attr: &'ast Attribute) {
-        if self.attributes.insert(self.site(attr.pound_token.span)) {
+        if self.here(attr.pound_token.span)
+            && self.attributes.insert(self.site(attr.pound_token.span))
+        {
             self.scanner.scan.unsafe_code.attributes +=
                 self.unsafe_attributes(attr.meta.clone()).len();
         }
@@ -2822,7 +3077,9 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
     }
 
     fn visit_expr_unsafe(&mut self, expr: &'ast ExprUnsafe) {
-        self.scanner.scan.unsafe_code.blocks += 1;
+        if self.here(expr.unsafe_token.span) {
+            self.scanner.scan.unsafe_code.blocks += 1;
+        }
         visit::visit_expr_unsafe(self, expr);
     }
 
@@ -2838,9 +3095,12 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
                 _ => None,
             })
             .collect();
-        for entry in entries {
-            let site = self.site(Self::start(expr));
-            self.scanner.scan.calls.entry(entry).or_default().push(site);
+        let start = Self::start(expr);
+        if self.here(start) {
+            for entry in entries {
+                let site = self.site(start);
+                self.scanner.scan.calls.entry(entry).or_default().push(site);
+            }
         }
         visit::visit_expr_path(self, expr);
     }
@@ -2853,6 +3113,7 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
                 .last()
                 .map(|s| s.ident.unraw().to_string())
             && self.scanner.disallowed.has_name(&name)
+            && self.here(Self::start(func))
         {
             let disallowed = self.scanner.disallowed;
             let resolved = self.resolve(func);
@@ -2882,7 +3143,7 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
 
     fn visit_expr_method_call(&mut self, expr: &'ast ExprMethodCall) {
         let name = expr.method.unraw().to_string();
-        if self.scanner.disallowed.has_method(&name) {
+        if self.scanner.disallowed.has_method(&name) && self.here(expr.method.span()) {
             self.unresolved(&name);
         }
         visit::visit_expr_method_call(self, expr);
@@ -3156,21 +3417,89 @@ mod tests {
     /// Scans a crate named `demo`, built for Linux with no features, whose
     /// files under `src/` are `files`.
     fn scan_files(files: &[(&str, &str)]) -> Scan {
+        scan_with(files, false, &[])
+    }
+
+    /// A library a test crate depends on.
+    struct Library<'t> {
+        /// Its crate name, which the crate that depends on it calls it by.
+        name: &'t str,
+        /// The features its build has.
+        features: &'t [&'t str],
+        /// Its files under `src/`.
+        files: &'t [(&'t str, &'t str)],
+    }
+
+    /// A new directory with `files` under `src/`.
+    fn package(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         for (name, text) in files {
             let path = dir.path().join("src").join(name);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
         }
+        dir
+    }
+
+    /// Scans a crate named `demo`, built for Linux with no features, whose
+    /// files under `src/` are `files`, in the 2015 edition if
+    /// `edition_2015`, and which depends on `libraries`.
+    fn scan_with(files: &[(&str, &str)], edition_2015: bool, libraries: &[Library]) -> Scan {
         let target = Target::parse("unix\ntarget_os=\"linux\"\n");
+        let no_externs = BTreeMap::new();
+        let no_dependencies = BTreeMap::new();
+        let dirs: Vec<_> = libraries
+            .iter()
+            .map(|library| package(library.files))
+            .collect();
+        let srcs: Vec<_> = dirs
+            .iter()
+            .map(|dir| dir.path().join("src/lib.rs"))
+            .collect();
+        let features: Vec<_> = libraries
+            .iter()
+            .map(|library| {
+                Features::from_sets(&[library.features.iter().map(|f| (*f).to_owned()).collect()])
+            })
+            .collect();
+        let crates: Vec<_> = libraries
+            .iter()
+            .zip(&dirs)
+            .zip(&srcs)
+            .zip(&features)
+            .map(|(((library, dir), src), features)| Crate {
+                name: library.name,
+                root: dir.path(),
+                src,
+                edition_2015: false,
+                externs: &no_externs,
+                dependencies: &no_dependencies,
+                cfg: Cfg {
+                    target: &target,
+                    features,
+                    proc_macro: false,
+                },
+            })
+            .collect();
+        let externs = libraries
+            .iter()
+            .map(|library| (library.name.to_owned(), library.name.to_owned()))
+            .collect();
+        let dependencies = libraries
+            .iter()
+            .zip(&crates)
+            .map(|(library, krate)| (library.name.to_owned(), krate))
+            .collect();
+        let dir = package(files);
         let features = Features::default();
         let src = dir.path().join("src/lib.rs");
         let krate = Crate {
             name: "demo",
             root: dir.path(),
             src: &src,
-            edition_2015: false,
-            externs: &BTreeMap::new(),
+            edition_2015,
+            externs: &externs,
+            dependencies: &dependencies,
             cfg: Cfg {
                 target: &target,
                 features: &features,
@@ -3340,6 +3669,265 @@ pick!();
             .map(|(line, name)| unscanned("src/lib.rs", line, &reason(name)));
         assert_eq!(scan.unscanned, listed);
         assert_eq!(scan.unsafe_code.functions, 2);
+    }
+
+    /// A call of a macro that a `#[macro_use] extern crate` brings in, as
+    /// stacker's `psm_stack_manipulation!`, is read as each definition the
+    /// other crate's build may have: psm defines the macro twice, under a
+    /// `cfg` its build script sets, so both arms are scanned, and the names
+    /// each binds may be either. The macros are the whole crate's, before
+    /// the item too.
+    #[test]
+    fn calls_of_macros_another_crate_exports_are_expanded() {
+        let psm = Library {
+            name: "psm",
+            features: &[],
+            files: &[(
+                "lib.rs",
+                r"#[cfg(switchable_stack)]
+#[macro_export]
+macro_rules! psm_stack_manipulation {
+    (yes { $($yes:tt)* } no { $($no:tt)* }) => { $($yes)* };
+}
+
+#[cfg(not(switchable_stack))]
+#[macro_export]
+macro_rules! psm_stack_manipulation {
+    (yes { $($yes:tt)* } no { $($no:tt)* }) => { $($no)* };
+}
+",
+            )],
+        };
+        let scan = scan_with(
+            &[
+                (
+                    "lib.rs",
+                    r"psm_stack_manipulation! {
+    yes {
+        mod guard;
+        use std::thread::spawn as go;
+    }
+    no {
+        mod fallback;
+        fn go(_: fn()) {}
+    }
+}
+
+#[macro_use]
+extern crate psm;
+
+pub fn run() {
+    go(|| ());
+}
+",
+                ),
+                ("guard.rs", "pub unsafe fn a() {}\n"),
+                ("fallback.rs", "pub unsafe fn b() {}\n"),
+            ],
+            false,
+            &[psm],
+        );
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 2);
+        let sites: Vec<_> = scan.calls.values().flatten().collect();
+        let site = Site {
+            file: "src/lib.rs".to_owned(),
+            line: 16,
+            column: 5,
+        };
+        assert_eq!(sites, [&site]);
+    }
+
+    /// Which of another crate's definitions a call may name is decided by
+    /// the `cfg`s of that crate's build, not of the calling crate's.
+    #[test]
+    fn other_crates_macros_are_defined_by_their_builds() {
+        let fast = Library {
+            name: "fast",
+            features: &["fast"],
+            files: &[(
+                "lib.rs",
+                r#"#[cfg(feature = "fast")]
+#[macro_export]
+macro_rules! pick { () => { mod quick; }; }
+
+#[cfg(not(feature = "fast"))]
+#[macro_export]
+macro_rules! pick { () => { mod slow; }; }
+
+#[cfg(windows)]
+mod windows {
+    #[macro_export]
+    macro_rules! never { () => { mod never; }; }
+}
+"#,
+            )],
+        };
+        let scan = scan_with(
+            &[
+                (
+                    "lib.rs",
+                    "#[macro_use]\nextern crate fast;\n\npick!();\nnever!();\n",
+                ),
+                ("quick.rs", "pub unsafe fn a() {}\n"),
+                ("slow.rs", "pub unsafe fn b() {}\n"),
+                ("never.rs", "pub unsafe fn c() {}\n"),
+            ],
+            false,
+            &[fast],
+        );
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 1);
+    }
+
+    /// `$crate` in another crate's macro names that crate. What the macro
+    /// writes itself counts for that crate, as rustc's `unsafe_code` lint
+    /// leaves it out; what the call passes it counts here.
+    #[test]
+    fn other_crates_macros_name_and_count_for_their_crate() {
+        let tokio = Library {
+            name: "tokio",
+            features: &[],
+            files: &[(
+                "lib.rs",
+                r"pub fn spawn() {}
+
+#[macro_export]
+macro_rules! runtime {
+    ($name:ident { $($body:tt)* }) => {
+        pub use $crate::spawn as start;
+        pub unsafe fn hidden() {
+            unsafe { std::thread::spawn(|| ()) };
+        }
+        unsafe impl Send for Handle {}
+        pub fn $name() { $($body)* }
+    };
+}
+",
+            )],
+        };
+        for (edition_2015, item) in [
+            (false, "extern crate tokio as rt;"),
+            (true, "extern crate tokio as rt;"),
+            (false, "extern crate tokio;"),
+        ] {
+            let lib = format!(
+                "#[macro_use]\n{item}\n\nruntime! {{ mine {{ unsafe {{ std::hint::spin_loop() }} }} }}\n\npub struct Handle;\n\npub fn run() {{\n    start();\n}}\n"
+            );
+            let scan = scan_with(&[("lib.rs", &lib)], edition_2015, slice::from_ref(&tokio));
+            assert_eq!(scan.unscanned, [], "{item}");
+            assert_eq!(
+                scan.unsafe_code,
+                UnsafeCounts {
+                    blocks: 1,
+                    ..UnsafeCounts::default()
+                },
+                "{item}"
+            );
+            let calls: Vec<_> = scan
+                .calls
+                .iter()
+                .map(|(entry, sites)| {
+                    (
+                        Disallowed::bundled().unwrap().entries[*entry].path.clone(),
+                        sites.clone(),
+                    )
+                })
+                .collect();
+            let site = Site {
+                file: "src/lib.rs".to_owned(),
+                line: 9,
+                column: 5,
+            };
+            assert_eq!(calls, [("tokio::spawn".to_owned(), vec![site])], "{item}");
+        }
+    }
+
+    /// The prelude a `#[macro_use] extern crate` adds comes after textual
+    /// scope. A `#[macro_use(...)]` brings in only the macros it names, and
+    /// an `extern crate` without it none.
+    #[test]
+    fn other_crates_macros_come_after_textual_scope() {
+        let picks = Library {
+            name: "picks",
+            features: &[],
+            files: &[(
+                "lib.rs",
+                r"#[macro_export]
+macro_rules! pick { () => { mod theirs; }; }
+#[macro_export]
+macro_rules! skipped { () => { mod skipped; }; }
+",
+            )],
+        };
+        let plain = Library {
+            name: "plain",
+            features: &[],
+            files: &[(
+                "lib.rs",
+                "#[macro_export]\nmacro_rules! plain { () => { mod plain; }; }\n",
+            )],
+        };
+        let scan = scan_with(
+            &[
+                (
+                    "lib.rs",
+                    r"mod before;
+
+macro_rules! pick { () => { mod own; }; }
+pick!();
+skipped!();
+plain!();
+
+#[macro_use(pick)]
+extern crate picks;
+extern crate plain;
+",
+                ),
+                ("before.rs", "pick!();\n"),
+                ("before/theirs.rs", "pub unsafe fn a() {}\n"),
+                ("own.rs", "pub unsafe fn b() {}\n"),
+                ("theirs.rs", "pub unsafe fn c() {}\n"),
+                ("skipped.rs", "pub unsafe fn d() {}\n"),
+                ("plain.rs", "pub unsafe fn e() {}\n"),
+            ],
+            false,
+            &[picks, plain],
+        );
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 2);
+    }
+
+    /// A macro that a module's `use` items bring in, or its glob imports
+    /// may, hides the prelude's, so a call there isn't expanded with it.
+    #[test]
+    fn other_crates_macros_are_hidden_by_imports() {
+        let picks = Library {
+            name: "picks",
+            features: &[],
+            files: &[(
+                "lib.rs",
+                "#[macro_export]\nmacro_rules! pick { () => { mod theirs; }; }\n",
+            )],
+        };
+        let scan = scan_with(
+            &[
+                (
+                    "lib.rs",
+                    "#[macro_use]\nextern crate picks;\n\nmod open;\nmod imports;\nmod globs;\n",
+                ),
+                ("open.rs", "pick!();\n"),
+                ("open/theirs.rs", "pub unsafe fn a() {}\n"),
+                ("imports.rs", "use other::pick;\npick!();\n"),
+                ("imports/theirs.rs", "pub unsafe fn b() {}\n"),
+                ("globs.rs", "use other::*;\npick!();\n"),
+                ("globs/theirs.rs", "pub unsafe fn c() {}\n"),
+            ],
+            false,
+            &[picks],
+        );
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 1);
     }
 
     /// A call of the crate's own `macro_rules!` with input, as Tokio's

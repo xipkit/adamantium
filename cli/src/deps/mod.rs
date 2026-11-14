@@ -10,7 +10,7 @@ mod rules;
 mod scan;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     io::{self, Write},
     path::{Path, PathBuf},
     process::ExitCode,
@@ -90,24 +90,54 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
     let disallowed = Disallowed::bundled()?;
     let (triple, printed) = metadata::host(root)?;
     let target = Target::parse(&printed);
+    let resolved = metadata::dependencies(root, &triple, &target, cargo_args)?;
+    // Each library's dependencies by the names its code uses, mapped to
+    // their library names.
+    let externs: HashMap<&str, BTreeMap<String, String>> = resolved
+        .iter()
+        .map(|dependency| {
+            let names = dependency
+                .externs
+                .iter()
+                .map(|(name, dependency)| (name.clone(), dependency.lib.clone()))
+                .collect();
+            (dependency.id.as_str(), names)
+        })
+        .collect();
+    let none = BTreeMap::new();
+    // Each library as a crate that depends on it reads it for its exported
+    // macros, which doesn't look past it to the crates it depends on.
+    let libraries: HashMap<&str, Crate> = resolved
+        .iter()
+        .filter_map(|dependency| {
+            let lib = dependency.lib.as_ref()?;
+            let externs = externs.get(dependency.id.as_str())?;
+            Some((
+                dependency.id.as_str(),
+                library(dependency, lib, externs, &none, &target),
+            ))
+        })
+        .collect();
     let mut dependencies = Vec::new();
-    for dependency in metadata::dependencies(root, &triple, &target, cargo_args)? {
-        let scan = match &dependency.lib {
-            Some(lib) => scan::scan(
-                &Crate {
-                    name: &lib.name,
-                    root: &dependency.root,
-                    src: &lib.src_path,
-                    edition_2015: lib.edition == "2015",
-                    externs: &dependency.externs,
-                    cfg: Cfg {
-                        target: &target,
-                        features: &dependency.features,
-                        proc_macro: lib.proc_macro,
-                    },
-                },
-                &disallowed,
-            ),
+    for dependency in &resolved {
+        let read = dependency
+            .lib
+            .as_ref()
+            .zip(externs.get(dependency.id.as_str()));
+        let scan = match read {
+            Some((lib, externs)) => {
+                let readable = dependency
+                    .externs
+                    .iter()
+                    .filter_map(|(name, dependency)| {
+                        Some((name.clone(), libraries.get(dependency.id.as_str())?))
+                    })
+                    .collect();
+                scan::scan(
+                    &library(dependency, lib, externs, &readable, &target),
+                    &disallowed,
+                )
+            }
             None => scan::Scan {
                 unscanned: vec![Unscanned {
                     file: "Cargo.toml".to_owned(),
@@ -131,9 +161,9 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
             })
             .collect();
         dependencies.push(Dependency {
-            name: dependency.name,
-            version: dependency.version,
-            source: dependency.source,
+            name: dependency.name.clone(),
+            version: dependency.version.clone(),
+            source: dependency.source.clone(),
             kind: dependency.kind,
             forbids_unsafe: scan.forbids_unsafe,
             unsafe_code: scan.unsafe_code,
@@ -148,6 +178,31 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
         target: triple,
         dependencies,
     })
+}
+
+/// A dependency's library as the scan reads it. `externs` are its
+/// dependencies' library names, and `dependencies` the ones whose source
+/// can be read, by the names its code uses.
+fn library<'a>(
+    dependency: &'a metadata::Dependency,
+    lib: &'a metadata::Lib,
+    externs: &'a BTreeMap<String, String>,
+    dependencies: &'a BTreeMap<String, &'a Crate<'a>>,
+    target: &'a Target,
+) -> Crate<'a> {
+    Crate {
+        name: &lib.name,
+        root: &dependency.root,
+        src: &lib.src_path,
+        edition_2015: lib.edition == "2015",
+        externs,
+        dependencies,
+        cfg: Cfg {
+            target,
+            features: &dependency.features,
+            proc_macro: lib.proc_macro,
+        },
+    }
 }
 
 fn print_text(out: &mut impl Write, report: &Report) -> io::Result<()> {

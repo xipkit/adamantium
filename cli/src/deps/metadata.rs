@@ -27,6 +27,8 @@ pub enum Kind {
 /// A dependency and what is needed to read its library's source.
 #[derive(Debug)]
 pub struct Dependency {
+    /// Cargo's id for the package.
+    pub id: String,
     pub name: String,
     pub version: String,
     pub source: Option<String>,
@@ -36,9 +38,17 @@ pub struct Dependency {
     pub lib: Option<Lib>,
     /// The features a normal build gives it.
     pub features: Features,
-    /// The name each of its normal dependencies goes by in its code, mapped
-    /// to that dependency's library name.
-    pub externs: BTreeMap<String, String>,
+    /// Its normal dependencies, by the name each goes by in its code.
+    pub externs: BTreeMap<String, Extern>,
+}
+
+/// A dependency as the crate that depends on it sees it.
+#[derive(Debug)]
+pub struct Extern {
+    /// Its library's crate name.
+    pub lib: String,
+    /// Cargo's id for its package.
+    pub id: String,
 }
 
 /// A dependency's library target.
@@ -322,9 +332,14 @@ fn resolve(metadata: Metadata, built: &[Built], host: &Host) -> Result<Vec<Depen
             .deps
             .iter()
             .filter(|dep| dep.is(None, host))
-            .filter_map(|dep| Some((dep.name.clone(), libs.get(dep.pkg.as_str())?.name.clone())))
+            .filter_map(|dep| {
+                let lib = libs.get(dep.pkg.as_str())?.name.clone();
+                let id = dep.pkg.clone();
+                Some((dep.name.clone(), Extern { lib, id }))
+            })
             .collect();
         dependencies.push(Dependency {
+            id: (*id).to_owned(),
             name: package.name.clone(),
             version: package.version.clone(),
             source: package.source.clone(),
