@@ -2,7 +2,7 @@
 //!
 //! A binding is rewritten only when every use of it, and of every clone of
 //! it, has one of the forms the migration guide marks as mechanical: the
-//! constructor, clones, a guard used within one statement, a snapshot, and
+//! constructor, clones, a guard used within one statement, a copy of the state, and
 //! taking the state back. Any other use leaves the binding and all of its
 //! clones unchanged, and the caller reports why with a link to the guide.
 
@@ -1128,8 +1128,10 @@ struct Plan<'a> {
 
 #[derive(Clone, Copy)]
 enum Narrow {
-    /// `guard.clone()`, which is `snapshot()`.
-    Snapshot,
+    /// `guard.clone()`. Method lookup for the guard starts at the state, so
+    /// it can clone what a reference in the state points to; `(*state)`
+    /// keeps that lookup, where `snapshot()` would always clone the state.
+    Clone,
     Read,
 }
 
@@ -1418,7 +1420,7 @@ impl<'a> Walker<'a> {
                     if projected {
                         Narrow::Read
                     } else {
-                        Narrow::Snapshot
+                        Narrow::Clone
                     },
                 ))
             }
@@ -1505,7 +1507,7 @@ impl<'a> Walker<'a> {
         }
         // The closure's parameter takes the binding's name, so the code that
         // moves into the closure must not name the binding anywhere else.
-        let substitute = |range: Range<usize>| -> Result<String, Reason> {
+        let substitute_with = |range: Range<usize>, guard: &str| -> Result<String, Reason> {
             let region = self.text.get(range.clone()).ok_or(UNLOCATED)?;
             if names_in(region, &name) != Some(1) {
                 return Err(Reason::Unfollowed(
@@ -1515,17 +1517,18 @@ impl<'a> Walker<'a> {
             let before = self.text.get(range.start..guard_range.start);
             let after = self.text.get(guard_range.end..range.end);
             match (before, after) {
-                (Some(before), Some(after)) => Ok(format!("{before}{name}{after}")),
+                (Some(before), Some(after)) => Ok(format!("{before}{guard}{after}")),
                 _ => Err(UNLOCATED),
             }
         };
+        let substitute = |range: Range<usize>| substitute_with(range, &name);
         if let Some((expr, narrow)) = plan.narrow {
             let range = self.text.of(expr).ok_or(UNLOCATED)?;
             let replacement = match narrow {
-                Narrow::Snapshot => {
-                    substitute(range.clone())?;
-                    format!("{name}.snapshot()")
-                }
+                Narrow::Clone => format!(
+                    "{name}.read(|{name}| {})",
+                    substitute_with(range.clone(), &format!("(*{name})"))?
+                ),
                 Narrow::Read => format!("{name}.read(|{name}| {})", substitute(range.clone())?),
             };
             return Ok(self.edit(range, replacement));
@@ -2645,6 +2648,19 @@ mod tests {
         );
         assert_eq!(refusals, []);
         assert!(fixed.starts_with("use std::sync::Arc;\nfn f()"), "{fixed}");
+    }
+
+    #[test]
+    fn a_guard_clone_keeps_its_method_lookup() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nfn f(mut value: Vec<i32>) -> Vec<i32> {\n    let m = Arc::new(Mutex::new(&mut value));\n    let copy: Vec<i32> = m.lock().unwrap().clone();\n    copy\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(
+            fixed.contains("let copy: Vec<i32> = m.read(|m| (*m).clone());"),
+            "{fixed}"
+        );
     }
 
     #[test]
