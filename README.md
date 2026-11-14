@@ -42,9 +42,9 @@ cargo adamantium explain clippy::rc_buffer --format json
 
 `check` runs `cargo clippy --all-targets` with Adamantium's rules and `clippy.toml`. It disables Clippy's default lints and runs the rules as warnings, allowing crates with findings and their dependents to be checked. It checks every workspace member unless arguments after `--` select packages; those arguments are passed to `cargo clippy`.
 
-The command prints diagnostics and a summary to stderr. With `--format json`, it prints a report to stdout with the rule, message, file, line, and column for each finding. The exit status is `0` when clean, `1` for findings, and `2` when the project did not build.
+The command prints diagnostics and a summary to stderr. With `--format json`, it prints a report to stdout with the rule, message, file, line, column, and source for each finding. The source is the text of the line the finding starts on, with leading and trailing whitespace removed; it is `null`, like the line and column, for a finding without a line. The exit status is `0` when clean, `1` for findings, and `2` when the project did not build.
 
-The JSON check report uses `schema_version: 2`. Its `warnings` array contains warnings about Adamantium's Clippy configuration and unknown, renamed, or removed lints, each with a message, file, and line. Warnings do not change the status or exit code. Configuration warnings and errors name the file `clippy.toml`; their lines refer to Adamantium's bundled configuration, which `cargo adamantium rules` prints. Lint warnings without a primary span (`E0602` and `renamed_and_removed_lints`) have `file: null` and `line: null` and appear once per code and message across targets. Compiler summaries are omitted. Other compiler warnings appear only in text output.
+The JSON check report uses `schema_version: 3`. Its `warnings` array contains warnings about Adamantium's Clippy configuration and unknown, renamed, or removed lints, each with a message, file, and line. Warnings do not change the status or exit code. Configuration warnings and errors name the file `clippy.toml`; their lines refer to Adamantium's bundled configuration, which `cargo adamantium rules` prints. Lint warnings without a primary span (`E0602` and `renamed_and_removed_lints`) have `file: null` and `line: null` and appear once per code and message across targets. Compiler summaries are omitted. Other compiler warnings appear only in text output.
 
 With `--format sarif`, it prints a [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) log to stdout, which GitHub code scanning shows as annotations on pull requests. Each finding is an `error` result for its rule. Build errors and warnings are tool notifications rather than results, so they raise no alerts. File URIs are relative to the root of the git repository holding the workspace, or to the workspace root outside git. A finding without a line, such as a missing `overflow-checks`, points at the first line of its file. The exit status is the same as for the other formats.
 
@@ -99,6 +99,19 @@ future_not_send = ["src/syntax/", "src/bytecode.rs"] # skip this rule in these p
 For a single package, use `[package.metadata.adamantium]`. Paths are globs relative to the directory containing `Cargo.toml`; paths without wildcards also cover their contents. Use either the bare rule name or the qualified name printed by `cargo adamantium rules`. Unknown rule names produce an error.
 
 `check` summarizes skipped findings and reports counts by rule in the JSON report's `skipped` map. Remove a rule from `allow` to see its findings. Projects with a skip list should run `cargo adamantium check` in CI because a `[lints]` table cannot scope a rule to a path.
+
+## Baselines
+
+The skip list adopts rules by path or by rule. To adopt them everywhere at once without fixing every existing finding first, save a report and check against it:
+
+```sh
+cargo adamantium check --format json > adamantium-baseline.json
+cargo adamantium check --baseline adamantium-baseline.json
+```
+
+With `--baseline`, findings that the earlier report already has are left out, so only new findings fail the check. The status, the exit code, and the findings in JSON and SARIF reports cover only new findings, and text output shows diagnostics only for them. The JSON report counts the matched findings by rule in its `baselined` map, and `baseline_unmatched` is the number of findings in the baseline that the check did not find, or `null` without a baseline. Regenerate the baseline after fixing findings so they cannot come back.
+
+A finding matches the baseline when its rule, its path relative to the project root, and its source text are the same. Line numbers, columns, and messages are ignored, so edits elsewhere in a file and a different Clippy version do not bring findings back, and the baseline can be written on another machine. Editing the line of a finding, or moving it to another file, makes it new. When findings share a rule, path, and source text, only those beyond the baseline's count are new. The skip list applies first. The baseline must be a `schema_version: 3` report from a check that built; `check` refuses older reports and reports from failed builds.
 
 For a machine-readable list of rules and their reasons, run `cargo adamantium rules --format json`.
 
@@ -267,6 +280,35 @@ Unnamed tasks create no spans or diagnostic bookkeeping. Without `tracing`, the
 named methods behave like their unnamed equivalents and do not convert or store
 names; the library has no tracing dependency in that configuration.
 
+### Retries and rate limits
+
+`retry(&cancellation, deadline, backoff, attempt)` calls `attempt` until its
+future succeeds, waiting between failures as a `Backoff` says:
+`Backoff::exponential(first, max)` doubles the wait up to `max`, and
+`Backoff::constant(delay)` keeps it fixed. `.attempts(n)` caps the attempts;
+otherwise the cancellation and deadline are what end it. `retry_if` takes a
+predicate that says which errors are worth another attempt.
+
+`RateLimit::new(permits, per)` lets at most `permits` calls start in any
+window of length `per`. Clones share the limit, so a clone per task bounds
+the whole of a `concurrently` map:
+
+```rust
+let limit = RateLimit::new(10, Duration::from_secs(1));
+let pages = concurrently(urls, 8, |url| {
+    let (limit, cancellation) = (limit.clone(), cancellation.clone());
+    async move { limit.run_until(&cancellation, None, || fetch(url)).await }
+})
+.await?;
+```
+
+Both return `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExceeded`.
+Every wait inside them, between attempts or for room under the limit, ends as
+soon as the `Cancellation` is requested or the deadline passes, and an attempt
+or call still running is dropped. As with `Tasks::run_until`, a request already
+present wins, so a cancelled call never starts its work or takes room under the
+limit, and cancellation wins over an equally ready deadline.
+
 ### Streaming concurrent maps
 
 Use `concurrently_ordered(items, limit, f)` to consume results in input order,
@@ -423,12 +465,15 @@ Strong reference cycles are not detected or collected. An `Actor` whose state ow
 cargo adamantium style check                      # every .rs file under the current directory
 cargo adamantium style check src/lib.rs --context "application code"
 cargo adamantium style check . --rule unnecessary_deep_clone --dry-run
+cargo adamantium style check --changed=main --cache-from last.json > next.json
 cargo adamantium style rules --format text
 ```
 
 The command prints JSON by default, or a readable report with `--format text`. It finds Rust files recursively, respects ignore files, and skips hidden directories, `target`, and `node_modules`. It does not resolve Cargo workspace membership. Each file is sent to the provider in a request with the selected rules and any context. `--provider` selects the service that answers the rules; `decisions`, the OpenAI Decisions API, is the default and currently the only provider. Reports record the provider, and `--retry-from` refuses a report from a different one. Findings apply to the whole file because Decisions does not provide reliable locations. The file, path, and context must fit within the API's 256 KiB JSON input limit. The exit status is `0` for a clean check or dry run, `1` for findings, and `2` for an incomplete check.
 
 Transient failures are retried with exponential backoff and jitter, up to four attempts within three minutes per file. `Retry-After` is honored up to 30 seconds. Authentication, quota, and spending-limit errors are not retried. A service failure stops further requests and marks the remaining files as unchecked. Use `--retry-from previous.json` to retry failed and unchecked files in a new report. Supply the same scan root and `--rule` options, and pass `--context` again if needed. Do not redirect the output over the report being read.
+
+Each request is billable, so two options keep a run to the files that need it. `--changed` reviews only the Rust files that differ from `HEAD`: staged, unstaged, and untracked files that are not ignored. `--changed=BASE` adds the files committed since the current branch left `BASE`, such as `--changed=main`. Deleted files are left out. `--cache-from previous.json` reuses a previous report's results for each file whose source has the same SHA-256 and was answered under the same provider, model, rule definitions, and context. Each report records those as `source_sha256` per file and `rules_sha256` and `context_sha256` for the run; editing a rule's wording changes `rules_sha256`. Reused files keep their findings, are marked `"cached": true`, and have no `input_tokens`. A report lists reused files alongside reviewed ones, so it can serve as the cache for the next run. Files that failed or were never sent are reviewed again. The cached report must have schema version 2 and the same scan root. `--retry-from` cannot be combined with either option.
 
 Set `OPENAI_API_KEY`. On macOS, the `openai-api-key` Keychain item is used when the variable is unset. Source files and context are sent to OpenAI. Results are model estimates. Evaluate them on labeled examples before using them as a blocking check. The questions instruct the model to treat source comments and strings as untrusted evidence, but this does not guarantee resistance to adversarial input.
 
