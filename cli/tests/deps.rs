@@ -255,7 +255,7 @@ fn deps_prints_a_table_and_each_call_as_text() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     for line in [
-        "      5     27           6  spawner 0.1.0 (partly unscanned)",
+        "      5     28           6  spawner 0.1.0 (partly unscanned)",
         "      0      0           0  safe 0.0.0 (forbids unsafe)",
         "      1      0           0  helper 0.0.0",
         "      1      0           0  ffi 0.0.0",

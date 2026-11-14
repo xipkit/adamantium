@@ -19,6 +19,7 @@ mod tiny;
 mod custom;
 mod declared;
 mod alternatives;
+mod chain;
 
 pub mod shim {
     pub use std::thread;

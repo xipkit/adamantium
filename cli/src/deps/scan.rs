@@ -209,7 +209,7 @@ impl Binding {
 /// The namespaces a name can be bound in. Modules and types share one,
 /// and functions, constants and statics the other, so `mod spawn;` and
 /// `pub use self::spawn::spawn;` bind different things.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Namespace {
     Types,
     Values,
@@ -788,217 +788,17 @@ impl Scanner<'_> {
         })
     }
 
-    /// The binding of `name` in `namespace`, in the blocks around a place in
-    /// `module` or in the module itself, with the blocks around the scope
-    /// that binds it: a `use` resolves there, not where its name is used.
-    fn lookup<'s>(
-        &'s self,
-        module: &[String],
-        blocks: &'s [Scope],
-        namespace: Namespace,
-        name: &str,
-    ) -> Option<(&'s Binding, &'s [Scope])> {
-        for (index, scope) in blocks.iter().enumerate().rev() {
-            if let Some(binding) = scope.get(namespace, name) {
-                return Some((binding, blocks.get(..=index).unwrap_or_default()));
-            }
-        }
-        self.modules
-            .get(module)
-            .and_then(|scope| scope.get(namespace, name))
-            .map(|binding| (binding, &[][..]))
-    }
-
-    /// Resolves a binding in `namespace`, found in `module`.
-    fn binding(
-        &self,
-        module: &[String],
-        blocks: &[Scope],
-        namespace: Namespace,
-        binding: &Binding,
-        depth: usize,
-    ) -> Resolved {
-        match binding {
-            Binding::Item(path) => Resolved::Path(path.clone()),
-            Binding::Opaque => Resolved::Local,
-            Binding::Use { path, leading } => {
-                self.use_path(module, blocks, namespace, path, *leading, depth + 1)
-            }
-            Binding::Either(alternatives) => Resolved::either(
-                alternatives
-                    .iter()
-                    .map(|alternative| self.binding(module, blocks, namespace, alternative, depth)),
-            ),
-        }
-    }
-
-    /// Resolves a `use` path written in `module`, for its target in
-    /// `namespace`.
-    fn use_path(
-        &self,
-        module: &[String],
-        blocks: &[Scope],
-        namespace: Namespace,
-        path: &[String],
-        leading: bool,
-        depth: usize,
-    ) -> Resolved {
-        let Some((first, rest)) = path.split_first() else {
-            return Resolved::Unknown;
-        };
-        if depth > MAX_DEPTH {
-            return Resolved::Unknown;
-        }
-        if let Some(path) = self.relative_path(module, path) {
-            return self.follow(path, namespace, depth);
-        }
-        if self.krate.edition_2015 {
-            return self.root_path(path, namespace, depth);
-        }
-        let unbound = || match self.extern_crate(first) {
-            Some(krate) => Resolved::Path(vec![krate]).join(rest),
-            None => Resolved::Unknown,
-        };
-        let first_namespace = self::namespace(path, 0, namespace);
-        if !leading
-            && let Some((binding, scope)) = self.lookup(module, blocks, first_namespace, first)
-        {
-            return self.use_binding(module, scope, binding, path, namespace, depth, unbound);
-        }
-        unbound()
-    }
-
-    /// Resolves a `use` path written in `module`, whose first segment is
-    /// bound to `binding` in `scope`. A `use` can't refer to itself: in
-    /// `use tokio;`, `tokio` is the crate. So where the binding is the `use`
-    /// of the path, the path resolves as `unbound` says a path whose first
-    /// segment isn't bound does.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "each is a part of the place being resolved"
-    )]
-    fn use_binding(
-        &self,
-        module: &[String],
-        scope: &[Scope],
-        binding: &Binding,
-        path: &[String],
-        namespace: Namespace,
-        depth: usize,
-        unbound: impl FnOnce() -> Resolved,
-    ) -> Resolved {
-        let first_namespace = self::namespace(path, 0, namespace);
-        let rest = path.get(1..).unwrap_or_default();
-        let mut alternatives = Vec::new();
-        let mut itself = false;
-        for alternative in binding.alternatives() {
-            if is_use_of(alternative, path) {
-                itself = true;
-                continue;
-            }
-            let resolved = self
-                .binding(module, scope, first_namespace, alternative, depth)
-                .join(rest);
-            alternatives.push(self.followed(resolved, namespace, depth));
-        }
-        if itself {
-            alternatives.push(unbound());
-        }
-        Resolved::either(alternatives)
-    }
-
-    /// Resolves a 2015 `use` path, which starts at the crate root.
-    fn root_path(&self, path: &[String], namespace: Namespace, depth: usize) -> Resolved {
-        let Some((first, rest)) = path.split_first() else {
-            return Resolved::Unknown;
-        };
-        let root = [self.krate.name.to_owned()];
-        let unbound = || {
-            if let Some(krate) = self.extern_crate(first) {
-                return Resolved::Path(vec![krate]).join(rest);
-            }
-            let mut full = root.to_vec();
-            full.extend(path.iter().cloned());
-            self.follow(full, namespace, depth)
-        };
-        let first_namespace = self::namespace(path, 0, namespace);
-        if let Some((binding, _)) = self.lookup(&root, &[], first_namespace, first) {
-            return self.use_binding(&root, &[], binding, path, namespace, depth, unbound);
-        }
-        unbound()
-    }
-
-    fn followed(&self, resolved: Resolved, namespace: Namespace, depth: usize) -> Resolved {
-        resolved.map_paths(|path| self.follow(path, namespace, depth))
-    }
-
-    /// Follows a path into this crate through the `use` items of the modules
-    /// it passes, as `crate::sync::Mutex` reaches `std::sync::Mutex` through
-    /// `mod sync { pub use std::sync::Mutex; }`. It stops at a disallowed
-    /// path, which names a re-export as often as a definition.
-    fn follow(&self, path: Vec<String>, namespace: Namespace, depth: usize) -> Resolved {
-        if self.disallowed.entry(&path).is_some() {
-            return Resolved::Path(path);
-        }
-        self.step(path, namespace, depth)
-    }
-
-    fn step(&self, path: Vec<String>, namespace: Namespace, depth: usize) -> Resolved {
-        self.walk(path, 1, namespace, depth)
-    }
-
-    /// Follows a path into this crate from its segment at `start`.
-    fn walk(
-        &self,
-        path: Vec<String>,
-        start: usize,
-        namespace: Namespace,
-        depth: usize,
-    ) -> Resolved {
-        if path.first().map(String::as_str) != Some(self.krate.name) || depth > MAX_DEPTH {
-            return Resolved::Path(path);
-        }
-        for end in start..path.len() {
-            let (Some(module), Some(name)) = (path.get(..end), path.get(end)) else {
-                break;
-            };
-            let Some(scope) = self.modules.get(module) else {
-                // A type or a function, whose items are its own.
-                break;
-            };
-            let name_namespace = self::namespace(&path, end, namespace);
-            match scope.get(name_namespace, name) {
-                Some(binding @ (Binding::Use { .. } | Binding::Either(_))) => {
-                    let rest = path.get(end + 1..).unwrap_or_default();
-                    return Resolved::either(binding.alternatives().iter().map(|alternative| {
-                        if let Binding::Use { .. } = alternative {
-                            let resolved = self
-                                .binding(module, &[], name_namespace, alternative, depth + 1)
-                                .join(rest);
-                            self.followed(resolved, namespace, depth + 1)
-                        } else {
-                            self.walk(path.clone(), end + 1, namespace, depth + 1)
-                        }
-                    }));
-                }
-                Some(_) => {}
-                None if scope.globs => return Resolved::Unknown,
-                None => break,
-            }
-        }
-        Resolved::Path(path)
-    }
-
     /// Where the disallowed paths into this crate are defined, mapped to
     /// their entries, so that a path reaching the definition another way
     /// matches too, as Clippy's resolved paths do.
     fn definitions(&self) -> HashMap<Vec<String>, usize> {
+        let mut resolver = Resolver::new(self, &[]);
         let mut definitions = HashMap::new();
         for (path, entry) in self.disallowed.paths() {
             if path.first().map(String::as_str) != Some(self.krate.name) {
                 continue;
             }
-            for definition in self
+            for definition in resolver
                 .step(path.to_vec(), Namespace::Values, 0)
                 .into_alternatives()
             {
@@ -1018,14 +818,60 @@ impl Scanner<'_> {
             .entry(path)
             .or_else(|| self.definitions.get(path).copied())
     }
+}
 
-    /// Resolves a path written in `module` within `blocks`, for its last
+/// The resolution of one path, or of the disallowed paths into the crate.
+/// Where names have more than one binding, a path can reach one `use` path,
+/// or one path into the crate, many ways: through a chain of names with two
+/// bindings each, as many as two to the power of its length. Each is
+/// resolved once and remembered, so the work grows with the number of them,
+/// not of the ways to them.
+struct Resolver<'s, 'a> {
+    scanner: &'s Scanner<'a>,
+    /// The blocks around the place of the path, innermost last. A `use` in
+    /// one of them resolves within the ones around it, which come first, so
+    /// a count of them names the blocks it resolves in.
+    blocks: &'s [Scope],
+    uses: HashMap<UseKey, Resolved>,
+    walks: HashMap<WalkKey, Resolved>,
+}
+
+/// A `use` path to resolve, as `Resolver::use_path` takes it.
+#[derive(PartialEq, Eq, Hash)]
+struct UseKey {
+    module: Vec<String>,
+    blocks: usize,
+    namespace: Namespace,
+    path: Vec<String>,
+    leading: bool,
+    depth: usize,
+}
+
+/// A path into the crate to follow, as `Resolver::walk` takes it.
+#[derive(PartialEq, Eq, Hash)]
+struct WalkKey {
+    path: Vec<String>,
+    start: usize,
+    namespace: Namespace,
+    depth: usize,
+}
+
+impl<'s, 'a> Resolver<'s, 'a> {
+    fn new(scanner: &'s Scanner<'a>, blocks: &'s [Scope]) -> Self {
+        Self {
+            scanner,
+            blocks,
+            uses: HashMap::new(),
+            walks: HashMap::new(),
+        }
+    }
+
+    /// Resolves a path written in `module` within the blocks, for its last
     /// segment in `namespace`: values for a path in an expression, types
     /// for the type of a qualified path.
     fn path(
-        &self,
+        &mut self,
         module: &[String],
-        blocks: &[Scope],
         namespace: Namespace,
         path: &[String],
         leading: bool,
@@ -1037,39 +883,297 @@ impl Scanner<'_> {
         if first == "self" && rest.is_empty() {
             return Resolved::Local;
         }
-        if let Some(path) = self.relative_path(module, path) {
+        let scanner = self.scanner;
+        if let Some(path) = scanner.relative_path(module, path) {
             return self.follow(path, namespace, 0);
         }
         if leading {
-            if self.krate.edition_2015 {
+            if scanner.krate.edition_2015 {
                 return self.root_path(path, namespace, 0);
             }
-            return match self.extern_crate(first) {
+            return match scanner.extern_crate(first) {
                 Some(krate) => Resolved::Path(vec![krate]).join(rest),
                 None => Resolved::Unknown,
             };
         }
         let first_namespace = self::namespace(path, 0, namespace);
-        if let Some((binding, scope)) = self.lookup(module, blocks, first_namespace, first) {
+        if let Some((binding, scope)) =
+            self.lookup(module, self.blocks.len(), first_namespace, first)
+        {
             let resolved = self
                 .binding(module, scope, first_namespace, binding, 0)
                 .join(rest);
             return self.followed(resolved, namespace, 0);
         }
-        if let Some(krate) = self.extern_crate(first) {
+        if let Some(krate) = scanner.extern_crate(first) {
             return Resolved::Path(vec![krate]).join(rest);
         }
         // A glob import shadows the prelude and may provide any name. It
         // could shadow a crate name too, but no crate exports an item named
         // like another crate, while a `Vec` or `Box` of its own is common.
-        let globs = blocks
+        let globs = self
+            .blocks
             .iter()
-            .chain(self.modules.get(module))
+            .chain(scanner.modules.get(module))
             .any(|scope| scope.globs);
         if !globs && let Some((_, prelude)) = PRELUDE.iter().find(|(name, _)| name == first) {
             return Resolved::Path(prelude.split("::").map(str::to_owned).collect()).join(rest);
         }
         Resolved::Unknown
+    }
+
+    /// The binding of `name` in `namespace`, in the first `blocks` of the
+    /// blocks around a place in `module` or in the module itself, with the
+    /// count of blocks around the scope that binds it: a `use` resolves
+    /// there, not where its name is used.
+    fn lookup(
+        &self,
+        module: &[String],
+        blocks: usize,
+        namespace: Namespace,
+        name: &str,
+    ) -> Option<(&'s Binding, usize)> {
+        let around = self.blocks.get(..blocks).unwrap_or_default();
+        for (index, scope) in around.iter().enumerate().rev() {
+            if let Some(binding) = scope.get(namespace, name) {
+                return Some((binding, index + 1));
+            }
+        }
+        self.scanner
+            .modules
+            .get(module)
+            .and_then(|scope| scope.get(namespace, name))
+            .map(|binding| (binding, 0))
+    }
+
+    /// Resolves a binding in `namespace`, found in `module` within the first
+    /// `blocks` of the blocks.
+    fn binding(
+        &mut self,
+        module: &[String],
+        blocks: usize,
+        namespace: Namespace,
+        binding: &Binding,
+        depth: usize,
+    ) -> Resolved {
+        match binding {
+            Binding::Item(path) => Resolved::Path(path.clone()),
+            Binding::Opaque => Resolved::Local,
+            Binding::Use { path, leading } => {
+                self.use_path(module, blocks, namespace, path, *leading, depth + 1)
+            }
+            Binding::Either(alternatives) => Resolved::either(
+                alternatives
+                    .iter()
+                    .map(|alternative| self.binding(module, blocks, namespace, alternative, depth)),
+            ),
+        }
+    }
+
+    /// Resolves a `use` path written in `module` within the first `blocks`
+    /// of the blocks, for its target in `namespace`.
+    fn use_path(
+        &mut self,
+        module: &[String],
+        blocks: usize,
+        namespace: Namespace,
+        path: &[String],
+        leading: bool,
+        depth: usize,
+    ) -> Resolved {
+        let key = UseKey {
+            module: module.to_vec(),
+            blocks,
+            namespace,
+            path: path.to_vec(),
+            leading,
+            depth,
+        };
+        if let Some(resolved) = self.uses.get(&key) {
+            return resolved.clone();
+        }
+        let resolved = self.resolve_use(module, blocks, namespace, path, leading, depth);
+        self.uses.insert(key, resolved.clone());
+        resolved
+    }
+
+    fn resolve_use(
+        &mut self,
+        module: &[String],
+        blocks: usize,
+        namespace: Namespace,
+        path: &[String],
+        leading: bool,
+        depth: usize,
+    ) -> Resolved {
+        let Some((first, rest)) = path.split_first() else {
+            return Resolved::Unknown;
+        };
+        if depth > MAX_DEPTH {
+            return Resolved::Unknown;
+        }
+        let scanner = self.scanner;
+        if let Some(path) = scanner.relative_path(module, path) {
+            return self.follow(path, namespace, depth);
+        }
+        if scanner.krate.edition_2015 {
+            return self.root_path(path, namespace, depth);
+        }
+        let unbound = |_: &mut Self| match scanner.extern_crate(first) {
+            Some(krate) => Resolved::Path(vec![krate]).join(rest),
+            None => Resolved::Unknown,
+        };
+        let first_namespace = self::namespace(path, 0, namespace);
+        if !leading
+            && let Some((binding, scope)) = self.lookup(module, blocks, first_namespace, first)
+        {
+            return self.use_binding(module, scope, binding, path, namespace, depth, unbound);
+        }
+        unbound(self)
+    }
+
+    /// Resolves a `use` path written in `module`, whose first segment is
+    /// bound to `binding` within the first `blocks` of the blocks. A `use`
+    /// can't refer to itself: in `use tokio;`, `tokio` is the crate. So where
+    /// the binding is the `use` of the path, the path resolves as `unbound`
+    /// says a path whose first segment isn't bound does.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each is a part of the place being resolved"
+    )]
+    fn use_binding(
+        &mut self,
+        module: &[String],
+        blocks: usize,
+        binding: &Binding,
+        path: &[String],
+        namespace: Namespace,
+        depth: usize,
+        unbound: impl FnOnce(&mut Self) -> Resolved,
+    ) -> Resolved {
+        let first_namespace = self::namespace(path, 0, namespace);
+        let rest = path.get(1..).unwrap_or_default();
+        let mut alternatives = Vec::new();
+        let mut itself = false;
+        for alternative in binding.alternatives() {
+            if is_use_of(alternative, path) {
+                itself = true;
+                continue;
+            }
+            let resolved = self
+                .binding(module, blocks, first_namespace, alternative, depth)
+                .join(rest);
+            alternatives.push(self.followed(resolved, namespace, depth));
+        }
+        if itself {
+            alternatives.push(unbound(self));
+        }
+        Resolved::either(alternatives)
+    }
+
+    /// Resolves a 2015 `use` path, which starts at the crate root.
+    fn root_path(&mut self, path: &[String], namespace: Namespace, depth: usize) -> Resolved {
+        let Some((first, rest)) = path.split_first() else {
+            return Resolved::Unknown;
+        };
+        let scanner = self.scanner;
+        let root = [scanner.krate.name.to_owned()];
+        let unbound = |resolver: &mut Self| {
+            if let Some(krate) = scanner.extern_crate(first) {
+                return Resolved::Path(vec![krate]).join(rest);
+            }
+            let mut full = root.to_vec();
+            full.extend(path.iter().cloned());
+            resolver.follow(full, namespace, depth)
+        };
+        let first_namespace = self::namespace(path, 0, namespace);
+        if let Some((binding, _)) = self.lookup(&root, 0, first_namespace, first) {
+            return self.use_binding(&root, 0, binding, path, namespace, depth, unbound);
+        }
+        unbound(self)
+    }
+
+    fn followed(&mut self, resolved: Resolved, namespace: Namespace, depth: usize) -> Resolved {
+        resolved.map_paths(|path| self.follow(path, namespace, depth))
+    }
+
+    /// Follows a path into this crate through the `use` items of the modules
+    /// it passes, as `crate::sync::Mutex` reaches `std::sync::Mutex` through
+    /// `mod sync { pub use std::sync::Mutex; }`. It stops at a disallowed
+    /// path, which names a re-export as often as a definition.
+    fn follow(&mut self, path: Vec<String>, namespace: Namespace, depth: usize) -> Resolved {
+        if self.scanner.disallowed.entry(&path).is_some() {
+            return Resolved::Path(path);
+        }
+        self.step(path, namespace, depth)
+    }
+
+    fn step(&mut self, path: Vec<String>, namespace: Namespace, depth: usize) -> Resolved {
+        self.walk(path, 1, namespace, depth)
+    }
+
+    /// Follows a path into this crate from its segment at `start`.
+    fn walk(
+        &mut self,
+        path: Vec<String>,
+        start: usize,
+        namespace: Namespace,
+        depth: usize,
+    ) -> Resolved {
+        let key = WalkKey {
+            path,
+            start,
+            namespace,
+            depth,
+        };
+        if let Some(resolved) = self.walks.get(&key) {
+            return resolved.clone();
+        }
+        let resolved = self.resolve_walk(&key.path, start, namespace, depth);
+        self.walks.insert(key, resolved.clone());
+        resolved
+    }
+
+    fn resolve_walk(
+        &mut self,
+        path: &[String],
+        start: usize,
+        namespace: Namespace,
+        depth: usize,
+    ) -> Resolved {
+        let scanner = self.scanner;
+        if path.first().map(String::as_str) != Some(scanner.krate.name) || depth > MAX_DEPTH {
+            return Resolved::Path(path.to_vec());
+        }
+        for end in start..path.len() {
+            let (Some(module), Some(name)) = (path.get(..end), path.get(end)) else {
+                break;
+            };
+            let Some(scope) = scanner.modules.get(module) else {
+                // A type or a function, whose items are its own.
+                break;
+            };
+            let name_namespace = self::namespace(path, end, namespace);
+            match scope.get(name_namespace, name) {
+                Some(binding @ (Binding::Use { .. } | Binding::Either(_))) => {
+                    let rest = path.get(end + 1..).unwrap_or_default();
+                    return Resolved::either(binding.alternatives().iter().map(|alternative| {
+                        if let Binding::Use { .. } = alternative {
+                            let resolved = self
+                                .binding(module, 0, name_namespace, alternative, depth + 1)
+                                .join(rest);
+                            self.followed(resolved, namespace, depth + 1)
+                        } else {
+                            self.walk(path.to_vec(), end + 1, namespace, depth + 1)
+                        }
+                    }));
+                }
+                Some(_) => {}
+                None if scope.globs => return Resolved::Unknown,
+                None => break,
+            }
+        }
+        Resolved::Path(path.to_vec())
     }
 }
 
@@ -1332,7 +1436,7 @@ impl FileVisitor<'_, '_> {
     }
 
     fn resolve(&self, expr: &ExprPath) -> Resolved {
-        let scanner = &*self.scanner;
+        let mut resolver = Resolver::new(self.scanner, &self.blocks);
         let names = segments(&expr.path);
         let leading = expr.path.leading_colon.is_some();
         let resolved = match &expr.qself {
@@ -1340,9 +1444,8 @@ impl FileVisitor<'_, '_> {
             Some(qself) if qself.position == 0 => {
                 let base = match &*qself.ty {
                     Type::Slice(_) => Resolved::Path(vec!["slice".to_owned()]),
-                    Type::Path(ty) if ty.qself.is_none() => scanner.path(
+                    Type::Path(ty) if ty.qself.is_none() => resolver.path(
                         &self.module,
-                        &self.blocks,
                         Namespace::Types,
                         &segments(&ty.path),
                         ty.path.leading_colon.is_some(),
@@ -1352,13 +1455,7 @@ impl FileVisitor<'_, '_> {
                 base.join(&names)
             }
             // `<T as Trait>::method` names the trait's item.
-            _ => scanner.path(
-                &self.module,
-                &self.blocks,
-                Namespace::Values,
-                &names,
-                leading,
-            ),
+            _ => resolver.path(&self.module, Namespace::Values, &names, leading),
         };
         resolved.map_paths(|path| Resolved::Path(canonical(path)))
     }
