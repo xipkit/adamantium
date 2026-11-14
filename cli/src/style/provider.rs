@@ -20,9 +20,7 @@ impl ProviderKind {
     /// Builds a client for this provider, reading its credentials.
     pub(crate) fn connect(self) -> Result<Box<dyn Provider>> {
         match self {
-            Self::Decisions => Ok(Box::new(
-                Decisions::new(crate::style::decisions::api_key()?),
-            )),
+            Self::Decisions => Ok(Box::new(Decisions::connect()?)),
         }
     }
 }

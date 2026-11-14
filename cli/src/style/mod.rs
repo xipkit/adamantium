@@ -4,7 +4,9 @@
 //! scripts live under `style/` in the repository.
 
 mod changed;
+mod credentials;
 mod decisions;
+mod http;
 mod provider;
 mod report;
 mod resume;
