@@ -571,7 +571,10 @@ struct Scanner<'a> {
     /// The macros that `#[macro_use] extern crate` items bring in from
     /// other crates, which a call names where no other macro of its name is
     /// in scope.
-    prelude: Vec<MacroRules>,
+    prelude: Vec<Imported>,
+    /// The dependencies read for the macros they export, by the names the
+    /// crate's code uses.
+    libraries: HashMap<String, Scanner<'a>>,
     /// The sources, as [`Span::file`] names them, of the files read for
     /// other crates' macros. Code written there counts for the crate that
     /// wrote it, not for this one, where the macros are called.
@@ -581,14 +584,14 @@ struct Scanner<'a> {
     /// crate goes by here.
     dollar_crates: HashMap<(String, usize, usize), Ident>,
     /// The `#[macro_export]` macros defined so far, where the crate is read
-    /// for another crate that brings them in.
+    /// for another crate that calls them.
     exports: Option<Vec<Export>>,
     /// Where `$crate` is written in the crate's macros, where the crate is
     /// read for another crate that brings them in.
     crate_spans: Vec<Span>,
 }
 
-/// A `#[macro_export]` macro of a crate, as another crate brings it in.
+/// A `#[macro_export]` macro of a crate, as another crate calls it.
 struct Export {
     name: String,
     rules: Option<Rules>,
@@ -627,13 +630,53 @@ struct MacroRules {
     /// Whether every build defines it.
     certain: bool,
     /// Whether a build that `condition` holds for defines it: not known
-    /// where it is defined in the expansion of another crate's macro, or is
-    /// another crate's, whose build decides.
+    /// where it is defined in the expansion of another crate's macro.
     defined: Truth,
-    /// For another crate's macro, which of the crate root's `#[macro_use]
-    /// extern crate` items brings it in, by their order: the last that
-    /// brings in a name hides the ones before it.
-    import: Option<usize>,
+}
+
+/// Another crate's `#[macro_export]` macro that a `#[macro_use] extern
+/// crate` item brings into the prelude.
+struct Imported {
+    name: String,
+    /// The library it is read from, by the name the crate's code uses.
+    library: String,
+    /// Which of the library's exports it is.
+    export: usize,
+    /// The predicates of the `cfg`s the `extern crate` item is under.
+    condition: Vec<TokenStream>,
+    /// Whether every build brings it in.
+    certain: bool,
+    /// Whether a build that `condition` holds for brings it in, which the
+    /// library's build decides too.
+    defined: Truth,
+    /// Which of the crate root's `#[macro_use] extern crate` items brings
+    /// it in, by their order: the last that brings in a name hides the ones
+    /// before it.
+    import: usize,
+}
+
+/// Where a definition a call may name comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// The crate's own `macro_rules!`, in textual scope.
+    Local,
+    /// Another crate's, that the `#[macro_use] extern crate` item of this
+    /// index among the crate root's items brings in.
+    MacroUse(usize),
+}
+
+/// A definition a call may name, as [`Scanner::expand`] reads it.
+struct Candidate<'t> {
+    rules: &'t Rules,
+    /// The file it is written in.
+    rel: &'t str,
+    /// Where its name is written.
+    span: Span,
+    /// The predicates of the `cfg`s it is defined under.
+    condition: &'t [TokenStream],
+    /// Whether a build that `condition` holds for defines it.
+    defined: Truth,
+    origin: Origin,
 }
 
 /// The `macro_rules!` a call can name by its bare name at a place in the
@@ -691,6 +734,7 @@ impl<'a> Scanner<'a> {
             sources: HashMap::new(),
             expansions: 0,
             prelude: Vec::new(),
+            libraries: HashMap::new(),
             foreign: HashSet::new(),
             dollar_crates: HashMap::new(),
             exports: None,
@@ -990,7 +1034,6 @@ impl<'a> Scanner<'a> {
             } else {
                 Truth::True
             },
-            import: None,
         });
     }
 
@@ -1003,10 +1046,6 @@ impl<'a> Scanner<'a> {
     fn import_macros(&mut self, items: &[Item], textual: &Textual) {
         for (import, item) in items.iter().enumerate() {
             let Item::ExternCrate(item) = item else {
-                continue;
-            };
-            let Some(dependency) = self.krate.dependencies.get(&item.ident.unraw().to_string())
-            else {
                 continue;
             };
             let mut condition = textual.conditions.clone();
@@ -1026,27 +1065,31 @@ impl<'a> Scanner<'a> {
             if holds == Truth::False || !macro_use {
                 continue;
             }
-            let (exports, crate_spans) = self.exports_of(dependency);
-            for span in crate_spans {
-                let start = span.start();
-                self.dollar_crates
-                    .insert((span.file(), start.line, start.column), item.ident.clone());
-            }
-            for export in exports {
-                let imported = self.imported(&item.attrs, &export.name);
-                if imported == Truth::False || export.defined == Truth::False {
+            let library = item.ident.unraw().to_string();
+            let Some(exports) = self
+                .library(&library)
+                .and_then(|library| library.exports.as_ref())
+            else {
+                continue;
+            };
+            let exports: Vec<_> = exports
+                .iter()
+                .map(|export| (export.name.clone(), export.defined))
+                .collect();
+            for (index, (name, exported)) in exports.into_iter().enumerate() {
+                let imported = self.imported(&item.attrs, &name);
+                if imported == Truth::False || exported == Truth::False {
                     continue;
                 }
-                let defined = export.defined.and(imported);
-                self.prelude.push(MacroRules {
-                    name: export.name,
-                    rules: export.rules,
-                    rel: export.rel,
-                    span: export.span,
+                let defined = exported.and(imported);
+                self.prelude.push(Imported {
+                    name,
+                    library: library.clone(),
+                    export: index,
                     condition: condition.clone(),
                     certain: holds == Truth::True && defined == Truth::True,
                     defined,
-                    import: Some(import),
+                    import,
                 });
             }
         }
@@ -1073,28 +1116,48 @@ impl<'a> Scanner<'a> {
             .fold(Truth::False, |truth, (applies, _)| truth.or(*applies))
     }
 
-    /// The `#[macro_export]` macros of a dependency, read from its module
-    /// tree with the `cfg`s of its own build, and where `$crate` is written
-    /// in its macros. A procedural macro crate can't export any. The
-    /// dependency's files are noted as other crates'.
-    fn exports_of(&mut self, krate: &Crate) -> (Vec<Export>, Vec<Span>) {
-        if krate.cfg.proc_macro {
-            return (Vec::new(), Vec::new());
+    /// The dependency that the crate's code calls `name`, if its source can
+    /// be read. It is read for the macros it exports the first time they are
+    /// needed: its module tree with the `cfg`s of its own build. Its files
+    /// are noted as other crates', and the `$crate` its macros
+    /// write as `name`. A procedural macro crate can't export any.
+    fn library(&mut self, name: &str) -> Option<&Scanner<'a>> {
+        if !self.libraries.contains_key(name) {
+            let krate = *self.krate.dependencies.get(name)?;
+            let ident = syn::parse_str::<Ident>(name).ok()?;
+            let mut reader = Scanner::new(krate, self.disallowed);
+            reader.exports = Some(Vec::new());
+            if !krate.cfg.proc_macro {
+                let root = vec![krate.name.to_owned()];
+                reader.load(krate.src, root, true, None, &mut Textual::default());
+                // Only the names are needed.
+                reader.files.clear();
+            }
+            for (source, rel) in mem::take(&mut reader.sources) {
+                self.foreign.insert(source.clone());
+                self.sources
+                    .insert(source, self.relative(&krate.root.join(rel)));
+            }
+            for export in reader.exports.iter_mut().flatten() {
+                export.rel = self.relative(&krate.root.join(&export.rel));
+            }
+            for span in mem::take(&mut reader.crate_spans) {
+                let start = span.start();
+                self.dollar_crates
+                    .insert((span.file(), start.line, start.column), ident.clone());
+            }
+            self.libraries.insert(name.to_owned(), reader);
         }
-        let mut reader = Scanner::new(krate, self.disallowed);
-        reader.exports = Some(Vec::new());
-        let root = vec![krate.name.to_owned()];
-        reader.load(krate.src, root, true, None, &mut Textual::default());
-        for (source, rel) in reader.sources {
-            self.foreign.insert(source.clone());
-            self.sources
-                .insert(source, self.relative(&krate.root.join(rel)));
-        }
-        let mut exports = reader.exports.unwrap_or_default();
-        for export in &mut exports {
-            export.rel = self.relative(&krate.root.join(&export.rel));
-        }
-        (exports, reader.crate_spans)
+        self.libraries.get(name)
+    }
+
+    /// The export that a macro the prelude has is read as.
+    fn export(&self, imported: &Imported) -> Option<&Export> {
+        self.libraries
+            .get(&imported.library)?
+            .exports
+            .as_ref()?
+            .get(imported.export)
     }
 
     /// The definitions a call of `name` may expand, the latest first: those
@@ -1112,13 +1175,20 @@ impl<'a> Scanner<'a> {
         textual: &'t Textual,
         scope: &Scope,
         name: &str,
-    ) -> Option<Vec<(&'t MacroRules, &'t Rules)>> {
+    ) -> Option<Vec<Candidate<'t>>> {
         let mut candidates = Vec::new();
         for definition in textual.macros.iter().rev() {
             if definition.name != name {
                 continue;
             }
-            candidates.push((definition, definition.rules.as_ref()?));
+            candidates.push(Candidate {
+                rules: definition.rules.as_ref()?,
+                rel: &definition.rel,
+                span: definition.span,
+                condition: &definition.condition,
+                defined: definition.defined,
+                origin: Origin::Local,
+            });
             if definition.certain {
                 return Some(candidates);
             }
@@ -1126,20 +1196,28 @@ impl<'a> Scanner<'a> {
         let mut prelude = self
             .prelude
             .iter()
-            .filter(|definition| definition.name == name)
+            .filter(|imported| imported.name == name)
             .peekable();
         if prelude.peek().is_some() {
             if scope.globs || scope.get(Namespace::Macros, name).is_some() {
                 return None;
             }
             let mut hidden = None;
-            for definition in prelude.rev() {
-                if hidden.is_some_and(|import| definition.import != Some(import)) {
+            for imported in prelude.rev() {
+                if hidden.is_some_and(|import| imported.import != import) {
                     break;
                 }
-                candidates.push((definition, definition.rules.as_ref()?));
-                if definition.certain {
-                    hidden = definition.import;
+                let export = self.export(imported)?;
+                candidates.push(Candidate {
+                    rules: export.rules.as_ref()?,
+                    rel: &export.rel,
+                    span: export.span,
+                    condition: &imported.condition,
+                    defined: imported.defined,
+                    origin: Origin::MacroUse(imported.import),
+                });
+                if imported.certain {
+                    hidden = Some(imported.import);
                 }
             }
         }
@@ -1197,19 +1275,19 @@ impl<'a> Scanner<'a> {
         // for the `extern crate` item whose definitions are being read, its
         // own: they don't hide each other, only the earlier items'.
         let mut later = Vec::new();
-        let mut import: Option<(Option<usize>, Option<TokenStream>)> = None;
+        let mut group: Option<(Origin, Option<TokenStream>)> = None;
         let mut expansions = Vec::new();
-        for (candidate, rules) in candidates {
+        for candidate in candidates {
             // The expansion is visited apart from other files, and no
             // attribute starts at a macro's name, so the `cfg` it is given
             // is told apart from those written in it.
             let span = candidate.span;
-            if candidate.import.is_none()
-                || import
+            if candidate.origin == Origin::Local
+                || group
                     .as_ref()
-                    .is_some_and(|(current, _)| *current != candidate.import)
+                    .is_some_and(|(current, _)| *current != candidate.origin)
             {
-                later.extend(import.take().and_then(|(_, hides)| hides));
+                later.extend(group.take().and_then(|(_, hides)| hides));
             }
             let mut condition = call_condition.clone();
             condition.extend(candidate.condition.iter().cloned());
@@ -1223,11 +1301,11 @@ impl<'a> Scanner<'a> {
             // A definition hides the earlier ones only where its condition
             // shows it is defined.
             let hides = (candidate.defined == Truth::True)
-                .then(|| cfg_call("all", candidate.condition.clone(), span));
-            match candidate.import {
-                None => later.extend(hides),
-                Some(_) => {
-                    let (_, item) = import.get_or_insert((candidate.import, None));
+                .then(|| cfg_call("all", candidate.condition.to_vec(), span));
+            match candidate.origin {
+                Origin::Local => later.extend(hides),
+                origin => {
+                    let (_, item) = group.get_or_insert((origin, None));
                     if hides.is_some() {
                         *item = hides;
                     }
@@ -1238,7 +1316,8 @@ impl<'a> Scanner<'a> {
             if self.krate.cfg.holds(predicate.clone()).and(defined) == Truth::False {
                 continue;
             }
-            let Some(mut items) = rules
+            let Some(mut items) = candidate
+                .rules
                 .expand(call.mac.tokens.clone())
                 .and_then(|tokens| parse_items.parse2(tokens).ok())
             else {
@@ -1257,8 +1336,8 @@ impl<'a> Scanner<'a> {
                 }
             }
             let start = span.start();
-            let at = (candidate.rel.clone(), start.line, start.column);
-            expansions.push((items, at, candidate.import.is_some(), defined));
+            let at = (candidate.rel.to_owned(), start.line, start.column);
+            expansions.push((items, at, candidate.origin != Origin::Local, defined));
         }
         self.expansions += 1;
         for (mut items, at, foreign, defined) in expansions {
