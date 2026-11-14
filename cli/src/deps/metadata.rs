@@ -11,6 +11,8 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+use super::cfg::Features;
+
 /// When a dependency's code runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,8 +34,8 @@ pub struct Dependency {
     /// The directory holding the dependency's `Cargo.toml`.
     pub root: PathBuf,
     pub lib: Option<Lib>,
-    /// The features Cargo resolved for it.
-    pub features: BTreeSet<String>,
+    /// The features a normal build gives it.
+    pub features: Features,
     /// The name each of its normal dependencies goes by in its code, mapped
     /// to that dependency's library name.
     pub externs: BTreeMap<String, String>,
@@ -51,29 +53,112 @@ pub struct Lib {
 
 /// The dependencies of the workspace at `root`, resolved for `target`, in
 /// order of name and version. Workspace members are left out: `check` covers
-/// them.
+/// them. `cargo_args` choose features.
+///
+/// `cargo metadata` gives the graph and the packages' sources, but it
+/// resolves features with the dev-dependencies' features merged in, as a
+/// test build would. `cargo tree` with only normal and build edges gives the
+/// packages and features of a normal build, so it decides which packages
+/// are built and with what features.
 pub fn dependencies(root: &Path, target: &str, cargo_args: &[String]) -> Result<Vec<Dependency>> {
-    let output = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-        .current_dir(root)
-        .args([
+    let metadata = cargo(
+        root,
+        &[
             "metadata",
             "--format-version",
             "1",
             "--filter-platform",
             target,
-        ])
+        ],
+        cargo_args,
+    )?;
+    let metadata: Metadata =
+        serde_json::from_slice(&metadata).context("reading cargo metadata's output")?;
+    let tree = cargo(
+        root,
+        &[
+            "tree",
+            "--edges",
+            "normal,build",
+            "--workspace",
+            "--prefix",
+            "none",
+            "--format",
+            "|{p}|{f}|",
+            "--target",
+            target,
+        ],
+        cargo_args,
+    )?;
+    let tree = String::from_utf8(tree).context("reading cargo tree's output")?;
+    let built = tree.lines().filter_map(Built::parse).collect::<Vec<_>>();
+    resolve(metadata, &built)
+}
+
+fn cargo(root: &Path, args: &[&str], cargo_args: &[String]) -> Result<Vec<u8>> {
+    let output = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .current_dir(root)
+        .args(args)
         .args(cargo_args)
         .output()
-        .context("running cargo metadata")?;
+        .with_context(|| format!("running cargo {}", args.first().unwrap_or(&"")))?;
     if !output.status.success() {
         bail!(
-            "cargo metadata failed:\n{}",
+            "cargo {} failed:\n{}",
+            args.first().unwrap_or(&""),
             String::from_utf8_lossy(&output.stderr).trim_end()
         );
     }
-    let metadata: Metadata =
-        serde_json::from_slice(&output.stdout).context("reading cargo metadata's output")?;
-    resolve(metadata)
+    Ok(output.stdout)
+}
+
+/// A package as one line of `cargo tree --format '|{p}|{f}|'` shows it:
+/// `|name v1.0.0 (proc-macro) (/path/to/it)|feature,feature|`, with the
+/// location only for packages outside a registry.
+#[derive(Debug, PartialEq, Eq)]
+struct Built {
+    name: String,
+    version: String,
+    location: Option<String>,
+    features: BTreeSet<String>,
+}
+
+impl Built {
+    fn parse(line: &str) -> Option<Self> {
+        let mut fields = line.strip_prefix('|')?.split('|');
+        let package = fields.next()?;
+        let features = fields.next()?;
+        let (name, rest) = package.split_once(' ')?;
+        let (version, rest) = rest.split_once(' ').unwrap_or((rest, ""));
+        let rest = rest.trim();
+        let rest = rest.strip_prefix("(proc-macro)").unwrap_or(rest).trim();
+        let location = rest
+            .strip_prefix('(')
+            .and_then(|rest| rest.strip_suffix(')'))
+            .map(str::to_owned);
+        Some(Self {
+            name: name.to_owned(),
+            version: version.strip_prefix('v')?.to_owned(),
+            location,
+            features: features
+                .split(',')
+                .filter(|feature| !feature.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        })
+    }
+
+    /// Whether this line shows `package`. A package from a registry is
+    /// shown by name and version alone; a path package by its directory.
+    fn shows(&self, package: &Package) -> bool {
+        if self.name != package.name || self.version != package.version {
+            return false;
+        }
+        match (&self.location, &package.source) {
+            (Some(location), None) => package.manifest_path.parent() == Some(Path::new(location)),
+            _ => true,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -110,7 +195,6 @@ struct Resolve {
 struct Node {
     id: String,
     deps: Vec<NodeDep>,
-    features: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -153,7 +237,7 @@ impl NodeDep {
     }
 }
 
-fn resolve(metadata: Metadata) -> Result<Vec<Dependency>> {
+fn resolve(metadata: Metadata, built: &[Built]) -> Result<Vec<Dependency>> {
     let resolve = metadata
         .resolve
         .ok_or_else(|| anyhow!("cargo metadata resolved no dependencies"))?;
@@ -178,14 +262,30 @@ fn resolve(metadata: Metadata) -> Result<Vec<Dependency>> {
         .map(String::as_str)
         .collect();
     let is_proc_macro = |id: &str| libs.get(id).is_some_and(|lib| lib.proc_macro);
+    // The feature sets of each package a normal build compiles. A package
+    // that only a dev-dependency's features pull in has none.
+    let feature_sets: HashMap<&str, Vec<BTreeSet<String>>> = metadata
+        .packages
+        .iter()
+        .map(|package| {
+            let sets = built
+                .iter()
+                .filter(|line| line.shows(package))
+                .map(|line| line.features.clone())
+                .collect::<Vec<_>>();
+            (package.id.as_str(), sets)
+        })
+        .filter(|(_, sets)| !sets.is_empty())
+        .collect();
+    let is_built = |id: &str| feature_sets.contains_key(id);
 
     // Runtime code is what the members reach through normal dependencies
     // without passing through a procedural macro, which runs in the compiler.
     let runtime = reachable(&members, &nodes, |dep| {
-        dep.is(None) && !is_proc_macro(&dep.pkg)
+        dep.is(None) && !is_proc_macro(&dep.pkg) && is_built(&dep.pkg)
     });
     let built = reachable(&members, &nodes, |dep| {
-        dep.is(None) || dep.is(Some("build"))
+        (dep.is(None) || dep.is(Some("build"))) && is_built(&dep.pkg)
     });
 
     let mut dependencies = Vec::new();
@@ -217,7 +317,7 @@ fn resolve(metadata: Metadata) -> Result<Vec<Dependency>> {
                 .map(Path::to_path_buf)
                 .ok_or_else(|| anyhow!("{} has no parent", package.manifest_path.display()))?,
             lib: package.lib(),
-            features: node.features.iter().cloned().collect(),
+            features: Features::from_sets(feature_sets.get(id).map_or(&[][..], Vec::as_slice)),
             externs,
         });
     }
@@ -275,4 +375,32 @@ fn rustc(root: &Path, args: &[&str]) -> Result<String> {
         );
     }
     String::from_utf8(output.stdout).context("reading rustc's output")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_cargo_tree_lines() {
+        assert_eq!(
+            Built::parse("|serde v1.0.229|default,derive,std|"),
+            Some(Built {
+                name: "serde".to_owned(),
+                version: "1.0.229".to_owned(),
+                location: None,
+                features: BTreeSet::from(["default", "derive", "std"].map(str::to_owned)),
+            })
+        );
+        assert_eq!(
+            Built::parse("|codegen v0.0.0 (proc-macro) (/src/codegen)|| (*)"),
+            Some(Built {
+                name: "codegen".to_owned(),
+                version: "0.0.0".to_owned(),
+                location: Some("/src/codegen".to_owned()),
+                features: BTreeSet::new(),
+            })
+        );
+        assert_eq!(Built::parse("warning: something"), None);
+    }
 }

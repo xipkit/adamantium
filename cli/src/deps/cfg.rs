@@ -109,11 +109,49 @@ impl Target {
     }
 }
 
+/// The features a crate is built with. A package built in more than one
+/// context, such as once for the target and once as a build dependency, can
+/// have a different set in each; a feature on in only some of them is
+/// unknown.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Features {
+    on: BTreeSet<String>,
+    maybe: BTreeSet<String>,
+}
+
+impl Features {
+    /// The features of a package built with each of `sets`.
+    pub fn from_sets(sets: &[BTreeSet<String>]) -> Self {
+        let mut sets = sets.iter();
+        let Some(first) = sets.next() else {
+            return Self::default();
+        };
+        let mut on = first.clone();
+        let mut any = first.clone();
+        for set in sets {
+            on.retain(|feature| set.contains(feature));
+            any.extend(set.iter().cloned());
+        }
+        let maybe = any.difference(&on).cloned().collect();
+        Self { on, maybe }
+    }
+
+    fn truth(&self, feature: &str) -> Truth {
+        if self.on.contains(feature) {
+            Truth::True
+        } else if self.maybe.contains(feature) {
+            Truth::Unknown
+        } else {
+            Truth::False
+        }
+    }
+}
+
 /// Everything that decides which of one crate's `cfg`s hold.
 #[derive(Clone, Copy)]
 pub struct Cfg<'a> {
     pub target: &'a Target,
-    pub features: &'a BTreeSet<String>,
+    pub features: &'a Features,
     pub proc_macro: bool,
 }
 
@@ -209,7 +247,7 @@ impl Cfg<'_> {
 
     fn option(&self, name: &str, value: Option<&str>) -> Truth {
         if name == "feature" {
-            return Truth::from_bool(value.is_some_and(|value| self.features.contains(value)));
+            return value.map_or(Truth::False, |value| self.features.truth(value));
         }
         if name == "proc_macro" {
             return Truth::from_bool(value.is_none() && self.proc_macro);
@@ -252,7 +290,10 @@ mod tests {
 
     fn check(predicate: &str, expected: Truth) {
         let target = Target::parse(LINUX);
-        let features = BTreeSet::from(["on".to_owned()]);
+        let features = Features::from_sets(&[
+            BTreeSet::from(["on".to_owned(), "host".to_owned()]),
+            BTreeSet::from(["on".to_owned()]),
+        ]);
         let cfg = Cfg {
             target: &target,
             features: &features,
@@ -266,6 +307,9 @@ mod tests {
         check(r#"feature = "on""#, Truth::True);
         check(r#"feature = "off""#, Truth::False);
         check(r#"not(feature = "off")"#, Truth::True);
+        // On in one of the package's builds only.
+        check(r#"feature = "host""#, Truth::Unknown);
+        check(r#"not(feature = "host")"#, Truth::Unknown);
     }
 
     #[test]
@@ -310,7 +354,7 @@ mod tests {
     #[test]
     fn attributes_combine_cfg_and_cfg_attr() {
         let target = Target::parse(LINUX);
-        let features = BTreeSet::new();
+        let features = Features::default();
         let cfg = Cfg {
             target: &target,
             features: &features,

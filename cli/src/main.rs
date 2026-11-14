@@ -61,7 +61,7 @@ enum Command {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = deps::Format::Text)]
         format: deps::Format,
-        /// Arguments passed on to `cargo metadata`, such as `--features` or
+        /// Arguments passed on to `cargo metadata` and `cargo tree`, such as `--features` or
         /// `--all-features`.
         #[arg(last = true)]
         cargo_args: Vec<String>,

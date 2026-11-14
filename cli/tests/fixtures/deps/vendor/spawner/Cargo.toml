@@ -7,7 +7,9 @@ publish = false
 [features]
 on = []
 off = []
+dev = ["dep:testonly"]
 
 [dependencies]
 pool = { path = "../pool" }
+testonly = { path = "../testonly", optional = true }
 rt = { package = "tokio", path = "../tokio" }

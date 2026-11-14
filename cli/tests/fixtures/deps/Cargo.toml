@@ -24,3 +24,5 @@ builder = { path = "vendor/builder" }
 
 [dev-dependencies]
 devonly = { path = "vendor/devonly" }
+# Only tests turn on `dev`, so a normal build leaves it and `testonly` out.
+spawner = { path = "vendor/spawner", features = ["on", "dev"] }

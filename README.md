@@ -91,7 +91,7 @@ cargo adamantium deps
 cargo adamantium deps --format json -- --all-features
 ```
 
-It reads the paths from the same `clippy.toml` that `check` applies, so the report and the rules cover the same calls. It takes the dependencies from `cargo metadata` for the host target, leaving out workspace members and dev-dependencies, and reads each library's source with syn, without building it. Arguments after `--` go to `cargo metadata`, to choose features. Runtime dependencies are listed apart from the ones that only run while compiling: build dependencies, procedural macros, and what only they depend on.
+It reads the paths from the same `clippy.toml` that `check` applies, so the report and the rules cover the same calls. It takes the dependencies from `cargo metadata` for the host target, leaving out workspace members and dev-dependencies, and reads each library's source with syn, without building it. Arguments after `--` go to `cargo metadata` and `cargo tree`, to choose features. Features come from a normal build: features that only dev-dependencies turn on, and the packages they pull in, are left out, and a feature that is on in only some of the builds of a package, such as its build for a build script, is treated as unknown. Runtime dependencies are listed apart from the ones that only run while compiling: build dependencies, procedural macros, and what only they depend on.
 
 For each dependency, the report counts `unsafe` functions, blocks, impls and traits, and `unsafe` in macro bodies that syn can't parse, such as `macro_rules!` definitions. It notes a library that forbids `unsafe_code`, by attribute or in its manifest's `[lints]`. It lists each disallowed path the dependency uses, with the file, line and column of each use.
 

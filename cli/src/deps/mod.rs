@@ -70,7 +70,7 @@ pub struct Call {
 }
 
 /// Audits the dependencies of the workspace at `path` and prints the report.
-/// `cargo_args` go to `cargo metadata`, to choose features.
+/// `cargo_args` go to `cargo metadata` and `cargo tree`, to choose features.
 pub fn run(path: &Path, format: Format, cargo_args: &[String]) -> Result<ExitCode> {
     let root = manifest::root(path)?;
     let report = audit(&root, cargo_args)?;

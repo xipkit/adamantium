@@ -86,6 +86,11 @@ pub fn not_on() {
     rt::task::spawn_local(());
 }
 
+#[cfg(not(feature = "dev"))]
+pub fn without_dev() {
+    rt::spawn(()); // tokio::spawn
+}
+
 cfg_on! {
     pub fn expanded() {
         task::spawn(()); // tokio::task::spawn
