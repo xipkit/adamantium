@@ -40,7 +40,7 @@ The command runs normal Clippy, then checks the same selection with Dylint's
 nightly compiler. Both passes must complete. Missing/incompatible tooling,
 an invalid library, or compilation failure produces exit **2** and JSON
 `status: "error"`, even if the other pass found violations. Findings use exit
-**1**, clean checks **0**, and the existing schema-version-2 report. Consumer
+**1**, clean checks **0**, and the existing schema-version-3 report. Baselines and SARIF include the experimental findings. Consumer
 Dylint metadata is ignored; only the explicitly selected library is loaded,
 and both expected lint registrations are checked before compilation.
 

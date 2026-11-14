@@ -8,8 +8,10 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "async-stream",
+ "event-listener",
  "futures-core",
  "indexmap",
+ "pin-project-lite",
  "tokio",
 ]
 

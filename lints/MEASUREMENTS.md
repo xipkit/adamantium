@@ -1,6 +1,6 @@
 # Prototype validation, 2026-11-14
 
-Validated on OTIS, macOS, aarch64, with Rust 1.98.1 for the normal check and
+Validated on OTIS, Apple M4 with 16 GiB RAM, macOS 27.0.1, aarch64, with Rust 1.98.1 for the timed normal check and
 `nightly-2026-08-20` for Dylint. `cargo-dylint`, `dylint-link`, and
 `dylint_linting` were pinned to 6.4.0. These are single-run wall times, not a
 statistical performance claim. No normal check loads the experimental library.
@@ -23,8 +23,8 @@ Warm runs immediately reused their respective targets. All four runs exited
 
 | Mode | Cold | Warm | Target disk after both runs |
 | --- | ---: | ---: | ---: |
-| Ordinary Clippy check | 5.209 s | 0.234 s | 106.8 MiB |
-| Clippy plus experimental check | 9.220 s | 0.353 s | 193.2 MiB |
+| Ordinary Clippy check | 6.231 s | 0.314 s | 121.8 MiB |
+| Clippy plus experimental check | 11.632 s | 0.473 s | 219.4 MiB |
 
 `du -sk` measured allocated disk. An isolated release lint build with cached
 registry sources took 17.20 s cold and 0.06 s warm and used 134.1 MiB including
@@ -47,11 +47,12 @@ versions work with this pin.
   async closures/blocks, callback argument evaluation, repeated-callback traversal,
   and constant arguments inside async bodies.
 - The real CLI integration suite verifies cold/warm report equality, package,
-  feature and target selection, skips/allows/exceptions, Clippy-only defaults,
+  feature and target selection, skips/allows/exceptions, baselines, SARIF, strict
+  checks, Clippy-only defaults,
   missing/corrupt libraries, unavailable Dylint, and compilation failures.
 - Both passes completed on a source archive of **Kan commit
   `3a7deb097021bd3c1fef6d5ec5cf4b2747179805`**, with `--locked --bin kan`.
-  It reported 9 existing standard-rule findings and no experimental findings.
+  It reported 17 existing standard-rule findings and no experimental findings.
   A temporary async `std::fs::read` probe in that archive added exactly one
   experimental finding at the expected line. The probe was removed; Kan's
   repository was not changed. This validates the checker on Kan, not its server
@@ -63,7 +64,8 @@ versions work with this pin.
 - The `streaming` example actually ran: ordered results 0 through 5, completion
   order 0/2/1, then cancellation with outstanding tasks drained. The actor
   consumer executable also ran and printed `actor consumer: 3`.
-- Stable workspace tests, Clippy with warnings denied, formatting, and the
+- Workspace tests on Rust 1.98.1, current stable (1.100.0) Clippy with warnings
+  denied, formatting, and the
   missing-library regression passed locally. A separate CI job runs the pinned
   experimental suite on Linux. Hosted CI results remain the PR's authority;
   these local measurements do not claim Linux or Windows validation.

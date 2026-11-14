@@ -18,15 +18,16 @@ fixture = Path(__file__).resolve().parent / "fixtures"
 rules = {"blocking": "adamantium_blocking_in_async", "nested": "adamantium_nested_actor_access"}
 
 
-def check(root, *extra, expected=1, lib=library, env=None):
+def check(root, *extra, expected=1, lib=library, env=None, options=()):
     command = [str(cli), "check", str(root), "--format", "json"]
+    command += list(options)
     if lib is not None:
         command += ["--dylint-library", str(lib)]
-    if extra:
-        command += ["--", *extra]
+    command += ["--", "--locked", *extra]
     result = subprocess.run(command, capture_output=True, text=True, env=env)
     assert result.returncode == expected, (command, result.stdout, result.stderr)
     report = json.loads(result.stdout)
+    assert report["schema_version"] == 3, report
     assert report["status"] == {0: "clean", 1: "findings", 2: "error"}[expected], report
     if expected != 2:
         assert not report["errors"], report
@@ -57,6 +58,16 @@ with tempfile.TemporaryDirectory(prefix="adamantium-lints-") as temporary:
     report = check(root)
     assert diagnostics(report) == marked(root), (diagnostics(report), marked(root))
     assert diagnostics(check(root)) == diagnostics(report), "warm diagnostics differ"
+    baseline = root / "baseline.json"
+    baseline.write_text(json.dumps(report))
+    known = check(root, expected=0, options=("--baseline", str(baseline)))
+    assert not known["findings"] and known["baseline_unmatched"] == 0, known
+    assert known["baselined"][rules["nested"]] == 9, known
+    assert diagnostics(check(root, options=("--strict",))) == marked(root)
+    sarif = subprocess.run([str(cli), "check", str(root), "--format", "sarif", "--dylint-library", str(library), "--", "--locked"], capture_output=True, text=True)
+    assert sarif.returncode == 1, sarif.stderr
+    results = json.loads(sarif.stdout)["runs"][0]["results"]
+    assert sum(r["ruleId"] == rules["nested"] for r in results) == 9, results
     assert diagnostics(check(root, "--features", "extra")) == marked(root, extra=True)
     assert diagnostics(check(root, "-plint-consumer", "--lib")) == marked(root, member=False, targets=False)
     member = check(root, "--package=lint-member", "--lib")

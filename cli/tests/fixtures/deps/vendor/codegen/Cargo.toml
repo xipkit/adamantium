@@ -1,0 +1,14 @@
+[package]
+name = "codegen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+helper = { path = "../helper" }
+
+[lints.rust]
+unsafe_code = { level = "forbid" }

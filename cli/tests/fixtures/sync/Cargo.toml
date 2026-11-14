@@ -1,0 +1,18 @@
+# Tokio's broadcast channel beside the synchronization the rules allow:
+# Semaphore permits held across an await or forgotten, watch, and one Channel
+# per receiver. Each line that must be reported ends in a comment naming its
+# rule. Its own workspace, so Cargo does not look for a parent.
+[workspace]
+
+[package]
+name = "sync"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+adamantium = { path = "../../../..", default-features = false }
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[profile.release]
+overflow-checks = true

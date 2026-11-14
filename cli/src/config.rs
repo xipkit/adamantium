@@ -27,7 +27,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use toml_edit::{DocumentMut, Item};
 
-use crate::lints::{EXPERIMENTAL_LINTS, LINTS, OVERFLOW_RULE};
+use crate::lints::{self, EXPERIMENTAL_LINTS, OVERFLOW_RULE};
 
 /// A project's skip list. The default skips nothing.
 #[derive(Debug)]
@@ -173,8 +173,7 @@ fn qualify(name: &str, table: &str) -> Result<String> {
     if EXPERIMENTAL_LINTS.contains(&name) {
         return Ok(name.to_owned());
     }
-    LINTS
-        .iter()
+    lints::selected(true)
         .find(|lint| lint.name == name || lint.qualified() == name)
         .map(|lint| lint.qualified())
         .ok_or_else(|| {

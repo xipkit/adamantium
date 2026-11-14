@@ -1,5 +1,7 @@
 #![cfg(feature = "tokio")]
 
+mod support;
+
 use std::{
     pin::{Pin, pin},
     sync::{
@@ -10,11 +12,10 @@ use std::{
     time::Duration,
 };
 
-use adamantium::{Tasks, blocking, concurrently};
-use tokio::{
-    sync::{Barrier, Semaphore, oneshot},
-    time::{sleep, timeout},
-};
+use adamantium::time::sleep;
+use adamantium::{Tasks, blocking, concurrently, first_ok};
+use support::timeout;
+use tokio::sync::{Barrier, Semaphore, oneshot};
 
 /// How long a test waits before calling a join hung. No test relies on it for
 /// ordering; it only turns a hang into a failure.
@@ -80,6 +81,16 @@ impl Drop for Live {
     }
 }
 
+/// Panics when dropped, which is how a test makes a task panic only once it
+/// is aborted.
+struct PanicsWhenDropped;
+
+impl Drop for PanicsWhenDropped {
+    fn drop(&mut self) {
+        panic!("kaboom while aborted");
+    }
+}
+
 /// A task that never finishes on its own and reports when it is dropped.
 fn forever(
     dropped: &Arc<AtomicBool>,
@@ -129,6 +140,21 @@ macro_rules! on_both_runtimes {
 }
 
 on_both_runtimes! {
+    async fn an_error_from_a_dropped_blocking_handle_is_reported_at_join() {
+        let mut tasks = Tasks::<&str>::new();
+        let (release, released) = std::sync::mpsc::sync_channel(1);
+        let failed = tasks.spawn_blocking(move || {
+            released.recv_timeout(HUNG).unwrap();
+            Err::<(), _>("dropped blocking handle")
+        });
+        drop(failed);
+        release.send(()).unwrap();
+        assert_eq!(
+            timeout(HUNG, tasks.join(Ok(()))).await.unwrap(),
+            Err("dropped blocking handle")
+        );
+    }
+
     async fn an_error_dropped_during_join_is_reported() {
         let mut tasks = Tasks::<&'static str>::new();
         let (sent, received) = oneshot::channel();
@@ -504,6 +530,152 @@ on_both_runtimes! {
     }
 }
 
+on_both_runtimes! {
+    async fn first_ok_returns_the_first_success_and_drains_the_rest() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let work = first_ok(0..2, 2, |n| {
+            let guard = (n == 0).then(|| DroppedSlowly(Arc::clone(&dropped)));
+            async move {
+                let _guard = guard;
+                if n == 0 {
+                    std::future::pending::<()>().await;
+                }
+                Ok::<_, &str>(n)
+            }
+        });
+        assert_eq!(timeout(HUNG, work).await.unwrap(), Ok(1));
+        assert!(dropped.load(Ordering::SeqCst), "the pending item was not drained");
+    }
+
+    // The input never ends, so only stopping at the success can finish this.
+    // With one place in the window, each failure lets the next item start.
+    async fn first_ok_tries_the_next_item_after_a_failure_and_stops_at_a_success() {
+        let taken = AtomicUsize::new(0);
+        let items = (0..).inspect(|_| {
+            taken.fetch_add(1, Ordering::SeqCst);
+        });
+        let work = first_ok(items, 1, |n| async move {
+            if n == 3 { Ok(n) } else { Err(n) }
+        });
+        assert_eq!(timeout(HUNG, work).await.unwrap(), Ok(3));
+        assert_eq!(taken.load(Ordering::SeqCst), 4);
+    }
+
+    async fn first_ok_returns_every_error_in_input_order_when_items_fail_in_reverse() {
+        // Each item waits for the one after it, so the last fails first.
+        let mut release_previous = None;
+        let mut items = Vec::new();
+        for n in 0..8 {
+            let (release, released) = oneshot::channel();
+            items.push((n, released, release_previous.replace(release)));
+        }
+        release_previous.unwrap().send(()).unwrap();
+        let work = first_ok(items, 8, |(n, released, release_earlier)| async move {
+            released.await.unwrap();
+            if let Some(release) = release_earlier {
+                release.send(()).unwrap();
+            }
+            Err::<(), _>(n)
+        });
+        let result = timeout(HUNG, work).await.unwrap();
+        assert_eq!(result, Err((0..8).collect()));
+    }
+
+    async fn first_ok_resumes_a_panic_and_drains_the_rest() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&dropped);
+        let work = first_ok(0..2, 2, move |n| {
+            let guard = (n == 0).then(|| DroppedSlowly(Arc::clone(&flag)));
+            async move {
+                let _guard = guard;
+                assert!(n == 0, "kaboom racing a pending item");
+                std::future::pending::<()>().await;
+                Ok::<_, &str>(())
+            }
+        });
+        #[allow(clippy::disallowed_methods, reason = "the way to catch the resumed panic")]
+        let joined = tokio::spawn(work);
+        let payload = timeout(HUNG, joined).await.unwrap().unwrap_err().into_panic();
+        assert_eq!(payload.downcast_ref(), Some(&"kaboom racing a pending item"));
+        assert!(dropped.load(Ordering::SeqCst), "the pending item was not drained");
+    }
+
+    // The loser can only panic once it is aborted, which happens after the
+    // winner has succeeded.
+    async fn first_ok_resumes_a_panic_from_a_loser_drained_after_a_success() {
+        let succeeded = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&succeeded);
+        let work = first_ok(0..2, 2, move |n| {
+            let guard = (n == 0).then(|| PanicsWhenDropped);
+            let succeeded = Arc::clone(&flag);
+            async move {
+                let _guard = guard;
+                if n == 0 {
+                    std::future::pending::<()>().await;
+                }
+                succeeded.store(true, Ordering::SeqCst);
+                Ok::<_, &str>(n)
+            }
+        });
+        #[allow(clippy::disallowed_methods, reason = "the way to catch the resumed panic")]
+        let joined = tokio::spawn(work);
+        let payload = timeout(HUNG, joined).await.unwrap().unwrap_err().into_panic();
+        assert_eq!(payload.downcast_ref(), Some(&"kaboom while aborted"));
+        assert!(succeeded.load(Ordering::SeqCst), "the winner never succeeded");
+    }
+
+    async fn first_ok_aborts_its_items_if_f_panics() {
+        let (held, dropped) = oneshot::channel::<()>();
+        let mut held = Some(held);
+        let work = first_ok(0..2, 2, move |n| {
+            assert!(n == 0, "kaboom in f");
+            let held = held.take();
+            async move {
+                let _held = held;
+                std::future::pending::<()>().await;
+                Ok::<_, &str>(())
+            }
+        });
+        #[allow(clippy::disallowed_methods, reason = "the way to catch the resumed panic")]
+        let joined = tokio::spawn(work);
+        let payload = timeout(HUNG, joined).await.unwrap().unwrap_err().into_panic();
+        assert_eq!(payload.downcast_ref(), Some(&"kaboom in f"));
+        assert!(timeout(HUNG, dropped).await.unwrap().is_err());
+    }
+
+    async fn first_ok_keeps_at_most_limit_futures_alive() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = AtomicUsize::new(0);
+        let work = first_ok(0..1000, 2, |n| {
+            let guard = Live::new(&live, &peak);
+            async move {
+                let _guard = guard;
+                tokio::task::yield_now().await;
+                if n == 999 { Ok(n) } else { Err(n) }
+            }
+        });
+        assert_eq!(timeout(HUNG, work).await.unwrap(), Ok(999));
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+    }
+
+    async fn dropping_first_ok_cancels_its_items() {
+        let (held, dropped) = oneshot::channel::<()>();
+        let mut held = Some(held);
+        {
+            let mut work = pin!(first_ok(0..2, 2, |_| {
+                let held = held.take();
+                async move {
+                    let _held = held;
+                    std::future::pending::<()>().await;
+                    Ok::<(), &str>(())
+                }
+            }));
+            begin(work.as_mut()).await;
+        }
+        assert!(timeout(HUNG, dropped).await.unwrap().is_err());
+    }
+}
+
 // One thread at a time, so the first task's error is recorded before the second
 // task can run. A multithreaded runtime gives no such order.
 #[tokio::test]
@@ -630,21 +802,23 @@ async fn a_successful_scope_waits_for_every_task() {
 #[tokio::test(flavor = "multi_thread")]
 #[should_panic(expected = "kaboom")]
 async fn a_panic_resumes_where_the_value_is_asked_for() {
-    let _ = Tasks::<&str>::run(async |t| {
+    Tasks::<&str>::run(async |t| {
         let handle = t.spawn::<(), _>(async { panic!("kaboom") });
         t.value(handle).await
     })
-    .await;
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[should_panic(expected = "kaboom at join")]
 async fn a_panic_in_an_unwatched_task_resumes_at_join() {
-    let _ = Tasks::<&str>::run(async |t| {
+    Tasks::<&str>::run(async |t| {
         t.spawn::<(), _>(async { panic!("kaboom at join") });
         Ok(())
     })
-    .await;
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -840,7 +1014,10 @@ fn concurrently_does_nothing_until_polled() {
 #[should_panic(expected = "Tokio 1.x runtime")]
 fn concurrently_needs_a_runtime_once_polled() {
     let work = pin!(concurrently(0..1, 1, |_| async { Ok::<_, &str>(()) }));
-    let _ = work.poll(&mut Context::from_waker(Waker::noop()));
+    assert!(
+        work.poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
 }
 
 // Each item goes straight into `f`, so only the iterator has to be `Send`.
@@ -853,6 +1030,77 @@ async fn concurrently_takes_items_that_are_not_send() {
         async move { Ok::<_, &str>(n) }
     });
     assert_eq!(work.await, Ok(vec![0, 1]));
+}
+
+#[tokio::test]
+async fn first_ok_fails_with_no_errors_when_there_are_no_items() {
+    let work = first_ok(
+        std::iter::empty::<u32>(),
+        2,
+        |n| async move { Ok::<_, &str>(n) },
+    );
+    assert_eq!(timeout(HUNG, work).await.unwrap(), Err(vec![]));
+}
+
+#[tokio::test]
+async fn first_ok_treats_a_limit_of_zero_as_one() {
+    let live = Arc::new(AtomicUsize::new(0));
+    let peak = AtomicUsize::new(0);
+    let work = first_ok(0..3, 0, |n| {
+        let guard = Live::new(&live, &peak);
+        async move {
+            let _guard = guard;
+            tokio::task::yield_now().await;
+            if n == 2 { Ok(n) } else { Err(n) }
+        }
+    });
+    assert_eq!(timeout(HUNG, work).await.unwrap(), Ok(2));
+    assert_eq!(peak.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn first_ok_does_nothing_until_polled() {
+    let taken = AtomicUsize::new(0);
+    let called = AtomicUsize::new(0);
+    let items = (0..2).inspect(|_| {
+        taken.fetch_add(1, Ordering::SeqCst);
+    });
+    let work = first_ok(items, 2, |_| {
+        called.fetch_add(1, Ordering::SeqCst);
+        async { Ok::<_, &str>(()) }
+    });
+    drop(work);
+    assert_eq!(taken.load(Ordering::SeqCst), 0);
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+}
+
+// As for `concurrently`: the runtime that spawned the first item shuts down,
+// cancelling it with no success and no error to report.
+#[test]
+fn first_ok_panics_if_the_runtime_cancels_its_items() {
+    let called = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&called);
+    let mut work = Box::pin(first_ok(0..2, 1, move |_| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        async {
+            std::future::pending::<()>().await;
+            Ok::<_, &str>(())
+        }
+    }));
+    let spawning = one_thread_runtime();
+    spawning.block_on(begin(work.as_mut()));
+    drop(spawning);
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the way to catch the resumed panic"
+    )]
+    let joined = one_thread_runtime().block_on(async { timeout(HUNG, tokio::spawn(work)).await });
+    let payload = joined.unwrap().unwrap_err().into_panic();
+    assert_eq!(
+        payload.downcast_ref(),
+        Some(&"adamantium: a task ended without a result and without a panic"),
+    );
+    assert_eq!(called.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

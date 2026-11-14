@@ -96,6 +96,28 @@ fn array_positional_writes_do_not_panic() {
 }
 
 #[test]
+fn array_invalid_positions_leave_shared_storage_untouched() {
+    let original = Array::from([1, 2, 3]);
+    let mut changed = original.clone();
+    for index in [changed.len(), usize::MAX] {
+        assert_eq!(changed.remove(index), None);
+        assert!(changed.is_shared());
+    }
+    for index in [changed.len() + 1, usize::MAX] {
+        assert_eq!(changed.insert(index, 9), Err(9));
+        assert!(changed.is_shared());
+    }
+    assert_eq!(changed, original);
+
+    let mut empty = Array::new();
+    assert_eq!(empty.remove(0), None);
+    assert_eq!(empty.insert(1, 9), Err(9));
+    assert_eq!(empty.insert(0, 9), Ok(()));
+    assert_eq!(empty.remove(0), Some(9));
+    assert!(empty.is_empty());
+}
+
+#[test]
 fn map_keeps_insertion_order_and_copies_on_write() {
     let mut a = Map::new();
     a.insert("c", 3);

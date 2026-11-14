@@ -1,0 +1,44 @@
+name: Action smoke test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  cold:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: ./
+        with:
+          rev: bfa0f78916cebb6c65cfaeefce45ed34339d324f
+          working-directory: cli/tests/fixtures/clean
+
+  cached:
+    needs: cold
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: ./
+        with:
+          rev: bfa0f78916cebb6c65cfaeefce45ed34339d324f
+          working-directory: cli/tests/fixtures/clean
+      - name: Check violations fail
+        id: violations
+        continue-on-error: true
+        uses: ./
+        with:
+          rev: bfa0f78916cebb6c65cfaeefce45ed34339d324f
+          working-directory: cli/tests/fixtures/violations
+      - name: Assert violations failed
+        if: steps.violations.outcome != 'failure'
+        run: exit 1

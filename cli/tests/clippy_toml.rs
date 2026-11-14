@@ -1,4 +1,4 @@
-//! The paths in Adamantium's `clippy.toml`. Its entries outside std carry
+//! The paths in Adamantium's `clippy.toml`. Its external-crate entries carry
 //! `allow-invalid`, so these tests check what that would otherwise hide: that
 //! every path names a real item, and that no project gets a warning for an
 //! item that its features leave out.
@@ -20,7 +20,7 @@ const LISTS: [&str; 2] = ["disallowed-types", "disallowed-methods"];
 
 /// Every feature that defines an item `clippy.toml` names. `tokio::task::Builder`
 /// also needs `--cfg tokio_unstable`.
-const ALL_FEATURES: &str = "futures,parking_lot,tokio/full,tokio/tracing";
+const ALL_FEATURES: &str = "async-channel,async-std/unstable,crossbeam-channel,flume,futures,parking_lot,smol,tokio/full,tokio/tracing";
 
 /// A line of `cargo --message-format=json`, with the fields these tests read.
 #[derive(Deserialize)]
@@ -139,12 +139,12 @@ fn entries(config: &str) -> Result<Vec<(Range<usize>, String)>> {
     Ok(entries)
 }
 
-/// Strips `allow-invalid` from every entry and adds a misspelled copy of each,
-/// then resolves them all with every feature on. Clippy must report exactly
-/// the copies: every real path resolves, and a misspelling of any of them
-/// would be caught.
+/// Strips `allow-invalid` from every crate path and adds a misspelled copy of
+/// each, then resolves them all with every feature on. Clippy must report
+/// exactly the copies. Slice methods are checked separately because Clippy
+/// suppresses unresolved-path warnings when the root isn't a loaded crate.
 #[test]
-fn every_path_resolves_with_every_feature_on() {
+fn every_crate_path_resolves_with_every_feature_on() {
     let mut config = shipped().unwrap();
     let mut expected = BTreeSet::new();
     for list in LISTS {
@@ -153,6 +153,9 @@ fn every_path_resolves_with_every_feature_on() {
         for entry in entries.iter_mut() {
             let entry = entry.as_inline_table_mut().unwrap();
             entry.remove("allow-invalid");
+            if path(entry).unwrap().starts_with("slice::") {
+                continue;
+            }
             let copy = misspelled(entry).unwrap();
             expected.insert(path(&copy).unwrap().to_owned());
             copies.push(copy);
@@ -166,6 +169,37 @@ fn every_path_resolves_with_every_feature_on() {
     assert!(
         unchecked.is_empty(),
         "Clippy didn't check these, so the fixture may not use their crate: {unchecked:?}"
+    );
+}
+
+/// Rust resolves slice methods directly, including a misspelling that Clippy
+/// would silently ignore. Build the references from the shipped entries so
+/// every configured slice method is checked.
+#[test]
+fn every_slice_method_resolves() {
+    let config = shipped().unwrap();
+    let mut source = String::from("fn check() {\n");
+    for entry in config["disallowed-methods"].as_array().unwrap() {
+        let path = path(entry.as_inline_table().unwrap()).unwrap();
+        if let Some(method) = path.strip_prefix("slice::") {
+            source.push_str(&format!("    let _ = <[u8]>::{method};\n"));
+        }
+    }
+    source.push_str("}\n");
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("methods.rs");
+    fs::write(&file, source).unwrap();
+    let output = Command::new(env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+        .args(["--crate-type=lib", "--emit=metadata"])
+        .arg(&file)
+        .arg("-o")
+        .arg(dir.path().join("methods.rmeta"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

@@ -1,0 +1,17 @@
+# Spawn entry points from async-std and smol, beside allowed ways to enter
+# their runtimes. Each line that must be reported ends in `// disallowed`.
+# Its own workspace, so Cargo does not look for a parent.
+[workspace]
+
+[package]
+name = "spawns"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-std = { version = "1", features = ["unstable"] }
+smol = "2"
+
+[profile.release]
+overflow-checks = true
