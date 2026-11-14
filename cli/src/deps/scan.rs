@@ -665,7 +665,7 @@ enum Origin {
     /// Another crate's, that the `#[macro_use] extern crate` item of this
     /// index among the crate root's items brings in.
     MacroUse(usize),
-    /// Another crate's, named by a path.
+    /// Another crate's, named by a path or brought in by a `use`.
     Path,
 }
 
@@ -706,6 +706,16 @@ struct Textual {
     /// don't show: it is in the expansion of another crate's macro, which
     /// that crate's build may not define.
     uncertain: bool,
+}
+
+impl Textual {
+    /// Whether every build has a macro named `name` here, which hides any
+    /// other a call of the name may mean.
+    fn hides(&self, name: &str) -> bool {
+        self.macros
+            .iter()
+            .any(|definition| definition.name == name && definition.certain)
+    }
 }
 
 /// Where items being indexed are.
@@ -1243,19 +1253,21 @@ impl<'a> Scanner<'a> {
 
     /// The definitions a call of `name` may expand, the latest first: those
     /// in textual scope back to the first that every build defines, then,
-    /// where a build may define none of them, those in the prelude, by the
-    /// `extern crate` items that bring them in, back to the first that
-    /// every build brings in. One crate's definitions of a name don't hide
-    /// each other, since its build has at most one. A macro that a `use` in
-    /// the calling module brings in would come before the prelude's, so a
-    /// call that a `use` or glob import there may name isn't given them.
-    /// `None` if there is no definition, or the rules of one of them can't
-    /// be read.
+    /// where a build may define none of them, those of another crate that a
+    /// `use` in the calling module brings in, `imported`, with whether every
+    /// build has the `use`, then, where a build may not, those in the
+    /// prelude, by the `extern crate` items that bring them in, back to the
+    /// first that every build brings in. One crate's definitions of a name
+    /// don't hide each other, since its build has at most one. A glob import
+    /// may bring in a macro that would come before the prelude's, so a call
+    /// in a module that has one isn't given them. `None` if there is no
+    /// definition, or the rules of one of them can't be read.
     fn candidates<'t>(
         &'t self,
         textual: &'t Textual,
         scope: &Scope,
         name: &str,
+        imported: Option<(&[Found], bool)>,
     ) -> Option<Vec<Candidate<'t>>> {
         let mut candidates = Vec::new();
         for definition in textual.macros.iter().rev() {
@@ -1274,13 +1286,19 @@ impl<'a> Scanner<'a> {
                 return Some(candidates);
             }
         }
+        if let Some((found, certain)) = imported {
+            candidates.extend(self.found_candidates(found, certain)?);
+            if certain {
+                return Some(candidates);
+            }
+        }
         let mut prelude = self
             .prelude
             .iter()
             .filter(|imported| imported.name == name)
             .peekable();
         if prelude.peek().is_some() {
-            if scope.globs || scope.get(Namespace::Macros, name).is_some() {
+            if scope.globs {
                 return None;
             }
             let mut hidden = None;
@@ -1305,11 +1323,12 @@ impl<'a> Scanner<'a> {
         (!candidates.is_empty()).then_some(candidates)
     }
 
-    /// The definitions a call of another crate's macro by path may name, as
-    /// `found` has them, the latest first. Where the path may name macros
-    /// of more than one place, a build may have any of them. `None` if the
-    /// rules of one of them can't be read.
-    fn found_candidates(&self, found: &[Found]) -> Option<Vec<Candidate<'_>>> {
+    /// The definitions a call of another crate's macro by path, or by a
+    /// name a `use` binds, may name, as `found` has them, the latest first.
+    /// Where the path may name macros of more than one place, or a build may
+    /// not have the `use`, as `certain` says, a build may have any of them
+    /// or none. `None` if the rules of one of them can't be read.
+    fn found_candidates(&self, found: &[Found], certain: bool) -> Option<Vec<Candidate<'_>>> {
         let places: HashSet<(&str, &str)> = found
             .iter()
             .filter_map(|found| {
@@ -1325,7 +1344,7 @@ impl<'a> Scanner<'a> {
                 rel: &export.rel,
                 span: export.span,
                 condition: &[],
-                defined: if places.len() == 1 {
+                defined: if certain && places.len() == 1 {
                     export.defined
                 } else {
                     Truth::Unknown
@@ -1359,9 +1378,27 @@ impl<'a> Scanner<'a> {
         if self.krate.cfg.enabled(&call.attrs) == Truth::False {
             return false;
         }
-        let found;
-        let candidates = if path.leading_colon.is_none() && path.segments.len() == 1 {
-            self.candidates(textual, scope, &name.unraw().to_string())
+        let bare = path.leading_colon.is_none() && path.segments.len() == 1;
+        let unraw = name.unraw().to_string();
+        // The other crates' macros that the path names, or that a `use` in
+        // the module brings in by the bare name where textual scope doesn't
+        // hide it, with whether every build has the `use`.
+        let found = if bare {
+            let bound = scope
+                .bound(Namespace::Macros, &unraw)
+                .filter(|_| !textual.hides(&unraw));
+            match bound {
+                Some(bound) => {
+                    let resolved = Resolver::new(self, &[])
+                        .indexing(place.module, scope)
+                        .binding(place.module, 0, Namespace::Macros, &bound.binding, 0);
+                    let Some(found) = self.foreign_macros(&resolved) else {
+                        return false;
+                    };
+                    Some((found, bound.certain))
+                }
+                None => None,
+            }
         } else {
             let resolved = Resolver::new(self, &[]).indexing(place.module, scope).path(
                 place.module,
@@ -1369,11 +1406,18 @@ impl<'a> Scanner<'a> {
                 &segments(path),
                 path.leading_colon.is_some(),
             );
-            let Some(foreign) = self.foreign_macros(&resolved) else {
+            let Some(found) = self.foreign_macros(&resolved) else {
                 return false;
             };
-            found = foreign;
-            self.found_candidates(&found)
+            Some((found, true))
+        };
+        let found = found
+            .as_ref()
+            .map(|(found, certain)| (&found[..], *certain));
+        let candidates = if bare {
+            self.candidates(textual, scope, &unraw, found)
+        } else {
+            found.and_then(|(found, certain)| self.found_candidates(found, certain))
         };
         let Some(candidates) = candidates else {
             return false;
@@ -4567,6 +4611,115 @@ stack::psm_stack_manipulation! {
             assert_eq!(scan.unscanned, [], "2015: {edition_2015}");
             assert_eq!(scan.unsafe_code.functions, 6, "2015: {edition_2015}");
         }
+    }
+
+    /// A call by a name that a `use` binds to another crate's macro, as
+    /// `use psm::psm_stack_manipulation;`, is read as that macro, under the
+    /// name or a rename.
+    #[test]
+    fn calls_of_other_crates_macros_a_use_brings_in_are_expanded() {
+        let scan = scan_with(
+            &[
+                ("lib.rs", "mod named;\nmod renamed;\n"),
+                (
+                    "named.rs",
+                    "use psm::psm_stack_manipulation;\n\npsm_stack_manipulation! {\n    yes { mod guard; }\n    no { mod fallback; }\n}\n",
+                ),
+                (
+                    "renamed.rs",
+                    "use psm::psm_stack_manipulation as stack;\n\nstack! {\n    yes { mod guard; }\n    no { mod fallback; }\n}\n",
+                ),
+                ("named/guard.rs", "pub unsafe fn a() {}\n"),
+                ("named/fallback.rs", "pub unsafe fn b() {}\n"),
+                ("renamed/guard.rs", "pub unsafe fn c() {}\n"),
+                ("renamed/fallback.rs", "pub unsafe fn d() {}\n"),
+            ],
+            false,
+            &[PSM],
+        );
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 4);
+    }
+
+    /// A macro that a `use` brings in comes after textual scope and before
+    /// the prelude a `#[macro_use] extern crate` adds, which it hides where
+    /// every build has the `use`. Textual scope hides even a `use` the scan
+    /// can't follow.
+    #[test]
+    fn macros_a_use_brings_in_come_between_textual_scope_and_the_prelude() {
+        let library = |name, files| Library {
+            name,
+            features: &[],
+            files,
+        };
+        let picks = library(
+            "picks",
+            &[(
+                "lib.rs",
+                "#[macro_export]\nmacro_rules! pick { () => { mod theirs; }; }\n",
+            )],
+        );
+        let prelude = library(
+            "prelude",
+            &[(
+                "lib.rs",
+                "#[macro_export]\nmacro_rules! pick { () => { mod prelude; }; }\n",
+            )],
+        );
+        let modules = ["imported", "maybe", "textual", "unknown"];
+        let mut files = vec![
+            (
+                "lib.rs".to_owned(),
+                "#[macro_use]\nextern crate prelude;\n\nmod imported;\nmod maybe;\nmod textual;\nmod unknown;\n"
+                    .to_owned(),
+            ),
+            (
+                "imported.rs".to_owned(),
+                "use picks::pick;\npick!();\n".to_owned(),
+            ),
+            (
+                "maybe.rs".to_owned(),
+                "#[cfg(demo_custom)]\nuse picks::pick;\npick!();\n".to_owned(),
+            ),
+            (
+                "textual.rs".to_owned(),
+                "use picks::pick;\nmacro_rules! pick { () => { mod own; }; }\npick!();\n".to_owned(),
+            ),
+            (
+                "unknown.rs".to_owned(),
+                "use other::pick;\nmacro_rules! pick { () => { mod own; }; }\npick!();\n".to_owned(),
+            ),
+        ];
+        for module in modules {
+            for child in ["theirs", "prelude", "own"] {
+                files.push((
+                    format!("{module}/{child}.rs"),
+                    "pub fn run() {\n    std::thread::spawn(|| ());\n}\n".to_owned(),
+                ));
+            }
+        }
+        let files: Vec<_> = files
+            .iter()
+            .map(|(name, text)| (name.as_str(), text.as_str()))
+            .collect();
+        let scan = scan_with(&files, false, &[picks, prelude]);
+        assert_eq!(scan.unscanned, []);
+        let scanned: BTreeSet<_> = scan
+            .calls
+            .values()
+            .flatten()
+            .map(|site| site.file.as_str())
+            .collect();
+        assert_eq!(
+            scanned,
+            BTreeSet::from([
+                "src/imported/theirs.rs",
+                "src/maybe/prelude.rs",
+                "src/maybe/theirs.rs",
+                "src/textual/own.rs",
+                "src/unknown/own.rs",
+            ])
+        );
     }
 
     /// A path to another crate's macro is followed through that crate's
