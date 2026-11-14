@@ -1677,18 +1677,35 @@ impl<'a> Walker<'a> {
 
     /// A function body, with its parameters in scope and the enclosing
     /// function's locals out of it.
-    fn function(&mut self, inputs: impl Iterator<Item = &'a syn::FnArg>, body: &'a Block) {
+    fn function(&mut self, sig: &'a syn::Signature, body: &'a Block) {
         self.scopes.push(Scope {
             vars: Vec::new(),
             barrier: true,
         });
-        for input in inputs {
+        for input in &sig.inputs {
             if let syn::FnArg::Typed(typed) = input {
                 self.declare_pattern(&typed.pat);
             }
         }
-        self.block(body, BlockKind::Body);
+        self.generic(&sig.generics, |walker| walker.block(body, BlockKind::Body));
         self.scopes.pop();
+    }
+
+    /// Runs `f` with `generics` in scope: a type parameter named `Arc`
+    /// shadows an imported one.
+    fn generic(&mut self, generics: &syn::Generics, f: impl FnOnce(&mut Self)) {
+        let mut scope = ItemScope::new([], false);
+        for param in &generics.params {
+            let name = match param {
+                syn::GenericParam::Type(param) => &param.ident,
+                syn::GenericParam::Const(param) => &param.ident,
+                syn::GenericParam::Lifetime(_) => continue,
+            };
+            scope.names.insert(name.to_string(), Binding::Item);
+        }
+        self.items.push(scope);
+        f(self);
+        self.items.pop();
     }
 
     /// The condition of an `if` or `while`, declaring what its `let`s bind.
@@ -1887,19 +1904,25 @@ impl<'a> Visit<'a> for Walker<'a> {
                     self.items.pop();
                 }
             }
-            Item::Fn(function) => self.function(function.sig.inputs.iter(), &function.block),
+            Item::Fn(function) => self.function(&function.sig, &function.block),
+            Item::Impl(item) => self.generic(&item.generics, |walker| {
+                syn::visit::visit_item_impl(walker, item);
+            }),
+            Item::Trait(item) => self.generic(&item.generics, |walker| {
+                syn::visit::visit_item_trait(walker, item);
+            }),
             _ => syn::visit::visit_item(self, item),
         }
         self.scopes.pop();
     }
 
     fn visit_impl_item_fn(&mut self, function: &'a syn::ImplItemFn) {
-        self.function(function.sig.inputs.iter(), &function.block);
+        self.function(&function.sig, &function.block);
     }
 
     fn visit_trait_item_fn(&mut self, function: &'a syn::TraitItemFn) {
         if let Some(body) = &function.default {
-            self.function(function.sig.inputs.iter(), body);
+            self.function(&function.sig, body);
         }
     }
 
@@ -2796,6 +2819,18 @@ mod tests {
             "m",
             Reason::Unfollowed("it is used in a macro"),
         );
+    }
+
+    #[test]
+    fn a_type_parameter_shadows_an_imported_arc() {
+        for source in [
+            "use std::sync::{Arc, Mutex};\ntrait Make { fn new(value: Mutex<i32>) -> Self; }\nfn f<Arc: Make>() { let m = Arc::new(Mutex::new(1)); drop(m); }\n",
+            "use std::sync::{Arc, Mutex};\ntrait Make { fn new(value: Mutex<i32>) -> Self; }\nstruct S<T>(T);\nimpl<Arc: Make> S<Arc> { fn f() { let m = Arc::new(Mutex::new(1)); drop(m); } }\n",
+        ] {
+            let (fixed, refusals) = fix(source, &["Mutex"]);
+            assert_eq!(fixed, source);
+            assert_eq!(refusals, []);
+        }
     }
 
     #[test]
