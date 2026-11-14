@@ -3,6 +3,7 @@
 //! the standalone `cargo rustoleum`; the rules, labeled cases and evaluation
 //! scripts live under `style/` in the repository.
 
+mod changed;
 mod decisions;
 mod provider;
 mod report;
@@ -53,12 +54,23 @@ pub struct CheckArgs {
     /// Show the files and rules that would be checked without an API call.
     #[arg(long)]
     dry_run: bool,
+    /// Review only the Rust files that differ from BASE, or from HEAD without
+    /// one: committed since the branch left BASE, staged, unstaged or
+    /// untracked.
+    #[arg(
+        long,
+        value_name = "BASE",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "HEAD"
+    )]
+    changed: Option<String>,
     /// Reuse results from a previous JSON report for files whose source,
     /// provider, model, rules and context are unchanged.
     #[arg(long, value_name = "REPORT")]
     cache_from: Option<PathBuf>,
     /// Retry files that failed or were not checked in a previous JSON report.
-    #[arg(long, conflicts_with = "cache_from")]
+    #[arg(long, conflicts_with_all = ["changed", "cache_from"])]
     retry_from: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = Format::Json)]
     format: Format,
@@ -100,6 +112,9 @@ pub fn run(command: Command) -> Result<ExitCode> {
                 args.context.as_deref(),
             )?;
             let mut scan = Scan::discover(&args.path)?;
+            if let Some(base) = &args.changed {
+                changed::retain_changed(&mut scan, base)?;
+            }
             if let Some(previous) = &args.retry_from {
                 resume::select_pending(
                     &mut scan,

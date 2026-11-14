@@ -155,6 +155,73 @@ fn style_check(dir: &std::path::Path, args: &[&str]) -> Command {
 }
 
 #[test]
+fn changed_reviews_only_files_that_differ_from_the_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(dir.path(), &["init", "--quiet", "--initial-branch=main"]);
+    fs::write(dir.path().join("kept.rs"), "fn kept() {}\n").unwrap();
+    fs::write(dir.path().join("edited.rs"), "fn edited() {}\n").unwrap();
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "--quiet", "-m", "initial"]);
+    fs::write(dir.path().join("edited.rs"), "fn changed() {}\n").unwrap();
+    fs::write(dir.path().join("new.rs"), "fn new() {}\n").unwrap();
+
+    let paths = |output: &std::process::Output| {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        report["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["path"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        paths(
+            &style_check(dir.path(), &["--changed", "--dry-run"])
+                .output()
+                .unwrap()
+        ),
+        ["edited.rs", "new.rs"]
+    );
+    assert_eq!(
+        paths(
+            &style_check(dir.path(), &["--changed=main", "--dry-run"])
+                .output()
+                .unwrap()
+        ),
+        ["edited.rs", "new.rs"]
+    );
+    assert_eq!(
+        paths(&style_check(dir.path(), &["--dry-run"]).output().unwrap()),
+        ["edited.rs", "kept.rs", "new.rs"]
+    );
+
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "--quiet", "-m", "change"]);
+    let output = style_check(dir.path(), &["--changed"]).output().unwrap();
+    assert!(paths(&output).is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "complete");
+}
+
+#[test]
 fn a_fully_cached_run_needs_no_key_and_keeps_its_findings() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
@@ -224,20 +291,14 @@ fn a_fully_cached_run_needs_no_key_and_keeps_its_findings() {
 }
 
 #[test]
-fn retry_from_cannot_be_combined_with_a_cache() {
+fn retry_from_cannot_be_combined_with_changed_or_a_cache() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
-    let output = style_check(
-        dir.path(),
-        &[
-            "--retry-from",
-            "previous.json",
-            "--cache-from",
-            "cache.json",
-        ],
-    )
-    .output()
-    .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+    for other in [&["--changed"][..], &["--cache-from", "cache.json"]] {
+        let mut args = vec!["--retry-from", "previous.json"];
+        args.extend_from_slice(other);
+        let output = style_check(dir.path(), &args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+    }
 }
