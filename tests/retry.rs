@@ -51,6 +51,24 @@ async fn waits_grow_exponentially_up_to_the_largest_delay() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_first_delay_above_the_largest_is_capped() {
+    let start = Instant::now();
+    let mut starts = Vec::new();
+    let result = retry(
+        &Cancellation::new(),
+        None,
+        Backoff::exponential(secs(5), secs(2)).attempts(3),
+        || {
+            starts.push(start.elapsed());
+            async { Err::<(), _>("no") }
+        },
+    )
+    .await;
+    assert_eq!(result, Err(ScopeError::Failed("no")));
+    assert_eq!(starts, [secs(0), secs(2), secs(4)]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn constant_backoff_waits_the_same_each_time() {
     let start = Instant::now();
     let mut starts = Vec::new();
@@ -111,7 +129,7 @@ async fn retry_if_stops_at_an_error_not_worth_retrying() {
     let result = retry_if(
         &Cancellation::new(),
         None,
-        Backoff::constant(secs(1)),
+        Backoff::constant(secs(1)).attempts(10),
         || {
             calls += 1;
             let error = if calls < 3 { "busy" } else { "denied" };
