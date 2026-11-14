@@ -348,7 +348,10 @@ mod tests {
 
     mod cache {
         use super::*;
-        use crate::style::report::{Finding, ReportStatus};
+        use crate::style::{
+            provider::Estimate,
+            report::{Finding, ReportStatus},
+        };
 
         /// A scan of `a.rs`, `b.rs`, `c.rs` and `d.rs`, each with distinct
         /// source, and the key and questions for one rule.
@@ -385,8 +388,10 @@ mod tests {
             report.files[0].findings.push(Finding {
                 rule: questions[0].name.clone(),
                 guidance: questions[0].instructions.clone(),
-                confidence: 0.9,
-                probabilities: BTreeMap::from([("violation".to_owned(), 0.9)]),
+                estimate: Some(Estimate {
+                    confidence: 0.9,
+                    probabilities: BTreeMap::from([("violation".to_owned(), 0.9)]),
+                }),
             });
             report.settle();
             report

@@ -1,11 +1,13 @@
-use std::{collections::BTreeMap, fmt, fs::File, io::Read, path::Path};
+use std::{fmt, fs::File, io::Read, path::Path};
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::style::{
-    provider::{Answer, Evaluation, FileReview, Provider, ProviderKind, ReviewError, Verdict},
+    provider::{
+        Answer, Estimate, Evaluation, FileReview, Provider, ProviderKind, ReviewError, Verdict,
+    },
     rules::Question,
     scan::Scan,
 };
@@ -89,16 +91,20 @@ pub(crate) enum FileStatus {
 pub(crate) struct Finding {
     pub rule: String,
     pub guidance: String,
-    pub confidence: f64,
-    pub probabilities: BTreeMap<String, f64>,
+    /// `confidence` and `probabilities`, written only by providers that give
+    /// them.
+    #[serde(flatten)]
+    pub estimate: Option<Estimate>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Unresolved {
     pub rule: String,
     pub reason: UnresolvedReason,
-    pub confidence: Option<f64>,
-    pub probabilities: Option<BTreeMap<String, f64>>,
+    /// `confidence` and `probabilities`, written only for an insufficient
+    /// context answer from a provider that gives them.
+    #[serde(flatten)]
+    pub estimate: Option<Estimate>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -282,18 +288,15 @@ impl FileReport {
                 Answer::Refusal => self.unresolved.push(Unresolved {
                     rule,
                     reason: UnresolvedReason::Refusal,
-                    confidence: None,
-                    probabilities: None,
+                    estimate: None,
                 }),
                 Answer::Choice {
                     verdict: Verdict::Violation,
-                    confidence,
-                    probabilities,
+                    estimate,
                 } => self.findings.push(Finding {
                     rule,
                     guidance: question.instructions.clone(),
-                    confidence,
-                    probabilities,
+                    estimate,
                 }),
                 Answer::Choice {
                     verdict: Verdict::NoViolation,
@@ -301,13 +304,11 @@ impl FileReport {
                 } => self.no_violation_count += 1,
                 Answer::Choice {
                     verdict: Verdict::InsufficientContext,
-                    confidence,
-                    probabilities,
+                    estimate,
                 } => self.unresolved.push(Unresolved {
                     rule,
                     reason: UnresolvedReason::InsufficientContext,
-                    confidence: Some(confidence),
-                    probabilities: Some(probabilities),
+                    estimate,
                 }),
             }
         }
@@ -354,7 +355,10 @@ impl fmt::Display for UnresolvedReason {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+    };
 
     use adamantium::Actor;
     use anyhow::anyhow;
@@ -365,6 +369,7 @@ mod tests {
     /// Answers every file with the same verdicts, or fails as configured.
     struct FakeProvider {
         answers: Option<Vec<Verdict>>,
+        estimate: Option<Estimate>,
         refuse_input: bool,
         reviews: Actor<Vec<(String, String, Option<String>)>>,
     }
@@ -373,6 +378,14 @@ mod tests {
         fn answering(verdicts: &[Verdict]) -> Self {
             Self {
                 answers: Some(verdicts.to_vec()),
+                estimate: Some(Estimate {
+                    confidence: 0.8,
+                    probabilities: BTreeMap::from([
+                        ("violation".to_owned(), 0.7),
+                        ("no_violation".to_owned(), 0.2),
+                        ("insufficient_context".to_owned(), 0.1),
+                    ]),
+                }),
                 refuse_input: false,
                 reviews: Actor::default(),
             }
@@ -381,6 +394,7 @@ mod tests {
         fn unavailable() -> Self {
             Self {
                 answers: None,
+                estimate: None,
                 refuse_input: false,
                 reviews: Actor::default(),
             }
@@ -416,12 +430,7 @@ mod tests {
                     .into_iter()
                     .map(|verdict| Answer::Choice {
                         verdict,
-                        confidence: 0.8,
-                        probabilities: BTreeMap::from([
-                            ("violation".to_owned(), 0.7),
-                            ("no_violation".to_owned(), 0.2),
-                            ("insufficient_context".to_owned(), 0.1),
-                        ]),
+                        estimate: self.estimate.clone(),
                     })
                     .collect(),
                 input_tokens: Some(123),
@@ -542,6 +551,70 @@ mod tests {
     }
 
     #[test]
+    fn estimates_are_written_only_when_the_provider_gives_them() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let verdicts = [Verdict::Violation, Verdict::InsufficientContext];
+
+        let estimated = check(
+            dir.path(),
+            &rules.questions[..2],
+            &FakeProvider::answering(&verdicts),
+        );
+        let written = serde_json::to_value(&estimated).unwrap();
+        for entry in [
+            &written["files"][0]["findings"][0],
+            &written["files"][0]["unresolved"][0],
+        ] {
+            assert_eq!(entry["confidence"], 0.8);
+            assert_eq!(entry["probabilities"]["no_violation"], 0.2);
+        }
+
+        let unestimated = check(
+            dir.path(),
+            &rules.questions[..2],
+            &FakeProvider {
+                estimate: None,
+                ..FakeProvider::answering(&verdicts)
+            },
+        );
+        let written = serde_json::to_value(&unestimated).unwrap();
+        let finding = written["files"][0]["findings"][0].as_object().unwrap();
+        assert_eq!(
+            finding.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            BTreeSet::from(["guidance", "rule"])
+        );
+        let unresolved = written["files"][0]["unresolved"][0].as_object().unwrap();
+        assert_eq!(
+            unresolved
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["reason", "rule"])
+        );
+        let read: Report = serde_json::from_value(written.clone()).unwrap();
+        assert_eq!(read.files[0].findings[0].estimate, None);
+        assert_eq!(serde_json::to_value(&read).unwrap(), written);
+    }
+
+    #[test]
+    fn reads_refusals_written_with_null_estimates() {
+        let unresolved: Unresolved = serde_json::from_value(serde_json::json!({
+            "rule": "glob_import_context",
+            "reason": "refusal",
+            "confidence": null,
+            "probabilities": null
+        }))
+        .unwrap();
+        assert_eq!(unresolved.estimate, None);
+        assert_eq!(
+            serde_json::to_value(&unresolved).unwrap(),
+            serde_json::json!({ "rule": "glob_import_context", "reason": "refusal" })
+        );
+    }
+
+    #[test]
     fn refusals_are_unresolved() {
         let rules = RuleSet::load().unwrap();
         let mut file = FileReport::new("lib.rs".into());
@@ -555,7 +628,7 @@ mod tests {
         .unwrap();
         assert_eq!(file.status, FileStatus::Incomplete);
         assert_eq!(file.unresolved[0].reason, UnresolvedReason::Refusal);
-        assert_eq!(file.unresolved[0].confidence, None);
+        assert_eq!(file.unresolved[0].estimate, None);
     }
 
     #[test]

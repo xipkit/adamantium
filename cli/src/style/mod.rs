@@ -163,11 +163,14 @@ fn render_text(output: &mut impl Write, report: &Report) -> Result<()> {
         let cached = if file.cached { " (cached)" } else { "" };
         writeln!(output, "{}: {}{cached}", file.path, file.status)?;
         for finding in &file.findings {
-            writeln!(
-                output,
-                "  {} (confidence {:.3}, file scope)",
-                finding.rule, finding.confidence
-            )?;
+            match &finding.estimate {
+                Some(estimate) => writeln!(
+                    output,
+                    "  {} (confidence {:.3}, file scope)",
+                    finding.rule, estimate.confidence
+                )?,
+                None => writeln!(output, "  {} (file scope)", finding.rule)?,
+            }
             writeln!(output, "    {}", finding.guidance)?;
         }
         for unresolved in &file.unresolved {

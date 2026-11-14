@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::style::{
     credentials,
     http::JsonService,
-    provider::{Answer, Evaluation, FileReview, Provider, ReviewError, Verdict},
+    provider::{Answer, Estimate, Evaluation, FileReview, Provider, ReviewError, Verdict},
     rules::Question,
 };
 
@@ -156,8 +156,10 @@ fn interpret(response: &Value, questions: &[Question]) -> Result<Evaluation> {
             .context("invalid selected choice")?;
         interpreted.push(Answer::Choice {
             verdict,
-            confidence,
-            probabilities,
+            estimate: Some(Estimate {
+                confidence,
+                probabilities,
+            }),
         });
     }
     ensure!(by_name.is_empty(), "unexpected named answer");
@@ -372,15 +374,14 @@ mod tests {
         };
         let Answer::Choice {
             verdict,
-            confidence,
-            probabilities,
+            estimate: Some(estimate),
         } = first
         else {
-            panic!("expected a choice");
+            panic!("expected a choice with an estimate");
         };
         assert_eq!(*verdict, Verdict::Violation);
-        assert_eq!(*confidence, 0.8);
-        assert_eq!(probabilities["insufficient_context"], 0.1);
+        assert_eq!(estimate.confidence, 0.8);
+        assert_eq!(estimate.probabilities["insufficient_context"], 0.1);
         assert!(matches!(second, Answer::Refusal));
         assert!(matches!(
             third,

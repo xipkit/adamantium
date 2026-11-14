@@ -53,10 +53,20 @@ pub(crate) struct Evaluation {
 pub(crate) enum Answer {
     Choice {
         verdict: Verdict,
-        confidence: f64,
-        probabilities: BTreeMap<String, f64>,
+        /// How sure the provider is, when it can say. Only calibrated
+        /// probabilities belong here; providers without them leave it out.
+        estimate: Option<Estimate>,
     },
     Refusal,
+}
+
+/// A provider's probability for each choice of one question.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub(crate) struct Estimate {
+    /// The probability of the selected choice.
+    pub confidence: f64,
+    /// The probability of every choice, by value.
+    pub probabilities: BTreeMap<String, f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
