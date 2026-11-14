@@ -350,7 +350,9 @@ enum Resolved {
     /// A local variable or an item local to a block.
     Local,
     Unknown,
-    /// What a path through a name with more than one binding may mean.
+    /// What a path through a name with more than one binding may mean. With
+    /// no alternatives, it is a way to a `use` that leads back to it, which
+    /// means nothing.
     Either(Vec<Resolved>),
 }
 
@@ -367,7 +369,6 @@ impl Resolved {
         }
         match <[Self; 1]>::try_from(flat) {
             Ok([only]) => only,
-            Err(flat) if flat.is_empty() => Self::Unknown,
             Err(flat) => Self::Either(flat),
         }
     }
@@ -821,11 +822,20 @@ impl Scanner<'_> {
 }
 
 /// The resolution of one path, or of the disallowed paths into the crate.
+///
 /// Where names have more than one binding, a path can reach one `use` path,
 /// or one path into the crate, many ways: through a chain of names with two
 /// bindings each, as many as two to the power of its length. Each is
 /// resolved once and remembered, so the work grows with the number of them,
 /// not of the ways to them.
+///
+/// A `use` can't be resolved through itself, so a way to it that leads
+/// back to it means nothing, as where `mod statx;` and `pub use
+/// statx::statx;` both bind `statx` and either may be built: the `use`
+/// means `self::statx::statx`, and the way through the `use` to that, which
+/// would mean `self::statx::statx::statx`, is not one. What a resolution
+/// found while it cut such a way short holds only within the `use` it
+/// reached, so it is remembered only once that `use` is resolved.
 struct Resolver<'s, 'a> {
     scanner: &'s Scanner<'a>,
     /// The blocks around the place of the path, innermost last. A `use` in
@@ -834,16 +844,27 @@ struct Resolver<'s, 'a> {
     blocks: &'s [Scope],
     uses: HashMap<UseKey, Resolved>,
     walks: HashMap<WalkKey, Resolved>,
+    /// The `use` paths being resolved, outermost first.
+    active: Vec<UseSite>,
+    /// The outermost of `active` that a way cut short reached, since the
+    /// resolution that is under way started.
+    circular: Option<usize>,
 }
 
-/// A `use` path to resolve, as `Resolver::use_path` takes it.
-#[derive(PartialEq, Eq, Hash)]
-struct UseKey {
+/// A `use` path and the place it is resolved in.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct UseSite {
     module: Vec<String>,
     blocks: usize,
     namespace: Namespace,
     path: Vec<String>,
     leading: bool,
+}
+
+/// A `use` path to resolve, as `Resolver::use_path` takes it.
+#[derive(PartialEq, Eq, Hash)]
+struct UseKey {
+    site: UseSite,
     depth: usize,
 }
 
@@ -863,13 +884,44 @@ impl<'s, 'a> Resolver<'s, 'a> {
             blocks,
             uses: HashMap::new(),
             walks: HashMap::new(),
+            active: Vec::new(),
+            circular: None,
         }
+    }
+
+    /// Runs `resolve`, and says whether what it resolves holds anywhere: not
+    /// where it cut short a way to one of the first `outside` of `active`,
+    /// which it runs within.
+    fn guarded(
+        &mut self,
+        outside: usize,
+        resolve: impl FnOnce(&mut Self) -> Resolved,
+    ) -> (Resolved, bool) {
+        let before = self.circular.take();
+        let resolved = resolve(self);
+        let reached = self.circular.filter(|index| *index < outside);
+        self.circular = before.into_iter().chain(reached).min();
+        (resolved, reached.is_none())
     }
 
     /// Resolves a path written in `module` within the blocks, for its last
     /// segment in `namespace`: values for a path in an expression, types
-    /// for the type of a qualified path.
+    /// for the type of a qualified path. A path whose every way leads back
+    /// to a `use` on it can't be resolved.
     fn path(
+        &mut self,
+        module: &[String],
+        namespace: Namespace,
+        path: &[String],
+        leading: bool,
+    ) -> Resolved {
+        match self.resolve_path(module, namespace, path, leading) {
+            Resolved::Either(alternatives) if alternatives.is_empty() => Resolved::Unknown,
+            resolved => resolved,
+        }
+    }
+
+    fn resolve_path(
         &mut self,
         module: &[String],
         namespace: Namespace,
@@ -982,18 +1034,31 @@ impl<'s, 'a> Resolver<'s, 'a> {
         depth: usize,
     ) -> Resolved {
         let key = UseKey {
-            module: module.to_vec(),
-            blocks,
-            namespace,
-            path: path.to_vec(),
-            leading,
+            site: UseSite {
+                module: module.to_vec(),
+                blocks,
+                namespace,
+                path: path.to_vec(),
+                leading,
+            },
             depth,
         };
         if let Some(resolved) = self.uses.get(&key) {
             return resolved.clone();
         }
-        let resolved = self.resolve_use(module, blocks, namespace, path, leading, depth);
-        self.uses.insert(key, resolved.clone());
+        if let Some(index) = self.active.iter().position(|site| *site == key.site) {
+            self.circular = Some(self.circular.map_or(index, |circular| circular.min(index)));
+            return Resolved::Either(Vec::new());
+        }
+        let outside = self.active.len();
+        self.active.push(key.site.clone());
+        let (resolved, holds) = self.guarded(outside, |resolver| {
+            resolver.resolve_use(module, blocks, namespace, path, leading, depth)
+        });
+        self.active.pop();
+        if holds {
+            self.uses.insert(key, resolved.clone());
+        }
         resolved
     }
 
@@ -1129,8 +1194,12 @@ impl<'s, 'a> Resolver<'s, 'a> {
         if let Some(resolved) = self.walks.get(&key) {
             return resolved.clone();
         }
-        let resolved = self.resolve_walk(&key.path, start, namespace, depth);
-        self.walks.insert(key, resolved.clone());
+        let (resolved, holds) = self.guarded(self.active.len(), |resolver| {
+            resolver.resolve_walk(&key.path, start, namespace, depth)
+        });
+        if holds {
+            self.walks.insert(key, resolved.clone());
+        }
         resolved
     }
 
