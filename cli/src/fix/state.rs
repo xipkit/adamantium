@@ -32,6 +32,9 @@ pub(super) enum Reason {
     TwoLocks,
     /// The statement that takes the guard returns, breaks or uses `?`.
     ControlFlow,
+    /// The guard is taken inside another actor's `with` or `read` callback,
+    /// where calling an actor panics.
+    InsideActor,
     /// Any other use that the rewrite can't follow.
     Unfollowed(&'static str),
 }
@@ -42,7 +45,7 @@ impl Reason {
         match self {
             Self::AcrossStatements => "a-guard-held-across-statements",
             Self::AcrossAwait => "a-lock-held-across-an-await",
-            Self::TwoLocks => "two-locks-at-once",
+            Self::TwoLocks | Self::InsideActor => "two-locks-at-once",
             Self::ControlFlow | Self::Unfollowed(_) => "shared-state",
         }
     }
@@ -53,6 +56,7 @@ impl Reason {
             Self::AcrossAwait => "a statement holding its guard also awaits",
             Self::TwoLocks => "a statement holding its guard takes another lock",
             Self::ControlFlow => "a statement holding its guard can return, break or use `?`",
+            Self::InsideActor => "it is locked inside another actor's `with` or `read` callback",
             Self::Unfollowed(detail) => detail,
         }
     }
@@ -1425,6 +1429,9 @@ impl<'a> Walker<'a> {
     }
 
     fn guard_edit(&mut self, var: usize, guard: &'a Expr) -> Result<Edit, Reason> {
+        if self.inside_actor() {
+            return Err(Reason::InsideActor);
+        }
         let plan = self.plan(guard)?;
         let name = self
             .vars
@@ -1548,6 +1555,21 @@ impl<'a> Walker<'a> {
             }
         };
         Ok(self.edit(range, replacement))
+    }
+
+    /// Whether the node on top of the stack is inside a closure passed to a
+    /// `with` or `read` method, which may be an actor's callback.
+    fn inside_actor(&self) -> bool {
+        self.stack
+            .iter()
+            .zip(self.stack.iter().skip(1))
+            .any(|(node, below)| match (node, below) {
+                (Node::Expr(Expr::MethodCall(call)), Node::Expr(arg)) => {
+                    (call.method == "with" || call.method == "read")
+                        && call.args.iter().any(|candidate| is(candidate, arg))
+                }
+                _ => false,
+            })
     }
 
     /// Whether an expression starts with attributes, which can't move into a
@@ -2467,6 +2489,15 @@ mod tests {
                 "{refusals:?}"
             );
         }
+    }
+
+    #[test]
+    fn guards_inside_an_actor_callback_are_refused() {
+        refused(
+            "fn f(a: &adamantium::Actor<u8>) { a.with(|_| { let m = Arc::new(Mutex::new(0)); *m.lock().unwrap() += 1; }); }",
+            "m",
+            Reason::InsideActor,
+        );
     }
 
     #[test]
