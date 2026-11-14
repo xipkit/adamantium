@@ -3,12 +3,15 @@ use std::{collections::BTreeSet, fs::File, path::Path};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
-use crate::style::{rules::Question, scan::Scan};
+use crate::style::{provider::ProviderKind, rules::Question, scan::Scan};
 
 #[derive(Deserialize)]
 struct PreviousReport {
     schema_version: u8,
     status: String,
+    /// Reports written before providers were selectable came from Decisions.
+    #[serde(default)]
+    provider: ProviderKind,
     model: String,
     root: String,
     selected_rules: Vec<String>,
@@ -24,6 +27,7 @@ struct PreviousFile {
 pub(crate) fn select_pending(
     scan: &mut Scan,
     previous_path: &Path,
+    provider: ProviderKind,
     model: &str,
     questions: &[Question],
 ) -> Result<()> {
@@ -45,6 +49,10 @@ pub(crate) fn select_pending(
     ensure!(
         previous.root == scan.root.to_string_lossy(),
         "previous report has a different scan root"
+    );
+    ensure!(
+        previous.provider == provider,
+        "previous report used a different provider"
     );
     ensure!(
         previous.model == model,
@@ -105,6 +113,7 @@ mod tests {
         json!({
             "schema_version": 1,
             "status": "incomplete",
+            "provider": "decisions",
             "model": model,
             "root": root,
             "selected_rules": [question.name],
@@ -129,7 +138,14 @@ mod tests {
         let report = previous_report(&scan.root, &rules.model, &questions[0]);
         let report_path = dir.path().join("report.json");
         fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
-        select_pending(&mut scan, &report_path, &rules.model, questions).unwrap();
+        select_pending(
+            &mut scan,
+            &report_path,
+            ProviderKind::Decisions,
+            &rules.model,
+            questions,
+        )
+        .unwrap();
         assert_eq!(
             scan.files
                 .iter()
@@ -153,12 +169,26 @@ mod tests {
         let check = |report: &Value| {
             fs::write(&report_path, serde_json::to_vec(report).unwrap()).unwrap();
             let mut scan = Scan::discover(dir.path()).unwrap();
-            select_pending(&mut scan, &report_path, &rules.model, questions)
+            select_pending(
+                &mut scan,
+                &report_path,
+                ProviderKind::Decisions,
+                &rules.model,
+                questions,
+            )
         };
 
         let mut wrong = valid.clone();
         wrong["root"] = json!("/different/root");
         assert!(check(&wrong).unwrap_err().to_string().contains("scan root"));
+        wrong = valid.clone();
+        wrong["provider"] = json!("claude");
+        assert!(
+            check(&wrong)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid previous JSON report")
+        );
         wrong = valid.clone();
         wrong["model"] = json!("other-model");
         assert!(
@@ -193,5 +223,29 @@ mod tests {
                 .to_string()
                 .contains("no longer in the scan")
         );
+    }
+
+    #[test]
+    fn reports_without_a_provider_came_from_decisions() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+            fs::write(dir.path().join(name), "").unwrap();
+        }
+        let rules = RuleSet::load().unwrap();
+        let questions = &rules.questions[..1];
+        let mut scan = Scan::discover(dir.path()).unwrap();
+        let mut report = previous_report(&scan.root, &rules.model, &questions[0]);
+        report.as_object_mut().unwrap().remove("provider");
+        let report_path = dir.path().join("report.json");
+        fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
+        select_pending(
+            &mut scan,
+            &report_path,
+            ProviderKind::Decisions,
+            &rules.model,
+            questions,
+        )
+        .unwrap();
+        assert_eq!(scan.files.len(), 2);
     }
 }

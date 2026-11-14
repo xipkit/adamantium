@@ -20,7 +20,7 @@ const LISTS: [&str; 2] = ["disallowed-types", "disallowed-methods"];
 
 /// Every feature that defines an item `clippy.toml` names. `tokio::task::Builder`
 /// also needs `--cfg tokio_unstable`.
-const ALL_FEATURES: &str = "futures,parking_lot,tokio/full,tokio/tracing";
+const ALL_FEATURES: &str = "async-std/unstable,futures,parking_lot,smol,tokio/full,tokio/tracing";
 
 /// A line of `cargo --message-format=json`, with the fields these tests read.
 #[derive(Deserialize)]
