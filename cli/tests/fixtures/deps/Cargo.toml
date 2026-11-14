@@ -22,6 +22,7 @@ old = { path = "vendor/old" }
 platform = { path = "vendor/platform" }
 runner = { path = "vendor/runner" }
 safe = { path = "vendor/safe" }
+selector = { path = "vendor/selector" }
 spawner = { path = "vendor/spawner", features = ["on"] }
 
 [build-dependencies]
