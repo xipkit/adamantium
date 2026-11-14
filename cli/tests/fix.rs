@@ -48,6 +48,7 @@ overflow-checks = true
 fn fixes_build_and_pass_check_with_a_non_mutating_preview() {
     for source in [
         "pub fn value() -> u32 { dbg!(7) }\n",
+        "pub async fn wait() { (|| async { std::hint::black_box(7); tokio::time::sleep(std::time::Duration::ZERO).await; })().await; }\n",
         "pub async fn wait() { /* café */ tokio::time::sleep(std::time::Duration::ZERO).await; }\r\n",
         "\u{feff}#!/usr/bin/env rust-script\npub async fn wait() { tokio::time::sleep(std::time::Duration::ZERO).await; }",
         "pub async fn wait() { tokio::time::sleep(std::time::Duration::ZERO).await; }\n",
@@ -132,4 +133,77 @@ fn skip_configuration_and_build_errors_never_edit_source() {
         fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
         "pub fn broken(\n"
     );
+}
+
+#[test]
+fn ambiguous_callees_explicit_generics_and_stored_timers_are_not_rewritten() {
+    for source in [
+        "pub async fn wait() { ({ std::hint::black_box(7); tokio::time::sleep })(std::time::Duration::ZERO).await; }\n",
+        "pub async fn wait() { let timer = tokio::time::sleep(std::time::Duration::ZERO); std::future::ready(()).await; timer.await; }\n",
+        "pub async fn work() -> usize { let value = tokio::task::spawn_blocking::<_, u64>(|| 1).await.unwrap(); std::mem::size_of_val(&value) }\n",
+        "pub async fn work() -> usize { ({ std::hint::black_box(7); tokio::task::spawn_blocking })(|| 1).await.unwrap() }\n",
+    ] {
+        let dir = project(source);
+        let preview = run(&["fix", "--dry-run"], dir.path());
+        assert_eq!(
+            preview.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&preview.stderr)
+        );
+        assert!(
+            preview.stdout.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&preview.stdout)
+        );
+        let output = run(&["fix"], dir.path());
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+            source
+        );
+    }
+}
+
+#[test]
+fn unavailable_or_uncertain_migration_apis_leave_source_buildable() {
+    let source = "pub async fn work() -> usize { tokio::time::sleep(std::time::Duration::ZERO).await; tokio::task::spawn_blocking(|| 7).await.unwrap() }\n";
+    for options in [
+        ", default-features = false",
+        ", optional = true",
+        ", default-features = false, features = [\"tokio\"]",
+    ] {
+        let dir = project(source);
+        let manifest = dir.path().join("Cargo.toml");
+        let text = fs::read_to_string(&manifest).unwrap();
+        let text = text
+            .lines()
+            .map(|line| {
+                if line.starts_with("adamantium = ") {
+                    format!("{}{options} }}", line.trim_end_matches('}').trim_end())
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(manifest, text).unwrap();
+        let output = run(&["fix"], dir.path());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if options.contains("features = [") {
+            assert!(output.status.success(), "{stderr}");
+        } else {
+            assert_eq!(output.status.code(), Some(1), "{stderr}");
+            assert!(stderr.contains("migration rewrites require"), "{stderr}");
+            assert_eq!(
+                fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+                source
+            );
+        }
+    }
 }

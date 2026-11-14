@@ -212,7 +212,7 @@ fn mechanical(diagnostic: &Value, root: &Path) -> Result<Vec<Vec<Edit>>> {
     };
     if !has_adamantium(&file, root)? {
         eprintln!(
-            "adamantium: {}: add an `adamantium` dependency before applying migration rewrites",
+            "adamantium: {}: migration rewrites require a nonoptional, noninherited `adamantium` dependency with default features or explicit `tokio` features",
             file.display()
         );
         return Ok(Vec::new());
@@ -233,6 +233,10 @@ fn mechanical(diagnostic: &Value, root: &Path) -> Result<Vec<Vec<Edit>>> {
             + tree.shebang.as_ref().map_or(0, String::len),
         file,
         start,
+        end: span["byte_end"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(start),
         message,
         edits: Vec::new(),
     };
@@ -251,10 +255,28 @@ fn has_adamantium(file: &Path, root: &Path) -> Result<bool> {
         let manifest = ancestor.join("Cargo.toml");
         if manifest.is_file() {
             let doc: toml_edit::DocumentMut = fs::read_to_string(manifest)?.parse()?;
-            return Ok(doc
+            let Some(dependency) = doc
                 .get("dependencies")
                 .and_then(|deps| deps.get("adamantium"))
-                .is_some());
+            else {
+                return Ok(false);
+            };
+            // Optional and inherited dependencies need feature/activation
+            // resolution for the selected build. Leave those for review.
+            let flag = |name| dependency.get(name).and_then(toml_edit::Item::as_bool);
+            let package = dependency.get("package").and_then(toml_edit::Item::as_str);
+            let tokio = dependency
+                .get("features")
+                .and_then(toml_edit::Item::as_array)
+                .is_some_and(|features| {
+                    features
+                        .iter()
+                        .any(|feature| feature.as_str() == Some("tokio"))
+                });
+            return Ok(flag("optional") != Some(true)
+                && flag("workspace") != Some(true)
+                && package.is_none_or(|name| name == "adamantium")
+                && (flag("default-features") != Some(false) || tokio));
         }
     }
     Ok(false)
@@ -265,6 +287,7 @@ struct Mechanical<'a> {
     prefix: usize,
     file: PathBuf,
     start: usize,
+    end: usize,
     message: &'a str,
     edits: Vec<Edit>,
 }
@@ -276,7 +299,8 @@ impl Mechanical<'_> {
         self.source.get(range.clone()).map(|_| range)
     }
     fn matches(&self, span: Span) -> bool {
-        self.range(span).is_some_and(|r| r.contains(&self.start))
+        self.range(span)
+            .is_some_and(|r| r.start == self.start && r.end == self.end)
     }
     fn replace(&mut self, span: Span, replacement: String) {
         if let Some(range) = self.range(span) {
@@ -291,13 +315,17 @@ impl Mechanical<'_> {
 }
 
 impl<'ast> Visit<'ast> for Mechanical<'_> {
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        // The diagnostic resolves aliases/imports; syntax alone cannot tell
-        // whether a function called `sleep` belongs to Tokio.
-        if self.message.contains("`tokio::time::sleep`") && self.matches(node.func.span()) {
-            self.replace(node.func.span(), "::adamantium::time::sleep".to_owned());
+    fn visit_expr_await(&mut self, node: &'ast syn::ExprAwait) {
+        // Only a directly awaited call preserves Tokio's timer-construction
+        // boundary. Exact path spans avoid discarding compound callee effects.
+        if self.message.contains("`tokio::time::sleep`")
+            && let syn::Expr::Call(call) = &*node.base
+            && let syn::Expr::Path(path) = &*call.func
+            && self.matches(path.span())
+        {
+            self.replace(path.span(), "::adamantium::time::sleep".to_owned());
         }
-        syn::visit::visit_expr_call(self, node);
+        syn::visit::visit_expr_await(self, node);
     }
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         if self.message.contains("`tokio::task::spawn_blocking`")
@@ -305,7 +333,11 @@ impl<'ast> Visit<'ast> for Mechanical<'_> {
             && node.args.is_empty()
             && let syn::Expr::Await(awaited) = &*node.receiver
             && let syn::Expr::Call(call) = &*awaited.base
-            && self.matches(call.func.span())
+            && let syn::Expr::Path(path) = &*call.func
+            && self.matches(path.span())
+            // The wrapper has a different generic parameter order. Retaining
+            // inference by dropping a turbofish can silently change the result.
+            && path.path.segments.iter().all(|segment| matches!(segment.arguments, syn::PathArguments::None))
             && let Some(args) = self.range(call.paren_token.span.join())
             && let Some(text) = self.source.get(args)
         {
