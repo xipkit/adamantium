@@ -56,7 +56,7 @@ pub(crate) fn select_pending(
     let previous: PreviousReport =
         serde_json::from_reader(previous_file).context("invalid previous JSON report")?;
     ensure!(
-        matches!(previous.schema_version, 1 | SCHEMA_VERSION),
+        (1..=SCHEMA_VERSION).contains(&previous.schema_version),
         "unsupported previous report schema"
     );
     ensure!(
@@ -139,7 +139,7 @@ impl Cache {
             serde_json::from_slice(&bytes).context("invalid cached JSON report")?;
         ensure!(
             version.schema_version == SCHEMA_VERSION,
-            "a cached report needs schema version {SCHEMA_VERSION}, which records source hashes"
+            "a cached report needs schema version {SCHEMA_VERSION}; run once without --cache-from to write one"
         );
         let previous: Report =
             serde_json::from_slice(&bytes).context("invalid cached JSON report")?;
@@ -348,7 +348,10 @@ mod tests {
 
     mod cache {
         use super::*;
-        use crate::style::report::{Finding, ReportStatus};
+        use crate::style::{
+            provider::LineRange,
+            report::{Finding, ReportStatus},
+        };
 
         /// A scan of `a.rs`, `b.rs`, `c.rs` and `d.rs`, each with distinct
         /// source, and the key and questions for one rule.
@@ -384,6 +387,10 @@ mod tests {
             }
             report.files[0].findings.push(Finding {
                 rule: questions[0].name.clone(),
+                lines: Some(LineRange {
+                    start_line: 1,
+                    end_line: 1,
+                }),
                 guidance: questions[0].instructions.clone(),
                 confidence: 0.9,
                 probabilities: BTreeMap::from([("violation".to_owned(), 0.9)]),
@@ -429,6 +436,13 @@ mod tests {
             assert_eq!(cached.path, "a.rs");
             assert_eq!(cached.findings.len(), 1);
             assert_eq!(cached.findings[0].rule, questions[0].name);
+            assert_eq!(
+                cached.findings[0].lines,
+                Some(LineRange {
+                    start_line: 1,
+                    end_line: 1
+                })
+            );
             assert_eq!(cached.input_tokens, None);
             assert!(report.has_planned_files());
         }
@@ -504,7 +518,7 @@ mod tests {
                 load(&old)
                     .unwrap_err()
                     .to_string()
-                    .contains("schema version 2")
+                    .contains("schema version 3")
             );
             let mut wrong = valid.clone();
             wrong["root"] = json!("/different/root");
