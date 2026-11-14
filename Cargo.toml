@@ -58,6 +58,7 @@ publish.workspace = true
 [features]
 default = ["tokio"]
 tokio = ["dep:tokio", "dep:async-stream", "dep:futures-core"]
+signal = ["tokio", "tokio/signal"]
 serde = ["dep:serde", "indexmap/serde"]
 
 [dependencies]

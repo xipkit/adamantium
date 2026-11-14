@@ -55,6 +55,47 @@ impl Cancellation {
         let mut requested = self.requested.subscribe();
         let _ = requested.wait_for(|requested| *requested).await;
     }
+
+    /// Requests shutdown on SIGINT or SIGTERM on Unix, or Ctrl-C on Windows.
+    ///
+    /// Requires the opt-in `signal` feature and a Tokio runtime with signal
+    /// handling enabled. Listening starts when this future is first polled;
+    /// registration errors are returned without requesting cancellation.
+    /// It also returns successfully if this signal is cancelled another way.
+    /// An already cancelled signal does not register process handlers.
+    ///
+    /// Await this alongside the work that observes this cancellation, for
+    /// example with `tokio::try_join!`. No background task is spawned. Dropping
+    /// the future stops listening without cancelling, but Tokio's process-wide
+    /// signal handlers remain installed, replacing the default termination
+    /// behavior even after the listener is dropped.
+    #[cfg(all(feature = "signal", any(unix, windows)))]
+    pub async fn cancel_on_signal(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        let received = async {
+            use tokio::signal::unix::{SignalKind, signal};
+
+            let mut interrupt = signal(SignalKind::interrupt())?;
+            let mut terminate = signal(SignalKind::terminate())?;
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
+            }
+            Ok::<(), std::io::Error>(())
+        };
+        #[cfg(windows)]
+        let received = tokio::signal::ctrl_c();
+
+        tokio::select! {
+            biased;
+            () = self.cancelled() => Ok(()),
+            result = received => {
+                result?;
+                self.cancel();
+                Ok(())
+            }
+        }
+    }
 }
 
 impl Default for Cancellation {

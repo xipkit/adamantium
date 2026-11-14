@@ -160,6 +160,30 @@ can await `cancelled()`, and blocking work can check `is_cancelled()`. The deadl
 is an optional `tokio::time::Instant`; `None` needs no timer. Use a fresh signal
 per scope. The scope also signals it on failure, deadline, completion, or drop.
 
+Enable the opt-in `signal` feature to use
+`cancellation.cancel_on_signal().await`: it requests cancellation on SIGINT or
+SIGTERM on Unix, or Ctrl-C alone on Windows. Await it alongside your scope with
+`tokio::try_join!`; it also finishes when the scope cancels the signal on normal
+completion. Registration errors are returned as `std::io::Error`. No background
+task is spawned. Listening starts on the first poll, and dropping the future
+stops listening without cancelling. Tokio's installed process handlers persist
+afterward, so the default signal termination behavior is not restored.
+
+```rust
+use adamantium::{Cancellation, Tasks};
+
+let cancellation = Cancellation::new();
+let (_, outcome) = tokio::try_join!(
+    cancellation.cancel_on_signal(),
+    async {
+        Ok::<_, std::io::Error>(Tasks::run_until(
+            cancellation.clone(), None, async |_| serve().await,
+        ).await)
+    },
+)?;
+// `outcome` is the scope's result, including `ScopeError::Cancelled` on a signal.
+```
+
 These methods return `ScopeError::Failed(error)`, `Cancelled`, or
 `DeadlineExceeded`. A completed body error wins over an unclaimed child error,
 which wins over shutdown; child panics are resumed after draining. If cancellation

@@ -15,6 +15,8 @@
 //! ordered and unordered concurrent streams, and `blocking`.
 //! Disable default features to use the values, actors, and channels
 //! without a Tokio dependency, including on WASI.
+//! The opt-in `signal` feature adds `Cancellation::cancel_on_signal` on Unix
+//! and Windows and enables Tokio's process signal support.
 
 #![forbid(unsafe_code)]
 
