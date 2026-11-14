@@ -17,7 +17,7 @@ pub fn settings() -> (Vec<String>, usize) {
     let settings: ::adamantium::Actor<Vec<String>> = ::adamantium::Actor::default();
     let writer = settings.clone();
     writer.with(|writer| { writer.push("verbose".to_owned()); });
-    let current = settings.read(|settings| (*settings).clone());
+    let current = settings.with(|settings| (*settings).clone());
     let count = settings.with(|settings| settings.len());
     (current, count)
 }
@@ -86,7 +86,7 @@ pub async fn deferred() -> Vec<u32> {
     }
     let spare = log.clone();
     std::mem::drop(spare);
-    let entries = log.read(|log| (*log).clone());
+    let entries = log.with(|log| (*log).clone());
     entries
 }
 

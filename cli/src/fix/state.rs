@@ -1144,10 +1144,14 @@ struct Plan<'a> {
 
 #[derive(Clone, Copy)]
 enum Narrow {
-    /// `guard.clone()`. Method lookup for the guard starts at the state, so
-    /// it can clone what a reference in the state points to; `(*state)`
-    /// keeps that lookup, where `snapshot()` would always clone the state.
-    Clone,
+    /// `guard.clone()` or `guard.field.clone()`. Method lookup for the guard
+    /// starts at the state, so it can clone what a reference in the state
+    /// points to; `(*state)` keeps that lookup, where `snapshot()` would
+    /// always clone the state. The state can also have its own `clone` that
+    /// takes `&mut self`, so the call runs in `with`.
+    Clone {
+        projected: bool,
+    },
     Read,
 }
 
@@ -1433,14 +1437,7 @@ impl<'a> Walker<'a> {
             Some(Node::Expr(expr @ Expr::MethodCall(call)))
                 if call.method == "clone" && call.args.is_empty() && call.turbofish.is_none() =>
             {
-                Some((
-                    expr,
-                    if projected {
-                        Narrow::Read
-                    } else {
-                        Narrow::Clone
-                    },
-                ))
+                Some((expr, Narrow::Clone { projected }))
             }
             Some(Node::Expr(expr @ Expr::Binary(binary)))
                 if projected && is_comparison(&binary.op) =>
@@ -1543,9 +1540,13 @@ impl<'a> Walker<'a> {
         if let Some((expr, narrow)) = plan.narrow {
             let range = self.text.of(expr).ok_or(UNLOCATED)?;
             let replacement = match narrow {
-                Narrow::Clone => format!(
-                    "{name}.read(|{name}| {})",
-                    substitute_with(range.clone(), &format!("(*{name})"))?
+                Narrow::Clone { projected } => format!(
+                    "{name}.with(|{name}| {})",
+                    if projected {
+                        substitute(range.clone())?
+                    } else {
+                        substitute_with(range.clone(), &format!("(*{name})"))?
+                    }
                 ),
                 Narrow::Read => format!("{name}.read(|{name}| {})", substitute(range.clone())?),
             };
@@ -2723,7 +2724,7 @@ mod tests {
         );
         assert_eq!(refusals, []);
         assert!(
-            fixed.contains("let copy: Vec<i32> = m.read(|m| (*m).clone());"),
+            fixed.contains("let copy: Vec<i32> = m.with(|m| (*m).clone());"),
             "{fixed}"
         );
     }
@@ -2767,6 +2768,19 @@ mod tests {
             "fn f() { let m = Arc::new(Mutex::new(1)); let g = (m.lock().unwrap()); println!(\"{}\", *g); }",
             "m",
             Reason::AcrossStatements,
+        );
+    }
+
+    #[test]
+    fn a_clone_that_takes_mut_self_keeps_mutable_access() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nstruct State(u32);\nimpl State { fn clone(&mut self) -> u32 { self.0 += 1; self.0 } }\nfn f() -> u32 {\n    let m = Arc::new(Mutex::new(State(0)));\n    let n = m.lock().unwrap().clone();\n    n\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(
+            fixed.contains("let n = m.with(|m| (*m).clone());"),
+            "{fixed}"
         );
     }
 
