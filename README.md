@@ -17,7 +17,7 @@ adamantium = { git = "https://github.com/xipkit/adamantium.git", rev = "..." }
 
 The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, the
 concurrent streams, and `blocking`. Set `default-features = false` to use `Actor`, `Str`, `Bytes`,
-`Array`, `Deque`, `Map`, `Set`, and `Channel` without Tokio, including on WASI. The `serde`
+`Array`, `Deque`, `Map`, `Set`, `Channel`, `Reply`, and `Watch` without Tokio, including on WASI. The `serde`
 feature can be enabled independently.
 
 Install the subcommand:
@@ -156,6 +156,26 @@ send ends with `SendError::Closed(value)`, `Cancelled(value)`, or
 `DeadlineExceeded(value)`, so the value comes back whichever way it fails. As
 with `Tasks::run_until`, a request already present wins over a ready channel,
 and cancellation wins over an equally ready deadline.
+
+`Reply::pair()` makes a one-shot **`Reply<T>`** and the **`ReplyReceiver<T>`**
+that waits for it, for request and reply between tasks. `send(value)` consumes
+the reply and never waits; it hands the value back in `Closed(value)` if the
+receiver is gone. `receive()` returns the value, or `None` if the reply was
+dropped without sending. The replying side can check `is_closed()` or await
+`closed()` to stop work whose answer nobody wants.
+
+**`Watch<T>`** holds the latest value of some state, such as configuration.
+`send(value)` replaces it and wakes every **`Watcher<T>`** made with
+`subscribe()`. A watcher's `receive()` waits for a value it hasn't seen and
+returns a copy, skipping values sent in between; `wait_for(condition)` waits for
+a value that satisfies `condition`, starting with the current one; `get()` reads
+the current value. Clones of a `Watch` can all send. Dropping the last one, or
+calling `close()`, closes it: each watcher receives the last value if it hasn't
+seen it, then `None`.
+
+Both work with `default-features = false`. Both receivers also have
+`try_receive()` and, with the `tokio` feature, `receive_until(&cancellation,
+deadline)`, which follows the channel's rules.
 
 For explicit shutdown, use `Tasks::run_until(cancellation, deadline, body)` or
 `tasks.join_until(cancellation, deadline, body_result)`. `Cancellation::new()`

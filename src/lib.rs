@@ -4,8 +4,9 @@
 //! The crate has two halves. The library gives that fragment its vocabulary:
 //! copy-on-write values ([`Str`], [`Bytes`], [`Array`], [`Deque`], [`Map`], [`Set`]), a
 //! structured task scope (`Tasks`), shared state whose methods run one at
-//! a time ([`Actor`]), a bounded channel ([`Channel`]), and `blocking` for
-//! code that must block a thread. The `cargo adamantium` subcommand applies
+//! a time ([`Actor`]), a bounded channel ([`Channel`]), a one-shot reply
+//! ([`Reply`]), the latest value of shared state ([`Watch`]), and `blocking`
+//! for code that must block a thread. The `cargo adamantium` subcommand applies
 //! the Clippy rules that keep a crate inside the fragment.
 //!
 //! Everything here is `Send + Sync + 'static` when its element types are, so
@@ -13,8 +14,8 @@
 //!
 //! The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, the
 //! ordered and unordered concurrent streams, and `blocking`.
-//! Disable default features to use the values, actors, and channels
-//! without a Tokio dependency, including on WASI.
+//! Disable default features to use the values, actors, channels, replies,
+//! and watches without a Tokio dependency, including on WASI.
 
 #![forbid(unsafe_code)]
 
