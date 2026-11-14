@@ -146,6 +146,7 @@ pub fn scan(krate: &Crate, disallowed: &Disallowed) -> Scan {
         unexpanded: HashSet::new(),
         deferred: BTreeMap::new(),
         sources: HashMap::new(),
+        expansions: 0,
     };
     // Every module's names are bound before any code is read, so a path can
     // be followed through another module's `use` items.
@@ -564,6 +565,8 @@ struct Scanner<'a> {
     /// are in, as [`Span::file`] names it. A macro's expansion has tokens
     /// from the call and from the macro, which may be in different files.
     sources: HashMap<String, String>,
+    /// How many calls of `macro_rules!` have been expanded.
+    expansions: usize,
 }
 
 /// The body of an expanded `macro_rules!`, and the module it is written in.
@@ -638,8 +641,13 @@ struct Place<'p> {
 }
 
 /// How many `macro_rules!` expansions deep the scan follows calls, so that a
-/// macro that calls itself can't keep it going.
-const MAX_EXPANSIONS: usize = 16;
+/// macro that calls itself can't keep it going: rustc's default
+/// `recursion_limit`.
+const MAX_EXPANSIONS: usize = 128;
+
+/// How many calls of `macro_rules!` the scan expands in one crate, so that
+/// a macro whose expansion calls it more than once can't keep it going.
+const MAX_EXPANDED_CALLS: usize = 10_000;
 
 impl Scanner<'_> {
     /// Loads the file of the module at `module`, and the modules it declares.
@@ -661,7 +669,7 @@ impl Scanner<'_> {
             Ok(text) => text,
             Err(error) => {
                 let reason = format!("reading {rel}: {error}");
-                self.scan.unscanned.push(match from {
+                self.unscanned(match from {
                     Some((file, span)) => Unscanned {
                         file: file.to_owned(),
                         line: Some(span.start().line),
@@ -682,7 +690,7 @@ impl Scanner<'_> {
         let mut file = match syn::parse_file(&text) {
             Ok(file) => file,
             Err(error) => {
-                self.scan.unscanned.push(Unscanned {
+                self.unscanned(Unscanned {
                     file: rel,
                     line: Some(error.span().start().line),
                     reason: format!("syn could not parse it: {error}"),
@@ -817,7 +825,7 @@ impl Scanner<'_> {
                     self.keep_macros(&attrs, macros, textual);
                 }
             }
-            Location::Unscannable(reason) => self.scan.unscanned.push(Unscanned {
+            Location::Unscannable(reason) => self.unscanned(Unscanned {
                 file: self.file_of(item.ident.span(), place.rel),
                 line: Some(item.ident.span().start().line),
                 reason,
@@ -851,6 +859,14 @@ impl Scanner<'_> {
             .iter()
             .filter(|(_, meta)| matches!(meta, Meta::Path(path) if path.is_ident("macro_use")))
             .fold(Truth::False, |truth, (applies, _)| truth.or(*applies))
+    }
+
+    /// Lists source the scan couldn't read, once: a call in a macro may be
+    /// expanded many times.
+    fn unscanned(&mut self, unscanned: Unscanned) {
+        if !self.scan.unscanned.contains(&unscanned) {
+            self.scan.unscanned.push(unscanned);
+        }
     }
 
     /// The file, relative to the package, that the token at `span` is
@@ -891,7 +907,7 @@ impl Scanner<'_> {
     /// and returns whether it did. Each definition the call may name expands
     /// under the `cfg`s that select it: its own, and none of the later
     /// ones'. A call that one of them can't be matched to or doesn't expand
-    /// to items isn't expanded. The expansion is
+    /// to items, or that is past a limit, isn't expanded. The expansion is
     /// part of the calling module, but it is read as its own [`Loaded`], so
     /// that its code counts for each call.
     fn expand(
@@ -912,15 +928,25 @@ impl Scanner<'_> {
         };
         let file = self.file_of(name.span(), place.rel);
         let start = name.span().start();
-        if textual.depth == MAX_EXPANSIONS {
-            self.scan.unscanned.push(Unscanned {
+        // A call past a limit is read as tokens.
+        let limit = if textual.depth == MAX_EXPANSIONS {
+            Some(format!(
+                "`{name}!` expands to more than {MAX_EXPANSIONS} nested macro calls"
+            ))
+        } else if self.expansions == MAX_EXPANDED_CALLS {
+            Some(format!(
+                "the crate's macros expand to more than {MAX_EXPANDED_CALLS} calls"
+            ))
+        } else {
+            None
+        };
+        if let Some(reason) = limit {
+            self.unscanned(Unscanned {
                 file,
                 line: Some(start.line),
-                reason: format!(
-                    "`{name}!` expands to more than {MAX_EXPANSIONS} nested macro calls"
-                ),
+                reason,
             });
-            return true;
+            return false;
         }
         let call_condition = cfg_predicates(&call.attrs);
         let mut later = Vec::new();
@@ -965,6 +991,7 @@ impl Scanner<'_> {
             let at = (candidate.rel.clone(), start.line, start.column);
             expansions.push((items, at));
         }
+        self.expansions += 1;
         for (mut items, at) in expansions {
             let rel = at.0.clone();
             self.expanded.insert(at);
@@ -2211,7 +2238,7 @@ impl FileVisitor<'_, '_> {
 
     fn unscanned(&mut self, span: Span, reason: String) {
         let site = self.site(span);
-        self.scanner.scan.unscanned.push(Unscanned {
+        self.scanner.unscanned(Unscanned {
             file: site.file,
             line: Some(site.line),
             reason,
@@ -3418,15 +3445,37 @@ maybe!();
         assert_eq!(scan.unscanned, listed);
     }
 
-    /// A macro that calls itself is followed only so far.
+    /// A macro that calls itself is followed only as deep as rustc follows
+    /// it, and the call past that is read as tokens, with its input.
     #[test]
     fn expansion_stops_at_a_macro_that_calls_itself() {
         let scan = scan_files(&[(
             "lib.rs",
-            "macro_rules! again { () => { again!(); }; }\nagain!();\n",
+            "macro_rules! again { ($($t:tt)*) => { again!($($t)*); }; }\nagain!(unsafe {});\n",
         )]);
-        let reason = "`again!` expands to more than 16 nested macro calls";
+        let reason = "`again!` expands to more than 128 nested macro calls";
         assert_eq!(scan.unscanned, [unscanned("src/lib.rs", 1, reason)]);
+        assert_eq!(scan.unsafe_code.in_macros, 1);
+    }
+
+    /// A macro whose expansion calls it more than once is followed only for
+    /// so many calls in all, after its first calls reach the depth limit.
+    /// Each call past a limit is listed once.
+    #[test]
+    fn expansion_stops_at_a_macro_that_calls_itself_twice() {
+        let scan = scan_files(&[(
+            "lib.rs",
+            "macro_rules! fan { () => { fan!(); fan!(); }; }\nfan!();\n",
+        )]);
+        let deep = "`fan!` expands to more than 128 nested macro calls";
+        let many = "the crate's macros expand to more than 10000 calls";
+        assert_eq!(
+            scan.unscanned,
+            [
+                unscanned("src/lib.rs", 1, deep),
+                unscanned("src/lib.rs", 1, many)
+            ]
+        );
     }
 
     /// A module whose `#[path]` depends on an unknown `cfg` is read from
