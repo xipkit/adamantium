@@ -53,3 +53,9 @@ pub use tasks::{
     Cancellation, ScopeError, Task, Tasks, blocking, concurrently, concurrently_ordered,
     concurrently_ordered_until, concurrently_unordered, concurrently_unordered_until,
 };
+
+// Runs the migration guide's examples as doctests, so its rewrites keep
+// compiling against the current API.
+#[cfg(all(doctest, feature = "tokio"))]
+#[doc = include_str!("../docs/migrating.md")]
+struct MigratingGuide;

@@ -83,6 +83,8 @@ The strict tier starts with [`arithmetic_side_effects`](https://clippy.rust-lang
 
 ## Skipping rules and paths
 
+Most findings in an existing async crate are `Arc<Mutex<T>>` and `tokio::spawn`. The [migration guide](docs/migrating.md) shows how to rewrite each with `Actor` and `Tasks`.
+
 To adopt the rules gradually, add a skip list to `Cargo.toml`:
 
 ```toml
