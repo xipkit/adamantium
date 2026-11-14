@@ -15,6 +15,8 @@
 //! ordered and unordered concurrent streams, and `blocking`.
 //! Disable default features to use the values, actors, and channels
 //! without a Tokio dependency, including on WASI.
+//! Enable the optional `tracing` feature for named task spans and warnings
+//! identifying unfinished named tasks when a scope's deadline expires.
 
 #![forbid(unsafe_code)]
 

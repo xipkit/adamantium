@@ -31,6 +31,12 @@ use crate::runtime::{Lock, Shared};
 ///
 /// Work that waits, such as a network call, happens in a task; the actor
 /// records its result afterwards.
+///
+/// Clones share ownership of the state. Storing a clone in its own state,
+/// directly or through other actors, creates a strong reference cycle that
+/// keeps the states alive after the last external handle is dropped. Cycles
+/// are not detected or collected; keep ownership acyclic or remove the
+/// cycle-forming handles before releasing the last external handle.
 pub struct Actor<S> {
     state: Shared<Lock<S>>,
 }

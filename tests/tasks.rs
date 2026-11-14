@@ -129,6 +129,21 @@ macro_rules! on_both_runtimes {
 }
 
 on_both_runtimes! {
+    async fn an_error_from_a_dropped_blocking_handle_is_reported_at_join() {
+        let mut tasks = Tasks::<&str>::new();
+        let (release, released) = std::sync::mpsc::channel();
+        let failed = tasks.spawn_blocking(move || {
+            released.recv_timeout(HUNG).unwrap();
+            Err::<(), _>("dropped blocking handle")
+        });
+        drop(failed);
+        release.send(()).unwrap();
+        assert_eq!(
+            timeout(HUNG, tasks.join(Ok(()))).await.unwrap(),
+            Err("dropped blocking handle")
+        );
+    }
+
     async fn an_error_dropped_during_join_is_reported() {
         let mut tasks = Tasks::<&'static str>::new();
         let (sent, received) = oneshot::channel();
@@ -630,21 +645,23 @@ async fn a_successful_scope_waits_for_every_task() {
 #[tokio::test(flavor = "multi_thread")]
 #[should_panic(expected = "kaboom")]
 async fn a_panic_resumes_where_the_value_is_asked_for() {
-    let _ = Tasks::<&str>::run(async |t| {
+    Tasks::<&str>::run(async |t| {
         let handle = t.spawn::<(), _>(async { panic!("kaboom") });
         t.value(handle).await
     })
-    .await;
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[should_panic(expected = "kaboom at join")]
 async fn a_panic_in_an_unwatched_task_resumes_at_join() {
-    let _ = Tasks::<&str>::run(async |t| {
+    Tasks::<&str>::run(async |t| {
         t.spawn::<(), _>(async { panic!("kaboom at join") });
         Ok(())
     })
-    .await;
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -840,7 +857,10 @@ fn concurrently_does_nothing_until_polled() {
 #[should_panic(expected = "Tokio 1.x runtime")]
 fn concurrently_needs_a_runtime_once_polled() {
     let work = pin!(concurrently(0..1, 1, |_| async { Ok::<_, &str>(()) }));
-    let _ = work.poll(&mut Context::from_waker(Waker::noop()));
+    assert!(
+        work.poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
 }
 
 // Each item goes straight into `f`, so only the iterator has to be `Send`.

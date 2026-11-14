@@ -41,6 +41,9 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
         .collect();
     for expected in [
         "unsafe_code",
+        "unused_must_use",
+        "clippy::let_underscore_future",
+        "clippy::let_underscore_must_use",
         "clippy::unwrap_used",
         "clippy::expect_used",
         "clippy::indexing_slicing",
@@ -761,6 +764,16 @@ fn init_writes_the_rules_into_a_package_and_is_idempotent() {
     );
     assert!(manifest.contains("[lints.clippy]\n"), "{manifest}");
     assert!(manifest.contains("unwrap_used = \"deny\""), "{manifest}");
+    for rule in [
+        "unused_must_use",
+        "let_underscore_future",
+        "let_underscore_must_use",
+    ] {
+        assert!(
+            manifest.contains(&format!("{rule} = \"deny\"")),
+            "{manifest}"
+        );
+    }
     assert!(
         manifest.contains("[profile.release]\noverflow-checks = true"),
         "{manifest}"
@@ -959,7 +972,7 @@ fn rules_as_toml_are_the_workspace_tables() {
         .unwrap();
     let toml = String::from_utf8(output.stdout).unwrap();
     assert!(toml.starts_with(
-        "[workspace.lints.rust]\nunsafe_code = \"forbid\"\n\n[workspace.lints.clippy]\n"
+        "[workspace.lints.rust]\nunsafe_code = \"forbid\"\nunused_must_use = \"deny\"\n\n[workspace.lints.clippy]\n"
     ));
     assert!(toml.contains("unwrap_used = \"deny\"\n"));
 }

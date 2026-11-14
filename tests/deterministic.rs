@@ -249,11 +249,44 @@ fn unsupported_primitives_cannot_silently_use_production_backends() {
         testing::check(config(), move || {
             let channel = channel.clone();
             async move {
-                let _ = channel.try_send(1);
+                channel.try_send(1).unwrap();
             }
         })
         .is_err()
     );
+}
+
+#[test]
+fn named_tasks_reject_the_harness_before_converting_names() {
+    struct Name(Arc<Mutex<bool>>);
+
+    impl From<Name> for adamantium::Str {
+        fn from(name: Name) -> Self {
+            *name.0.lock().unwrap() = true;
+            "foreign task".into()
+        }
+    }
+
+    for blocking in [false, true] {
+        let tasks = Arc::new(Mutex::new(Tasks::<()>::new()));
+        let converted = Arc::new(Mutex::new(false));
+        let observed = converted.clone();
+        let failure = testing::check(config(), move || {
+            let tasks = tasks.clone();
+            let name = Name(converted.clone());
+            async move {
+                let mut tasks = tasks.lock().unwrap();
+                if blocking {
+                    tasks.spawn_blocking_named(name, || Ok(()));
+                } else {
+                    tasks.spawn_named(name, async { Ok(()) });
+                }
+            }
+        })
+        .unwrap_err();
+        assert_eq!(failure.kind(), FailureKind::Panic);
+        assert!(!*observed.lock().unwrap());
+    }
 }
 
 #[tokio::test]
@@ -384,8 +417,9 @@ fn prepolled_task_scope_is_rejected_and_cleans_up_without_double_panic() {
     let cancellation = Cancellation::new();
     let signal = cancellation.clone();
     let mut future = Box::pin(async move {
-        let _ =
-            Tasks::<()>::run_until(signal, None, async |_| pending::<Result<(), ()>>().await).await;
+        Tasks::<()>::run_until(signal, None, async |_| pending::<Result<(), ()>>().await)
+            .await
+            .unwrap();
     });
     assert!(future.as_mut().now_or_never().is_none());
     let future = Mutex::new(Some(future));

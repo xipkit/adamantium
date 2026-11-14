@@ -22,6 +22,7 @@ publish = false
 # prints the same table, and a test keeps the two in step.
 [workspace.lints.rust]
 unsafe_code = "forbid"
+unused_must_use = "deny"
 
 [workspace.lints.clippy]
 await_holding_invalid_type = "deny"
@@ -37,6 +38,8 @@ exit = "deny"
 expect_used = "deny"
 future_not_send = "deny"
 indexing_slicing = "deny"
+let_underscore_future = "deny"
+let_underscore_must_use = "deny"
 mem_forget = "deny"
 panic = "deny"
 rc_buffer = "deny"
@@ -61,6 +64,7 @@ default = ["tokio"]
 tokio = ["dep:tokio", "dep:async-stream", "dep:futures-core"]
 serde = ["dep:serde", "indexmap/serde"]
 deterministic = ["tokio", "dep:shuttle", "dep:shuttle-engine", "dep:shuttle-std", "dep:shuttle-schedulers", "dep:serde", "dep:serde_json"]
+tracing = ["dep:tracing"]
 
 [dependencies]
 async-channel = "2"
@@ -77,6 +81,7 @@ shuttle-engine = { version = "=0.1.8", optional = true }
 shuttle-std = { version = "=0.1.5", optional = true }
 shuttle-schedulers = { version = "=0.1.1", optional = true }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"], optional = true }
+tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
 cbor4ii = { version = "1", features = ["serde1", "use_alloc"] }
@@ -86,6 +91,7 @@ im = "=15.1.0"
 serde_json = "1"
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt"] }
 
 [[bench]]
 name = "cow"
@@ -94,6 +100,10 @@ harness = false
 [[example]]
 name = "streaming"
 required-features = ["tokio"]
+
+[[example]]
+name = "task_diagnostics"
+required-features = ["tokio", "tracing"]
 
 [profile.release]
 overflow-checks = true
