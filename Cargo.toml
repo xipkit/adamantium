@@ -21,6 +21,7 @@ publish = false
 # prints the same table, and a test keeps the two in step.
 [workspace.lints.rust]
 unsafe_code = "forbid"
+unused_must_use = "deny"
 
 [workspace.lints.clippy]
 await_holding_invalid_type = "deny"
@@ -36,6 +37,8 @@ exit = "deny"
 expect_used = "deny"
 future_not_send = "deny"
 indexing_slicing = "deny"
+let_underscore_future = "deny"
+let_underscore_must_use = "deny"
 mem_forget = "deny"
 panic = "deny"
 rc_buffer = "deny"

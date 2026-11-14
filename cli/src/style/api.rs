@@ -247,8 +247,9 @@ pub(crate) fn api_key() -> Result<String> {
                 break;
             }
             if started.elapsed() >= Duration::from_secs(10) {
-                let _ = child.kill();
-                let _ = child.wait();
+                // Report the timeout below even if cleanup fails.
+                drop(child.kill());
+                drop(child.wait());
                 bail!("Keychain lookup timed out; set OPENAI_API_KEY instead");
             }
             thread::sleep(Duration::from_millis(50));
