@@ -357,7 +357,7 @@ impl<E: Send + 'static> Tasks<E> {
     }
 
     /// Runs a scope until completion, cancellation, or an absolute deadline.
-    /// Pass `None` for no deadline. A deadline needs Tokio's time driver.
+    /// Pass `None` for no deadline. A deadline uses [`crate::time`].
     /// The body and children can observe clones of `cancellation` themselves.
     ///
     /// A request already present at a poll wins over polling the body, including

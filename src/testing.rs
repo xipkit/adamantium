@@ -6,7 +6,9 @@
 //! [`parallel`] also supplies independent workers. Blocking closures model the
 //! queued/started boundary: abort can prevent entry, but started work finishes.
 //! Replace actual blocking I/O with fixtures using modeled primitives.
-//! Virtual time and OS signals remain unsupported; pass `None` for deadlines.
+//! [`crate::time`] drives virtual deadlines without wall-clock waits. Time advances
+//! to the earliest pending deadline only when no application task can run.
+//! OS signals remain unsupported.
 //! Outside a harness execution, enabling the feature leaves production behavior
 //! intact, including ordinary `#[tokio::test]` tests in the same build.
 //!
@@ -61,7 +63,8 @@ use shuttle::scheduler::{RandomScheduler, ReplayScheduler, Schedule, Scheduler, 
 use crate::runtime::execution::Execution;
 
 const ENGINE: &str = "shuttle=0.9.10;engine=0.1.8;std=0.1.5;schedulers=0.1.1";
-const FORMAT: u32 = 1;
+// The clock driver changes task identities and scheduling choices in v1 traces.
+const FORMAT: u32 = 2;
 
 /// Bounds for seeded exploration. Every execution gets fresh factory state.
 #[derive(Clone, Copy, Debug)]
@@ -320,7 +323,8 @@ impl<S: Scheduler> Scheduler for Recording<S> {
         current: Option<TaskId>,
         yielding: bool,
     ) -> Option<TaskId> {
-        let task = self.scheduler.next_task(runnable, current, yielding)?;
+        let runnable = crate::runtime::clock::runnable(runnable);
+        let task = self.scheduler.next_task(&runnable, current, yielding)?;
         lock(&self.trace).record.steps.push(Some(usize::from(task)));
         Some(task)
     }
@@ -370,7 +374,10 @@ where
         .ungraceful_shutdown_config
         .continuation_function_behavior = shuttle::ContinuationFunctionBehavior::Drop;
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        shuttle::Runner::new(scheduler, engine).run(move || shuttle::future::block_on(factory()));
+        shuttle::Runner::new(scheduler, engine).run(move || {
+            crate::runtime::clock::start();
+            shuttle::future::block_on(factory());
+        });
     }));
     let record = lock(&trace).record.clone();
     let kind = if original.as_ref().is_some_and(|r| r.steps != record.steps) {

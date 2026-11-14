@@ -12,6 +12,8 @@ use std::{
 };
 
 #[cfg(feature = "deterministic")]
+pub(crate) mod clock;
+#[cfg(feature = "deterministic")]
 pub(crate) mod execution;
 
 pub(crate) mod queue;
@@ -71,7 +73,7 @@ impl World {
     }
 }
 
-#[cfg(feature = "tokio")]
+#[cfg(all(feature = "signal", any(unix, windows)))]
 pub(crate) fn production_only(_primitive: &str) {
     #[cfg(feature = "deterministic")]
     assert!(

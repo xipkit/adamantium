@@ -59,7 +59,7 @@ impl Backoff {
 
 /// Calls `attempt` until its future succeeds, waiting as `backoff` says after
 /// each failure, until `cancellation` is requested or the absolute `deadline`
-/// passes. Pass `None` for no deadline. Waits need Tokio's time driver.
+/// passes. Pass `None` for no deadline. Waits use [`crate::time`].
 ///
 /// Returns the first success, or [`ScopeError::Failed`] with the last error
 /// once the backoff's attempts run out. Shutdown ends both an attempt in

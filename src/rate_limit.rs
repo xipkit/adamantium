@@ -50,7 +50,7 @@ impl RateLimit {
 
     /// Waits for room under the limit, then runs the future `work` returns,
     /// until `cancellation` is requested or the absolute `deadline` passes.
-    /// Pass `None` for no deadline. Waits need Tokio's time driver.
+    /// Pass `None` for no deadline. Waits use [`crate::time`].
     ///
     /// The call counts against the limit from the moment `work` is called.
     /// Shutdown ends the wait for room, without taking any, or drops the

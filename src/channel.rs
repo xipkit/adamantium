@@ -365,7 +365,7 @@ impl<T> Sender<T> {
 
     /// Sends a value, waiting while the channel is full, until
     /// `cancellation` is requested or the absolute `deadline` passes. Pass
-    /// `None` for no deadline. A deadline needs Tokio's time driver.
+    /// `None` for no deadline. A deadline uses [`crate::time`].
     ///
     /// Every failure hands the value back in [`SendError`]. A request
     /// already present when the call is made, or at any later poll, wins
@@ -489,7 +489,7 @@ impl<T> Receiver<T> {
 
     /// Receives the next value, waiting while the channel is empty, until
     /// `cancellation` is requested or the absolute `deadline` passes. Pass
-    /// `None` for no deadline. A deadline needs Tokio's time driver.
+    /// `None` for no deadline. A deadline uses [`crate::time`].
     ///
     /// A request already present when the call is made, or at any later
     /// poll, wins over a queued message, and cancellation wins over an
