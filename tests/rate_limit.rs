@@ -1,11 +1,13 @@
 #![cfg(feature = "tokio")]
 
+use adamantium::time::{self, sleep, sleep_until};
 use adamantium::{Cancellation, RateLimit, ScopeError, concurrently};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::time::{Duration, Instant, sleep, sleep_until};
+use std::time::Duration;
+use tokio::time::Instant;
 
 const HOUR: Duration = Duration::from_secs(3600);
 
@@ -39,7 +41,7 @@ impl Drop for Dropped {
 async fn lets_a_burst_through_then_waits_for_the_window_to_move() {
     let limit = RateLimit::new(2, secs(10));
     let cancellation = Cancellation::new();
-    let start = Instant::now();
+    let start = time::now();
     let mut starts = Vec::new();
     for _ in 0..5 {
         call(&limit, &cancellation).await.unwrap();
@@ -56,7 +58,7 @@ async fn an_idle_limit_allows_one_full_window_and_no_more() {
         call(&limit, &cancellation).await.unwrap();
     }
     sleep(HOUR).await;
-    let start = Instant::now();
+    let start = time::now();
     let mut starts = Vec::new();
     for _ in 0..4 {
         call(&limit, &cancellation).await.unwrap();
@@ -69,7 +71,7 @@ async fn an_idle_limit_allows_one_full_window_and_no_more() {
 async fn zero_permits_allows_one() {
     let limit = RateLimit::new(0, secs(10));
     let cancellation = Cancellation::new();
-    let start = Instant::now();
+    let start = time::now();
     call(&limit, &cancellation).await.unwrap();
     call(&limit, &cancellation).await.unwrap();
     assert_eq!(start.elapsed(), secs(10));
@@ -79,7 +81,7 @@ async fn zero_permits_allows_one() {
 async fn clones_share_one_limit_across_concurrent_work() {
     let limit = RateLimit::new(2, secs(1));
     let cancellation = Cancellation::new();
-    let start = Instant::now();
+    let start = time::now();
     let mut starts = concurrently(0..7, 7, |_| {
         let (limit, cancellation) = (limit.clone(), cancellation.clone());
         async move {
@@ -121,7 +123,7 @@ async fn cancellation_ends_the_wait_for_room() {
     let limit = RateLimit::new(1, HOUR);
     let cancellation = Cancellation::new();
     call(&limit, &cancellation).await.unwrap();
-    let start = Instant::now();
+    let start = time::now();
     let mut ran = false;
     let (result, ()) = tokio::join!(
         limit.run_until(&cancellation, None, || {
@@ -140,7 +142,7 @@ async fn the_deadline_ends_the_wait_for_room() {
     let limit = RateLimit::new(1, HOUR);
     let cancellation = Cancellation::new();
     call(&limit, &cancellation).await.unwrap();
-    let start = Instant::now();
+    let start = time::now();
     let result = limit
         .run_until(&cancellation, Some(start + secs(5)), || async {
             Ok::<_, ()>(())
@@ -155,7 +157,7 @@ async fn a_wait_past_the_end_of_time_still_ends_when_cancelled() {
     let limit = RateLimit::new(1, Duration::MAX);
     let cancellation = Cancellation::new();
     call(&limit, &cancellation).await.unwrap();
-    let start = Instant::now();
+    let start = time::now();
     let (result, ()) = tokio::join!(
         call(&limit, &cancellation),
         cancel_at(&cancellation, start + secs(5)),
@@ -169,7 +171,7 @@ async fn cancellation_drops_work_in_flight() {
     let limit = RateLimit::new(1, secs(1));
     let cancellation = Cancellation::new();
     let dropped = Arc::new(AtomicBool::new(false));
-    let start = Instant::now();
+    let start = time::now();
     let (result, ()) = tokio::join!(
         limit.run_until(&cancellation, None, || {
             let guard = Dropped(Arc::clone(&dropped));
@@ -201,7 +203,7 @@ async fn a_request_made_before_the_call_takes_no_room() {
     assert_eq!(result, Err(ScopeError::Cancelled));
     assert!(!ran);
 
-    let start = Instant::now();
+    let start = time::now();
     call(&limit, &Cancellation::new()).await.unwrap();
     assert_eq!(start.elapsed(), Duration::ZERO);
 }

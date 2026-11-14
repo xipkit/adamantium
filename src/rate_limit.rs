@@ -1,8 +1,10 @@
 use std::{collections::VecDeque, future::Future, pin::pin};
 
-use tokio::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::{Actor, Cancellation, ScopeError, tasks::shutdown};
+use tokio::time::Instant;
+
+use crate::{Actor, Cancellation, ScopeError, tasks::shutdown, time};
 
 /// Lets at most a number of calls start in any window of a given length.
 ///
@@ -14,7 +16,7 @@ use crate::{Actor, Cancellation, ScopeError, tasks::shutdown};
 ///
 /// ```
 /// use adamantium::{Cancellation, RateLimit, concurrently};
-/// use tokio::time::Duration;
+/// use std::time::Duration;
 /// # async fn fetch(n: u32) -> Result<u32, std::io::Error> { Ok(n) }
 /// # #[tokio::main] async fn main() -> Result<(), adamantium::ScopeError<std::io::Error>> {
 /// let cancellation = Cancellation::new();
@@ -75,7 +77,7 @@ impl RateLimit {
             let room = async {
                 match wake {
                     None => {}
-                    Some(Some(wake)) => tokio::time::sleep_until(wake).await,
+                    Some(Some(wake)) => time::sleep_until(wake).await,
                     Some(None) => std::future::pending().await,
                 }
             };
@@ -107,7 +109,7 @@ impl RateLimit {
             // order they are admitted and time spent waiting for the lock
             // doesn't count against the window. Expiry looks only at the
             // front, which relies on that order.
-            let now = Instant::now();
+            let now = time::now();
             while let Some(start) = started.front()
                 && start.checked_add(self.per).is_some_and(|end| end <= now)
             {

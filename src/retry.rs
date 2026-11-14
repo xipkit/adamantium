@@ -1,8 +1,10 @@
 use std::{future::Future, pin::pin};
 
-use tokio::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::{Cancellation, ScopeError, tasks::shutdown};
+use tokio::time::Instant;
+
+use crate::{Cancellation, ScopeError, tasks::shutdown, time};
 
 /// How long [`retry`] waits between attempts, and how many it makes.
 ///
@@ -71,7 +73,7 @@ impl Backoff {
 ///
 /// ```
 /// use adamantium::{Backoff, Cancellation, retry};
-/// use tokio::time::Duration;
+/// use std::time::Duration;
 /// # #[tokio::main] async fn main() {
 /// let cancellation = Cancellation::new();
 /// let backoff = Backoff::exponential(Duration::from_millis(1), Duration::from_millis(8));
@@ -136,7 +138,7 @@ where
         tokio::select! {
             biased;
             reason = &mut stop => return Err(reason.scope_error()),
-            () = tokio::time::sleep(delay) => {}
+            () = time::sleep(delay) => {}
         }
         delay = backoff.after(delay);
     }
