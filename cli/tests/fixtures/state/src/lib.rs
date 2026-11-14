@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use std::cell::{Cell, RefCell}; // disallowed_types
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::thread::LocalKey;
@@ -9,8 +8,8 @@ use adamantium::{Actor, Array, Str};
 
 thread_local! {
     static NAME: Str = Str::from("worker");
-    static COUNT: Cell<usize> = const { Cell::new(0) }; // disallowed_types
-    static NAMES: RefCell<Array<Str>> = RefCell::new(Array::new()); // disallowed_types
+    static COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; // disallowed_types
+    static NAMES: std::cell::RefCell<Array<Str>> = std::cell::RefCell::new(Array::new()); // disallowed_types
 }
 
 fn counts() -> usize {
