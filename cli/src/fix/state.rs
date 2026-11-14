@@ -1643,6 +1643,10 @@ impl<'a> Walker<'a> {
                     (call.method == "with" || call.method == "read")
                         && call.args.iter().any(|candidate| is(candidate, arg))
                 }
+                (Node::Expr(Expr::Call(call)), Node::Expr(arg)) => {
+                    callee_name(&call.func).is_some_and(|name| name == "with" || name == "read")
+                        && call.args.iter().any(|candidate| is(candidate, arg))
+                }
                 _ => false,
             })
     }
@@ -1799,6 +1803,18 @@ impl<'a> Walker<'a> {
                 TokenTree::Punct(_) => {}
             }
         }
+    }
+}
+
+/// The last segment of a call's path, as `read` in `Actor::read(&a, f)`.
+fn callee_name(func: &Expr) -> Option<String> {
+    match func {
+        Expr::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string()),
+        _ => None,
     }
 }
 
@@ -2112,6 +2128,12 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
                 self.leaves = true;
             }
             Expr::MethodCall(call) if LOCKS.contains(&call.method.to_string().as_str()) => {
+                self.locks = true;
+            }
+            // `Actor::read(&a, f)` and `Mutex::lock(&m)` take locks too.
+            Expr::Call(call)
+                if callee_name(&call.func).is_some_and(|name| LOCKS.contains(&name.as_str())) =>
+            {
                 self.locks = true;
             }
             Expr::Call(call) if self.walker.local(&call.func).is_some() => {
@@ -2864,6 +2886,20 @@ mod tests {
         assert!(
             fixed.contains("m.with(|m| { consume(m.clone()); });"),
             "{fixed}"
+        );
+    }
+
+    #[test]
+    fn associated_function_lock_calls_count() {
+        refused(
+            "fn f(a: &adamantium::Actor<u8>) { let m = Arc::new(Mutex::new(0u8)); *m.lock().unwrap() += adamantium::Actor::read(a, |v| *v); }",
+            "m",
+            Reason::TwoLocks,
+        );
+        refused(
+            "fn f(a: &adamantium::Actor<u8>) { adamantium::Actor::with(a, |_| { let m = Arc::new(Mutex::new(0)); *m.lock().unwrap() += 1; }); }",
+            "m",
+            Reason::InsideActor,
         );
     }
 
