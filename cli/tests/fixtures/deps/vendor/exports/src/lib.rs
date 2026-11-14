@@ -52,12 +52,17 @@ items! {
     pub fn second() {}
 }
 
-// Counted in macros: the `unsafe` of the attribute.
+// Counted in macros: the bare attribute, and the `unsafe` of the other,
+// but not the one a `cfg_attr` can't add.
 macro_rules! export {
-    ($section:ident) => {
+    ($name:ident, $section:ident, $other:ident) => {
+        #[no_mangle]
+        pub extern "C" fn $name() {}
         #[unsafe(link_section = ".data.exported")]
         pub static $section: u32 = 0;
+        #[cfg_attr(any(), no_mangle)]
+        pub fn $other() {}
     };
 }
 
-export!(EXPORTED);
+export!(exported, EXPORTED, other);

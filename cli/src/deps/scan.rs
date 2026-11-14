@@ -75,7 +75,8 @@ pub struct UnsafeCounts {
     /// those a `cfg_attr` adds.
     pub attributes: usize,
     /// `unsafe` in macro bodies that syn can't parse as code, such as
-    /// `macro_rules!` definitions.
+    /// `macro_rules!` definitions, and the attributes `unsafe_code` reports
+    /// that are written there without `unsafe(...)`.
     pub in_macros: usize,
 }
 
@@ -1435,6 +1436,18 @@ impl FileVisitor<'_, '_> {
                     self.scanner.scan.unsafe_code.in_macros += 1;
                 }
                 TokenTree::Group(group) => {
+                    if group.delimiter() == Delimiter::Bracket
+                        && is_attribute(previous.as_ref(), before.as_ref())
+                        && let Ok(meta) = syn::parse2::<Meta>(group.stream())
+                    {
+                        // An attribute written as `unsafe(...)` counts as
+                        // the `unsafe` in it.
+                        self.scanner.scan.unsafe_code.in_macros += self
+                            .unsafe_attributes(meta)
+                            .iter()
+                            .filter(|meta| !meta.path().is_ident("unsafe"))
+                            .count();
+                    }
                     if group.delimiter() == Delimiter::Parenthesis
                         && let Some(TokenTree::Ident(name)) = &previous
                     {
@@ -1577,6 +1590,16 @@ impl FileVisitor<'_, '_> {
         visit(self);
         self.blocks.pop();
     }
+}
+
+/// Whether a bracketed group that follows these tokens is an attribute:
+/// `#[...]` or `#![...]`.
+fn is_attribute(previous: Option<&TokenTree>, before: Option<&TokenTree>) -> bool {
+    is_punct(previous, '#') || (is_punct(previous, '!') && is_punct(before, '#'))
+}
+
+fn is_punct(tree: Option<&TokenTree>, char: char) -> bool {
+    matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == char)
 }
 
 /// The names that patterns bind.
