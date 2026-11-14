@@ -356,13 +356,20 @@ fn check_reports_spanless_lint_warnings_once_in_json_and_text() {
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-/// Runs `check --format sarif` on `dir` and returns its exit code and log,
-/// or an error if the log does not match the SARIF 2.1.0 schema.
-fn check_sarif(dir: &Path, env: &[(&str, &Path)]) -> TestResult<(Option<i32>, serde_json::Value)> {
+/// Runs `check --format sarif` on `dir`, passing `cargo_args` on to Clippy,
+/// and returns its exit code and log, or an error if the log does not match
+/// the SARIF 2.1.0 schema.
+fn check_sarif(
+    dir: &Path,
+    env: &[(&str, &Path)],
+    cargo_args: &[&str],
+) -> TestResult<(Option<i32>, serde_json::Value)> {
     let mut command = adamantium();
     command
         .args(["adamantium", "check", "--format", "sarif"])
-        .arg(dir);
+        .arg(dir)
+        .arg("--")
+        .args(cargo_args);
     for (name, value) in env {
         command.env(name, value);
     }
@@ -490,7 +497,7 @@ fn check_reports_the_violations_fixture_as_sarif() {
     expected.sort();
     assert!(expected.len() > 10, "{report}");
 
-    let (code, log) = check_sarif(&fixture("violations"), &[]).unwrap();
+    let (code, log) = check_sarif(&fixture("violations"), &[], &[]).unwrap();
     assert_eq!(code, Some(1), "{log:#}");
     assert_eq!(log["version"], "2.1.0");
     let run = &log["runs"][0];
@@ -564,7 +571,7 @@ fn sarif_uris_are_relative_to_the_git_repository_root() {
     let workspace = repository.path().join("nested dir/ws");
     copy_dir(&fixture("workspace"), &workspace).unwrap();
 
-    let (code, log) = check_sarif(&workspace.join("member"), &[]).unwrap();
+    let (code, log) = check_sarif(&workspace.join("member"), &[], &[]).unwrap();
     assert_eq!(code, Some(1), "{log:#}");
     let base = log["runs"][0]["originalUriBaseIds"]["%SRCROOT%"]["uri"]
         .as_str()
@@ -596,6 +603,54 @@ fn sarif_uris_are_relative_to_the_git_repository_root() {
     );
 }
 
+/// `--manifest-path` after `--` makes Clippy check another workspace, whose
+/// root its file names are relative to.
+#[test]
+fn sarif_uris_follow_a_forwarded_manifest_path() {
+    let repository = tempfile::tempdir().unwrap();
+    let status = Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(repository.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let outer = repository.path().join("outer");
+    fs::create_dir_all(outer.join("src")).unwrap();
+    fs::write(outer.join("src/lib.rs"), "").unwrap();
+    fs::write(
+        outer.join("Cargo.toml"),
+        "[package]\nname = \"outer\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[profile.release]\noverflow-checks = true\n",
+    )
+    .unwrap();
+    copy_dir(&fixture("workspace"), &outer.join("inner")).unwrap();
+
+    for args in [
+        ["--manifest-path", "inner/Cargo.toml"].as_slice(),
+        ["--manifest-path=inner/Cargo.toml"].as_slice(),
+    ] {
+        let (code, log) = check_sarif(&outer, &[], args).unwrap();
+        assert_eq!(code, Some(1), "{args:?}: {log:#}");
+        assert_eq!(
+            sarif_artifacts(&log).unwrap(),
+            [
+                (
+                    "clippy::indexing_slicing".to_owned(),
+                    "outer/inner/src/lib.rs".to_owned()
+                ),
+                (
+                    "clippy::string_slice".to_owned(),
+                    "outer/inner/shared.rs".to_owned()
+                ),
+                (
+                    "clippy::unwrap_used".to_owned(),
+                    "outer/inner/member/src/lib.rs".to_owned()
+                ),
+            ],
+            "{args:?}"
+        );
+    }
+}
+
 /// Outside a git repository, URIs are relative to the workspace root.
 #[test]
 fn sarif_uris_outside_git_are_relative_to_the_workspace() {
@@ -603,7 +658,8 @@ fn sarif_uris_outside_git_are_relative_to_the_workspace() {
     let workspace = dir.path().join("ws");
     copy_dir(&fixture("workspace"), &workspace).unwrap();
 
-    let (code, log) = check_sarif(&workspace, &[("GIT_CEILING_DIRECTORIES", dir.path())]).unwrap();
+    let (code, log) =
+        check_sarif(&workspace, &[("GIT_CEILING_DIRECTORIES", dir.path())], &[]).unwrap();
     assert_eq!(code, Some(1), "{log:#}");
     let base = log["runs"][0]["originalUriBaseIds"]["%SRCROOT%"]["uri"]
         .as_str()
@@ -639,7 +695,8 @@ fn check_reports_build_errors_as_sarif_notifications() {
         "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[profile.release]\noverflow-checks = true\n",
     )
     .unwrap();
-    let (code, log) = check_sarif(dir.path(), &[("GIT_CEILING_DIRECTORIES", dir.path())]).unwrap();
+    let (code, log) =
+        check_sarif(dir.path(), &[("GIT_CEILING_DIRECTORIES", dir.path())], &[]).unwrap();
     assert_eq!(code, Some(2), "{log:#}");
     let run = &log["runs"][0];
     assert_eq!(run["results"], serde_json::json!([]));

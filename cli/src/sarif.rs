@@ -33,11 +33,20 @@ pub struct Roots {
 }
 
 impl Roots {
-    /// Finds the workspace and repository roots for a project directory.
-    pub fn locate(root: &Path) -> Result<Self> {
-        let output = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
-            .current_dir(root)
-            .args(["locate-project", "--workspace", "--message-format", "plain"])
+    /// Finds the workspace and repository roots for a project directory,
+    /// following a `--manifest-path` among the arguments for `cargo clippy`.
+    pub fn locate(root: &Path, cargo_args: &[String]) -> Result<Self> {
+        let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+        command.current_dir(root).args([
+            "locate-project",
+            "--workspace",
+            "--message-format",
+            "plain",
+        ]);
+        if let Some(manifest) = manifest_path(cargo_args) {
+            command.args(["--manifest-path", manifest]);
+        }
+        let output = command
             .stdin(Stdio::null())
             .stderr(Stdio::inherit())
             .output()
@@ -54,6 +63,21 @@ impl Roots {
         let source = repository(&workspace).unwrap_or_else(|| workspace.clone());
         Ok(Self { workspace, source })
     }
+}
+
+/// The manifest that `--manifest-path` selects among arguments for `cargo
+/// clippy`. Arguments after `--` go to Clippy itself, not to Cargo.
+fn manifest_path(cargo_args: &[String]) -> Option<&str> {
+    let mut args = cargo_args.iter().take_while(|arg| *arg != "--");
+    while let Some(arg) = args.next() {
+        if arg == "--manifest-path" {
+            return args.next().map(String::as_str);
+        }
+        if let Some(path) = arg.strip_prefix("--manifest-path=") {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// The root of the git repository holding `dir`, or `None` outside one or
@@ -401,6 +425,25 @@ mod tests {
             .map(|result| result["ruleIndex"].as_u64().unwrap())
             .collect();
         assert_eq!(indexes, [0, 1, 0]);
+    }
+
+    #[test]
+    fn manifest_path_is_read_from_cargo_arguments_only() {
+        let args =
+            |args: &[&str]| -> Vec<String> { args.iter().map(|arg| (*arg).to_owned()).collect() };
+        assert_eq!(manifest_path(&args(&["--release"])), None);
+        assert_eq!(
+            manifest_path(&args(&["--manifest-path", "a/Cargo.toml", "-p", "a"])),
+            Some("a/Cargo.toml")
+        );
+        assert_eq!(
+            manifest_path(&args(&["--manifest-path=b/Cargo.toml"])),
+            Some("b/Cargo.toml")
+        );
+        assert_eq!(
+            manifest_path(&args(&["--", "--manifest-path", "a/Cargo.toml"])),
+            None
+        );
     }
 
     #[test]

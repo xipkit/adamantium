@@ -126,7 +126,10 @@ pub fn run(path: &Path, cargo_args: &[String], format: ReportFormat) -> Result<E
     let report = check(&root, cargo_args, matches!(format, ReportFormat::Text))?;
     match format {
         ReportFormat::Json => print_json(&report)?,
-        ReportFormat::Sarif => print_json(&sarif::log(&report, &sarif::Roots::locate(&root)?))?,
+        ReportFormat::Sarif => print_json(&sarif::log(
+            &report,
+            &sarif::Roots::locate(&root, cargo_args)?,
+        ))?,
         ReportFormat::Text => {
             let mut stderr = io::stderr().lock();
             let skipped: usize = report.skipped.values().sum();
