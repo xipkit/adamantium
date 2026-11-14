@@ -16,8 +16,8 @@ allow-dbg-in-tests = true
 
 disallowed-types = [
   { path = "std::rc::Rc", reason = "shared identity; use a value, or adamantium::Actor for state that tasks share" },
-  { path = "std::rc::Weak", reason = "a weak reference implies a cycle, and values can't form one" },
-  { path = "std::sync::Weak", reason = "a weak reference implies a cycle, and values can't form one" },
+  { path = "std::rc::Weak", reason = "weak references are outside Adamantium's ownership model" },
+  { path = "std::sync::Weak", reason = "weak references are outside Adamantium's ownership model" },
   { path = "std::cell::RefCell", reason = "borrow checking at runtime panics; use a value" },
   { path = "std::cell::Cell", reason = "interior mutability without a lock; use a value" },
   { path = "std::sync::Mutex", reason = "use adamantium::Actor, which never holds its lock across an await or inside another actor" },
@@ -63,6 +63,6 @@ disallowed-methods = [
   { path = "std::thread::sleep", reason = "blocks a worker thread; use tokio::time::sleep" },
   { path = "std::mem::forget", reason = "leaks" },
   { path = "std::boxed::Box::leak", reason = "leaks" },
-  { path = "std::sync::Arc::downgrade", reason = "a weak reference implies a cycle, and values can't form one" },
+  { path = "std::sync::Arc::downgrade", reason = "weak references are outside Adamantium's ownership model" },
   { path = "futures::executor::block_on", reason = "blocks a worker thread", allow-invalid = true },
 ]
