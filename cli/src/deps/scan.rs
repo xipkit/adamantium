@@ -1148,7 +1148,10 @@ impl<'a> Scanner<'a> {
     fn library(&mut self, name: &str) -> Option<&Scanner<'a>> {
         if !self.libraries.contains_key(name) {
             let krate = *self.krate.dependencies.get(name)?;
-            let ident = syn::parse_str::<Ident>(name).ok()?;
+            // A dependency named like a keyword, as `r#async`, is written raw.
+            let ident = syn::parse_str::<Ident>(name)
+                .or_else(|_| syn::parse_str::<Ident>(&format!("r#{name}")))
+                .ok()?;
             let mut reader = Scanner::new(krate, self.disallowed);
             reader.exports = Some(Vec::new());
             if !krate.cfg.proc_macro {
@@ -4848,6 +4851,43 @@ pick! { yes { pub unsafe fn f() {} } }
         );
         assert_eq!(scan.unscanned, []);
         assert_eq!(scan.unsafe_code.functions, 1);
+    }
+
+    /// A dependency named like a keyword, as `r#async`, has its macros
+    /// called, and `$crate` in them names it.
+    #[test]
+    fn macros_of_dependencies_named_like_keywords_are_expanded() {
+        let keyword = Library {
+            name: "async",
+            features: &[],
+            files: &[(
+                "lib.rs",
+                r"#[macro_export]
+macro_rules! outer {
+    ($name:ident) => { $crate::inner! { yes { mod $name; } } };
+}
+
+#[macro_export]
+macro_rules! inner {
+    (yes { $($body:tt)* }) => { $($body)* };
+}
+",
+            )],
+        };
+        let scan = scan_with(
+            &[
+                (
+                    "lib.rs",
+                    "#[macro_use]\nextern crate r#async;\n\nouter! { first }\nr#async::outer! { second }\n",
+                ),
+                ("first.rs", "pub unsafe fn a() {}\n"),
+                ("second.rs", "pub unsafe fn b() {}\n"),
+            ],
+            false,
+            &[keyword],
+        );
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 2);
     }
 
     /// `$crate::inner!` in another crate's macro calls that crate's
