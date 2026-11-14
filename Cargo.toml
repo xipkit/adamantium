@@ -6,6 +6,7 @@ exclude = [
     "cli/tests/fixtures/workspace",
     "cli/tests/fixtures/skips",
     "cli/tests/fixtures/runtime",
+    "cli/tests/fixtures/spawns",
     "cli/tests/fixtures/unstable",
     "cli/tests/fixtures/paths",
     "cli/tests/fixtures/indexing",

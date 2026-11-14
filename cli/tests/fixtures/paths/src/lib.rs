@@ -2,6 +2,8 @@
 
 #[cfg(feature = "async-channel")]
 use async_channel as _;
+#[cfg(feature = "async-std")]
+use async_std as _;
 #[cfg(feature = "crossbeam-channel")]
 use crossbeam_channel as _;
 #[cfg(feature = "flume")]
@@ -10,5 +12,7 @@ use flume as _;
 use futures as _;
 #[cfg(feature = "parking_lot")]
 use parking_lot as _;
+#[cfg(feature = "smol")]
+use smol as _;
 #[cfg(feature = "tokio")]
 use tokio as _;
