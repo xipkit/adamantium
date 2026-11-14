@@ -887,7 +887,7 @@ struct Group {
     /// Whether a guard of it is taken in a closure, an async block or
     /// outside any function.
     escapes: bool,
-    /// The names in the statements that become its callbacks.
+    /// The names of the functions and methods its callbacks might run.
     callbacks: BTreeSet<String>,
 }
 
@@ -1879,15 +1879,21 @@ impl<'a> Walker<'a> {
             entry.used = true;
         }
         match self.guard_edit(var, guard) {
-            Ok(edit) => {
-                self.lock_site(var, &edit);
+            Ok((edit, runs)) => {
+                self.lock_site(var, runs);
                 self.add_edit(var, edit);
             }
             Err(reason) => self.refuse(var, reason),
         }
     }
 
-    fn guard_edit(&mut self, var: usize, guard: &'a Expr) -> Result<Edit, Reason> {
+    /// The edit that turns `guard`'s statement into an actor call, and the
+    /// names of the functions and methods its callback might run.
+    fn guard_edit(
+        &mut self,
+        var: usize,
+        guard: &'a Expr,
+    ) -> Result<(Edit, BTreeSet<String>), Reason> {
         if self.inside_actor() {
             return Err(Reason::InsideActor);
         }
@@ -1929,6 +1935,7 @@ impl<'a> Walker<'a> {
         if inside.calls {
             return Err(Reason::Calls);
         }
+        let Scan { runs, .. } = inside;
         // Method lookup on a guard starts at the guard and reaches the state
         // through `Deref`; on the callback's `&mut T` it would start at the
         // reference and could pick another trait's method. Starting at `*m`
@@ -1961,7 +1968,7 @@ impl<'a> Walker<'a> {
         if let Some(expr) = plan.narrow {
             let range = self.text.of(expr).ok_or(UNLOCATED)?;
             let replacement = format!("{holder}.read(|{name}| {})", substitute(range.clone())?);
-            return Ok(self.edit(range, replacement));
+            return Ok((self.edit(range, replacement), runs));
         }
         let method = plan.mode.method();
         let (range, replacement) = match plan.root {
@@ -2028,7 +2035,7 @@ impl<'a> Walker<'a> {
                 (range, format!("{holder}.{method}(|{name}| {body})"))
             }
         };
-        Ok(self.edit(range, replacement))
+        Ok((self.edit(range, replacement), runs))
     }
 
     /// Whether the node on top of the stack is inside a closure passed to a
@@ -2531,6 +2538,10 @@ struct Scan<'w, 'a> {
     leaves: bool,
     calls: bool,
     unfollowed: Option<&'static str>,
+    /// The names of the functions and methods the code might run: method
+    /// names and every path that doesn't name a local. A field or a local
+    /// doesn't run anything.
+    runs: BTreeSet<String>,
 }
 
 impl<'w, 'a> Scan<'w, 'a> {
@@ -2545,6 +2556,7 @@ impl<'w, 'a> Scan<'w, 'a> {
             leaves: false,
             calls: false,
             unfollowed: None,
+            runs: BTreeSet::new(),
         }
     }
 
@@ -2588,6 +2600,20 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
     fn visit_expr(&mut self, expr: &'a Expr) {
         if is(expr, self.guard) {
             return;
+        }
+        match expr {
+            Expr::MethodCall(call) => {
+                self.runs.insert(bare(&call.method));
+            }
+            Expr::Path(path) if self.walker.local(expr).is_none() => {
+                self.runs.extend(
+                    path.path
+                        .segments
+                        .iter()
+                        .map(|segment| bare(&segment.ident)),
+                );
+            }
+            _ => {}
         }
         match expr {
             Expr::Await(_) if self.deferred == 0 => self.awaits = true,

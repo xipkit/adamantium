@@ -391,17 +391,11 @@ impl<'a> Walker<'a> {
     }
 
     /// Notes where a guard of `var` becomes a callback: the function that
-    /// takes it and the names its statement uses.
-    pub(super) fn lock_site(&mut self, var: usize, edit: &crate::fix::Edit) {
+    /// takes it and the names of what the callback might run.
+    pub(super) fn lock_site(&mut self, var: usize, runs: BTreeSet<String>) {
         let Some(group) = self.group_of(var) else {
             return;
         };
-        let mut names = BTreeSet::new();
-        if let Some(text) = self.text.get(edit.start..edit.end)
-            && let Ok(tokens) = text.parse::<TokenStream>()
-        {
-            idents(tokens, &mut names);
-        }
         let function = self.functions.last().cloned();
         let deferred = function.as_ref().is_none_or(|(_, depth)| {
             self.stack
@@ -410,7 +404,7 @@ impl<'a> Walker<'a> {
                 .any(|node| matches!(node, super::Node::Expr(Expr::Closure(_) | Expr::Async(_))))
         });
         if let Some(group) = self.groups.get_mut(group) {
-            group.callbacks.extend(names);
+            group.callbacks.extend(runs);
             match function {
                 Some((name, _)) if !deferred => {
                     group.functions.insert(name);
@@ -743,6 +737,18 @@ mod tests {
             "{fixed}"
         );
         assert!(fixed.contains("hits: Arc<Mutex<u64>>"), "{fixed}");
+    }
+
+    #[test]
+    fn a_getter_named_like_its_field_is_rewritten() {
+        let (fixed, refusals) = fix(
+            &format!(
+                "{COUNTER}impl Counter {{\n    fn hits(&self) -> u64 {{\n        *self.hits.lock().unwrap()\n    }}\n}}\n"
+            ),
+            MUTEXES,
+        );
+        assert_eq!(refusals, []);
+        assert!(fixed.contains("self.hits.read(|hits| *hits)"), "{fixed}");
     }
 
     #[test]
