@@ -17,6 +17,8 @@ mod off;
 mod tiny;
 #[cfg(spawner_custom)]
 mod custom;
+mod declared;
+mod alternatives;
 
 pub mod shim {
     pub use std::thread;
@@ -196,3 +198,14 @@ pub unsafe fn unsafe_fn() {}
 pub unsafe trait UnsafeTrait {}
 
 unsafe impl UnsafeTrait for u8 {}
+
+// A `#[test]` function is built only for tests, like `#[cfg(test)]`.
+#[test]
+fn standalone_test() {
+    unsafe { rt::spawn(()) };
+}
+
+#[cfg_attr(all(), test)]
+fn conditional_test() {
+    unsafe { rt::spawn(()) };
+}

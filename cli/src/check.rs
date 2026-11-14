@@ -137,6 +137,32 @@ struct Span {
     /// The source lines the span covers, starting with `line_start`.
     #[serde(default)]
     text: Vec<SpanLine>,
+    expansion: Option<Box<Expansion>>,
+}
+
+#[derive(Deserialize)]
+struct Expansion {
+    span: Span,
+}
+
+impl Span {
+    fn call_site(&self) -> &Self {
+        let mut span = self;
+        while let Some(expansion) = &span.expansion {
+            span = &expansion.span;
+        }
+        span
+    }
+}
+
+impl Drop for Span {
+    fn drop(&mut self) {
+        // Deep macro backtraces must also be dropped without recursive stack use.
+        let mut expansion = self.expansion.take();
+        while let Some(mut caller) = expansion {
+            expansion = caller.span.expansion.take();
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -397,7 +423,7 @@ fn check(
     let mut built = false;
     for line in BufReader::new(stdout).lines() {
         let line = line.context("reading cargo's output")?;
-        let Ok(parsed) = serde_json::from_str::<CargoLine>(&line) else {
+        let Ok(parsed) = parse_cargo_line(&line) else {
             continue;
         };
         match parsed.reason.as_str() {
@@ -460,6 +486,16 @@ fn check(
         warnings,
         errors,
     })
+}
+
+fn parse_cargo_line(line: &str) -> serde_json::Result<CargoLine> {
+    let mut deserializer = serde_json::Deserializer::from_str(line);
+    // Rust macro backtraces can exceed JSON's default nesting limit. Grow
+    // the stack while decoding rather than dropping those diagnostics.
+    deserializer.disable_recursion_limit();
+    let parsed = CargoLine::deserialize(serde_stacker::Deserializer::new(&mut deserializer))?;
+    deserializer.end()?;
+    Ok(parsed)
 }
 
 /// What `classify` needs to know about the run.
@@ -542,6 +578,9 @@ fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted) 
         });
         return;
     };
+    // Recursive expansions can point into a dependency. Use the invocation
+    // for the location, deduplication, skips and source-based baseline.
+    let span = span.call_site();
     let about_config = Path::new(&span.file_name) == setting.clippy_config;
     let file = normalize(&span.file_name);
     let code = diagnostic.code.as_ref().map(|code| code.code.clone());
@@ -668,6 +707,7 @@ mod tests {
                 text: vec![SpanLine {
                     text: "    let value = option.unwrap();  ".to_owned(),
                 }],
+                expansion: None,
             }],
         }
     }
@@ -677,13 +717,21 @@ mod tests {
     }
 
     fn classify_against(baseline: Option<Baseline>, diagnostics: Vec<Diagnostic>) -> Report {
-        let root = Path::new("project");
         let config = Config::default();
+        classify_with_config(&config, baseline, diagnostics)
+    }
+
+    fn classify_with_config(
+        config: &Config,
+        baseline: Option<Baseline>,
+        diagnostics: Vec<Diagnostic>,
+    ) -> Report {
+        let root = Path::new("project");
         let rules = lints::selected(false).map(Lint::qualified).collect();
         let setting = Setting {
             root,
             clippy_config: Path::new("generated/clippy.toml"),
-            config: &config,
+            config,
             rules: &rules,
             echo: false,
         };
@@ -705,6 +753,206 @@ mod tests {
             warnings: sorted.warnings,
             errors: sorted.errors,
         }
+    }
+
+    fn expanded_macro(file: &str, line: u64, column: u64, text: &str) -> Diagnostic {
+        let mut span = serde_json::json!({
+            "file_name": file,
+            "line_start": line,
+            "column_start": column,
+            "is_primary": false,
+            "text": [{ "text": text }],
+            "expansion": null,
+        });
+        for line in [808, 780, 765] {
+            span = serde_json::json!({
+                "file_name": "/registry/macros/src/lib.rs",
+                "line_start": line,
+                "column_start": 9,
+                "is_primary": true,
+                "text": [{ "text": "$crate::recursive!(@next)" }],
+                "expansion": {
+                    "span": span,
+                    "macro_decl_name": "recursive!",
+                    "def_site_span": null,
+                },
+            });
+        }
+        serde_json::from_value(serde_json::json!({
+            "message": "use of a disallowed method",
+            "level": "warning",
+            "code": { "code": "clippy::disallowed_methods" },
+            "spans": [span],
+            "rendered": null,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn macro_findings_use_call_sites_and_deduplicate_expansions() {
+        let source = "    recursive!();";
+        let mut another_expansion = expanded_macro("src/lib.rs", 10, 5, source);
+        another_expansion.spans.first_mut().unwrap().line_start = 774;
+        let report = classify_diagnostics(vec![
+            expanded_macro("src/lib.rs", 10, 5, source),
+            expanded_macro("src/lib.rs", 10, 5, source),
+            another_expansion,
+            expanded_macro("src/lib.rs", 20, 5, source),
+            expanded_macro("src/lib.rs", 20, 25, source),
+            expanded_macro("src/other.rs", 10, 5, source),
+        ]);
+        let locations: Vec<_> = report
+            .findings
+            .iter()
+            .map(|finding| (finding.file.as_str(), finding.line, finding.column))
+            .collect();
+        assert_eq!(
+            locations,
+            [
+                ("src/lib.rs", Some(10), Some(5)),
+                ("src/lib.rs", Some(20), Some(5)),
+                ("src/lib.rs", Some(20), Some(25)),
+                ("src/other.rs", Some(10), Some(5)),
+            ]
+        );
+        for finding in report.findings {
+            assert_eq!(finding.source.as_deref(), Some("recursive!();"));
+        }
+    }
+
+    #[test]
+    fn deep_macro_backtraces_are_not_dropped_by_the_json_parser() {
+        let mut span = serde_json::json!({
+            "file_name": "src/lib.rs",
+            "line_start": 2,
+            "column_start": 5,
+            "is_primary": false,
+            "text": [{ "text": "    deep!();" }],
+            "expansion": null,
+        });
+        for line in 1..=70 {
+            span = serde_json::json!({
+                "file_name": "/registry/macros/src/lib.rs",
+                "line_start": line,
+                "column_start": 9,
+                "is_primary": true,
+                "text": [],
+                "expansion": { "span": span },
+            });
+        }
+        let line = serde_json::json!({
+            "reason": "compiler-message",
+            "message": {
+                "message": "use of a disallowed method",
+                "level": "warning",
+                "code": { "code": "clippy::disallowed_methods" },
+                "spans": [span],
+                "rendered": null,
+            },
+        })
+        .to_string();
+        let parsed = parse_cargo_line(&line).unwrap();
+        let report = classify_diagnostics(vec![parsed.message.unwrap()]);
+        assert_eq!(report.findings.len(), 1);
+        let finding = report.findings.first().unwrap();
+        assert_eq!(finding.file, "src/lib.rs");
+        assert_eq!(finding.line, Some(2));
+        assert_eq!(finding.column, Some(5));
+        assert_eq!(finding.source.as_deref(), Some("deep!();"));
+        assert!(parse_cargo_line(&format!("{line} trailing data")).is_err());
+    }
+
+    #[test]
+    fn macro_baselines_match_caller_source_and_count_distinct_invocations() {
+        let baseline = baseline(
+            "/elsewhere/project",
+            serde_json::json!([earlier(
+                "clippy::disallowed_methods",
+                "src/lib.rs",
+                Some("recursive!();"),
+            )]),
+        );
+        let report = classify_against(
+            Some(baseline),
+            vec![
+                expanded_macro("project/src/lib.rs", 40, 9, "        recursive!();"),
+                expanded_macro("project/src/lib.rs", 40, 9, "        recursive!();"),
+                expanded_macro("project/src/lib.rs", 50, 9, "        recursive!();"),
+                expanded_macro("src/lib.rs", 60, 5, "    recursive!(edited);"),
+                expanded_macro("src/other.rs", 40, 5, "    recursive!();"),
+            ],
+        );
+        let locations: Vec<_> = report
+            .findings
+            .iter()
+            .map(|finding| (finding.file.as_str(), finding.line))
+            .collect();
+        assert_eq!(
+            locations,
+            [
+                ("project/src/lib.rs", Some(50)),
+                ("src/lib.rs", Some(60)),
+                ("src/other.rs", Some(40)),
+            ]
+        );
+        assert_eq!(
+            report.baselined,
+            BTreeMap::from([("clippy::disallowed_methods".to_owned(), 1)])
+        );
+        assert_eq!(report.baseline_unmatched, Some(0));
+    }
+
+    #[test]
+    fn macro_skip_paths_and_exceptions_match_the_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package.metadata.adamantium]\nskip = [\"tests/\"]\n\n[package.metadata.adamantium.exceptions]\ndisallowed_methods = [\"src/allowed.rs\"]\n",
+        )
+        .unwrap();
+        let config = Config::load(dir.path()).unwrap();
+        let report = classify_with_config(
+            &config,
+            None,
+            vec![
+                expanded_macro("project/tests/cases.rs", 10, 5, "    recursive!();"),
+                expanded_macro("project/tests/cases.rs", 10, 5, "    recursive!();"),
+                expanded_macro("src/allowed.rs", 10, 5, "    recursive!();"),
+                expanded_macro("src/lib.rs", 10, 5, "    recursive!();"),
+            ],
+        );
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings.first().unwrap().file, "src/lib.rs");
+        assert_eq!(
+            report.skipped,
+            BTreeMap::from([("clippy::disallowed_methods".to_owned(), 2)])
+        );
+    }
+
+    #[test]
+    fn recorded_tokio_expansion_matches_the_rendered_location() {
+        // Clippy 1.100.0 with tokio 1.54.1 and tokio::select disallowed.
+        let diagnostic: Diagnostic =
+            serde_json::from_str(include_str!("../tests/diagnostics/tokio-select.json")).unwrap();
+        let rendered = diagnostic.rendered.as_ref().unwrap().clone();
+        let config = Config::default();
+        let rules = HashSet::from(["clippy::disallowed_macros".to_owned()]);
+        let setting = Setting {
+            root: Path::new("project"),
+            clippy_config: Path::new("generated/clippy.toml"),
+            config: &config,
+            rules: &rules,
+            echo: false,
+        };
+        let mut sorted = Sorted::default();
+        classify(diagnostic, &setting, &mut sorted);
+        assert_eq!(sorted.findings.len(), 1);
+        let finding = sorted.findings.first().unwrap();
+        assert_eq!(finding.file, "src/lib.rs");
+        assert_eq!(finding.line, Some(2));
+        assert_eq!(finding.column, Some(5));
+        assert_eq!(finding.source.as_deref(), Some("tokio::select! {"));
+        assert!(rendered.contains("--> src/lib.rs:2:5"), "{rendered}");
     }
 
     #[test]
