@@ -752,6 +752,24 @@ mod tests {
     }
 
     #[test]
+    fn a_function_imported_under_another_name_still_reaches_the_field() {
+        let source = format!(
+            "{COUNTER}fn hit(counter: &Counter) {{ *counter.hits.lock().unwrap() += 1; }}\nuse crate::hit as bump;\nstruct State {{ counter: Counter }}\nimpl State {{ fn go(&self) {{ bump(&self.counter); }} }}\nfn f() {{ let outer = Arc::new(Mutex::new(State {{ counter: Counter::default() }})); outer.lock().unwrap().go(); }}\n"
+        );
+        let (fixed, refusals) = fix(&source, &["Mutex", "Mutex<u64>", "Mutex<State>"]);
+        assert_eq!(
+            refusals,
+            [(
+                "Counter.hits".to_owned(),
+                Reason::Nested(
+                    "a function that locks it is called in a statement that becomes an actor's callback"
+                )
+            )]
+        );
+        assert!(fixed.contains("hits: Arc<Mutex<u64>>"), "{fixed}");
+    }
+
+    #[test]
     fn traced_parameters_locals_and_impls_are_rewritten() {
         let (fixed, refusals) = fix(
             &format!(

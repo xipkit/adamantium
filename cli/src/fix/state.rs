@@ -3310,6 +3310,24 @@ fn f() { let s = Arc::new(Mutex::new(S)); s.lock().unwrap().bump(); }
     }
 
     #[test]
+    fn a_local_locked_by_a_function_imported_under_another_name_is_refused() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nmod inner {\n    use std::sync::{Arc, Mutex};\n    pub(crate) fn count() { let m = Arc::new(Mutex::new(0)); *m.lock().unwrap() += 1; }\n}\nuse inner::count as bump;\nstruct S;\nimpl S { fn go(&self) { bump(); } }\nfn f() { let s = Arc::new(Mutex::new(S)); s.lock().unwrap().go(); }\n",
+            &["Mutex"],
+        );
+        assert_eq!(
+            refusals,
+            [(
+                "m".to_owned(),
+                Reason::Nested(
+                    "a function that locks it is called in a statement that becomes an actor's callback"
+                )
+            )]
+        );
+        assert!(fixed.contains("s.with(|s| { (*s).go(); });"), "{fixed}");
+    }
+
+    #[test]
     fn a_local_named_like_its_function_is_rewritten() {
         let (fixed, refusals) = fix(
             "use std::sync::{Arc, Mutex};
