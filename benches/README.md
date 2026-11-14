@@ -89,3 +89,8 @@ cargo bench --locked -p adamantium --bench cow -- persistent
 These cases use different timing boundaries from the clear/no-op cases above:
 `snapshot_edit` includes cloning and dropping the edited snapshot. See the report
 for controls, instruction profiling, results, and compatibility constraints.
+
+## Channel scheduling
+
+The separate [Channel benchmark and replacement gate](channel.md) compares
+contended send/receive workloads with alternating binaries and same-binary controls.

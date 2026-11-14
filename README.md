@@ -522,11 +522,19 @@ it and the same factory to `testing::replay`. Keep code, dependencies and fixtur
 inputs unchanged when replaying. Deadlock and step exhaustion are failures;
 passing exploration is not a proof of all executions.
 
-This first stage supports Actor only. `testing::parallel` provides independent
-test workers; it does not model Tasks' cleanup semantics. Channel, Reply, Watch,
-Tasks, Cancellation and blocking work reject use in the harness until their
-adapters land (ADAM-159 and ADAM-160); virtual deadlines follow in ADAM-161. Use `#[test]`,
-not `#[tokio::test]`, and create actors inside the execution that uses them.
+Actor and Channel support deterministic scheduling, including synchronous
+channel operations, competing senders and receivers, streams, close-and-drain,
+endpoint drops and cancellation by dropping a pending future. Channel and Watch
+share a private register-then-recheck notification boundary. Channel's bounded
+storage uses a concurrent ring in production and a locked FIFO in the harness;
+its notification, closure and endpoint ownership logic are shared. The harness schedules registration, notification,
+polling and cancellation handoff, treating event-listener operations as atomic
+notification steps rather than modeling event-listener's internal atomics.
+`testing::parallel` provides independent test workers; it does not model Tasks'
+cleanup semantics. Reply, Watch, Tasks, Cancellation and blocking work still
+reject use in the harness (ADAM-160), including Channel's `send_until` and
+`receive_until`; virtual deadlines follow in ADAM-161. Use `#[test]`, not
+`#[tokio::test]`, and create primitives inside the execution that uses them.
 Replace I/O, real time, uncontrolled randomness and foreign executors with
 deterministic fixtures. Arbitrary foreign futures cannot all be diagnosed, and
 a step bound cannot interrupt a loop that makes no scheduling calls.

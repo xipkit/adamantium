@@ -9,6 +9,7 @@ dependencies = [
  "async-channel",
  "async-stream",
  "cbor4ii",
+ "concurrent-queue",
  "criterion",
  "event-listener",
  "futures-core",

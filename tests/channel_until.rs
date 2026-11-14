@@ -360,3 +360,57 @@ fn errors_describe_themselves_and_hand_values_back() {
         "the channel is closed and empty"
     );
 }
+
+#[tokio::test]
+async fn cancelling_a_notified_receive_passes_the_message_to_another_waiter() {
+    let ch = Channel::bounded(1);
+    let cancellation = Cancellation::new();
+    let first_wake = Arc::new(WakeCounter::default());
+    let second_wake = Arc::new(WakeCounter::default());
+    let mut first = pin!(ch.receive_until(&cancellation, None));
+    let mut second = pin!(ch.receive());
+    assert!(poll_once(first.as_mut(), &first_wake).is_pending());
+    assert!(poll_once(second.as_mut(), &second_wake).is_pending());
+
+    ch.try_send(7).unwrap();
+    assert!(first_wake.wakes() > 0);
+    assert_eq!(second_wake.wakes(), 0);
+    cancellation.cancel();
+    assert_eq!(
+        poll_once(first.as_mut(), &first_wake),
+        Poll::Ready(Err(ReceiveError::Cancelled))
+    );
+    assert!(second_wake.wakes() > 0);
+    assert_eq!(
+        poll_once(second.as_mut(), &second_wake),
+        Poll::Ready(Some(7))
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_notified_send_passes_room_and_returns_its_value() {
+    let ch = Channel::bounded(1);
+    let cancellation = Cancellation::new();
+    ch.try_send(0).unwrap();
+    let first_wake = Arc::new(WakeCounter::default());
+    let second_wake = Arc::new(WakeCounter::default());
+    let mut first = pin!(ch.send_until(&cancellation, None, 1));
+    let mut second = pin!(ch.send(2));
+    assert!(poll_once(first.as_mut(), &first_wake).is_pending());
+    assert!(poll_once(second.as_mut(), &second_wake).is_pending());
+
+    assert_eq!(ch.try_receive(), Ok(0));
+    assert!(first_wake.wakes() > 0);
+    assert_eq!(second_wake.wakes(), 0);
+    cancellation.cancel();
+    assert_eq!(
+        poll_once(first.as_mut(), &first_wake),
+        Poll::Ready(Err(SendError::Cancelled(1)))
+    );
+    assert!(second_wake.wakes() > 0);
+    assert_eq!(
+        poll_once(second.as_mut(), &second_wake),
+        Poll::Ready(Ok(()))
+    );
+    assert_eq!(ch.try_receive(), Ok(2));
+}

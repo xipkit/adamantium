@@ -85,6 +85,7 @@ tracing = ["dep:tracing"]
 
 [dependencies]
 async-channel = "2"
+concurrent-queue = "2"
 event-listener = "5"
 async-stream = { version = "0.3", optional = true }
 futures-core = { version = "0.3", optional = true }
@@ -131,3 +132,8 @@ overflow-checks = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "channel"
+harness = false
+required-features = ["tokio"]

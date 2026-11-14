@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use event_listener::Event;
+use crate::runtime::wait::WaitQueue;
 #[cfg(feature = "tokio")]
 use tokio::time::Instant;
 
@@ -72,7 +72,7 @@ struct Shared<T> {
     /// caller code but `T::clone` and `T::fmt`.
     state: Lock<State<T>>,
     /// Notified on every send and on close.
-    changed: Event,
+    changed: WaitQueue,
 }
 
 struct State<T> {
@@ -107,7 +107,7 @@ impl<T> Shared<T> {
         let was_open = !std::mem::replace(&mut state.closed, true);
         drop(state);
         if was_open {
-            self.changed.notify(usize::MAX);
+            self.changed.notify_all();
         }
         was_open
     }
@@ -125,7 +125,7 @@ impl<T> Watch<T> {
                     closed: false,
                     watches: 1,
                 }),
-                changed: Event::new(),
+                changed: WaitQueue::new(),
             }),
         }
     }
@@ -143,7 +143,7 @@ impl<T> Watch<T> {
             state.version = state.version.wrapping_add(1);
             std::mem::replace(&mut state.value, value)
         };
-        self.shared.changed.notify(usize::MAX);
+        self.shared.changed.notify_all();
         // The old value's destructor is the caller's code, so it runs after
         // the lock is released, and after the wake in case it panics.
         drop(old);

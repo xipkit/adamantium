@@ -222,12 +222,6 @@ fn rejects_actor_reused_between_iterations() {
 fn unsupported_primitives_cannot_silently_use_production_backends() {
     assert!(
         testing::check(config(), || async {
-            let _channel = Channel::<u8>::bounded(1);
-        })
-        .is_err()
-    );
-    assert!(
-        testing::check(config(), || async {
             let _tasks = Tasks::<()>::new();
         })
         .is_err()

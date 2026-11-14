@@ -1,8 +1,10 @@
 //! Deterministic interleaving tests, enabled by the `deterministic` feature.
 //!
-//! This first stage models [`crate::Actor`]. [`parallel`] supplies independent
-//! workers while Channel, Reply, Watch, Tasks, Cancellation and virtual time
-//! are implemented in follow-up work. Those production primitives reject use in this harness.
+//! Models [`crate::Actor`] and [`crate::Channel`], including synchronous channel
+//! operations, competing endpoints, streams, notification and cancellation by
+//! dropping a pending future. [`parallel`] supplies independent workers.
+//! Reply, Watch, Tasks, Cancellation and virtual time remain follow-up work and
+//! reject use in this harness, including Channel's cancellation/deadline variants.
 //! Outside a harness execution, enabling the feature leaves production behavior
 //! intact, including ordinary `#[tokio::test]` tests in the same build.
 //!
@@ -256,7 +258,7 @@ where
 
 /// Runs independent test workers and joins their results in input order.
 ///
-/// Only usable inside this harness. This is an Actor test fixture, not a model
+/// Only usable inside this harness. This is a primitive test fixture, not a model
 /// of Tasks' error/cancellation semantics. A worker panic fails the execution.
 /// Each worker must own its inputs, as a spawned production task does.
 pub async fn parallel<I, F>(workers: I) -> Vec<F::Output>
