@@ -616,7 +616,7 @@ fn relative<'a>(root: &Path, file: &'a str) -> &'a str {
 
 /// `file` relative to `root`, with `/` between segments, for matching a
 /// baseline. A report names files with the separators of the platform that
-/// wrote it, so a baseline written on Windows names `src\\lib.rs` what Linux
+/// wrote it, so a baseline written on Windows names `src\lib.rs` what Linux
 /// names `src/lib.rs`, and its root is not a path Linux can strip.
 fn portable_path(root: &Path, file: &str) -> String {
     let root = root.to_string_lossy().replace('\\', "/");
