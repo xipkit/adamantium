@@ -125,6 +125,29 @@ pub fn hides_locally() {
     }
 }
 
+// Nor in a macro body, read as its expansion or as tokens, where a
+// `macro_rules!` in textual scope hides it.
+mod hidden_in_a_macro_body {
+    #[allow(unused_imports)]
+    use core::arch::global_asm;
+
+    macro_rules! global_asm {
+        ($template:expr) => {};
+    }
+
+    macro_rules! wrapper {
+        () => {
+            global_asm!("");
+        };
+    }
+
+    wrapper!();
+
+    pub fn wraps() {
+        wrapper!();
+    }
+}
+
 // Counted in macros, where the scan reads the body as tokens since the call
 // is in a function: by a path or `$crate`, but not the other macro.
 macro_rules! assembled {

@@ -19,7 +19,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry},
     fs, mem,
     path::{Component, Path, PathBuf},
     slice,
@@ -165,6 +165,7 @@ pub fn scan(crates: &[Crate], entry: usize, disallowed: &Disallowed) -> Scan {
                 path_dir: loaded.path_dir.clone(),
                 blocks: Vec::new(),
                 attributes: HashSet::new(),
+                hidden: HashSet::new(),
             };
             for attr in &loaded.attrs {
                 visitor.visit_attribute(attr);
@@ -200,6 +201,7 @@ pub fn scan(crates: &[Crate], entry: usize, disallowed: &Disallowed) -> Scan {
                 path_dir: deferred.path_dir,
                 blocks: Vec::new(),
                 attributes: HashSet::new(),
+                hidden: deferred.hidden,
             };
             visitor.tokens(deferred.tokens);
         }
@@ -658,11 +660,11 @@ struct Scanner<'a> {
     /// How many definitions were read at each place in this reading of the
     /// module tree.
     read_at: HashMap<(String, usize, usize), usize>,
-    /// Whether a bare call left unexpanded among a module's items names a
-    /// `macro_rules!` in textual scope that every build has, by
-    /// [`call_site`]: true only if it does everywhere the call is read, as
-    /// in each expansion of the macro it is written in.
-    hidden: HashMap<(String, usize, usize), bool>,
+    /// The names that a `macro_rules!` in textual scope, which every build
+    /// has, hides at each macro call or definition left among a module's
+    /// items, by [`call_site`]: those it hides everywhere the item is read,
+    /// as in each expansion of a macro it is written in.
+    hidden: HashMap<(String, usize, usize), HashSet<String>>,
 }
 
 /// A call of a macro by path, or by a bare name a `use` may bind, as the
@@ -697,6 +699,8 @@ struct Deferred {
     mod_dir: PathBuf,
     path_dir: PathBuf,
     tokens: TokenStream,
+    /// The names a `macro_rules!` in textual scope hides where it is written.
+    hidden: HashSet<String>,
 }
 
 /// A `macro_rules!` in textual scope.
@@ -841,6 +845,15 @@ impl Textual {
         self.macros
             .iter()
             .any(|definition| definition.name == name && definition.certain)
+    }
+
+    /// The names every build has a macro of here, which [`Textual::hides`].
+    fn hidden(&self) -> HashSet<String> {
+        self.macros
+            .iter()
+            .filter(|definition| definition.certain)
+            .map(|definition| definition.name.clone())
+            .collect()
     }
 }
 
@@ -1143,21 +1156,25 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 Item::Use(item) => self.use_macros(item, place, scope, textual),
-                Item::Macro(call) => match &call.ident {
-                    Some(name) => self.define(call, name, place, scope, textual),
-                    None => {
-                        let site = call_site(&call.mac);
-                        if !reads_input(&call.mac) && self.expand(call, place, scope, textual) {
-                            continue;
-                        }
-                        if is_bare(&call.mac.path)
-                            && let Some(name) = call.mac.path.get_ident()
-                        {
-                            let hides = textual.hides(&name.unraw().to_string());
-                            *self.hidden.entry(site).or_insert(true) &= hides;
+                Item::Macro(call) => {
+                    match &call.ident {
+                        Some(name) => self.define(call, name, place, scope, textual),
+                        None => {
+                            if !reads_input(&call.mac) && self.expand(call, place, scope, textual) {
+                                continue;
+                            }
                         }
                     }
-                },
+                    let hidden = textual.hidden();
+                    match self.hidden.entry(call_site(&call.mac)) {
+                        Entry::Occupied(mut known) => {
+                            known.get_mut().retain(|name| hidden.contains(name));
+                        }
+                        Entry::Vacant(place) => {
+                            place.insert(hidden);
+                        }
+                    }
+                }
                 _ => {}
             }
             indexed.push(item);
@@ -3439,6 +3456,9 @@ struct FileVisitor<'s, 'a> {
     blocks: Vec<Scope>,
     /// Where the attributes already visited are written.
     attributes: HashSet<Site>,
+    /// The names a `macro_rules!` in textual scope hides where the macro
+    /// body being read as tokens is, as [`Scanner::hidden`] has them.
+    hidden: HashSet<String>,
 }
 
 impl FileVisitor<'_, '_> {
@@ -3513,10 +3533,11 @@ impl FileVisitor<'_, '_> {
     /// path leads to `core::arch::global_asm`, or it is named `global_asm`
     /// and can't be resolved. A bare name that nothing binds names a
     /// `macro_rules!` unless a glob import may provide it, and with
-    /// `hidden`, a `macro_rules!` in textual scope hides any other.
-    fn calls_global_asm(&self, path: &[String], leading: bool, hidden: bool) -> bool {
+    /// a `macro_rules!` in textual scope hides any other, where its name is
+    /// among `hidden`.
+    fn calls_global_asm(&self, path: &[String], leading: bool, hidden: &HashSet<String>) -> bool {
         let bare = !leading && path.len() == 1;
-        if bare && hidden {
+        if bare && path.first().is_some_and(|name| hidden.contains(name)) {
             return false;
         }
         let named = path.last().is_some_and(|name| name == "global_asm");
@@ -3541,8 +3562,7 @@ impl FileVisitor<'_, '_> {
 
     /// Counts a call among the items as `global_asm!` if it may be one and
     /// is written here.
-    fn item_call(&mut self, mac: &Macro) {
-        let hidden = self.scanner.hidden.get(&call_site(mac)) == Some(&true);
+    fn item_call(&mut self, mac: &Macro, hidden: &HashSet<String>) {
         if self.here(mac.bang_token.span)
             && self.calls_global_asm(
                 &segments(&mac.path),
@@ -3642,7 +3662,7 @@ impl FileVisitor<'_, '_> {
                         if self.here(name.span())
                             && let Some((path, leading)) =
                                 trees.get(..index.saturating_sub(1)).and_then(trailing_path)
-                            && self.calls_global_asm(&path, leading, false)
+                            && self.calls_global_asm(&path, leading, &self.hidden)
                         {
                             self.scanner.scan.unsafe_code.in_macros += 1;
                         }
@@ -3944,8 +3964,14 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
             );
             return;
         }
+        let hidden = self
+            .scanner
+            .hidden
+            .get(&call_site(&item.mac))
+            .cloned()
+            .unwrap_or_default();
         if item.ident.is_none() {
-            self.item_call(&item.mac);
+            self.item_call(&item.mac, &hidden);
             // Its input is among the items after it, with its attributes.
             if reads_input(&item.mac) {
                 return;
@@ -3967,6 +3993,7 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
                         mod_dir: self.mod_dir.clone(),
                         path_dir: self.path_dir.clone(),
                         tokens: item.mac.tokens.clone(),
+                        hidden,
                     };
                     self.scanner.deferred.insert(at, deferred);
                     return;
@@ -3977,7 +4004,9 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         }
         // A `macro_rules!` definition, or an invocation whose body isn't
         // items.
+        let outer = mem::replace(&mut self.hidden, hidden);
         self.tokens(item.mac.tokens.clone());
+        self.hidden = outer;
     }
 
     fn visit_item_fn(&mut self, item: &'ast ItemFn) {
