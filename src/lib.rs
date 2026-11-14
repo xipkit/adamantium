@@ -16,6 +16,10 @@
 //! ordered and unordered concurrent streams, and `blocking`.
 //! Disable default features to use the values, actors, channels, replies,
 //! and watches without a Tokio dependency, including on WASI.
+//! The opt-in `signal` feature adds `Cancellation::cancel_on_signal` on Unix
+//! and Windows and enables Tokio's process signal support.
+//! Enable the optional `tracing` feature for named task spans and warnings
+//! identifying unfinished named tasks when a scope's deadline expires.
 
 #![forbid(unsafe_code)]
 
@@ -26,10 +30,13 @@ mod channel;
 mod deque;
 mod map;
 mod reply;
+mod runtime;
 mod set;
 mod string;
 #[cfg(feature = "tokio")]
 mod tasks;
+#[cfg(feature = "deterministic")]
+pub mod testing;
 mod watch;
 
 pub use actor::Actor;
