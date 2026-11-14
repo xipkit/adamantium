@@ -473,6 +473,18 @@ fn check_reports_broadcast_and_allows_semaphore() {
     }
 }
 
+/// Direct calls and imported aliases are reported, while structured deadlines
+/// and reasoned local exceptions remain allowed.
+#[test]
+fn check_reports_timeouts_and_allows_structured_deadlines() {
+    for finding in check_marked_rules("cancellation").unwrap() {
+        assert_eq!(
+            finding["message"], "use of a disallowed method `tokio::time::timeout`",
+            "{finding}"
+        );
+    }
+}
+
 /// Every access method of a `thread_local!` value is reported, called on the
 /// static or through a `&LocalKey`, unless a local allow exempts it. Atomics,
 /// `OnceLock` and `LazyLock` statics, and a static `Actor` are not.

@@ -1,5 +1,7 @@
 #![cfg(feature = "tokio")]
 
+mod support;
+
 use std::{
     future,
     pin::Pin,
@@ -17,8 +19,8 @@ use adamantium::{
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
+use support::timeout;
 use tokio::sync::{Semaphore, oneshot};
-use tokio::time::timeout;
 
 const HUNG: Duration = Duration::from_secs(30);
 
