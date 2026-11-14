@@ -28,6 +28,7 @@ changes behavior in a way to check.
 | `tokio::spawn` with the handle awaited in the same function | `Tasks::run` | Mostly |
 | A loop of spawns, or results pushed into an `Arc<Mutex<Vec<T>>>` | `concurrently` | Mostly |
 | `JoinSet::join_next` | `concurrently_unordered` | No |
+| `select!` racing futures for the first success | `first_ok` | Mostly |
 | A detached worker fed by a channel | A worker task in the scope that sends to it | No |
 | `JoinHandle::abort` on a long-lived task | `Tasks::run_until` with a `Cancellation` | No |
 | `tokio::spawn` inside a task | A scope inside the task | No |
@@ -599,6 +600,74 @@ async fn main() -> Result<(), ScopeError<std::io::Error>> {
 
 Use `concurrently_ordered` for input order. `StreamExt` comes from
 `futures-util`, which the project adds itself.
+
+### The first to succeed
+
+Racing futures with `select!` and keeping the first success means looping
+until a branch succeeds, disabling the branches that failed, and remembering
+that the losers are cancelled only by being dropped, which waits for none of
+them. `first_ok` takes items the way `concurrently` does, keeps going past
+failures, and aborts and drains the rest once one succeeds. If every item
+fails, it returns all the errors in input order.
+
+Before:
+
+```rust
+async fn fetch(mirror: &str) -> Result<String, String> {
+    if mirror == "a.example.com" {
+        return Err(format!("{mirror} is down"));
+    }
+    Ok(format!("page from {mirror}"))
+}
+
+#[tokio::main]
+async fn main() -> Result<(), String> {
+    let a = fetch("a.example.com");
+    let b = fetch("b.example.com");
+    tokio::pin!(a, b);
+    let (mut a_done, mut b_done) = (false, false);
+    let page = loop {
+        tokio::select! {
+            result = &mut a, if !a_done => match result {
+                Ok(page) => break page,
+                Err(error) if b_done => return Err(error),
+                Err(_) => a_done = true,
+            },
+            result = &mut b, if !b_done => match result {
+                Ok(page) => break page,
+                Err(error) if a_done => return Err(error),
+                Err(_) => b_done = true,
+            },
+        }
+    };
+    assert_eq!(page, "page from b.example.com");
+    Ok(())
+}
+```
+
+After:
+
+```rust
+use adamantium::first_ok;
+
+async fn fetch(mirror: &str) -> Result<String, String> {
+    if mirror == "a.example.com" {
+        return Err(format!("{mirror} is down"));
+    }
+    Ok(format!("page from {mirror}"))
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Vec<String>> {
+    let mirrors = ["a.example.com", "b.example.com"];
+    let page = first_ok(mirrors, mirrors.len(), fetch).await?;
+    assert_eq!(page, "page from b.example.com");
+    Ok(())
+}
+```
+
+Each item runs as a task, so its future must be `'static`. A limit of one
+tries the items in turn, which replaces a chain of fallbacks.
 
 ### Blocking work
 
