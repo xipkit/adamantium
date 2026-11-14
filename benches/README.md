@@ -76,3 +76,16 @@ library, using the same target directory:
 cargo bench --locked -p adamantium --bench cow -- '(deque|set)/clear' --save-baseline before
 cargo bench --locked -p adamantium --bench cow -- '(deque|set)/clear' --baseline before
 ```
+
+## Persistent collection evaluation (ADAM-127)
+
+The [persistent collection report](persistent.md) compares the existing backing
+with benchmark-only `im` candidates. Run just the new cases with:
+
+```sh
+cargo bench --locked -p adamantium --bench cow -- persistent
+```
+
+These cases use different timing boundaries from the clear/no-op cases above:
+`snapshot_edit` includes cloning and dropping the edited snapshot. See the report
+for controls, instruction profiling, results, and compatibility constraints.

@@ -453,6 +453,29 @@ mod stream {
         );
     }
 
+    #[tokio::test]
+    async fn receiving_from_a_stream_wakes_pending_send_until() {
+        use adamantium::Cancellation;
+
+        let (sender, receiver) = Channel::bounded(1).split();
+        let cancellation = Cancellation::new();
+        let send_wake = Arc::new(WakeCounter::default());
+        let receive_wake = Arc::new(WakeCounter::default());
+        let mut receiver = pin!(receiver);
+        sender.try_send(0).unwrap();
+
+        for value in 1..=2 {
+            let mut send = pin!(sender.send_until(&cancellation, None, value));
+            assert!(poll_once(send.as_mut(), &send_wake).is_pending());
+            assert_eq!(
+                poll_once(pin!(receiver.next()), &receive_wake),
+                Poll::Ready(Some(value - 1))
+            );
+            assert!(send_wake.0.swap(0, Ordering::SeqCst) > 0);
+            assert_eq!(poll_once(send.as_mut(), &send_wake), Poll::Ready(Ok(())));
+        }
+    }
+
     #[test]
     fn explicit_close_wakes_a_pending_stream() {
         for close_from_sender in [true, false] {
