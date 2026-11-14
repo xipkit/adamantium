@@ -20,9 +20,10 @@ use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use serde::Serialize;
 use syn::{
     Arm, Attribute, Block, Expr, ExprCall, ExprClosure, ExprForLoop, ExprIf, ExprLit,
-    ExprMethodCall, ExprPath, ExprUnsafe, ExprWhile, Field, FieldValue, File, FnArg, ImplItem,
-    ImplItemFn, Item, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemTrait, Lit, Macro, Meta, Pat,
-    PatIdent, Safety, Signature, Stmt, Token, TraitItem, TraitItemFn, Type, UseTree, Variant,
+    ExprMethodCall, ExprPath, ExprUnsafe, ExprWhile, Field, FieldValue, File, FnArg, GenericParam,
+    Generics, ImplItem, ImplItemFn, Item, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemTrait, Lit,
+    Macro, Meta, Pat, PatIdent, Safety, Signature, Stmt, Token, TraitItem, TraitItemFn, Type,
+    UseTree, Variant,
     ext::IdentExt,
     parse::ParseStream,
     punctuated::Punctuated,
@@ -1259,6 +1260,30 @@ impl FileVisitor<'_, '_> {
         }
     }
 
+    /// Visits code with an item's generic parameters in scope: a type
+    /// parameter named `Vec` is not the prelude's.
+    fn with_generics(&mut self, generics: &Generics, visit: impl FnOnce(&mut Self)) {
+        let mut scope = Scope::default();
+        for param in &generics.params {
+            match param {
+                GenericParam::Type(param) => scope.define(
+                    Namespace::Types,
+                    param.ident.unraw().to_string(),
+                    Binding::Opaque,
+                ),
+                GenericParam::Const(param) => scope.define(
+                    Namespace::Values,
+                    param.ident.unraw().to_string(),
+                    Binding::Opaque,
+                ),
+                _ => {}
+            }
+        }
+        self.blocks.push(scope);
+        visit(self);
+        self.blocks.pop();
+    }
+
     /// Visits code with the names some patterns bind in scope, such as a
     /// function's parameters or a match arm's pattern.
     fn with_patterns<'p>(
@@ -1336,8 +1361,10 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         if is_unsafe(&item.sig.safety) {
             self.scanner.scan.unsafe_code.functions += 1;
         }
-        self.with_patterns(parameters(&item.sig), |this| {
-            visit::visit_item_fn(this, item);
+        self.with_generics(&item.sig.generics, |this| {
+            this.with_patterns(parameters(&item.sig), |this| {
+                visit::visit_item_fn(this, item);
+            });
         });
     }
 
@@ -1345,14 +1372,14 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         if item.unsafety.is_some() {
             self.scanner.scan.unsafe_code.impls += 1;
         }
-        visit::visit_item_impl(self, item);
+        self.with_generics(&item.generics, |this| visit::visit_item_impl(this, item));
     }
 
     fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
         if item.unsafety.is_some() {
             self.scanner.scan.unsafe_code.traits += 1;
         }
-        visit::visit_item_trait(self, item);
+        self.with_generics(&item.generics, |this| visit::visit_item_trait(this, item));
     }
 
     fn visit_impl_item(&mut self, item: &'ast ImplItem) {
@@ -1372,8 +1399,10 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         if is_unsafe(&item.sig.safety) {
             self.scanner.scan.unsafe_code.functions += 1;
         }
-        self.with_patterns(parameters(&item.sig), |this| {
-            visit::visit_impl_item_fn(this, item);
+        self.with_generics(&item.sig.generics, |this| {
+            this.with_patterns(parameters(&item.sig), |this| {
+                visit::visit_impl_item_fn(this, item);
+            });
         });
     }
 
@@ -1394,8 +1423,10 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         if is_unsafe(&item.sig.safety) {
             self.scanner.scan.unsafe_code.functions += 1;
         }
-        self.with_patterns(parameters(&item.sig), |this| {
-            visit::visit_trait_item_fn(this, item);
+        self.with_generics(&item.sig.generics, |this| {
+            this.with_patterns(parameters(&item.sig), |this| {
+                visit::visit_trait_item_fn(this, item);
+            });
         });
     }
 

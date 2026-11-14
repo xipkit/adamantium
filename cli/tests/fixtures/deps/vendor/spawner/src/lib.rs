@@ -160,6 +160,24 @@ pub fn condition_order() {
     }
 }
 
+// Generic parameters named like prelude types are not the prelude's.
+pub trait Safe {
+    fn insert();
+    fn leak();
+}
+
+pub fn generic<Vec: Safe>() {
+    Vec::insert();
+}
+
+pub struct Holder<T>(T);
+
+impl<Box: Safe> Holder<Box> {
+    pub fn leak() {
+        Box::leak();
+    }
+}
+
 pub fn blocks() {
     unsafe { rt::task::raw() };
     println!("{:?}", task::spawn(())); // tokio::task::spawn
