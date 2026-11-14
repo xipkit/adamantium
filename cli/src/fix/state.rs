@@ -2450,10 +2450,7 @@ impl<'t> Imports<'t> {
                             .iter()
                             .any(|item| item.start <= range.start && range.end <= item.end)
                     {
-                        self.idents
-                            .entry(ident.to_string())
-                            .or_default()
-                            .push(range);
+                        self.idents.entry(bare(&ident)).or_default().push(range);
                     }
                 }
                 TokenTree::Punct(ref punct) if punct.as_char() == ':' => {
@@ -2480,10 +2477,7 @@ impl<'t> Imports<'t> {
             }
         };
         if let Some(range) = self.text.range(ident.span()) {
-            self.idents
-                .entry(ident.to_string())
-                .or_default()
-                .push(range);
+            self.idents.entry(bare(ident)).or_default().push(range);
         }
     }
 
@@ -2498,7 +2492,7 @@ impl<'t> Imports<'t> {
     ) {
         let (ident, name) = match tree {
             UseTree::Path(path) => {
-                prefix.push(path.ident.to_string());
+                prefix.push(bare(&path.ident));
                 self.unused(&path.tree, prefix, edits, removed);
                 prefix.pop();
                 return;
@@ -2517,11 +2511,11 @@ impl<'t> Imports<'t> {
         let name = if ident == "self" {
             match (tree, prefix.last()) {
                 (UseTree::Name(_), Some(module)) => module.clone(),
-                _ => name.to_string(),
+                _ => bare(name),
             }
         } else {
-            path.push(ident.to_string());
-            name.to_string()
+            path.push(bare(ident));
+            bare(name)
         };
         // The rewrite can leave unused only the imports of the module and the
         // two types it replaces.
@@ -3148,6 +3142,16 @@ mod tests {
             "{fixed}"
         );
         assert!(fixed.contains("::adamantium::Actor::new(1)"), "{fixed}");
+    }
+
+    #[test]
+    fn raw_identifiers_keep_their_imports() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nfn f() -> r#Arc<u8> {\n    let m = Arc::new(Mutex::new(0));\n    drop(m);\n    r#Arc::new(1)\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(fixed.starts_with("use std::sync::Arc;\n"), "{fixed}");
     }
 
     #[test]
