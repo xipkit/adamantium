@@ -15,9 +15,9 @@ use std::{
 
 use proc_macro2::{Span, TokenStream, TokenTree};
 use syn::{
-    BinOp, Block, Expr, GenericArgument, Item, ItemUse, Lit, Local, Macro, Pat, PathArguments,
-    Stmt, Type, UnOp, UseTree, ext::IdentExt, punctuated::Punctuated, spanned::Spanned,
-    visit::Visit,
+    BinOp, Block, Expr, ExprLit, GenericArgument, Item, ItemUse, Lit, Local, Macro, Pat,
+    PathArguments, Stmt, Type, UnOp, UseTree, ext::IdentExt, punctuated::Punctuated,
+    spanned::Spanned, visit::Visit,
 };
 
 use super::Edit;
@@ -328,6 +328,9 @@ struct MacroArgs {
     /// Whether the first argument is borrowed mutably, as the destination of
     /// `write!` and `writeln!` is.
     destination: bool,
+    /// Whether the first argument is a condition, as an assertion's is,
+    /// rather than a value the macro formats.
+    condition: bool,
     /// The first argument evaluated only on some paths: an assertion's
     /// message runs only when it fails, and a debug assertion only in debug
     /// builds.
@@ -388,6 +391,7 @@ impl<'ast> Visit<'ast> for Parsed<'_> {
                 args,
                 format,
                 destination: name == "write" || name == "writeln",
+                condition: name == "assert" || name == "debug_assert",
                 conditional: if name.starts_with("debug_assert") {
                     0
                 } else if name.starts_with("assert") {
@@ -2285,12 +2289,27 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
         match parsed {
             Some(parsed) => {
                 for (position, arg) in parsed.args.iter().enumerate() {
+                    let value = parsed.named(position, arg).unwrap_or(arg);
+                    // Formatting a value calls its `Display` or `Debug`, and
+                    // `write!` calls its destination's `write_fmt`, which
+                    // might use an actor like any other call.
+                    let calls = if position == parsed.format {
+                        match value {
+                            Expr::Lit(ExprLit {
+                                lit: Lit::Str(format),
+                                ..
+                            }) => !format_captures(&format.value()).is_empty(),
+                            _ => true,
+                        }
+                    } else {
+                        !(position == 0 && parsed.condition)
+                            && !matches!(value, Expr::Lit(_))
+                            && !self.computed_from_state(value)
+                    };
+                    self.calls |= calls;
                     let conditional = usize::from(position >= parsed.conditional);
                     self.branch += conditional;
-                    match parsed.named(position, arg) {
-                        Some(value) => self.visit_expr(value),
-                        None => self.visit_expr(arg),
-                    }
+                    self.visit_expr(value);
                     self.branch -= conditional;
                 }
             }
@@ -2768,7 +2787,7 @@ mod tests {
     fn a_statement_naming_the_binding_again_is_refused() {
         for body in [
             "fn f() { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().push({ let h = &m; 1 }); }",
-            "fn f() { let m = Arc::new(Mutex::new(Vec::new())); m.lock().unwrap().push(format!(\"{m:?}\")); }",
+            "fn f() { let m = Arc::new(Mutex::new(Vec::new())); m.lock().unwrap().push({ let _c = || &m; 1 }); }",
         ] {
             let source = format!("use std::sync::{{Arc, Mutex}};\n{body}\n");
             let (fixed, refusals) = fix(&source, &["Mutex"]);
@@ -2814,6 +2833,13 @@ mod tests {
             "fn f(other: &[u32]) { let m = Arc::new(Mutex::new(0usize)); *m.lock().unwrap() += other.len(); }",
             "fn f(other: &[u32]) { let m = Arc::new(Mutex::new(0usize)); *m.lock().unwrap() += (other, 1).0.len(); }",
             "fn f(other: &[u32]) { let m = Arc::new(Mutex::new(0usize)); let _n = (other, m.lock().unwrap().len()).0.len(); }",
+            // Formatting calls `Display` or `Debug`, and `write!` calls the
+            // destination's `write_fmt`.
+            "fn f(other: &str) { let m = Arc::new(Mutex::new(0u32)); let _s = format!(\"{} {}\", *m.lock().unwrap(), other); }",
+            "fn f(other: &str) { let m = Arc::new(Mutex::new(0u32)); let _s = format!(\"{} {other}\", *m.lock().unwrap()); }",
+            "const OTHER: &str = \"\";\nfn f() { let m = Arc::new(Mutex::new(0u32)); assert_eq!(*m.lock().unwrap(), 0, \"{}\", OTHER); }",
+            "fn f(other: &str) { let m = Arc::new(Mutex::new(\"\")); assert_eq!(*m.lock().unwrap(), other); }",
+            "fn f(out: &mut String) { use std::fmt::Write; let m = Arc::new(Mutex::new(0u32)); writeln!(out, \"{}\", *m.lock().unwrap()).unwrap(); }",
         ] {
             refused(body, "m", Reason::Calls);
         }
@@ -2863,7 +2889,7 @@ mod tests {
     #[test]
     fn a_write_destination_is_borrowed_mutably() {
         let (fixed, refusals) = fix(
-            "use std::fmt::Write;\nuse std::sync::{Arc, Mutex};\nfn f(mut out: String) -> std::fmt::Result {\n    let m = Arc::new(Mutex::new(String::new()));\n    write!(*m.lock().unwrap(), \"hello\").unwrap();\n    writeln!(out, \"{}\", *m.lock().unwrap())\n}\n",
+            "use std::fmt::Write;\nuse std::sync::{Arc, Mutex};\nfn f() -> String {\n    let m = Arc::new(Mutex::new(String::new()));\n    write!(*m.lock().unwrap(), \"hello\").unwrap();\n    format!(\"{}\", *m.lock().unwrap())\n}\n",
             &["Mutex"],
         );
         assert_eq!(refusals, []);
@@ -2871,10 +2897,7 @@ mod tests {
             fixed.contains("m.with(|m| { write!(*m, \"hello\").unwrap(); });"),
             "{fixed}"
         );
-        assert!(
-            fixed.contains("m.read(|m| writeln!(out, \"{}\", *m))"),
-            "{fixed}"
-        );
+        assert!(fixed.contains("m.read(|m| format!(\"{}\", *m))"), "{fixed}");
     }
 
     #[test]
@@ -3000,6 +3023,23 @@ mod tests {
                 Reason::Unfollowed("a conditional declaration shadows it"),
             );
         }
+    }
+
+    #[test]
+    fn formatting_the_state_and_literals_is_rewritten() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nfn f() -> String {\n    let m = Arc::new(Mutex::new(1u32));\n    assert_eq!(*m.lock().unwrap(), 1, \"{}\", \"one\");\n    format!(\"{:>4} {}\", m.lock().unwrap().pow(2), 'x')\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(
+            fixed.contains("m.read(|m| { assert_eq!(*m, 1, \"{}\", \"one\"); });"),
+            "{fixed}"
+        );
+        assert!(
+            fixed.contains("m.with(|m| format!(\"{:>4} {}\", (*m).pow(2), 'x'))"),
+            "{fixed}"
+        );
     }
 
     #[test]
