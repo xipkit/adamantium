@@ -42,9 +42,9 @@ cargo adamantium explain clippy::rc_buffer --format json
 
 `check` runs `cargo clippy --all-targets` with Adamantium's rules and `clippy.toml`. It disables Clippy's default lints and runs the rules as warnings, allowing crates with findings and their dependents to be checked. It checks every workspace member unless arguments after `--` select packages; those arguments are passed to `cargo clippy`.
 
-The command prints diagnostics and a summary to stderr. With `--format json`, it prints a report to stdout with the rule, message, file, line, and column for each finding. The exit status is `0` when clean, `1` for findings, and `2` when the project did not build.
+The command prints diagnostics and a summary to stderr. With `--format json`, it prints a report to stdout with the rule, message, file, line, column, and source for each finding. The source is the text of the line the finding starts on, with leading and trailing whitespace removed; it is `null`, like the line and column, for a finding without a line. The exit status is `0` when clean, `1` for findings, and `2` when the project did not build.
 
-The JSON check report uses `schema_version: 2`. Its `warnings` array contains warnings about Adamantium's Clippy configuration and unknown, renamed, or removed lints, each with a message, file, and line. Warnings do not change the status or exit code. Configuration warnings and errors name the file `clippy.toml`; their lines refer to Adamantium's bundled configuration, which `cargo adamantium rules` prints. Lint warnings without a primary span (`E0602` and `renamed_and_removed_lints`) have `file: null` and `line: null` and appear once per code and message across targets. Compiler summaries are omitted. Other compiler warnings appear only in text output.
+The JSON check report uses `schema_version: 3`. Its `warnings` array contains warnings about Adamantium's Clippy configuration and unknown, renamed, or removed lints, each with a message, file, and line. Warnings do not change the status or exit code. Configuration warnings and errors name the file `clippy.toml`; their lines refer to Adamantium's bundled configuration, which `cargo adamantium rules` prints. Lint warnings without a primary span (`E0602` and `renamed_and_removed_lints`) have `file: null` and `line: null` and appear once per code and message across targets. Compiler summaries are omitted. Other compiler warnings appear only in text output.
 
 With `--format sarif`, it prints a [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) log to stdout, which GitHub code scanning shows as annotations on pull requests. Each finding is an `error` result for its rule. Build errors and warnings are tool notifications rather than results, so they raise no alerts. File URIs are relative to the root of the git repository holding the workspace, or to the workspace root outside git. A finding without a line, such as a missing `overflow-checks`, points at the first line of its file. The exit status is the same as for the other formats.
 
@@ -83,6 +83,8 @@ The strict tier starts with [`arithmetic_side_effects`](https://clippy.rust-lang
 
 ## Skipping rules and paths
 
+Most findings in an existing async crate are `Arc<Mutex<T>>` and `tokio::spawn`. The [migration guide](docs/migrating.md) shows how to rewrite each with `Actor` and `Tasks`.
+
 To adopt the rules gradually, add a skip list to `Cargo.toml`:
 
 ```toml
@@ -97,6 +99,19 @@ future_not_send = ["src/syntax/", "src/bytecode.rs"] # skip this rule in these p
 For a single package, use `[package.metadata.adamantium]`. Paths are globs relative to the directory containing `Cargo.toml`; paths without wildcards also cover their contents. Use either the bare rule name or the qualified name printed by `cargo adamantium rules`. Unknown rule names produce an error.
 
 `check` summarizes skipped findings and reports counts by rule in the JSON report's `skipped` map. Remove a rule from `allow` to see its findings. Projects with a skip list should run `cargo adamantium check` in CI because a `[lints]` table cannot scope a rule to a path.
+
+## Baselines
+
+The skip list adopts rules by path or by rule. To adopt them everywhere at once without fixing every existing finding first, save a report and check against it:
+
+```sh
+cargo adamantium check --format json > adamantium-baseline.json
+cargo adamantium check --baseline adamantium-baseline.json
+```
+
+With `--baseline`, findings that the earlier report already has are left out, so only new findings fail the check. The status, the exit code, and the findings in JSON and SARIF reports cover only new findings, and text output shows diagnostics only for them. The JSON report counts the matched findings by rule in its `baselined` map, and `baseline_unmatched` is the number of findings in the baseline that the check did not find, or `null` without a baseline. Regenerate the baseline after fixing findings so they cannot come back.
+
+A finding matches the baseline when its rule, its path relative to the project root, and its source text are the same. Line numbers, columns, and messages are ignored, so edits elsewhere in a file and a different Clippy version do not bring findings back, and the baseline can be written on another machine. Editing the line of a finding, or moving it to another file, makes it new. When findings share a rule, path, and source text, only those beyond the baseline's count are new. The skip list applies first. The baseline must be a `schema_version: 3` report from a check that built; `check` refuses older reports and reports from failed builds.
 
 For a machine-readable list of rules and their reasons, run `cargo adamantium rules --format json`.
 
@@ -245,6 +260,35 @@ Unnamed tasks create no spans or diagnostic bookkeeping. Without `tracing`, the
 named methods behave like their unnamed equivalents and do not convert or store
 names; the library has no tracing dependency in that configuration.
 
+### Retries and rate limits
+
+`retry(&cancellation, deadline, backoff, attempt)` calls `attempt` until its
+future succeeds, waiting between failures as a `Backoff` says:
+`Backoff::exponential(first, max)` doubles the wait up to `max`, and
+`Backoff::constant(delay)` keeps it fixed. `.attempts(n)` caps the attempts;
+otherwise the cancellation and deadline are what end it. `retry_if` takes a
+predicate that says which errors are worth another attempt.
+
+`RateLimit::new(permits, per)` lets at most `permits` calls start in any
+window of length `per`. Clones share the limit, so a clone per task bounds
+the whole of a `concurrently` map:
+
+```rust
+let limit = RateLimit::new(10, Duration::from_secs(1));
+let pages = concurrently(urls, 8, |url| {
+    let (limit, cancellation) = (limit.clone(), cancellation.clone());
+    async move { limit.run_until(&cancellation, None, || fetch(url)).await }
+})
+.await?;
+```
+
+Both return `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExceeded`.
+Every wait inside them, between attempts or for room under the limit, ends as
+soon as the `Cancellation` is requested or the deadline passes, and an attempt
+or call still running is dropped. As with `Tasks::run_until`, a request already
+present wins, so a cancelled call never starts its work or takes room under the
+limit, and cancellation wins over an equally ready deadline.
+
 ### Streaming concurrent maps
 
 Use `concurrently_ordered(items, limit, f)` to consume results in input order,
@@ -376,6 +420,7 @@ The default lint levels are in this repository's `[workspace.lints]`, and the Cl
 | Every value can cross a task | `future_not_send`; `Rc`, `RefCell`, `Cell`, and `LocalSet` disallowed, and so are `LocalRuntime`'s entry points and the methods that read or write a `thread_local!` value, since a task can move to another thread at any await |
 | No task outlives its scope | `tokio::spawn`, `spawn_local`, `JoinSet`, the spawn methods of Tokio's `Handle`, `Runtime`, `LocalRuntime`, and `task::Builder`, async-std's task and builder spawns, `smol::spawn`, smol's executor spawns, `std::thread::spawn`, and `scope` disallowed; tasks use `Tasks` |
 | No lock is held across an await or inside another lock | `await_holding_lock`; `Mutex` and `RwLock` from std, tokio, parking_lot, and futures disallowed; `Actor::with` is synchronous and rejects nesting |
+| Unbounded channel constructors restricted | Unbounded channel constructors from std, Tokio, async-channel, flume, and crossbeam-channel disallowed; use `Channel` |
 | No channel drops messages for a receiver that falls behind | Tokio's `broadcast` channel disallowed; send a clone to one `Channel` per receiver, or use `tokio::sync::watch` when only the latest value matters |
 | No worker thread is blocked | `std::thread::sleep`, `block_in_place`, every Tokio `spawn_blocking`, `async_std::task::spawn_blocking`, `smol::unblock`, and `block_on` on a `Handle` or `LocalRuntime` disallowed; blocking work uses `blocking` |
 | No silently discarded must-use results or futures | `unused_must_use`, `let_underscore_must_use`, `let_underscore_future`; intentional discards use an explicit `drop` |

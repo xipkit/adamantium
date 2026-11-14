@@ -609,7 +609,7 @@ async fn cancellation_waits_for_synchronous_destructors() {
     }
     let cancel = Cancellation::new();
     let (started, cleaning) = oneshot::channel();
-    let (release, wait) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::sync_channel(1);
     let mut guard = Some(Cleanup {
         started: Some(started),
         release: wait,

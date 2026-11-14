@@ -308,16 +308,19 @@ mod tests {
             file: file.to_owned(),
             line,
             column: line.map(|_| 5),
+            source: line.map(|_| format!("{rule}();")),
         }
     }
 
     fn report(root: &str, findings: Vec<Finding>) -> Report {
         Report {
-            schema_version: 2,
+            schema_version: 3,
             root: PathBuf::from(root),
             status: Status::Findings,
             findings,
             skipped: BTreeMap::new(),
+            baselined: BTreeMap::new(),
+            baseline_unmatched: None,
             warnings: Vec::new(),
             errors: Vec::new(),
         }
