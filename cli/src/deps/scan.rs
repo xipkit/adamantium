@@ -1314,7 +1314,8 @@ fn bind_use(
 
 /// Replaces each item macro whose body parses as items with those items, as
 /// macros such as Tokio's `cfg_rt! { ... }` expand to their input, and each
-/// `cfg_if!` with the items of its branches, under the `cfg` it gives them.
+/// `cfg_if!` or `cfg_select!` with the items of its branches, under the
+/// `cfg` it gives them.
 /// The macro's own attributes carry over to each item, so a `cfg` on it still
 /// applies.
 struct Expand;
@@ -1333,6 +1334,8 @@ impl Expand {
             }
             let parsed = if is_cfg_if(&item.mac) {
                 item.mac.parse_body_with(parse_cfg_if)
+            } else if is_cfg_select(&item.mac) {
+                item.mac.parse_body_with(parse_cfg_select)
             } else {
                 item.mac.parse_body_with(parse_items)
             };
@@ -1439,6 +1442,51 @@ fn cfg_if_condition(input: ParseStream) -> syn::Result<(Span, TokenStream)> {
     }
 }
 
+/// Parses item-position `cfg_select!` arms, giving each item the predicate
+/// that selects its arm and excludes every earlier arm. The trailing `_`
+/// arm only excludes earlier predicates.
+fn parse_cfg_select(input: ParseStream) -> syn::Result<Vec<Item>> {
+    let mut earlier = Vec::new();
+    let mut items = Vec::new();
+    loop {
+        let span = input.span();
+        let otherwise = input.peek(Token![_]);
+        let none_earlier = cfg_call("not", [cfg_call("any", earlier.clone(), span)], span);
+        let predicate = if otherwise {
+            input.parse::<Token![_]>()?;
+            none_earlier
+        } else {
+            let mut condition = TokenStream::new();
+            while !input.peek(Token![=>]) {
+                condition.extend([input.parse::<TokenTree>()?]);
+            }
+            if condition.is_empty() {
+                return Err(input.error("expected a cfg predicate"));
+            }
+            earlier.push(condition.clone());
+            cfg_call("all", [condition, none_earlier], span)
+        };
+        input.parse::<Token![=>]>()?;
+        let body;
+        braced!(body in input);
+        let cfg = cfg_attribute(predicate, span);
+        for mut item in parse_items(&body)? {
+            if let Some(attrs) = item_attrs_mut(&mut item) {
+                let own = mem::take(attrs);
+                attrs.push(cfg.clone());
+                attrs.extend(own);
+            }
+            items.push(item);
+        }
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+        }
+        if otherwise || input.is_empty() {
+            return Ok(items);
+        }
+    }
+}
+
 /// The predicate `name(args, ...)`.
 fn cfg_call(name: &str, args: impl IntoIterator<Item = TokenStream>, span: Span) -> TokenStream {
     let mut list = TokenStream::new();
@@ -1480,6 +1528,15 @@ fn is_cfg_if(mac: &Macro) -> bool {
         .segments
         .last()
         .is_some_and(|segment| segment.ident == "cfg_if")
+}
+
+fn is_cfg_select(mac: &Macro) -> bool {
+    let mut names = mac.path.segments.iter().map(|segment| &segment.ident);
+    match (names.next(), names.next(), names.next()) {
+        (Some(name), None, None) => name == "cfg_select",
+        (Some(root), Some(name), None) => (root == "std" || root == "core") && name == "cfg_select",
+        _ => false,
+    }
 }
 
 fn is_include(mac: &Macro) -> bool {
@@ -2353,6 +2410,117 @@ mod tests {
             "cfg_if! { if #[cfg(unix)] { fn a() {} } else { fn b() {} } else { fn c() {} } }",
             "cfg_if! { if #[cfg(unix)] { mod a; 1 + 1 } }",
             "other! { if #[cfg(unix)] { fn a() {} } }",
+        ] {
+            let mut file = syn::parse_file(source).unwrap();
+            Expand.visit_file_mut(&mut file);
+            assert!(
+                matches!(&file.items[..], [Item::Macro(_)]),
+                "{source}: {:?}",
+                file.items.len()
+            );
+        }
+    }
+
+    #[test]
+    fn cfg_select_gives_each_arm_the_cfg_that_selects_it() {
+        let target = Target::parse("unix\ntarget_pointer_width=\"64\"\n");
+        let features = Features::default();
+        let cfg = Cfg {
+            target: &target,
+            features: &features,
+            proc_macro: false,
+        };
+        let mut file = syn::parse_file(
+            r#"
+            cfg_select! {
+                windows => { fn a() {} },
+                all(unix, target_pointer_width = "64") => { fn b() {} struct B; }
+                platform_custom => { fn c() {} }
+                _ => { fn d() {} },
+            }
+            std::cfg_select! {
+                platform_custom => {
+                    fn e() {}
+                    core::cfg_select! {
+                        unix => { fn f() {} }
+                        _ => { fn g() {} }
+                    }
+                }
+                _ => {
+                    #[cfg(windows)]
+                    fn h() {}
+                    fn i() {}
+                }
+            }
+            ::core::cfg_select! {
+                target_pointer_width = "8" => { fn j() {} }
+                _ => { fn k() {} }
+            }
+            #[cfg(windows)]
+            ::std::cfg_select! { unix => { fn l() {} } }
+            cfg_select! { _ => { fn m() {} } }
+            cfg_select! { feature = "off" => { fn n() {} } }
+            cfg_select! {
+                platform_custom => { fn o() {} }
+                unix => { fn p() {} }
+                platform_later => { fn q() {} }
+                _ => { fn r() {} }
+            }
+            "#,
+        )
+        .unwrap();
+        Expand.visit_file_mut(&mut file);
+        let built: Vec<_> = file
+            .items
+            .iter()
+            .map(|item| {
+                let name = match item {
+                    Item::Fn(item) => item.sig.ident.to_string(),
+                    Item::Struct(item) => item.ident.to_string(),
+                    _ => panic!("an item that isn't a function or struct"),
+                };
+                (name, cfg.enabled(item_attrs(item)))
+            })
+            .collect();
+        let expected = [
+            ("a", Truth::False),
+            ("b", Truth::True),
+            ("B", Truth::True),
+            ("c", Truth::False),
+            ("d", Truth::False),
+            ("e", Truth::Unknown),
+            ("f", Truth::Unknown),
+            ("g", Truth::False),
+            ("h", Truth::False),
+            ("i", Truth::Unknown),
+            ("j", Truth::False),
+            ("k", Truth::True),
+            ("l", Truth::False),
+            ("m", Truth::True),
+            ("n", Truth::False),
+            ("o", Truth::Unknown),
+            ("p", Truth::Unknown),
+            ("q", Truth::False),
+            ("r", Truth::False),
+        ]
+        .map(|(name, truth)| (name.to_owned(), truth));
+        assert_eq!(built, expected);
+    }
+
+    #[test]
+    fn unreadable_cfg_select_bodies_stay_macros() {
+        for source in [
+            "cfg_select! {}",
+            "cfg_select! { => { fn a() {} } }",
+            "cfg_select! { unix { fn a() {} } }",
+            "cfg_select! { unix => fn a() {} }",
+            "cfg_select! { unix => { mod a; 1 + 1 } }",
+            "cfg_select! { _ => { fn a() {} } unix => { fn b() {} } }",
+            "cfg_select! { unix => { fn a() {} },, }",
+            "cfg_select! { unix => { fn a() {} } _ => 42 }",
+            "other! { unix => { fn a() {} } }",
+            "other::cfg_select! { unix => { fn a() {} } }",
+            "std::other::cfg_select! { unix => { fn a() {} } }",
         ] {
             let mut file = syn::parse_file(source).unwrap();
             Expand.visit_file_mut(&mut file);
