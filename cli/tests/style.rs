@@ -28,6 +28,7 @@ fn cargo_style_dry_run_is_machine_readable_without_an_api_key() {
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["status"], "planned");
+    assert_eq!(report["provider"], "decisions");
     assert_eq!(
         report["selected_rules"],
         serde_json::json!(["glob_import_context"])
@@ -35,6 +36,32 @@ fn cargo_style_dry_run_is_machine_readable_without_an_api_key() {
     assert_eq!(report["files"].as_array().unwrap().len(), 1);
     assert_eq!(report["files"][0]["path"], "src/main.rs");
     assert_eq!(report["files"][0]["scope"], "file");
+}
+
+#[test]
+fn provider_can_be_named_and_unknown_providers_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+    let invoke = |provider: &str| {
+        Command::new(env!("CARGO_BIN_EXE_cargo-adamantium"))
+            .args(["style", "check", "--dry-run", "--provider", provider])
+            .arg(dir.path())
+            .env_remove("OPENAI_API_KEY")
+            .output()
+            .unwrap()
+    };
+    let output = invoke("decisions");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["provider"], "decisions");
+
+    let output = invoke("not_a_provider");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--provider"));
 }
 
 #[test]

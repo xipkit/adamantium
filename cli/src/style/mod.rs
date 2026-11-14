@@ -1,9 +1,10 @@
 //! Judgment-based review of Rust files against the Google Rust style guide,
-//! through the OpenAI Decisions API. Formerly the standalone `cargo
-//! rustoleum`; the rules, labeled cases and evaluation scripts live under
-//! `style/` in the repository.
+//! through a model provider, the OpenAI Decisions API by default. Formerly
+//! the standalone `cargo rustoleum`; the rules, labeled cases and evaluation
+//! scripts live under `style/` in the repository.
 
-mod api;
+mod decisions;
+mod provider;
 mod report;
 mod resume;
 mod rules;
@@ -14,13 +15,13 @@ use std::{io::Write, path::PathBuf, process::ExitCode};
 use anyhow::Result;
 use clap::{Args, Subcommand, ValueEnum};
 
-use self::{report::Report, rules::RuleSet, scan::Scan};
+use self::{provider::ProviderKind, report::Report, rules::RuleSet, scan::Scan};
 
 #[derive(Subcommand)]
 pub enum Command {
     /// Review a Rust file or directory without modifying it. Sends each file
-    /// to the Decisions API, so it needs OPENAI_API_KEY or, on macOS, an
-    /// `openai-api-key` Keychain item.
+    /// to the provider, which needs credentials: for the default Decisions
+    /// API, OPENAI_API_KEY or, on macOS, an `openai-api-key` Keychain item.
     Check(CheckArgs),
     /// List the style rules.
     Rules {
@@ -37,7 +38,10 @@ pub struct CheckArgs {
     /// Evaluate only this rule; may be repeated.
     #[arg(long = "rule")]
     rules: Vec<String>,
-    /// Project context shared with the Decisions API for each file.
+    /// The service that answers the rules for each file.
+    #[arg(long, value_enum, default_value_t = ProviderKind::Decisions)]
+    provider: ProviderKind,
+    /// Project context shared with the provider for each file.
     #[arg(long)]
     context: Option<String>,
     /// Show the files and rules that would be checked without an API call.
@@ -81,22 +85,29 @@ pub fn run(command: Command) -> Result<ExitCode> {
             let questions = rules.select(&args.rules)?;
             let mut scan = Scan::discover(&args.path)?;
             if let Some(previous) = &args.retry_from {
-                resume::select_pending(&mut scan, previous, &rules.model, &questions)?;
+                resume::select_pending(
+                    &mut scan,
+                    previous,
+                    args.provider,
+                    &rules.model,
+                    &questions,
+                )?;
             }
             let report = if args.dry_run {
-                Report::planned(&scan, &rules.model, &questions)
+                Report::planned(&scan, args.provider, &rules.model, &questions)
             } else if scan.files.is_empty() {
-                let mut report = Report::planned(&scan, &rules.model, &questions);
+                let mut report = Report::planned(&scan, args.provider, &rules.model, &questions);
                 report.status = "complete";
                 report
             } else {
-                let client = api::HttpDecisions::new(api::api_key()?);
+                let provider = args.provider.connect()?;
                 Report::check(
                     &scan,
+                    args.provider,
                     &rules.model,
                     &questions,
                     args.context.as_deref(),
-                    &client,
+                    provider.as_ref(),
                 )
             };
             let stdout = std::io::stdout();
