@@ -380,6 +380,19 @@ fn a_fully_cached_run_needs_no_key_and_keeps_its_findings() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("OPENAI_API_KEY"));
 
+    // A dry run shows the cached findings but still succeeds.
+    let output = style_check(dir.path(), &["--cache-from", cache, "--dry-run"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "planned");
+    assert_eq!(report["files"][0]["cached"], true);
+    assert_eq!(
+        report["files"][0]["findings"][0]["rule"],
+        "glob_import_context"
+    );
+
     fs::write(dir.path().join("lib.rs"), "fn edited() {}\n").unwrap();
     let output = style_check(dir.path(), &["--cache-from", cache, "--dry-run"])
         .output()

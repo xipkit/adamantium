@@ -231,13 +231,14 @@ impl Report {
         };
     }
 
+    /// A planned report exits 0 even when cached files carry findings: a dry
+    /// run previews the review, it doesn't judge it.
     pub fn exit_code(&self) -> u8 {
-        if self.status == ReportStatus::Incomplete {
-            2
-        } else if self.files.iter().any(|file| !file.findings.is_empty()) {
-            1
-        } else {
-            0
+        match self.status {
+            ReportStatus::Planned => 0,
+            ReportStatus::Incomplete => 2,
+            ReportStatus::Complete if self.files.iter().any(|file| !file.findings.is_empty()) => 1,
+            ReportStatus::Complete => 0,
         }
     }
 }
