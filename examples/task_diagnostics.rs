@@ -1,7 +1,6 @@
 use std::time::Duration;
 
-use adamantium::{Cancellation, Tasks};
-use tokio::time::Instant;
+use adamantium::{Cancellation, Tasks, time};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -12,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let result = Tasks::<std::io::Error>::run_until(
         Cancellation::new(),
-        Some(Instant::now() + Duration::from_millis(100)),
+        Some(time::now() + Duration::from_millis(100)),
         async |tasks| {
             let completed = tasks.spawn_named("load profile", async { Ok(42) });
             tasks.spawn_named("load feed", async {

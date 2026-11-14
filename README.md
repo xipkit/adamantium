@@ -36,6 +36,8 @@ cargo adamantium check --format json
 cargo adamantium check --format sarif  # for GitHub code scanning
 cargo adamantium init               # write the rules into Cargo.toml and clippy.toml
 cargo adamantium rules              # list the rules and why each exists
+cargo adamantium explain unwrap_used # show why a rule exists and how to fix it
+cargo adamantium explain clippy::rc_buffer --format json
 ```
 
 `check` runs `cargo clippy --all-targets` with Adamantium's rules and `clippy.toml`. It disables Clippy's default lints and runs the rules as warnings, allowing crates with findings and their dependents to be checked. It checks every workspace member unless arguments after `--` select packages; those arguments are passed to `cargo clippy`.
@@ -65,6 +67,20 @@ The rules also require `overflow-checks = true` in the release profile. Integer 
 
 `init` adds the rules to a project so plain `cargo clippy` applies them. It writes the `[lints]` tables, or `[workspace.lints]` in a workspace, the release profile's overflow check, and a `clippy.toml`. It excludes rules listed under `allow` or `exceptions` in the [skip list](#skipping-rules-and-paths). Running it again makes no changes, and it will not replace a different `clippy.toml` without `--force`.
 
+### Strict tier
+
+Use `--strict` to add stricter rules to the default set:
+
+```sh
+cargo adamantium check --strict
+cargo adamantium init --strict
+cargo adamantium rules --strict              # also supports --format json or toml
+```
+
+The strict tier starts with [`arithmetic_side_effects`](https://clippy.rust-lang.org/master/index.html#arithmetic_side_effects). It flags arithmetic operators that can overflow or panic, including integer division and negation. Use methods such as `checked_add`, `checked_div`, `saturating_add`, or `wrapping_add` to make the intended behavior explicit. Clippy recognizes some safe operations, but cannot prove every application's arithmetic bounds, so this tier is opt-in.
+
+`init --strict` adds the strict lint levels to the project's tables so plain `cargo clippy` applies them. Keep passing `--strict` to `check` in CI to include those rules in Adamantium's reports. Repeating `init --strict` makes no changes; running `init` afterward preserves previously added strict lint levels. The same skip lists apply to both tiers.
+
 ## Skipping rules and paths
 
 To adopt the rules gradually, add a skip list to `Cargo.toml`:
@@ -83,6 +99,8 @@ For a single package, use `[package.metadata.adamantium]`. Paths are globs relat
 `check` summarizes skipped findings and reports counts by rule in the JSON report's `skipped` map. Remove a rule from `allow` to see its findings. Projects with a skip list should run `cargo adamantium check` in CI because a `[lints]` table cannot scope a rule to a path.
 
 For a machine-readable list of rules and their reasons, run `cargo adamantium rules --format json`.
+
+`cargo adamantium explain <rule>` prints the rule's reasoning, recommended replacement, and before-and-after example without loading a project or accessing the network. It accepts the bare or qualified rule name, including `overflow_checks` or `adamantium::overflow_checks` for the release profile check. With `--format json`, it prints an object with `schema_version: 1`, `rule` (the qualified name), `why`, `replacement`, `before`, and `after`. Successful explanations exit with `0`; unknown rule names exit with `2` and an error on stderr.
 
 ## The library
 
@@ -161,8 +179,33 @@ For explicit shutdown, use `Tasks::run_until(cancellation, deadline, body)` or
 `tasks.join_until(cancellation, deadline, body_result)`. `Cancellation::new()`
 creates a cloneable signal: callers request shutdown with `cancel()`, async work
 can await `cancelled()`, and blocking work can check `is_cancelled()`. The deadline
-is an optional `tokio::time::Instant`; `None` needs no timer. Use a fresh signal
-per scope. The scope also signals it on failure, deadline, completion, or drop.
+is an optional `tokio::time::Instant`, built from `adamantium::time::now()`;
+`None` needs no timer. Use a fresh signal per scope. The scope also signals it
+on failure, deadline, completion, or drop.
+
+Enable the opt-in `signal` feature to use
+`cancellation.cancel_on_signal().await`: it requests cancellation on SIGINT or
+SIGTERM on Unix, or Ctrl-C alone on Windows. Await it alongside your scope with
+`tokio::try_join!`; it also finishes when the scope cancels the signal on normal
+completion. Registration errors are returned as `std::io::Error`. No background
+task is spawned. Listening starts on the first poll, and dropping the future
+stops listening without cancelling. Tokio's installed process handlers persist
+afterward, so the default signal termination behavior is not restored.
+
+```rust
+use adamantium::{Cancellation, Tasks};
+
+let cancellation = Cancellation::new();
+let (_, outcome) = tokio::try_join!(
+    cancellation.cancel_on_signal(),
+    async {
+        Ok::<_, std::io::Error>(Tasks::run_until(
+            cancellation.clone(), None, async |_| serve().await,
+        ).await)
+    },
+)?;
+// `outcome` is the scope's result, including `ScopeError::Cancelled` on a signal.
+```
 
 These methods return `ScopeError::Failed(error)`, `Cancelled`, or
 `DeadlineExceeded`. A completed body error wins over an unclaimed child error,
@@ -181,6 +224,12 @@ cannot be forcibly stopped, so cleanup can extend beyond the deadline. The free
 when an enclosing async task is aborted. Dropping a scope future or panicking in
 its body signals shutdown and requests aborts but cannot wait for cleanup. For
 that guarantee, request cancellation and continue awaiting the scope.
+
+With the `tokio` feature, use `adamantium::time::sleep(duration)` and
+`adamantium::time::sleep_until(deadline)` for waits. These functions and
+`time::now()` currently use Tokio's clock, including its paused test clock.
+Build periodic waits with a loop over `time::sleep_until`. For measuring elapsed
+wall-clock time, `std::time::Instant::now()` remains allowed.
 
 Enable the optional `tracing` feature and use `tasks.spawn_named("fetch", future)`
 or `tasks.spawn_blocking_named("parse", closure)` to diagnose stuck work. Each
@@ -319,24 +368,24 @@ a step bound cannot interrupt a loop that makes no scheduling calls.
 
 ## The rules
 
-The lint levels are in this repository's `[workspace.lints]`, and the Clippy configuration is in `clippy.toml`. `cargo adamantium rules` prints both. The rules and library provide the following properties for code that follows them:
+The default lint levels are in this repository's `[workspace.lints]`, and the Clippy configuration is in `clippy.toml`. `cargo adamantium rules` prints both. The optional strict additions are recorded separately in `[workspace.metadata.adamantium-strict.lints]` and printed with `rules --strict`; they do not apply to this repository itself. The rules and library provide the following properties for code that follows them:
 
 | Property | Enforced by |
 | --- | --- |
 | No `unsafe` code | `unsafe_code = "forbid"` |
 | Every value can cross a task | `future_not_send`; `Rc`, `RefCell`, `Cell`, and `LocalSet` disallowed, and so are `LocalRuntime`'s entry points |
-| No task outlives its scope | `tokio::spawn`, `spawn_local`, `JoinSet`, the spawn methods of Tokio's `Handle`, `Runtime`, `LocalRuntime`, and `task::Builder`, `std::thread::spawn`, and `scope` disallowed; tasks use `Tasks` |
+| No task outlives its scope | `tokio::spawn`, `spawn_local`, `JoinSet`, the spawn methods of Tokio's `Handle`, `Runtime`, `LocalRuntime`, and `task::Builder`, async-std's task and builder spawns, `smol::spawn`, smol's executor spawns, `std::thread::spawn`, and `scope` disallowed; tasks use `Tasks` |
 | No lock is held across an await or inside another lock | `await_holding_lock`; `Mutex` and `RwLock` from std, tokio, parking_lot, and futures disallowed; `Actor::with` is synchronous and rejects nesting |
-| No worker thread is blocked | `std::thread::sleep`, `block_in_place`, every Tokio `spawn_blocking`, and `block_on` on a `Handle` or `LocalRuntime` disallowed; blocking work uses `blocking` |
+| No worker thread is blocked | `std::thread::sleep`, `block_in_place`, every Tokio `spawn_blocking`, `async_std::task::spawn_blocking`, `smol::unblock`, and `block_on` on a `Handle` or `LocalRuntime` disallowed; blocking work uses `blocking` |
 | No silently discarded must-use results or futures | `unused_must_use`, `let_underscore_must_use`, `let_underscore_future`; intentional discards use an explicit `drop` |
 | No panic from indexing, unwrapping, or an explicit `panic!` | `indexing_slicing`, `string_slice`, `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `unreachable`; `Vec::remove`, `Vec::insert`, `Vec::swap_remove`, `slice::split_at`, and `slice::copy_from_slice` disallowed |
 | No silent truncation or wrap | `cast_possible_truncation`, `cast_possible_wrap`, `cast_sign_loss`; `overflow-checks = true` in release |
-| Explicit leak APIs and weak references restricted | `mem_forget`, `Box::leak`, `Arc::downgrade`, and `Weak` disallowed |
-| No skipped cleanup | `exit` |
+| Explicit leak APIs and weak references restricted | `mem_forget`, `Box::leak`, `ManuallyDrop`, `Arc::downgrade`, and `Weak` disallowed |
+| No skipped cleanup | `exit`; `std::process::abort` disallowed |
 
 Tests are exempt from the panic rules, so `unwrap`, indexing, and `panic!` are allowed in `#[test]` functions and `#[cfg(test)]` modules. Before Rust 1.100, Clippy does not treat helper functions in integration test files as tests, so those functions follow the rules. From Rust 1.100, they are exempt as well.
 
-The rules have limits. A plain `receive` or `send` can wait indefinitely while the channel stays open and empty or full; use `receive_until` or `send_until` to bound the wait with a `Cancellation` or a deadline. Dependencies can still use unsafe code or panic, and Clippy cannot detect every call that blocks a worker thread. `Runtime::block_on` is allowed because `#[tokio::main]` and `#[tokio::test]` expand to it; called inside a runtime, it panics at run time instead of blocking. Arithmetic overflow and stack exhaustion can still panic.
+The rules have limits. A plain `receive` or `send` can wait indefinitely while the channel stays open and empty or full; use `receive_until` or `send_until` to bound the wait with a `Cancellation` or a deadline. Dependencies can still use unsafe code or panic, and Clippy cannot detect every call that blocks a worker thread. `Runtime::block_on` is allowed because `#[tokio::main]` and `#[tokio::test]` expand to it; called inside a runtime, it panics at run time instead of blocking. The default tier permits arithmetic that can panic; the strict tier lints potentially panicking arithmetic operators. Neither tier prevents stack exhaustion or panics inside called methods.
 
 Strong reference cycles are not detected or collected. An `Actor` whose state owns a clone of itself, directly or through other actors, keeps every state in the cycle alive after the last external handle is dropped. Banning `Weak` and `Arc::downgrade` does not prevent strong cycles; keep actor ownership acyclic or explicitly remove cycle-forming handles before releasing the last external handle.
 

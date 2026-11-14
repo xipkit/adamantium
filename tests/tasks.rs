@@ -10,10 +10,11 @@ use std::{
     time::Duration,
 };
 
+use adamantium::time::sleep;
 use adamantium::{Tasks, blocking, concurrently};
 use tokio::{
     sync::{Barrier, Semaphore, oneshot},
-    time::{sleep, timeout},
+    time::timeout,
 };
 
 /// How long a test waits before calling a join hung. No test relies on it for
