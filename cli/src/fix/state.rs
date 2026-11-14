@@ -266,6 +266,8 @@ struct Names {
     constants: BTreeSet<String>,
     /// `macro_rules!` definitions and imports.
     macros: BTreeSet<String>,
+    /// Type aliases for unsized types, such as `type Bytes = [u8];`.
+    unsized_aliases: BTreeSet<String>,
 }
 
 impl<'ast> Visit<'ast> for Names {
@@ -279,6 +281,9 @@ impl<'ast> Visit<'ast> for Names {
             }
             Item::Struct(item) => {
                 self.constants.insert(item.ident.to_string());
+            }
+            Item::Type(item) if is_unsized(&item.ty, &BTreeSet::new()) => {
+                self.unsized_aliases.insert(item.ident.to_string());
             }
             Item::Use(_) => {
                 for (name, _) in ItemScope::bindings(item) {
@@ -837,7 +842,8 @@ impl<'a> Walker<'a> {
         let Some(GenericArgument::Type(state)) = inner.args.first() else {
             return None;
         };
-        if inner.args.len() != 1 {
+        // A mutex can hold a slice or trait object; an actor can't.
+        if inner.args.len() != 1 || is_unsized(state, &self.names.unsized_aliases) {
             return None;
         }
         Some(format!("{ACTOR}<{}>", self.text.get(self.text.of(state)?)?))
@@ -1049,6 +1055,24 @@ impl<'a> Walker<'a> {
                 }
             }
         }
+    }
+}
+
+/// Whether `ty` is written as an unsized type: a slice, `str`, a trait
+/// object, or one of `aliases`.
+fn is_unsized(ty: &Type, aliases: &BTreeSet<String>) -> bool {
+    match ty {
+        Type::Slice(_) | Type::TraitObject(_) => true,
+        Type::Paren(inner) => is_unsized(&inner.elem, aliases),
+        Type::Group(inner) => is_unsized(&inner.elem, aliases),
+        Type::Path(path) => {
+            path.qself.is_none()
+                && path
+                    .path
+                    .get_ident()
+                    .is_some_and(|ident| ident == "str" || aliases.contains(&ident.to_string()))
+        }
+        _ => false,
     }
 }
 
@@ -2508,6 +2532,27 @@ mod tests {
         );
         assert_eq!(refusals, []);
         assert!(fixed.contains("m.with(|m| { bump(*m); });"), "{fixed}");
+    }
+
+    #[test]
+    fn unsized_state_is_left_alone() {
+        for body in [
+            "fn f() { let m: Arc<Mutex<[u8]>> = Arc::new(Mutex::new([1u8, 2])); assert_eq!(m.lock().unwrap().len(), 2); }",
+            "fn f() { let m: Arc<Mutex<dyn std::fmt::Debug>> = Arc::new(Mutex::new(1)); drop(m); }",
+            "type Bytes = [u8];\nfn f() { let m: Arc<Mutex<Bytes>> = Arc::new(Mutex::new([1u8])); drop(m); }",
+        ] {
+            let source = format!("use std::sync::{{Arc, Mutex}};\n{body}\n");
+            let (fixed, _) = fix(
+                &source,
+                &[
+                    "Mutex",
+                    "Mutex<[u8]>",
+                    "Mutex<dyn std::fmt::Debug>",
+                    "Mutex<Bytes>",
+                ],
+            );
+            assert_eq!(fixed, source);
+        }
     }
 
     #[test]
