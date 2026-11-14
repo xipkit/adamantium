@@ -191,7 +191,7 @@ impl Baseline {
         let mut baseline = Self::default();
         for finding in report.findings {
             let key = BaselineKey {
-                path: relative(&report.root, &finding.file).to_owned(),
+                path: portable_path(&report.root, &finding.file),
                 rule: finding.rule,
                 source: finding.source,
             };
@@ -567,7 +567,7 @@ fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted) 
             *sorted.skipped.entry(rule.clone()).or_insert(0) += 1;
             return;
         }
-        if sorted.in_baseline(rule, path, source.as_deref()) {
+        if sorted.in_baseline(rule, &portable_path(setting.root, &file), source.as_deref()) {
             return;
         }
     }
@@ -612,6 +612,18 @@ fn relative<'a>(root: &Path, file: &'a str) -> &'a str {
         .ok()
         .and_then(Path::to_str)
         .unwrap_or(file)
+}
+
+/// `file` relative to `root`, with `/` between segments, for matching a
+/// baseline. A report names files with the separators of the platform that
+/// wrote it, so a baseline written on Windows names `src\\lib.rs` what Linux
+/// names `src/lib.rs`, and its root is not a path Linux can strip.
+fn portable_path(root: &Path, file: &str) -> String {
+    let root = root.to_string_lossy().replace('\\', "/");
+    let file = file.replace('\\', "/");
+    file.strip_prefix(root.trim_end_matches('/'))
+        .and_then(|rest| rest.strip_prefix('/'))
+        .map_or_else(|| file.clone(), str::to_owned)
 }
 
 /// Resolves `.` and `..` segments without touching the file system, so a
@@ -1031,5 +1043,55 @@ mod tests {
             Baseline::parse(&report(SCHEMA_VERSION.into(), "clean")).unwrap(),
             Baseline::default()
         );
+    }
+
+    #[test]
+    fn baseline_paths_match_across_platforms() {
+        for (root, file) in [
+            (r"C:\work\project", r"src\lib.rs"),
+            (r"C:\work\project", r"C:\work\project\src\lib.rs"),
+            (r"C:\work\project\", r"C:\work\project\src\lib.rs"),
+            ("/home/ci/project", "/home/ci/project/src/lib.rs"),
+            ("/home/ci/project/", "src/lib.rs"),
+        ] {
+            assert_eq!(
+                portable_path(Path::new(root), file),
+                "src/lib.rs",
+                "{root} {file}"
+            );
+        }
+        // A sibling directory that shares the root's prefix is not inside it.
+        assert_eq!(
+            portable_path(
+                Path::new("/home/ci/project"),
+                "/home/ci/project-two/src/lib.rs"
+            ),
+            "/home/ci/project-two/src/lib.rs"
+        );
+
+        let baseline = baseline(
+            r"C:\work\project",
+            serde_json::json!([
+                earlier(
+                    "clippy::unwrap_used",
+                    r"src\lib.rs",
+                    Some("let a = x.unwrap();")
+                ),
+                earlier(
+                    "clippy::unwrap_used",
+                    r"C:\work\project\src\main.rs",
+                    Some("let b = y.unwrap();"),
+                ),
+            ]),
+        );
+        let report = classify_against(
+            Some(baseline),
+            vec![
+                unwrap_at("src/lib.rs", 1, "let a = x.unwrap();", "unwrap"),
+                unwrap_at("project/src/main.rs", 1, "let b = y.unwrap();", "unwrap"),
+            ],
+        );
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert_eq!(report.baseline_unmatched, Some(0));
     }
 }
