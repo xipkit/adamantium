@@ -431,12 +431,15 @@ fn is_identifier(name: &str) -> bool {
 }
 
 /// What a name means in one item scope.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 enum Binding {
     /// A `use` or `extern crate`, with the path it names.
     Import(Vec<String>),
     /// An item defined here.
     Item,
+    /// A name whose meaning depends on the configuration, or that two
+    /// declarations claim.
+    Ambiguous,
 }
 
 /// The items and imports of one module or block.
@@ -454,11 +457,28 @@ impl ItemScope {
             module,
         };
         for item in items {
+            let mut own = Self {
+                names: HashMap::new(),
+                globs: Vec::new(),
+                module,
+            };
             if let Item::Use(item) = item {
-                let mut prefix = Vec::new();
-                scope.import(&item.tree, &mut prefix);
+                own.import(&item.tree, &mut Vec::new());
             } else {
-                scope.names.extend(Self::bindings(item));
+                own.names.extend(Self::bindings(item));
+            }
+            scope.globs.extend(own.globs);
+            // A `#[cfg]` item may not exist in the build fix checked.
+            let conditional = item_attributes(item)
+                .iter()
+                .any(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"));
+            for (name, binding) in own.names {
+                let binding = match scope.names.get(&name) {
+                    _ if conditional => Binding::Ambiguous,
+                    Some(existing) if *existing != binding => Binding::Ambiguous,
+                    _ => binding,
+                };
+                scope.names.insert(name, binding);
             }
         }
         scope
@@ -530,6 +550,27 @@ impl ItemScope {
             }
             _ => Vec::new(),
         }
+    }
+}
+
+fn item_attributes(item: &Item) -> &[syn::Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        _ => &[],
     }
 }
 
@@ -752,6 +793,7 @@ impl<'a> Walker<'a> {
                 return match binding {
                     Binding::Import(path) => Resolved::Path(path.clone()),
                     Binding::Item => Resolved::Item,
+                    Binding::Ambiguous => Resolved::Ambiguous,
                 };
             }
             if scope.module {
@@ -764,6 +806,7 @@ impl<'a> Walker<'a> {
                             match parent.names.get(name) {
                                 Some(Binding::Import(path)) => Resolved::Path(path.clone()),
                                 Some(Binding::Item) => Resolved::Item,
+                                Some(Binding::Ambiguous) => Resolved::Ambiguous,
                                 None => Resolved::Prelude,
                             }
                         }
@@ -2826,6 +2869,18 @@ mod tests {
         for source in [
             "use std::sync::{Arc, Mutex};\ntrait Make { fn new(value: Mutex<i32>) -> Self; }\nfn f<Arc: Make>() { let m = Arc::new(Mutex::new(1)); drop(m); }\n",
             "use std::sync::{Arc, Mutex};\ntrait Make { fn new(value: Mutex<i32>) -> Self; }\nstruct S<T>(T);\nimpl<Arc: Make> S<Arc> { fn f() { let m = Arc::new(Mutex::new(1)); drop(m); } }\n",
+        ] {
+            let (fixed, refusals) = fix(source, &["Mutex"]);
+            assert_eq!(fixed, source);
+            assert_eq!(refusals, []);
+        }
+    }
+
+    #[test]
+    fn conditional_or_conflicting_names_are_ambiguous() {
+        for source in [
+            "use std::sync::Mutex;\nstruct Arc<T>(T);\nimpl<T> Arc<T> { fn new(t: T) -> Self { Self(t) } }\n#[cfg(any())]\nuse std::sync::Arc;\nfn f() { let m = Arc::new(Mutex::new(1u8)); drop(m); }\n",
+            "use std::sync::Mutex;\n#[cfg(any())]\nuse std::sync::Arc;\nfn f() { let m = Arc::new(Mutex::new(1u8)); drop(m); }\n",
         ] {
             let (fixed, refusals) = fix(source, &["Mutex"]);
             assert_eq!(fixed, source);
