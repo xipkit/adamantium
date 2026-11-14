@@ -196,3 +196,14 @@ pub unsafe fn unsafe_fn() {}
 pub unsafe trait UnsafeTrait {}
 
 unsafe impl UnsafeTrait for u8 {}
+
+// A `#[test]` function is built only for tests, like `#[cfg(test)]`.
+#[test]
+fn standalone_test() {
+    unsafe { rt::spawn(()) };
+}
+
+#[cfg_attr(all(), test)]
+fn conditional_test() {
+    unsafe { rt::spawn(()) };
+}
