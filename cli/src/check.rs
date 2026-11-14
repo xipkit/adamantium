@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ReportFormat,
     config::Config,
-    lints::{CLIPPY_TOML, LINTS, OVERFLOW_RULE},
+    lints::{self, CLIPPY_TOML, OVERFLOW_RULE},
     manifest, sarif,
 };
 
@@ -121,9 +121,19 @@ impl Status {
 /// Runs the check and prints the report, as text on stderr or as JSON or
 /// SARIF on stdout. The exit status is 0 when clean, 1 with findings and 2
 /// when the project failed to build.
-pub fn run(path: &Path, cargo_args: &[String], format: ReportFormat) -> Result<ExitCode> {
+pub fn run(
+    path: &Path,
+    cargo_args: &[String],
+    format: ReportFormat,
+    strict: bool,
+) -> Result<ExitCode> {
     let root = manifest::root(path)?;
-    let report = check(&root, cargo_args, matches!(format, ReportFormat::Text))?;
+    let report = check(
+        &root,
+        cargo_args,
+        matches!(format, ReportFormat::Text),
+        strict,
+    )?;
     match format {
         ReportFormat::Json => print_json(&report)?,
         ReportFormat::Sarif => print_json(&sarif::log(
@@ -187,7 +197,7 @@ fn write_clippy_config(dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
+fn check(root: &Path, cargo_args: &[String], echo: bool, strict: bool) -> Result<Report> {
     let config = Config::load(root)?;
     let conf = tempfile::tempdir().context("creating a directory for clippy.toml")?;
     let clippy_config = write_clippy_config(conf.path())?;
@@ -210,7 +220,7 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
         // test targets that depend on it are checked too. A lint the project
         // itself denies would otherwise stop the build at the first crate.
         .args(["--", "--cap-lints", "warn", "-A", "clippy::all"]);
-    for lint in LINTS {
+    for lint in lints::selected(strict) {
         command.args(["-W", &lint.qualified()]);
     }
     command
@@ -220,7 +230,9 @@ fn check(root: &Path, cargo_args: &[String], echo: bool) -> Result<Report> {
     let mut child = command.spawn().context("running cargo clippy")?;
     let stdout = child.stdout.take().context("capturing cargo's output")?;
 
-    let rules: HashSet<String> = LINTS.iter().map(super::lints::Lint::qualified).collect();
+    let rules: HashSet<String> = lints::selected(strict)
+        .map(lints::Lint::qualified)
+        .collect();
     let mut findings = Vec::new();
     let mut skipped = BTreeMap::new();
     let mut warnings = Vec::new();
@@ -466,7 +478,7 @@ mod tests {
     fn classify_diagnostics(diagnostics: Vec<Diagnostic>) -> Report {
         let root = Path::new("project");
         let config = Config::default();
-        let rules = LINTS.iter().map(Lint::qualified).collect();
+        let rules = lints::selected(false).map(Lint::qualified).collect();
         let setting = Setting {
             root,
             clippy_config: Path::new("generated/clippy.toml"),
