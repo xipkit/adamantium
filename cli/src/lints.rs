@@ -223,9 +223,9 @@ async fn example() {
     ),
     clippy(
         "disallowed_methods",
-        "panicking index methods, unstructured spawns, blocking calls, clocks outside adamantium::time, leaks and weak references, listed in clippy.toml",
+        "panicking index methods, broadcast channels, unstructured spawns, blocking calls, clocks outside adamantium::time, leaks and weak references, listed in clippy.toml",
         example(
-            "Use adamantium::Array::remove/insert and split_at_checked for checked index operations, Tasks::run and Tasks::spawn for scoped tasks, adamantium::blocking for blocking work, and adamantium::time::sleep or sleep_until for timers. Build deadlines with adamantium::time::now and periodic waits with a loop over adamantium::time::sleep_until. Drop resources instead of leaking them; use owned values instead of weak references.",
+            "Use adamantium::Array::remove/insert and split_at_checked for checked index operations, one adamantium::Channel per receiver to broadcast, Tasks::run and Tasks::spawn for scoped tasks, adamantium::blocking for blocking work, and adamantium::time::sleep or sleep_until for timers. Build deadlines with adamantium::time::now and periodic waits with a loop over adamantium::time::sleep_until. Drop resources instead of leaking them; use owned values instead of weak references.",
             r#"async fn example() -> Result<u32, tokio::task::JoinError> {
     let task = tokio::spawn(async { 42 });
     task.await
@@ -240,9 +240,9 @@ async fn example() {
     ),
     clippy(
         "disallowed_types",
-        "shared identity, runtime borrow checking, raw locks and unscoped task sets, listed in clippy.toml",
+        "shared identity, runtime borrow checking, raw locks, broadcast channels and unscoped task sets, listed in clippy.toml",
         example(
-            "Use Adamantium values (Str, Bytes, Array, Deque, Map, Set) for owned data, Actor for shared state, and Tasks for scoped concurrency. These replace Rc/Weak, RefCell/Cell, raw locks and unscoped task sets.",
+            "Use Adamantium values (Str, Bytes, Array, Deque, Map, Set) for owned data, Actor for shared state, one Channel per receiver to broadcast, and Tasks for scoped concurrency. These replace Rc/Weak, RefCell/Cell, raw locks, broadcast channels and unscoped task sets.",
             r#"fn example() {
     let state = std::sync::Mutex::new(0);
     *state.lock().unwrap() += 1;
