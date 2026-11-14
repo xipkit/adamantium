@@ -1,7 +1,10 @@
+#[path = "support/persistent.rs"]
+mod persistent;
+
 use std::{hint::black_box, time::Duration};
 
 use adamantium::{Array, Bytes, Deque, Map, Set, Str};
-use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group};
 
 fn bench_value<T>(
     c: &mut Criterion,
@@ -142,6 +145,90 @@ criterion_group! {
         .warm_up_time(Duration::from_millis(300))
         .measurement_time(Duration::from_secs(1))
         .sample_size(30);
-    targets = cow
+    targets = cow, persistent_collections
 }
-criterion_main!(benches);
+#[allow(
+    clippy::exit,
+    reason = "invalid standalone profiler arguments must fail"
+)]
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--profile") {
+        if !profile(&args) {
+            eprintln!(
+                "usage: cow --profile <array|deque|map|set> <cow|im> <size> <repeats>; size/repeats must be positive, size <= 65536"
+            );
+            std::process::exit(2);
+        }
+    } else {
+        benches();
+        Criterion::default().configure_from_args().final_summary();
+    }
+}
+
+fn persistent_collections(c: &mut Criterion) {
+    compare::<Array<usize>>(c);
+    compare::<im::Vector<usize>>(c);
+    compare::<Deque<usize>>(c);
+    compare::<persistent::PersistentDeque>(c);
+    compare::<Map<usize, usize>>(c);
+    compare::<im::HashMap<usize, usize>>(c);
+    compare::<Set<usize>>(c);
+    compare::<im::HashSet<usize>>(c);
+}
+
+fn compare<T: persistent::Collection>(c: &mut Criterion) {
+    let mut group = c.benchmark_group(format!("persistent/{}", T::NAME));
+    for size in persistent::SIZES {
+        let original = T::build(size);
+        group.bench_function(format!("snapshot_edit/{}/{size}", T::BACKEND), |b| {
+            b.iter(|| persistent::snapshot_edit(&original, size));
+        });
+        group.bench_function(format!("unique_edit/{}/{size}", T::BACKEND), |b| {
+            b.iter_batched_ref(
+                || T::build(size),
+                |value| black_box(value).edit(size),
+                BatchSize::PerIteration,
+            );
+        });
+        group.bench_function(format!("lookup/{}/{size}", T::BACKEND), |b| {
+            b.iter(|| black_box(black_box(&original).lookup(black_box(size / 2))));
+        });
+        group.bench_function(format!("iterate/{}/{size}", T::BACKEND), |b| {
+            b.iter(|| black_box(black_box(&original).checksum()));
+        });
+    }
+    group.finish();
+}
+
+fn profile(args: &[String]) -> bool {
+    let (Some(collection), Some(backend), Some(size), Some(repeats)) =
+        (args.get(2), args.get(3), args.get(4), args.get(5))
+    else {
+        return false;
+    };
+    let (Ok(size), Ok(repeats)) = (size.parse::<usize>(), repeats.parse::<usize>()) else {
+        return false;
+    };
+    if size == 0 || size > 65_536 || repeats == 0 || args.len() != 6 {
+        return false;
+    }
+    macro_rules! run {
+        ($ty:ty) => {{
+            let original = <$ty as persistent::Collection>::build(size);
+            persistent::profile_snapshots(&original, size, repeats);
+        }};
+    }
+    match (collection.as_str(), backend.as_str()) {
+        ("array", "cow") => run!(Array<usize>),
+        ("array", "im") => run!(im::Vector<usize>),
+        ("deque", "cow") => run!(Deque<usize>),
+        ("deque", "im") => run!(persistent::PersistentDeque),
+        ("map", "cow") => run!(Map<usize, usize>),
+        ("map", "im") => run!(im::HashMap<usize, usize>),
+        ("set", "cow") => run!(Set<usize>),
+        ("set", "im") => run!(im::HashSet<usize>),
+        _ => return false,
+    }
+    true
+}

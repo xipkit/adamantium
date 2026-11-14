@@ -72,6 +72,7 @@ tokio = { version = "1", features = ["macros", "rt", "sync", "time"], optional =
 cbor4ii = { version = "1", features = ["serde1", "use_alloc"] }
 criterion = { version = "0.5", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+im = "=15.1.0"
 serde_json = "1"
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
