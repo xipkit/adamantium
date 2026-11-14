@@ -1867,6 +1867,12 @@ fn binds_by_reference(pat: &Pat) -> bool {
 
 impl<'a> Visit<'a> for Walker<'a> {
     fn visit_item(&mut self, item: &'a Item) {
+        // A `macro_rules!` body can name the locals in scope where it is
+        // defined, so it is read without an item barrier.
+        if let Item::Macro(mac) = item {
+            self.mac(&mac.mac);
+            return;
+        }
         self.scopes.push(Scope {
             vars: Vec::new(),
             barrier: true,
@@ -1882,7 +1888,6 @@ impl<'a> Visit<'a> for Walker<'a> {
                 }
             }
             Item::Fn(function) => self.function(function.sig.inputs.iter(), &function.block),
-            Item::Macro(mac) => self.mac(&mac.mac),
             _ => syn::visit::visit_item(self, item),
         }
         self.scopes.pop();
@@ -2781,6 +2786,15 @@ mod tests {
         assert!(
             fixed.contains("let n = m.with(|m| (*m).clone());"),
             "{fixed}"
+        );
+    }
+
+    #[test]
+    fn a_local_macro_naming_the_binding_is_refused() {
+        refused(
+            "fn f() { let m = Arc::new(Mutex::new(0)); macro_rules! bump { () => { *m.lock().unwrap() += 1 }; } bump!(); }",
+            "m",
+            Reason::Unfollowed("it is used in a macro"),
         );
     }
 
