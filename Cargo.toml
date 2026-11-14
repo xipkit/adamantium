@@ -84,7 +84,6 @@ deterministic = ["tokio", "dep:shuttle", "dep:shuttle-engine", "dep:shuttle-std"
 tracing = ["dep:tracing"]
 
 [dependencies]
-async-channel = "2"
 concurrent-queue = "2"
 event-listener = "5"
 async-stream = { version = "0.3", optional = true }

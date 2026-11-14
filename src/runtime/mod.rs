@@ -15,6 +15,8 @@ use std::{
 pub(crate) mod execution;
 
 pub(crate) mod queue;
+#[cfg(feature = "tokio")]
+pub(crate) mod task;
 pub(crate) mod wait;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +33,17 @@ impl World {
         }
     }
 
+    pub(crate) fn is_model(self) -> bool {
+        #[cfg(feature = "deterministic")]
+        {
+            self.execution.is_some()
+        }
+        #[cfg(not(feature = "deterministic"))]
+        {
+            false
+        }
+    }
+
     pub(crate) fn check(self) {
         assert_eq!(
             self,
@@ -43,7 +56,10 @@ impl World {
         self.check();
         #[cfg(feature = "deterministic")]
         if self.execution.is_some() {
-            shuttle::thread::yield_now();
+            // Shuttle 0.9.10 yield_now wakes the current task, so using it
+            // inside a waiter poll would turn a deadlock into a busy loop.
+            // Its sleep shim only switches tasks; it does not model time.
+            shuttle::thread::sleep(std::time::Duration::ZERO);
         }
     }
 
@@ -55,11 +71,12 @@ impl World {
     }
 }
 
+#[cfg(feature = "tokio")]
 pub(crate) fn production_only(_primitive: &str) {
     #[cfg(feature = "deterministic")]
     assert!(
         execution::current().is_none(),
-        "adamantium::testing harness: {_primitive} is not supported yet; this execution supports Actor and Channel only"
+        "adamantium::testing harness: {_primitive} is not supported yet; this operation requires the production runtime"
     );
 }
 
@@ -201,18 +218,40 @@ impl<T> DerefMut for Guard<'_, T> {
     }
 }
 
-#[allow(
-    clippy::future_not_send,
-    reason = "Send follows the wrapped future; channel operations retain their existing bounds"
-)]
-pub(crate) async fn production_future<F: std::future::Future>(
-    primitive: &str,
-    future: F,
-) -> F::Output {
+/// Checks the execution before every poll, including a resumed future.
+#[allow(clippy::future_not_send, reason = "Send follows the wrapped future")]
+pub(crate) async fn in_world<F: std::future::Future>(world: World, future: F) -> F::Output {
     let mut future = std::pin::pin!(future);
     std::future::poll_fn(|cx| {
-        production_only(primitive);
+        world.check();
         future.as_mut().poll(cx)
     })
     .await
+}
+
+#[cfg(feature = "tokio")]
+pin_project_lite::pin_project! {
+    pub(crate) struct InWorldStream<S> {
+        world: World,
+        #[pin]
+        stream: S,
+    }
+}
+
+#[cfg(feature = "tokio")]
+pub(crate) fn in_world_stream<S>(world: World, stream: S) -> InWorldStream<S> {
+    InWorldStream { world, stream }
+}
+
+#[cfg(feature = "tokio")]
+impl<S: futures_core::Stream> futures_core::Stream for InWorldStream<S> {
+    type Item = S::Item;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.project();
+        this.world.check();
+        this.stream.poll_next(cx)
+    }
 }

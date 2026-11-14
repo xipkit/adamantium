@@ -467,3 +467,15 @@ fn cancelled_next_retained_during_active_receive_replays() {
         })
     });
 }
+
+#[test]
+fn parked_receive_reports_deadlock_instead_of_waking_itself_forever() {
+    async fn scenario() {
+        Channel::<()>::bounded(1).receive().await;
+    }
+    let failure = testing::check(config(), scenario).unwrap_err();
+    assert_eq!(failure.kind(), FailureKind::Deadlock);
+    let replayed = testing::replay(failure.replay(), scenario).unwrap_err();
+    assert_eq!(replayed.kind(), FailureKind::Deadlock);
+    assert_eq!(replayed.replay(), failure.replay());
+}

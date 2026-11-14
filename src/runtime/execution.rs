@@ -54,15 +54,3 @@ impl Drop for Execution {
         CURRENT.set(None);
     }
 }
-
-/// Rejects dropping an unsupported production handle in a modeled execution.
-/// Keep this as its first field so rejection precedes field destruction.
-pub(crate) struct Production(pub(crate) &'static str);
-
-impl Drop for Production {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            super::production_only(self.0);
-        }
-    }
-}
