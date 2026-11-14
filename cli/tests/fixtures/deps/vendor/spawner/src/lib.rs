@@ -138,6 +138,18 @@ pub fn shadowed_by_patterns(callbacks: Option<fn(())>) {
     blocking(()); // tokio::task::spawn_blocking
 }
 
+pub enum Discriminants {
+    #[cfg(any())]
+    Disabled = unsafe { rt::spawn(0) },
+    Enabled = 1,
+}
+
+pub struct Fields {
+    #[cfg(any())]
+    pub disabled: [u8; unsafe { rt::spawn(0) }],
+    pub enabled: u8,
+}
+
 pub fn blocks() {
     unsafe { rt::task::raw() };
     println!("{:?}", task::spawn(())); // tokio::task::spawn

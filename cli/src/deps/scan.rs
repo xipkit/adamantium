@@ -20,9 +20,9 @@ use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use serde::Serialize;
 use syn::{
     Arm, Attribute, Block, Expr, ExprCall, ExprClosure, ExprForLoop, ExprIf, ExprLit,
-    ExprMethodCall, ExprPath, ExprUnsafe, ExprWhile, FieldValue, File, FnArg, ImplItem, ImplItemFn,
-    Item, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemTrait, Lit, Macro, Meta, Pat, PatIdent, Safety,
-    Signature, Stmt, Token, TraitItem, TraitItemFn, Type, UseTree,
+    ExprMethodCall, ExprPath, ExprUnsafe, ExprWhile, Field, FieldValue, File, FnArg, ImplItem,
+    ImplItemFn, Item, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemTrait, Lit, Macro, Meta, Pat,
+    PatIdent, Safety, Signature, Stmt, Token, TraitItem, TraitItemFn, Type, UseTree, Variant,
     ext::IdentExt,
     parse::ParseStream,
     punctuated::Punctuated,
@@ -1411,6 +1411,20 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
     fn visit_field_value(&mut self, field: &'ast FieldValue) {
         if self.enabled(&field.attrs) {
             visit::visit_field_value(self, field);
+        }
+    }
+
+    /// A variant's discriminant and a field's type can hold expressions,
+    /// such as `X = unsafe { 0 }` or an array length.
+    fn visit_variant(&mut self, variant: &'ast Variant) {
+        if self.enabled(&variant.attrs) {
+            visit::visit_variant(self, variant);
+        }
+    }
+
+    fn visit_field(&mut self, field: &'ast Field) {
+        if self.enabled(&field.attrs) {
+            visit::visit_field(self, field);
         }
     }
 
