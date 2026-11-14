@@ -830,7 +830,14 @@ impl Scanner<'_> {
         if let Some(krate) = self.extern_crate(first) {
             return Resolved::Path(vec![krate]).join(rest);
         }
-        if let Some((_, prelude)) = PRELUDE.iter().find(|(name, _)| name == first) {
+        // A glob import shadows the prelude and may provide any name. It
+        // could shadow a crate name too, but no crate exports an item named
+        // like another crate, while a `Vec` or `Box` of its own is common.
+        let globs = blocks
+            .iter()
+            .chain(self.modules.get(module))
+            .any(|scope| scope.globs);
+        if !globs && let Some((_, prelude)) = PRELUDE.iter().find(|(name, _)| name == first) {
             return Resolved::Path(prelude.split("::").map(str::to_owned).collect()).join(rest);
         }
         Resolved::Unknown

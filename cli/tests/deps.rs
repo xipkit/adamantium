@@ -164,7 +164,7 @@ fn deps_finds_each_marked_call_and_nothing_else() {
     }
     assert_eq!(
         dependency(&report, "spawner").unwrap()["unresolved"],
-        json!({"spawn": 5})
+        json!({"leak": 1, "spawn": 5})
     );
 }
 
@@ -235,12 +235,12 @@ fn deps_prints_a_table_and_each_call_as_text() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     for line in [
-        "      5     19           5  spawner 0.1.0 (partly unscanned)",
+        "      5     19           6  spawner 0.1.0 (partly unscanned)",
         "      0      0           0  safe 0.0.0 (forbids unsafe)",
         "      1      0           0  helper 0.0.0",
         "  tokio::task::spawn: an unstructured task; spawn inside adamantium::Tasks",
         "    src/nested/deeper.rs:2:5",
-        "  unresolved calls: spawn 5",
+        "  unresolved calls: leak 1, spawn 5",
         "  unscanned: src/lib.rs:9: module `missing` has no file: neither missing.rs nor missing/mod.rs",
         "adamantium: 8 dependencies; 3 with unsafe code, 4 with disallowed calls, 1 with unresolved calls, 1 partly unscanned",
     ] {
