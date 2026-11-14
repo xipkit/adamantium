@@ -351,6 +351,11 @@ impl<'ast> Visit<'ast> for Mechanical<'_> {
 fn section(message: &str) -> &'static str {
     if message.contains("spawn_blocking") || message.contains("thread::spawn") {
         "blocking-work"
+    } else if message.contains("across an await")
+        || message.contains("`tokio::sync::Mutex`")
+        || message.contains("`futures::lock::Mutex`")
+    {
+        "a-lock-held-across-an-await"
     } else if message.contains("RwLock") {
         "rwlock"
     } else if message.contains("Mutex") || message.contains("lock") {
@@ -440,6 +445,25 @@ mod tests {
         assert_eq!(edits, vec![edit(2, 5)]);
         accept(&mut edits, vec![edit(10, 12), edit(20, 22)]);
         assert_eq!(edits.len(), 3);
+    }
+
+    #[test]
+    fn locks_held_across_an_await_link_to_their_section() {
+        for message in [
+            "this `MutexGuard` is held across an await point",
+            "use of a disallowed type `tokio::sync::Mutex`",
+            "use of a disallowed type `futures::lock::Mutex`",
+        ] {
+            assert_eq!(section(message), "a-lock-held-across-an-await");
+        }
+        assert_eq!(
+            section("use of a disallowed type `std::sync::Mutex`"),
+            "shared-state"
+        );
+        assert_eq!(
+            section("use of a disallowed type `tokio::sync::RwLock`"),
+            "rwlock"
+        );
     }
 
     #[test]
