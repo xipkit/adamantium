@@ -10,11 +10,8 @@ use std::{
     time::Duration,
 };
 
-use adamantium::{Cancellation, ScopeError, Tasks};
-use tokio::{
-    sync::oneshot,
-    time::{Instant, timeout},
-};
+use adamantium::{Cancellation, ScopeError, Tasks, time};
+use tokio::{sync::oneshot, time::timeout};
 
 const HUNG: Duration = Duration::from_secs(30);
 
@@ -62,7 +59,7 @@ on_both_runtimes! {
 
     async fn expired_deadline_never_polls_body() {
         let result = Tasks::<&str>::run_until(
-            Cancellation::new(), Some(Instant::now()), async |_| {
+            Cancellation::new(), Some(time::now()), async |_| {
                 panic!("an expired body must not start");
                 #[allow(unreachable_code)]
                 Ok(())
@@ -74,7 +71,7 @@ on_both_runtimes! {
     async fn cancellation_wins_over_an_equally_ready_deadline() {
         let cancel = Cancellation::new();
         cancel.cancel();
-        assert_eq!(Tasks::<&str>::run_until(cancel, Some(Instant::now()), async |_| {
+        assert_eq!(Tasks::<&str>::run_until(cancel, Some(time::now()), async |_| {
             Ok(())
         }).await, Err(ScopeError::Cancelled));
     }
@@ -413,7 +410,7 @@ async fn deadline_interrupts_body_and_drains_children() {
     let cancel = Cancellation::new();
     let dropped = Arc::new(AtomicBool::new(false));
     let guard = Dropped(dropped.clone());
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = time::now() + Duration::from_secs(10);
     let mut scope = Box::pin(Tasks::<&str>::run_until(
         cancel.clone(),
         Some(deadline),
@@ -439,7 +436,7 @@ async fn deadline_during_join_waits_for_blocking_cleanup_and_keeps_its_reason() 
     let cancel = Cancellation::new();
     let (started, running) = oneshot::channel();
     let (release, released) = std::sync::mpsc::channel();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = time::now() + Duration::from_secs(10);
     let mut tasks = Tasks::<&str>::new();
     tasks.spawn_blocking(move || {
         started.send(()).unwrap();

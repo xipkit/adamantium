@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use adamantium::{Actor, Array, Channel, Map, Str, Tasks, blocking, concurrently};
+use adamantium::{Actor, Array, Channel, Map, Str, Tasks, blocking, concurrently, time};
 
 #[derive(Default)]
 struct Tally {
@@ -22,7 +22,7 @@ impl Tally {
 }
 
 async fn fetch(url: Str) -> Result<Str, Str> {
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    time::sleep(Duration::from_millis(5)).await;
     if url.contains("broken") {
         return Err(Str::from("connection refused"));
     }

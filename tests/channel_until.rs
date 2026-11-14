@@ -1,6 +1,6 @@
 #![cfg(feature = "tokio")]
 
-use adamantium::{Cancellation, Channel, ReceiveError, SendError, Tasks};
+use adamantium::{Cancellation, Channel, ReceiveError, SendError, Tasks, time};
 use std::{
     future::Future,
     pin::{Pin, pin},
@@ -37,7 +37,7 @@ fn poll_once<F: Future>(future: Pin<&mut F>, counter: &Arc<WakeCounter>) -> Poll
 }
 
 fn past() -> Option<Instant> {
-    Some(Instant::now() - Duration::from_millis(1))
+    Some(time::now() - Duration::from_millis(1))
 }
 
 #[tokio::test]
@@ -58,7 +58,7 @@ async fn receive_until_returns_queued_values_then_closed() {
 #[tokio::test(start_paused = true)]
 async fn receive_until_ends_at_the_deadline() {
     let (_sender, receiver) = Channel::<u8>::bounded(1).split();
-    let start = Instant::now();
+    let start = time::now();
     let deadline = start + Duration::from_secs(5);
     assert_eq!(
         receiver
@@ -66,7 +66,7 @@ async fn receive_until_ends_at_the_deadline() {
             .await,
         Err(ReceiveError::DeadlineExceeded)
     );
-    assert!(Instant::now() >= deadline);
+    assert!(time::now() >= deadline);
 }
 
 #[tokio::test]
@@ -118,7 +118,7 @@ async fn send_until_sends_when_there_is_room() {
 async fn send_until_hands_the_value_back_at_the_deadline() {
     let (sender, receiver) = Channel::bounded(1).split();
     sender.try_send(String::from("queued")).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = time::now() + Duration::from_secs(5);
     let result = sender
         .send_until(&Cancellation::new(), Some(deadline), String::from("late"))
         .await;
@@ -126,7 +126,7 @@ async fn send_until_hands_the_value_back_at_the_deadline() {
         result,
         Err(SendError::DeadlineExceeded(String::from("late")))
     );
-    assert!(Instant::now() >= deadline);
+    assert!(time::now() >= deadline);
     assert_eq!(receiver.try_receive().as_deref(), Ok("queued"));
     assert!(receiver.is_empty());
 }

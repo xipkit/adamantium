@@ -89,7 +89,7 @@ pub const LINTS: &[Lint] = &[
     clippy("dbg_macro", "debugging output left in code"),
     clippy(
         "disallowed_methods",
-        "panicking index methods, unstructured spawns, blocking calls, leaks and weak references, listed in clippy.toml",
+        "panicking index methods, unstructured spawns, blocking calls, clocks outside adamantium::time, leaks and weak references, listed in clippy.toml",
     ),
     clippy(
         "disallowed_types",

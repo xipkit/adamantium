@@ -80,10 +80,11 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
 /// of its `src` files that end in `// disallowed`, and on no others. `runtime`
 /// covers Tokio's runtime entry points; `unstable` covers `task::Builder`,
 /// which needs `--cfg tokio_unstable`; `indexing` covers panicking index methods
-/// beside their checked alternatives.
+/// beside their checked alternatives; `time` covers clock entry points beside
+/// Adamantium's wrappers and wall-clock measurements.
 #[test]
 fn check_reports_disallowed_methods() {
-    for name in ["runtime", "unstable", "indexing"] {
+    for name in ["runtime", "unstable", "indexing", "time"] {
         let root = fixture(name);
         let mut marked = Vec::new();
         let mut directories = vec![root.join("src")];

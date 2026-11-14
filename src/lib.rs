@@ -12,7 +12,7 @@
 //! a value of any of these types can be handed to a task without ceremony.
 //!
 //! The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, the
-//! ordered and unordered concurrent streams, and `blocking`.
+//! ordered and unordered concurrent streams, `blocking`, and the `time` module.
 //! Disable default features to use the values, actors, and channels
 //! without a Tokio dependency, including on WASI.
 
@@ -28,6 +28,8 @@ mod set;
 mod string;
 #[cfg(feature = "tokio")]
 mod tasks;
+#[cfg(feature = "tokio")]
+pub mod time;
 
 pub use actor::Actor;
 pub use array::Array;
