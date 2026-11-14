@@ -324,3 +324,81 @@ fn shared_state_fix_cannot_follow_is_reported_and_left_unchanged() {
     }
     assert!(stderr.contains("migrating.md#rwlock"), "{stderr}");
 }
+
+/// A project whose only target is a binary with `main` as its main file, so
+/// no other crate can call its functions.
+#[allow(clippy::unwrap_used, reason = "a failed fixture setup fails the test")]
+fn binary(main: &str) -> tempfile::TempDir {
+    let dir = project("");
+    fs::remove_file(dir.path().join("src/lib.rs")).unwrap();
+    fs::write(dir.path().join("src/main.rs"), main).unwrap();
+    dir
+}
+
+#[test]
+fn shared_state_fields_build_pass_check_and_keep_behavior() {
+    let source = shared_state_fixture("fields.rs");
+    let dir = binary(&source);
+    let file = dir.path().join("src/main.rs");
+
+    let fixed = run(&["fix"], dir.path());
+    assert!(
+        fixed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        shared_state_fixture("fields.fixed.rs")
+    );
+    let tested = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["test", "--quiet"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        tested.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&tested.stdout),
+        String::from_utf8_lossy(&tested.stderr)
+    );
+    let again = run(&["fix", "--dry-run"], dir.path());
+    assert!(again.status.success());
+    assert!(again.stdout.is_empty());
+}
+
+#[test]
+fn shared_state_fields_fix_cannot_follow_are_reported_and_left_unchanged() {
+    let source = shared_state_fixture("fields-review.rs");
+    let dir = binary(&source);
+    let output = run(&["fix"], dir.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        source
+    );
+    for (name, section) in [
+        ("Deferred.deferred", "two-locks-at-once"),
+        ("Awaited.awaited", "shared-state"),
+        ("Dropped.dropped", "two-locks-at-once"),
+        ("Touched.touched", "shared-state"),
+        ("Printed.printed", "shared-state"),
+    ] {
+        let (_, field) = name.split_once('.').unwrap();
+        let line = source
+            .lines()
+            .position(|line| line.trim_start().starts_with(&format!("{field}: Arc<")))
+            .unwrap()
+            + 1;
+        let report = format!("src/main.rs:{line}: `{name}` stays an `Arc<Mutex<_>>`: ");
+        let mut lines = stderr.lines().skip_while(|line| !line.starts_with(&report));
+        assert!(lines.next().is_some(), "{report}\n{stderr}");
+        assert!(
+            lines
+                .next()
+                .is_some_and(|link| link.ends_with(&format!("/docs/migrating.md#{section}"))),
+            "{name}: {stderr}"
+        );
+    }
+}

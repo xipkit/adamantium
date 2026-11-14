@@ -1,15 +1,18 @@
-//! Shared-state rewrites: local `Arc<Mutex<T>>` bindings become `Actor<T>`.
+//! Shared-state rewrites: local `Arc<Mutex<T>>` bindings and private struct
+//! fields become `Actor<T>`.
 //!
 //! A binding is rewritten only when every use of it, and of every clone of
 //! it, has one of the forms the migration guide marks as mechanical: the
 //! constructor, clones, a guard used within one statement, a copy of the state, and
 //! taking the state back. Any other use leaves the binding and all of its
 //! clones unchanged, and the caller reports why with a link to the guide.
+//! Fields follow the same rules, with the extra checks in `fields`, and a
+//! field and the locals holding its state stand or fall together.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ops::Range,
-    path::Path,
+    path::{Path, PathBuf},
     str::FromStr,
 };
 
@@ -20,7 +23,14 @@ use syn::{
     spanned::Spanned, visit::Visit,
 };
 
-use super::Edit;
+use quote::ToTokens;
+
+use super::{
+    Edit,
+    scan::{Crate, Hazard, macro_attribute},
+};
+
+mod fields;
 
 /// Why a binding was left for review.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +50,9 @@ pub(super) enum Reason {
     /// a value other than the state, which might call an actor and would
     /// then panic inside the callback.
     Calls,
+    /// Code that locks a field might run inside an actor's callback, where
+    /// the field's own actor would then panic.
+    Nested(&'static str),
     /// Any other use that the rewrite can't follow.
     Unfollowed(&'static str),
 }
@@ -50,7 +63,9 @@ impl Reason {
         match self {
             Self::AcrossStatements => "a-guard-held-across-statements",
             Self::AcrossAwait => "a-lock-held-across-an-await",
-            Self::TwoLocks | Self::InsideActor | Self::Calls => "two-locks-at-once",
+            Self::TwoLocks | Self::InsideActor | Self::Calls | Self::Nested(_) => {
+                "two-locks-at-once"
+            }
             Self::ControlFlow | Self::Unfollowed(_) => "shared-state",
         }
     }
@@ -65,7 +80,7 @@ impl Reason {
             Self::Calls => {
                 "a statement holding its guard calls a function or another value's method, which might use an actor"
             }
-            Self::Unfollowed(detail) => detail,
+            Self::Nested(detail) | Self::Unfollowed(detail) => detail,
         }
     }
 }
@@ -83,10 +98,24 @@ pub(super) struct Outcome {
     pub(super) refusals: Vec<Refusal>,
 }
 
+/// One file's rewrites before the checks that need the whole package.
+pub(super) struct Draft {
+    file: PathBuf,
+    source: String,
+    groups: Vec<Group>,
+    /// Groups that hold one state, such as a field and a local it is
+    /// cloned into, which stand or fall together.
+    links: Vec<(usize, usize)>,
+}
+
 const ACTOR: &str = "::adamantium::Actor";
 
 /// A node whose text fix couldn't find, which only a parser bug would cause.
 const UNLOCATED: Reason = Reason::Unfollowed("fix couldn't find its source text");
+
+/// Why a group that holds the same state as a refused one is refused.
+const SHARED: Reason =
+    Reason::Unfollowed("it holds the same state as a value fix leaves for review");
 
 /// Methods that take a lock on std, Tokio, parking_lot and Adamantium types.
 /// A statement that holds a guard and calls one of these holds two locks.
@@ -109,19 +138,17 @@ const LOCKS: &[&str] = &[
 
 /// Plans the shared-state rewrites for one file. `mutexes` holds the byte
 /// ranges that Clippy resolved to `std::sync::Mutex`.
-pub(super) fn plan(file: &Path, source: &str, mutexes: &BTreeSet<(usize, usize)>) -> Outcome {
-    let mut outcome = Outcome {
-        edits: Vec::new(),
-        refusals: Vec::new(),
+pub(super) fn plan(file: &Path, source: &str, mutexes: &BTreeSet<(usize, usize)>) -> Draft {
+    let mut draft = Draft {
+        file: file.to_path_buf(),
+        source: source.to_owned(),
+        groups: Vec::new(),
+        links: Vec::new(),
     };
     let Ok(tree) = syn::parse_file(source) else {
-        return outcome;
+        return draft;
     };
-    let text = Text {
-        source,
-        prefix: usize::from(source.starts_with('\u{feff}')) * '\u{feff}'.len_utf8()
-            + tree.shebang.as_ref().map_or(0, String::len),
-    };
+    let text = Text::new(source, &tree);
     let mut names = Names::default();
     names.visit_file(&tree);
     let mut parsed = Parsed {
@@ -144,13 +171,20 @@ pub(super) fn plan(file: &Path, source: &str, mutexes: &BTreeSet<(usize, usize)>
         groups: Vec::new(),
         pending: Vec::new(),
         awaiting: Vec::new(),
+        fields: HashMap::new(),
+        impls: Vec::new(),
+        functions: Vec::new(),
+        links: Vec::new(),
+        declared: HashMap::new(),
     };
+    walker.candidates(&tree);
     walker.visit_file(&tree);
     let Walker {
         vars,
         mut groups,
         pending,
         awaiting,
+        links,
         ..
     } = walker;
     for (group, _) in awaiting {
@@ -170,24 +204,202 @@ pub(super) fn plan(file: &Path, source: &str, mutexes: &BTreeSet<(usize, usize)>
         }
     }
     refuse_overlaps(&mut groups);
-    for group in groups {
-        match group.refusal {
-            Some(reason) => outcome.refusals.push(Refusal {
-                line: group.line,
-                name: group.name,
-                reason,
-            }),
-            None => outcome.edits.extend(group.edits),
+    draft.groups = groups;
+    draft.links = links;
+    draft
+}
+
+/// Finishes every file's plan in one package: a field is rewritten only if
+/// nothing in the package can reach it in a way fix can't follow.
+pub(super) fn settle(mut drafts: Vec<Draft>, krate: &Crate) -> Vec<(PathBuf, Outcome)> {
+    for draft in &mut drafts {
+        draft.share();
+    }
+    // The statements that would become actor callbacks, anywhere in the
+    // package, and the names they call.
+    let callbacks: BTreeSet<String> = drafts
+        .iter()
+        .flat_map(|draft| &draft.groups)
+        .filter(|group| group.refusal.is_none())
+        .flat_map(|group| group.callbacks.iter().cloned())
+        .collect();
+    for draft in &mut drafts {
+        draft.reach(krate, &callbacks);
+        draft.share();
+    }
+    drafts.into_iter().map(Draft::finish).collect()
+}
+
+impl Draft {
+    /// The groups that share a state, through the links between them.
+    fn components(&self) -> Vec<Vec<usize>> {
+        let mut parent: Vec<usize> = (0..self.groups.len()).collect();
+        fn root(parent: &mut [usize], mut node: usize) -> usize {
+            while let Some(&up) = parent.get(node)
+                && up != node
+            {
+                node = up;
+            }
+            node
+        }
+        for &(a, b) in &self.links {
+            let (a, b) = (root(&mut parent, a), root(&mut parent, b));
+            if let Some(slot) = parent.get_mut(a) {
+                *slot = b;
+            }
+        }
+        let mut components: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for group in 0..self.groups.len() {
+            components
+                .entry(root(&mut parent, group))
+                .or_default()
+                .push(group);
+        }
+        components.into_values().collect()
+    }
+
+    /// Refuses every group that holds the state of a refused one.
+    fn share(&mut self) {
+        for component in self.components() {
+            let refused = component.iter().any(|&group| {
+                self.groups
+                    .get(group)
+                    .is_some_and(|group| group.refusal.is_some())
+            });
+            if refused {
+                for &group in &component {
+                    if let Some(group) = self.groups.get_mut(group) {
+                        group.refuse(SHARED);
+                    }
+                }
+            }
         }
     }
-    // A module in another file can name its ancestors' private imports, so
-    // fix can't see every use of them.
-    if !outcome.edits.is_empty() && !has_out_of_line_module(&tree) {
-        let imports = Imports::prune(&text, file, &tree, &outcome.edits);
-        outcome.edits.extend(imports);
+
+    /// Refuses each field that the package might reach where fix can't
+    /// follow, with every group holding its state.
+    fn reach(&mut self, krate: &Crate, callbacks: &BTreeSet<String>) {
+        for group in &mut self.groups {
+            if let Some(member) = &group.member
+                && let Some(reason) = Self::unseen(krate, member, &self.file)
+            {
+                group.refuse(reason);
+            }
+        }
+        for component in self.components() {
+            let groups: Vec<&Group> = component
+                .iter()
+                .filter_map(|&group| self.groups.get(group))
+                .collect();
+            let Some(&first) = component.iter().find(|&&group| {
+                self.groups
+                    .get(group)
+                    .is_some_and(|group| group.member.is_some())
+            }) else {
+                continue;
+            };
+            if groups.iter().any(|group| group.refusal.is_some()) {
+                continue;
+            }
+            if let Some(reason) = Self::hazard(&groups, krate, callbacks)
+                && let Some(group) = self.groups.get_mut(first)
+            {
+                group.refuse(reason);
+            }
+        }
     }
-    outcome.edits = coalesce(outcome.edits);
-    outcome
+
+    /// Why the package might use the field `member` where fix can't see.
+    fn unseen(krate: &Crate, member: &str, file: &Path) -> Option<Reason> {
+        if let Some(reason) = krate.unreadable_reason() {
+            return Some(Reason::Unfollowed(reason));
+        }
+        if krate.field_declarations(member) > 1 {
+            return Some(Reason::Unfollowed(
+                "another struct, union or variant in its package has a field of its name",
+            ));
+        }
+        krate
+            .names_member_elsewhere(member, file)
+            .then_some(Reason::Unfollowed(
+                "another file in its package names a field of its name",
+            ))
+    }
+
+    /// Why code that locks the state of `groups` might run inside an actor's
+    /// callback, if it might.
+    fn hazard(groups: &[&Group], krate: &Crate, callbacks: &BTreeSet<String>) -> Option<Reason> {
+        if groups.iter().any(|group| group.escapes) {
+            return Some(Reason::Nested(
+                "it is locked in a closure or an async block, which might run inside an actor's callback",
+            ));
+        }
+        let locking: BTreeSet<String> = groups
+            .iter()
+            .flat_map(|group| group.functions.iter().cloned())
+            .collect();
+        let reached = krate.callers(&locking);
+        match krate.hazard(&reached) {
+            Some(Hazard::Asynchronous) => {
+                return Some(Reason::Unfollowed(
+                    "it is locked in async code, which fix doesn't follow yet",
+                ));
+            }
+            Some(Hazard::Trait) => {
+                return Some(Reason::Nested(
+                    "it is locked through a trait method, which might run inside an actor's callback",
+                ));
+            }
+            Some(Hazard::Public) => {
+                return Some(Reason::Nested(
+                    "it is locked through a public function, which another crate might call inside an actor's callback",
+                ));
+            }
+            Some(Hazard::Escapes) => {
+                return Some(Reason::Nested(
+                    "a function that locks it is used as a value, or in a closure, an async block or a macro, which might run inside an actor's callback",
+                ));
+            }
+            Some(Hazard::Callbacks) => {
+                return Some(Reason::Nested(
+                    "an actor callback in its package calls code that might lock it",
+                ));
+            }
+            None => {}
+        }
+        (!reached.is_disjoint(callbacks)).then_some(Reason::Nested(
+            "a function that locks it is called in a statement that becomes an actor's callback",
+        ))
+    }
+
+    fn finish(self) -> (PathBuf, Outcome) {
+        let mut outcome = Outcome {
+            edits: Vec::new(),
+            refusals: Vec::new(),
+        };
+        for group in self.groups {
+            match group.refusal {
+                Some(reason) => outcome.refusals.push(Refusal {
+                    line: group.line,
+                    name: group.name,
+                    reason,
+                }),
+                None => outcome.edits.extend(group.edits),
+            }
+        }
+        // A module in another file can name its ancestors' private imports, so
+        // fix can't see every use of them.
+        if !outcome.edits.is_empty()
+            && let Ok(tree) = syn::parse_file(&self.source)
+            && !has_out_of_line_module(&tree)
+        {
+            let text = Text::new(&self.source, &tree);
+            let imports = Imports::prune(&text, &self.file, &tree, &outcome.edits);
+            outcome.edits.extend(imports);
+        }
+        outcome.edits = coalesce(outcome.edits);
+        (self.file, outcome)
+    }
 }
 
 /// Whether any module in the file is declared as `mod name;`.
@@ -262,7 +474,15 @@ struct Text<'a> {
     prefix: usize,
 }
 
-impl Text<'_> {
+impl<'a> Text<'a> {
+    fn new(source: &'a str, tree: &syn::File) -> Self {
+        Self {
+            source,
+            prefix: usize::from(source.starts_with('\u{feff}')) * '\u{feff}'.len_utf8()
+                + tree.shebang.as_ref().map_or(0, String::len),
+        }
+    }
+
     fn range(&self, span: Span) -> Option<Range<usize>> {
         let range = span.byte_range();
         let range = (range.start + self.prefix)..(range.end + self.prefix);
@@ -334,7 +554,7 @@ impl<'ast> Visit<'ast> for Names {
 
 /// The standard macros whose arguments are expressions, and the position of
 /// their format string.
-fn known_macro(name: &str) -> Option<usize> {
+pub(super) fn known_macro(name: &str) -> Option<usize> {
     match name {
         "format" | "print" | "println" | "eprint" | "eprintln" | "panic" => Some(0),
         "assert" | "debug_assert" | "write" | "writeln" => Some(1),
@@ -482,6 +702,8 @@ enum Binding {
     Import(Vec<String>),
     /// An item defined here.
     Item,
+    /// A generic parameter.
+    Parameter,
     /// A name whose meaning depends on the configuration, or that two
     /// declarations claim.
     Ambiguous,
@@ -603,7 +825,7 @@ impl ItemScope {
     }
 }
 
-fn item_attributes(item: &Item) -> &[syn::Attribute] {
+pub(super) fn item_attributes(item: &Item) -> &[syn::Attribute] {
     match item {
         Item::Const(item) => &item.attrs,
         Item::Enum(item) => &item.attrs,
@@ -628,6 +850,7 @@ fn item_attributes(item: &Item) -> &[syn::Attribute] {
 enum Resolved {
     Path(Vec<String>),
     Item,
+    Parameter,
     /// Not declared in the file: the extern or standard prelude.
     Prelude,
     /// A glob import might declare it.
@@ -643,6 +866,12 @@ struct Var {
     /// The shared-state binding this variable holds, if it holds one.
     group: Option<usize>,
     used: bool,
+    /// Whether this stands for a struct field rather than a local. Its name
+    /// is the field's, and an access through a traced receiver uses it.
+    field: bool,
+    /// The struct with candidate fields that this variable holds or points
+    /// to, by its declared type or a struct literal.
+    record: Option<String>,
 }
 
 /// One `Arc<Mutex<T>>` and every variable that holds a clone of it.
@@ -651,9 +880,31 @@ struct Group {
     line: usize,
     refusal: Option<Reason>,
     edits: Vec<Edit>,
+    /// The field's name, for a struct field.
+    member: Option<String>,
+    /// The functions whose bodies take a guard of it.
+    functions: BTreeSet<String>,
+    /// Whether a guard of it is taken in a closure, an async block or
+    /// outside any function.
+    escapes: bool,
+    /// The names in the statements that become its callbacks.
+    callbacks: BTreeSet<String>,
 }
 
 impl Group {
+    fn new(name: String, line: usize, edits: Vec<Edit>) -> Self {
+        Self {
+            name,
+            line,
+            refusal: None,
+            edits,
+            member: None,
+            functions: BTreeSet::new(),
+            escapes: false,
+            callbacks: BTreeSet::new(),
+        }
+    }
+
     fn refuse(&mut self, reason: Reason) {
         self.refusal.get_or_insert(reason);
     }
@@ -744,6 +995,17 @@ struct Walker<'a> {
     pending: Vec<(usize, usize)>,
     /// The same, while the `let` is still being read.
     awaiting: Vec<(usize, &'a Local)>,
+    /// The struct fields that could become actors, by name.
+    fields: HashMap<String, fields::Field>,
+    /// For each enclosing `impl`, the struct with candidate fields it is
+    /// for, if it is for one.
+    impls: Vec<Option<String>>,
+    /// The enclosing functions, with the stack depth where each body starts.
+    functions: Vec<(String, usize)>,
+    /// Pairs of groups that hold the same state.
+    links: Vec<(usize, usize)>,
+    /// How many items and imports in the file bind each name.
+    declared: HashMap<String, usize>,
 }
 
 impl<'a> Walker<'a> {
@@ -784,6 +1046,8 @@ impl<'a> Walker<'a> {
             name,
             group,
             used: false,
+            field: false,
+            record: None,
         });
         if let Some(scope) = self.scopes.last_mut() {
             scope.vars.push(index);
@@ -792,10 +1056,14 @@ impl<'a> Walker<'a> {
     }
 
     fn declare_pattern(&mut self, pat: &Pat) {
+        self.destructures(pat);
         let mut names = Vec::new();
         pattern_names(pat, &mut names);
         for name in names {
             self.declare(name, None);
+        }
+        if let Pat::Type(typed) = pat {
+            self.record(&typed.pat, &typed.ty);
         }
     }
 
@@ -835,9 +1103,22 @@ impl<'a> Walker<'a> {
         self.lookup(&bare(path.path.get_ident()?))
     }
 
-    /// A tracked variable named by `expr`.
+    /// A tracked variable named by `expr`, or the variable for a candidate
+    /// field that `expr` reads through a traced receiver.
     fn tracked(&self, expr: &Expr) -> Option<usize> {
-        self.local(expr).filter(|&var| self.group_of(var).is_some())
+        self.field_place(expr)
+            .or_else(|| self.local(expr).filter(|&var| self.group_of(var).is_some()))
+    }
+
+    /// The text that names `var` where `expr` does: a local's spelling at
+    /// its declaration, or a field access as written.
+    fn holder(&self, var: usize, expr: &Expr) -> Option<String> {
+        let var = self.vars.get(var)?;
+        if var.field {
+            Some(self.text.get(self.text.of(expr)?)?.to_owned())
+        } else {
+            Some(var.spelling.clone())
+        }
     }
 
     fn resolve_name(&self, name: &str) -> Resolved {
@@ -847,6 +1128,7 @@ impl<'a> Walker<'a> {
                 return match binding {
                     Binding::Import(path) => Resolved::Path(path.clone()),
                     Binding::Item => Resolved::Item,
+                    Binding::Parameter => Resolved::Parameter,
                     Binding::Ambiguous => Resolved::Ambiguous,
                 };
             }
@@ -860,6 +1142,7 @@ impl<'a> Walker<'a> {
                             match parent.names.get(name) {
                                 Some(Binding::Import(path)) => Resolved::Path(path.clone()),
                                 Some(Binding::Item) => Resolved::Item,
+                                Some(Binding::Parameter) => Resolved::Parameter,
                                 Some(Binding::Ambiguous) => Resolved::Ambiguous,
                                 None => Resolved::Prelude,
                             }
@@ -893,7 +1176,7 @@ impl<'a> Walker<'a> {
         let mut resolved = match self.resolve_name(first) {
             Resolved::Path(path) => path,
             Resolved::Prelude => vec![first.clone()],
-            Resolved::Item | Resolved::Ambiguous => return None,
+            Resolved::Item | Resolved::Parameter | Resolved::Ambiguous => return None,
         };
         resolved.extend(rest.iter().cloned());
         Some(resolved)
@@ -1057,7 +1340,7 @@ impl<'a> Walker<'a> {
                     return None;
                 }
                 let var = self.tracked(&reference.expr)?;
-                let name = &self.vars.get(var)?.spelling;
+                let name = self.holder(var, &reference.expr)?;
                 Some((var, Some(format!("{name}.clone()"))))
             }
             _ => None,
@@ -1065,6 +1348,7 @@ impl<'a> Walker<'a> {
     }
 
     fn local_statement(&mut self, local: &'a Local) {
+        self.destructures(&local.pat);
         let mut names = Vec::new();
         pattern_names(&local.pat, &mut names);
         // A conditional `let` may shadow a binding in one configuration and
@@ -1108,12 +1392,8 @@ impl<'a> Walker<'a> {
             {
                 self.visit_expr(init);
                 let group = self.groups.len();
-                let mut group_state = Group {
-                    name: name.clone(),
-                    line,
-                    refusal: None,
-                    edits: vec![self.edit(range, constructor)],
-                };
+                let mut group_state =
+                    Group::new(name.clone(), line, vec![self.edit(range, constructor)]);
                 group_state.edits.extend(ty_edit);
                 if !local.attrs.is_empty() {
                     group_state.refuse(Reason::Unfollowed("its declaration has attributes"));
@@ -1180,6 +1460,18 @@ impl<'a> Walker<'a> {
         for name in names {
             declared = Some(self.declare(name, None));
         }
+        if let (Some(_), Some(var)) = (ident, declared) {
+            let record = match (ty, init) {
+                (Some(ty), _) => self.record_type(ty),
+                (None, Some(Expr::Struct(literal))) if literal.qself.is_none() => {
+                    self.literal_struct(&literal.path)
+                }
+                _ => None,
+            };
+            if let Some(entry) = self.vars.get_mut(var) {
+                entry.record = record;
+            }
+        }
         self.settle(local, ident.and(declared));
     }
 
@@ -1225,7 +1517,7 @@ fn is_unsized(ty: &Type, aliases: &BTreeSet<String>) -> bool {
 }
 
 /// The variables a pattern binds.
-fn pattern_names(pat: &Pat, names: &mut Vec<String>) {
+pub(super) fn pattern_names(pat: &Pat, names: &mut Vec<String>) {
     match pat {
         Pat::Ident(ident) => {
             names.push(bare(&ident.ident));
@@ -1347,11 +1639,12 @@ impl<'a> Walker<'a> {
             "into_inner" => ".ok()",
             _ => return None,
         };
-        let var = self.tracked(call.args.first()?)?;
+        let held = call.args.first()?;
+        let var = self.tracked(held)?;
         let start = self.text.range(first.method.span())?.start;
         let end = self.text.range(first.paren_token.span.close())?.end;
         let unwrap = self.text.get(start..end)?;
-        let name = &self.vars.get(var)?.spelling;
+        let name = self.holder(var, held)?;
         Some((var, format!("{name}.into_inner(){ok}.{unwrap}")))
     }
 
@@ -1586,7 +1879,10 @@ impl<'a> Walker<'a> {
             entry.used = true;
         }
         match self.guard_edit(var, guard) {
-            Ok(edit) => self.add_edit(var, edit),
+            Ok(edit) => {
+                self.lock_site(var, &edit);
+                self.add_edit(var, edit);
+            }
             Err(reason) => self.refuse(var, reason),
         }
     }
@@ -1601,6 +1897,11 @@ impl<'a> Walker<'a> {
             .get(var)
             .map(|var| (var.name.clone(), var.spelling.clone()))
             .ok_or(UNLOCATED)?;
+        let held = lock_receiver(guard).ok_or(UNLOCATED)?;
+        let holder = self.holder(var, held).ok_or(UNLOCATED)?;
+        // A field's receiver stays outside the closure, so the code moving
+        // into it must not use the receiver either.
+        let base = self.place_base(held);
         let guard_range = self.text.of(guard).ok_or(UNLOCATED)?;
         let full = plan.root.full();
         let mut scan = Scan::new(self, guard);
@@ -1641,7 +1942,11 @@ impl<'a> Walker<'a> {
         // moves into the closure must not name the binding anywhere else.
         let substitute = |range: Range<usize>| -> Result<String, Reason> {
             let region = self.text.get(range.clone()).ok_or(UNLOCATED)?;
-            if names_in(region, &bare_name) != Some(1) {
+            if names_in(region, &bare_name) != Some(1)
+                || base
+                    .as_ref()
+                    .is_some_and(|base| names_in(region, base) != Some(1))
+            {
                 return Err(Reason::Unfollowed(
                     "a statement holding its guard names it again",
                 ));
@@ -1655,7 +1960,7 @@ impl<'a> Walker<'a> {
         };
         if let Some(expr) = plan.narrow {
             let range = self.text.of(expr).ok_or(UNLOCATED)?;
-            let replacement = format!("{name}.read(|{name}| {})", substitute(range.clone())?);
+            let replacement = format!("{holder}.read(|{name}| {})", substitute(range.clone())?);
             return Ok(self.edit(range, replacement));
         }
         let method = plan.mode.method();
@@ -1687,9 +1992,9 @@ impl<'a> Walker<'a> {
                 }
                 let body = substitute(range.clone())?;
                 let call = if assignment {
-                    format!("{name}.{method}(|{name}| {body})")
+                    format!("{holder}.{method}(|{name}| {body})")
                 } else {
-                    format!("{name}.{method}(|{name}| {{ {body}; }})")
+                    format!("{holder}.{method}(|{name}| {{ {body}; }})")
                 };
                 (range, if semi { call } else { format!("{call};") })
             }
@@ -1707,7 +2012,7 @@ impl<'a> Walker<'a> {
                 }
                 let range = self.text.of(expr).ok_or(UNLOCATED)?;
                 let body = substitute(range.clone())?;
-                (range, format!("{name}.{method}(|{name}| {body})"))
+                (range, format!("{holder}.{method}(|{name}| {body})"))
             }
             Root::Value(expr) | Root::Condition(expr) => {
                 if self.attributed(expr) {
@@ -1720,7 +2025,7 @@ impl<'a> Walker<'a> {
                 }
                 let range = self.text.of(expr).ok_or(UNLOCATED)?;
                 let body = substitute(range.clone())?;
-                (range, format!("{name}.{method}(|{name}| {body})"))
+                (range, format!("{holder}.{method}(|{name}| {body})"))
             }
         };
         Ok(self.edit(range, replacement))
@@ -1795,9 +2100,12 @@ impl<'a> Walker<'a> {
         for input in &sig.inputs {
             if let syn::FnArg::Typed(typed) = input {
                 self.declare_pattern(&typed.pat);
+                self.record(&typed.pat, &typed.ty);
             }
         }
+        self.functions.push((bare(&sig.ident), self.stack.len()));
         self.generic(&sig.generics, |walker| walker.block(body, BlockKind::Body));
+        self.functions.pop();
         self.scopes.pop();
     }
 
@@ -1811,7 +2119,7 @@ impl<'a> Walker<'a> {
                 syn::GenericParam::Const(param) => &param.ident,
                 syn::GenericParam::Lifetime(_) => continue,
             };
-            scope.names.insert(name.to_string(), Binding::Item);
+            scope.names.insert(name.to_string(), Binding::Parameter);
         }
         self.items.push(scope);
         f(self);
@@ -1880,7 +2188,9 @@ impl<'a> Walker<'a> {
             match token {
                 TokenTree::Group(group) => self.mentions(group.stream()),
                 TokenTree::Ident(ident) => {
-                    self.mention(&bare(&ident), Reason::Unfollowed("it is used in a macro"));
+                    let name = bare(&ident);
+                    self.mention(&name, Reason::Unfollowed("it is used in a macro"));
+                    self.mention_field(&name, Reason::Unfollowed("it is used in a macro"));
                 }
                 TokenTree::Literal(literal) => {
                     if let Ok(Lit::Str(string)) =
@@ -1953,6 +2263,17 @@ fn is_unwrap(call: &syn::ExprMethodCall) -> bool {
         }
 }
 
+/// `m` in the guard `m.lock().unwrap()`.
+fn lock_receiver(guard: &Expr) -> Option<&Expr> {
+    let Expr::MethodCall(unwrap) = guard else {
+        return None;
+    };
+    let Expr::MethodCall(lock) = &*unwrap.receiver else {
+        return None;
+    };
+    Some(&lock.receiver)
+}
+
 fn contains_let(expr: &Expr) -> bool {
     match expr {
         Expr::Let(_) => true,
@@ -2014,6 +2335,9 @@ impl<'a> Visit<'a> for Walker<'a> {
             self.mac(&mac.mac);
             return;
         }
+        if macro_attribute(item_attributes(item)) {
+            self.attribute_macro(item.to_token_stream());
+        }
         self.scopes.push(Scope {
             vars: Vec::new(),
             barrier: true,
@@ -2028,12 +2352,21 @@ impl<'a> Visit<'a> for Walker<'a> {
                     self.items.pop();
                 }
             }
-            Item::Fn(function) => self.function(&function.sig, &function.block),
+            Item::Fn(function) => {
+                self.impls.push(None);
+                self.function(&function.sig, &function.block);
+                self.impls.pop();
+            }
             Item::Impl(item) => self.generic(&item.generics, |walker| {
+                let structure = walker.impl_struct(item);
+                walker.impls.push(structure);
                 syn::visit::visit_item_impl(walker, item);
+                walker.impls.pop();
             }),
             Item::Trait(item) => self.generic(&item.generics, |walker| {
+                walker.impls.push(None);
                 syn::visit::visit_item_trait(walker, item);
+                walker.impls.pop();
             }),
             _ => syn::visit::visit_item(self, item),
         }
@@ -2041,10 +2374,16 @@ impl<'a> Visit<'a> for Walker<'a> {
     }
 
     fn visit_impl_item_fn(&mut self, function: &'a syn::ImplItemFn) {
+        if macro_attribute(&function.attrs) {
+            self.attribute_macro(function.to_token_stream());
+        }
         self.function(&function.sig, &function.block);
     }
 
     fn visit_trait_item_fn(&mut self, function: &'a syn::TraitItemFn) {
+        if macro_attribute(&function.attrs) {
+            self.attribute_macro(function.to_token_stream());
+        }
         if let Some(body) = &function.default {
             self.function(&function.sig, body);
         }
@@ -2095,8 +2434,16 @@ impl<'a> Visit<'a> for Walker<'a> {
             }
             return;
         }
+        if let Expr::Assign(assign) = expr {
+            self.assigns(&assign.left);
+        }
         self.stack.push(Node::Expr(expr));
         match expr {
+            Expr::Struct(literal) => self.literal(literal),
+            Expr::Field(field) if self.candidate(&field.member).is_some() => {
+                self.stray(field);
+                syn::visit::visit_expr(self, expr);
+            }
             Expr::Path(path) => {
                 if path.qself.is_none()
                     && let Some(name) = path.path.get_ident()
@@ -2683,16 +3030,26 @@ impl<'ast> Visit<'ast> for Uses<'ast> {
 mod tests {
     use super::*;
 
-    /// Plans `source` as Clippy would see it, with every occurrence of each
-    /// of `mutexes` resolved to `std::sync::Mutex`, and applies the edits.
-    fn fix(source: &str, mutexes: &[&str]) -> (String, Vec<(String, Reason)>) {
+    /// Plans `source` as the only file of its package, as Clippy would see
+    /// it with every occurrence of each of `mutexes` resolved to
+    /// `std::sync::Mutex`.
+    pub(super) fn outcome(source: &str, mutexes: &[&str]) -> Outcome {
         let mut spans = BTreeSet::new();
         for mutex in mutexes {
             for (start, _) in source.match_indices(mutex) {
                 spans.insert((start, start + mutex.len()));
             }
         }
-        let outcome = plan(Path::new("lib.rs"), source, &spans);
+        let file = Path::new("lib.rs");
+        let mut krate = Crate::default();
+        krate.add(file, source);
+        let mut settled = settle(vec![plan(file, source, &spans)], &krate);
+        settled.pop().map(|(_, outcome)| outcome).unwrap()
+    }
+
+    /// Plans `source` and applies the edits.
+    pub(super) fn fix(source: &str, mutexes: &[&str]) -> (String, Vec<(String, Reason)>) {
+        let outcome = outcome(source, mutexes);
         let mut edits = outcome.edits;
         edits.sort();
         let mut fixed = source.to_owned();
@@ -2835,15 +3192,7 @@ mod tests {
     #[test]
     fn adjacent_imports_are_removed_in_one_edit() {
         let source = "use std::sync::Mutex;\nuse std::sync::Arc;\n\nfn f() {\n    let m = Arc::new(Mutex::new(1));\n    drop(m);\n}\n";
-        let outcome = plan(
-            Path::new("lib.rs"),
-            source,
-            &source
-                .match_indices("Mutex")
-                .map(|(start, _)| (start, start + "Mutex".len()))
-                .collect(),
-        );
-        assert_eq!(outcome.edits.len(), 2);
+        assert_eq!(outcome(source, &["Mutex"]).edits.len(), 2);
         let (fixed, _) = fix(source, &["Mutex"]);
         assert_eq!(
             fixed,
