@@ -260,7 +260,7 @@ fn deps_names_modules_declared_in_macro_bodies_it_could_not_read() {
         dependency(&report, "platform").unwrap()["unscanned"],
         json!([{
             "file": "src/lib.rs",
-            "line": 10,
+            "line": 22,
             "reason": "module `hidden` is declared in a macro body the scan can't read",
         }])
     );
@@ -270,11 +270,12 @@ fn deps_names_modules_declared_in_macro_bodies_it_could_not_read() {
 fn deps_scans_each_conditional_macro_branch_that_may_be_built() {
     let report = report(&[]).unwrap();
     // Unknown predicates keep both possible branches. Nested `cfg_if!` and
-    // `cfg_select!` invocations load their modules too. `hidden.rs` isn't counted.
+    // `cfg_select!` invocations load their modules too, as does the call of
+    // the crate's own macro. `hidden.rs` isn't counted.
     assert_eq!(
         dependency(&report, "platform").unwrap()["unsafe"],
         json!({
-            "functions": 3,
+            "functions": 4,
             "blocks": 1,
             "impls": 1,
             "traits": 1,
@@ -335,12 +336,12 @@ fn deps_prints_a_table_and_each_call_as_text() {
         "      1      0           0  helper 0.0.0",
         "      1      0           0  ffi 0.0.0",
         "     13      0           0  exports 0.0.0",
-        "      6      2           0  platform 0.0.0 (partly unscanned)",
+        "      7      2           0  platform 0.0.0 (partly unscanned)",
         "  tokio::task::spawn: an unstructured task; spawn inside adamantium::Tasks",
         "    src/nested/deeper.rs:2:5",
         "  unresolved calls: leak 1, spawn 5",
         "  unscanned: src/lib.rs:11: module `missing` has no file: neither missing.rs nor missing/mod.rs",
-        "  unscanned: src/lib.rs:10: module `hidden` is declared in a macro body the scan can't read",
+        "  unscanned: src/lib.rs:22: module `hidden` is declared in a macro body the scan can't read",
         "      3      1           0  facade 0.0.0",
         "    src/macros.rs:15:13",
         "adamantium: 13 dependencies; 7 with unsafe code, 6 with disallowed calls, 1 with unresolved calls, 2 partly unscanned",

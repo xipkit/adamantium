@@ -6,6 +6,7 @@
 mod cfg;
 mod disallowed;
 mod metadata;
+mod rules;
 mod scan;
 
 use std::{
