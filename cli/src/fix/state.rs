@@ -180,12 +180,28 @@ pub(super) fn plan(file: &Path, source: &str, mutexes: &BTreeSet<(usize, usize)>
             None => outcome.edits.extend(group.edits),
         }
     }
-    if !outcome.edits.is_empty() {
+    // A module in another file can name its ancestors' private imports, so
+    // fix can't see every use of them.
+    if !outcome.edits.is_empty() && !has_out_of_line_module(&tree) {
         let imports = Imports::prune(&text, file, &tree, &outcome.edits);
         outcome.edits.extend(imports);
     }
     outcome.edits = coalesce(outcome.edits);
     outcome
+}
+
+/// Whether any module in the file is declared as `mod name;`.
+fn has_out_of_line_module(tree: &syn::File) -> bool {
+    struct Modules(bool);
+    impl<'ast> Visit<'ast> for Modules {
+        fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+            self.0 |= module.content.is_none();
+            syn::visit::visit_item_mod(self, module);
+        }
+    }
+    let mut modules = Modules(false);
+    modules.visit_file(tree);
+    modules.0
 }
 
 /// Joins edits that touch, such as two adjacent `use` lines removed, since
@@ -3118,6 +3134,20 @@ mod tests {
             "m",
             Reason::Unfollowed("a guard is in a macro whose value ends a block"),
         );
+    }
+
+    #[test]
+    fn imports_stay_when_a_child_module_is_in_another_file() {
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nmod child;\nfn f() {\n    let m = Arc::new(Mutex::new(1));\n    drop(m);\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(
+            fixed.starts_with("use std::sync::{Arc, Mutex};\nmod child;\n"),
+            "{fixed}"
+        );
+        assert!(fixed.contains("::adamantium::Actor::new(1)"), "{fixed}");
     }
 
     #[test]
