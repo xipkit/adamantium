@@ -29,6 +29,10 @@ fn forget(s: String) {
     std::mem::forget(s);
 }
 
+fn manually_dropped(s: String) {
+    let _value = std::mem::ManuallyDrop::new(s);
+}
+
 fn threads() {
     std::thread::spawn(|| {});
     std::thread::sleep(Duration::from_millis(1));
@@ -40,6 +44,10 @@ fn debug() {
 
 fn quit() {
     std::process::exit(1);
+}
+
+fn aborts() {
+    std::process::abort();
 }
 
 fn raw() -> i32 {
@@ -61,4 +69,10 @@ fn spawns() {
 async fn not_send(r: Rc<i32>) -> i32 {
     tokio::time::sleep(Duration::from_millis(1)).await;
     *r
+}
+
+fn dropped_results() {
+    std::fs::read("unused");
+    let _ = std::fs::read("discarded");
+    let _ = async { 42 };
 }
