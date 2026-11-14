@@ -1,8 +1,8 @@
 //! Deterministic interleaving tests, enabled by the `deterministic` feature.
 //!
 //! This first stage models [`crate::Actor`]. [`parallel`] supplies independent
-//! workers while Channel, Tasks, Cancellation and virtual time are implemented
-//! in follow-up work. Those production primitives reject use in this harness.
+//! workers while Channel, Reply, Watch, Tasks, Cancellation and virtual time
+//! are implemented in follow-up work. Those production primitives reject use in this harness.
 //! Outside a harness execution, enabling the feature leaves production behavior
 //! intact, including ordinary `#[tokio::test]` tests in the same build.
 //!
