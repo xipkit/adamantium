@@ -1438,15 +1438,9 @@ impl FileVisitor<'_, '_> {
                 TokenTree::Group(group) => {
                     if group.delimiter() == Delimiter::Bracket
                         && is_attribute(previous.as_ref(), before.as_ref())
-                        && let Ok(meta) = syn::parse2::<Meta>(group.stream())
                     {
-                        // An attribute written as `unsafe(...)` counts as
-                        // the `unsafe` in it.
-                        self.scanner.scan.unsafe_code.in_macros += self
-                            .unsafe_attributes(meta)
-                            .iter()
-                            .filter(|meta| !meta.path().is_ident("unsafe"))
-                            .count();
+                        self.scanner.scan.unsafe_code.in_macros +=
+                            self.bare_unsafe_attributes(group.stream());
                     }
                     if group.delimiter() == Delimiter::Parenthesis
                         && let Some(TokenTree::Ident(name)) = &previous
@@ -1470,6 +1464,39 @@ impl FileVisitor<'_, '_> {
             }
             before = previous.replace(tree);
         }
+    }
+
+    /// The attributes that `unsafe_code` reports, written without
+    /// `unsafe(...)`, among those an attribute in a macro body stands for
+    /// once `cfg_attr` is expanded. One written as `unsafe(...)` counts as
+    /// the `unsafe` in it. The attribute is read as tokens, not parsed, since
+    /// its value may be a metavariable, as in `#[export_name = $name]`, and a
+    /// `cfg_attr` predicate that doesn't parse is unknown.
+    fn bare_unsafe_attributes(&self, attribute: TokenStream) -> usize {
+        let mut trees = attribute.into_iter();
+        let Some(TokenTree::Ident(name)) = trees.next() else {
+            return 0;
+        };
+        if UNSAFE_ATTRIBUTES
+            .iter()
+            .any(|unsafe_name| name == unsafe_name)
+        {
+            return 1;
+        }
+        if name != "cfg_attr" {
+            return 0;
+        }
+        let (Some(TokenTree::Group(group)), None) = (trees.next(), trees.next()) else {
+            return 0;
+        };
+        let mut parts = split_commas(group.stream()).into_iter();
+        let Some(predicate) = parts.next() else {
+            return 0;
+        };
+        if self.scanner.krate.cfg.holds(predicate) == Truth::False {
+            return 0;
+        }
+        parts.map(|part| self.bare_unsafe_attributes(part)).sum()
     }
 
     fn module_item(&mut self, item: &ItemMod) {
@@ -1596,6 +1623,21 @@ impl FileVisitor<'_, '_> {
 /// `#[...]` or `#![...]`.
 fn is_attribute(previous: Option<&TokenTree>, before: Option<&TokenTree>) -> bool {
     is_punct(previous, '#') || (is_punct(previous, '!') && is_punct(before, '#'))
+}
+
+/// The comma-separated parts of a token stream, without empty ones, as a
+/// trailing comma leaves.
+fn split_commas(stream: TokenStream) -> Vec<TokenStream> {
+    let mut parts = vec![TokenStream::new()];
+    for tree in stream {
+        if is_punct(Some(&tree), ',') {
+            parts.push(TokenStream::new());
+        } else if let Some(part) = parts.last_mut() {
+            part.extend([tree]);
+        }
+    }
+    parts.retain(|part| !part.is_empty());
+    parts
 }
 
 fn is_punct(tree: Option<&TokenTree>, char: char) -> bool {

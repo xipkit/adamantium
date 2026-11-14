@@ -219,7 +219,7 @@ fn deps_counts_each_kind_of_unsafe_and_notes_forbidding_crates() {
             "traits": 0,
             "extern_blocks": 0,
             "attributes": 9,
-            "in_macros": 2,
+            "in_macros": 4,
         })
     );
     // By attribute, by a lint level string, and by a lint level table.
@@ -276,7 +276,7 @@ fn deps_prints_a_table_and_each_call_as_text() {
         "      0      0           0  safe 0.0.0 (forbids unsafe)",
         "      1      0           0  helper 0.0.0",
         "      1      0           0  ffi 0.0.0",
-        "     11      0           0  exports 0.0.0",
+        "     13      0           0  exports 0.0.0",
         "  tokio::task::spawn: an unstructured task; spawn inside adamantium::Tasks",
         "    src/nested/deeper.rs:2:5",
         "  unresolved calls: leak 1, spawn 5",

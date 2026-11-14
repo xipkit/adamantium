@@ -7,6 +7,8 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use proc_macro2::TokenStream;
+
 use syn::{
     Attribute, Ident, LitStr, Meta, Token,
     ext::IdentExt,
@@ -250,6 +252,14 @@ impl Cfg<'_> {
                 }
             }
         }
+    }
+
+    /// Whether a predicate written as tokens holds. One that doesn't parse,
+    /// such as one with a macro's metavariable in it, is unknown.
+    pub fn holds(&self, predicate: TokenStream) -> Truth {
+        (|input: ParseStream| self.predicate(input))
+            .parse2(predicate)
+            .unwrap_or(Truth::Unknown)
     }
 
     fn predicate(&self, input: ParseStream) -> syn::Result<Truth> {
