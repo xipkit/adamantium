@@ -56,6 +56,8 @@ pub(super) enum Reason {
     /// Code that locks a field might run inside an actor's callback, where
     /// the field's own actor would then panic.
     Nested(&'static str),
+    /// The enclosing future has no proved polling context.
+    Poll,
     /// Any other use that the rewrite can't follow.
     Unfollowed(&'static str),
 }
@@ -69,7 +71,7 @@ impl Reason {
             Self::TwoLocks | Self::InsideActor | Self::Calls | Self::Nested(_) => {
                 "two-locks-at-once"
             }
-            Self::ControlFlow | Self::Unfollowed(_) => "shared-state",
+            Self::ControlFlow | Self::Unfollowed(_) | Self::Poll => "shared-state",
         }
     }
 
@@ -84,6 +86,7 @@ impl Reason {
                 "a statement holding its guard calls a function or another value's method, which might use an actor"
             }
             Self::Nested(detail) | Self::Unfollowed(detail) => detail,
+            Self::Poll => "its future polling context is unproved; the rewrite remains manual",
         }
     }
 }
@@ -93,6 +96,7 @@ pub(super) struct Refusal {
     pub(super) line: usize,
     pub(super) name: String,
     pub(super) reason: Reason,
+    pub(super) boundary: Option<String>,
 }
 
 /// The edits for one file, applied together, and the bindings left alone.
@@ -144,7 +148,12 @@ const LOCKS: &[&str] = &[
 
 /// Plans the shared-state rewrites for one file. `mutexes` holds the byte
 /// ranges that Clippy resolved to `std::sync::Mutex`.
-pub(super) fn plan(file: &Path, source: &str, mutexes: &BTreeSet<(usize, usize)>) -> Draft {
+pub(super) fn plan(
+    file: &Path,
+    source: &str,
+    mutexes: &BTreeSet<(usize, usize)>,
+    krate: &Crate,
+) -> Draft {
     let mut draft = Draft {
         file: file.to_path_buf(),
         source: source.to_owned(),
@@ -167,6 +176,7 @@ pub(super) fn plan(file: &Path, source: &str, mutexes: &BTreeSet<(usize, usize)>
     let macros = parsed.macros;
     let mut walker = Walker {
         text: &text,
+        krate,
         file,
         mutexes,
         names: &names,
@@ -332,12 +342,31 @@ impl Draft {
             if groups.iter().any(|group| group.refusal.is_some()) {
                 continue;
             }
-            if let Some(reason) = Self::hazard(&groups, krate, callbacks)
+            let locking = groups
+                .iter()
+                .flat_map(|g| g.functions.iter().cloned())
+                .collect();
+            let blocks = groups
+                .iter()
+                .flat_map(|g| g.poll_blocks.iter().cloned())
+                .collect();
+            let boundary = if groups.iter().any(|group| group.escapes) {
+                None
+            } else {
+                krate.poll_hazard(&krate.callers(&locking), &blocks)
+            };
+            let reason = if boundary.is_some() {
+                Some(Reason::Poll)
+            } else {
+                Self::hazard(&groups, krate, callbacks)
+            };
+            if let Some(reason) = reason
                 && let Some(group) = component
                     .first()
                     .and_then(|&first| self.groups.get_mut(first))
             {
                 group.refuse(reason);
+                group.boundary = boundary;
             }
         }
     }
@@ -370,11 +399,6 @@ impl Draft {
             .collect();
         let reached = krate.callers(&locking);
         match krate.hazard(&reached) {
-            Some(Hazard::Asynchronous) => {
-                return Some(Reason::Unfollowed(
-                    "it is locked in async code, which fix doesn't follow yet",
-                ));
-            }
             Some(Hazard::Trait) => {
                 return Some(Reason::Nested(
                     "it is locked through a trait method, which might run inside an actor's callback",
@@ -413,6 +437,7 @@ impl Draft {
                     line: group.line,
                     name: group.name,
                     reason,
+                    boundary: group.boundary,
                 }),
                 None => outcome.edits.extend(group.edits),
             }
@@ -917,6 +942,8 @@ struct Group {
     member: Option<String>,
     /// The functions whose bodies take a guard of it.
     functions: BTreeSet<String>,
+    poll_blocks: BTreeSet<String>,
+    boundary: Option<String>,
     /// Whether a guard of it is taken in a closure, an async block or
     /// outside any function.
     escapes: bool,
@@ -933,6 +960,8 @@ impl Group {
             edits,
             member: None,
             functions: BTreeSet::new(),
+            poll_blocks: BTreeSet::new(),
+            boundary: None,
             escapes: false,
             callbacks: BTreeSet::new(),
         }
@@ -1013,6 +1042,7 @@ impl Mode {
 }
 
 struct Walker<'a> {
+    krate: &'a Crate,
     text: &'a Text<'a>,
     file: &'a Path,
     mutexes: &'a BTreeSet<(usize, usize)>,
@@ -2449,7 +2479,9 @@ impl<'a> Visit<'a> for Walker<'a> {
             self.mac(&mac.mac);
             return;
         }
-        if macro_attribute(item_attributes(item)) {
+        if macro_attribute(item_attributes(item))
+            && !matches!(item, Item::Fn(f) if self.krate.poll_root(self.file, &f.sig))
+        {
             self.attribute_macro(item.to_token_stream());
         }
         self.scopes.push(Scope {
@@ -3200,7 +3232,7 @@ mod tests {
         let file = Path::new("lib.rs");
         let mut krate = Crate::default();
         krate.add(file, source);
-        let mut settled = settle(vec![plan(file, source, &spans)], &krate);
+        let mut settled = settle(vec![plan(file, source, &spans, &krate)], &krate);
         settled.pop().map(|(_, outcome)| outcome).unwrap()
     }
 
@@ -3408,7 +3440,7 @@ mod tests {
             (
                 "async fn f() { let m = Arc::new(Mutex::new(0)); *m.lock().unwrap() += 1; }"
                     .to_owned(),
-                Reason::Unfollowed("it is locked in async code, which fix doesn't follow yet"),
+                Reason::Poll,
             ),
             (
                 "trait Bump { fn bump(&self) { let m = Arc::new(Mutex::new(0)); *m.lock().unwrap() += 1; } }".to_owned(),

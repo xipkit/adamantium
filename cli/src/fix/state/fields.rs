@@ -387,16 +387,39 @@ impl<'a> Walker<'a> {
             return;
         };
         let function = self.functions.last().cloned();
+        let mut block = false;
+        let mut boundary = None;
         let deferred = function.as_ref().is_none_or(|(_, depth)| {
             self.stack
                 .iter()
+                .enumerate()
                 .skip(*depth)
-                .any(|node| matches!(node, super::Node::Expr(Expr::Closure(_) | Expr::Async(_))))
+                .any(|(index, node)| match node {
+                    super::Node::Expr(Expr::Closure(_)) => true,
+                    super::Node::Expr(Expr::Async(expr)) => {
+                        block = true;
+                        let unproved = !expr.attrs.is_empty()
+                            || !matches!(index.checked_sub(1).and_then(|i| self.stack.get(i)),
+                                Some(super::Node::Expr(Expr::Await(await_))) if await_.attrs.is_empty());
+                        if unproved {
+                            boundary = Some(format!("future boundary `async block` at line {} is not directly awaited; the rewrite remains manual", expr.async_token.span.start().line));
+                        }
+                        unproved
+                    }
+                    _ => false,
+                })
         });
         if let Some(group) = self.groups.get_mut(group) {
             group.callbacks.extend(runs);
+            if boundary.is_some() {
+                group.refuse(Reason::Poll);
+                group.boundary = boundary;
+            }
             match function {
                 Some((name, _)) if !deferred => {
+                    if block {
+                        group.poll_blocks.insert(name.clone());
+                    }
                     group.functions.insert(name);
                 }
                 _ => group.escapes = true,
@@ -616,7 +639,7 @@ mod tests {
             ),
             (
                 "impl Counter { async fn f(&self) { *self.hits.lock().unwrap() += 1; } }",
-                Reason::Unfollowed("it is locked in async code, which fix doesn't follow yet"),
+                Reason::Poll,
             ),
             (
                 "impl Counter { fn hit(&self) { *self.hits.lock().unwrap() += 1; } }\nimpl Drop for Counter { fn drop(&mut self) { self.hit(); } }",
@@ -797,7 +820,10 @@ mod tests {
             let mut krate = Crate::default();
             krate.add(Path::new("lib.rs"), &source);
             krate.add(Path::new("other.rs"), other);
-            let settled = settle(vec![plan(Path::new("lib.rs"), &source, &spans)], &krate);
+            let settled = settle(
+                vec![plan(Path::new("lib.rs"), &source, &spans, &krate)],
+                &krate,
+            );
             let refusals: Vec<_> = settled
                 .iter()
                 .flat_map(|(_, outcome)| &outcome.refusals)
@@ -827,7 +853,7 @@ mod tests {
             fs::write(dir.path().join(file), &source).unwrap();
             let path = dir.path().join(file).canonicalize().unwrap();
             let krate = Crate::scan(dir.path()).unwrap();
-            let settled = settle(vec![plan(&path, &source, &spans)], &krate);
+            let settled = settle(vec![plan(&path, &source, &spans, &krate)], &krate);
             let reasons: Vec<_> = settled
                 .iter()
                 .flat_map(|(_, outcome)| &outcome.refusals)

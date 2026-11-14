@@ -44,6 +44,16 @@ any actor from inside it panics, so two locks are never held at once. A panic
 inside a closure doesn't poison the actor: the next caller sees the state as
 the closure left it, so the `unwrap` on every `lock()` goes away.
 
+`fix` can migrate a bounded async chain when it proves where every future
+is polled: private functions/methods called only with direct `.await`, and
+immediately awaited blocks, all the way to a verified Tokio binary entry.
+Immediate await alone is not enough; an enclosing future could be stored and
+later polled inside an actor callback. Stored, returned, boxed, externally
+passed or public-library futures remain manual, as do custom executors and
+macro wrappers. One unproved path keeps the entire connected state unchanged.
+The CLI reports that boundary. See the [CLI coverage](../README.md)
+for the deliberately narrow entry-point rules.
+
 ### Lock, change, unlock
 
 Before:
