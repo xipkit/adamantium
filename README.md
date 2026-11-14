@@ -118,6 +118,21 @@ For a single package, use `[package.metadata.adamantium]`. Paths are globs relat
 
 `check` summarizes skipped findings and reports counts by rule in the JSON report's `skipped` map. Remove a rule from `allow` to see its findings. Projects with a skip list should run `cargo adamantium check` in CI because a `[lints]` table cannot scope a rule to a path.
 
+The GitHub Action installs the CLI from a pinned commit and caches the binary. Check out your project and install Rust with Clippy first:
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+  - uses: dtolnay/rust-toolchain@stable
+    with:
+      components: clippy
+  - uses: xipkit/adamantium@main # Pin the action to a commit in production.
+    with:
+      rev: bfa0f78916cebb6c65cfaeefce45ed34339d324f # CLI commit
+      # working-directory: path/to/project
+```
+
+`rev` must be a full commit SHA. Update it to upgrade the CLI; the cache is separated by commit, runner platform, and Rust compiler. The action requires Git, Cargo, and Clippy on the runner.
 ## Baselines
 
 The skip list adopts rules by path or by rule. To adopt them everywhere at once without fixing every existing finding first, save a report and check against it:
