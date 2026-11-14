@@ -1400,6 +1400,8 @@ impl<'a> Walker<'a> {
         // `guard[i]`.
         let mut chain = guard;
         let mut index = top;
+        // Parentheses alone leave the guard itself.
+        let mut projected = false;
         let parent = loop {
             let below = index.checked_sub(1).and_then(|below| self.stack.get(below));
             match below.copied() {
@@ -1412,16 +1414,16 @@ impl<'a> Walker<'a> {
                         _ => false,
                     } =>
                 {
+                    projected |= !matches!(parent, Expr::Paren(_));
                     chain = parent;
                     index = index.saturating_sub(1);
                 }
                 other => break other,
             }
         };
-        let projected = !is(chain, guard);
         if !projected {
             match parent {
-                Some(Node::Expr(Expr::MethodCall(call))) if is(&call.receiver, guard) => {}
+                Some(Node::Expr(Expr::MethodCall(call))) if is(&call.receiver, chain) => {}
                 Some(Node::Stmt(Stmt::Local(_))) => return Err(Reason::AcrossStatements),
                 _ => return Err(Reason::Unfollowed("a guard is used as a value")),
             }
@@ -2756,6 +2758,15 @@ mod tests {
             Reason::Unfollowed(
                 "a statement holding its guard may move a variable on only one path",
             ),
+        );
+    }
+
+    #[test]
+    fn a_parenthesized_guard_is_still_the_guard() {
+        refused(
+            "fn f() { let m = Arc::new(Mutex::new(1)); let g = (m.lock().unwrap()); println!(\"{}\", *g); }",
+            "m",
+            Reason::AcrossStatements,
         );
     }
 
