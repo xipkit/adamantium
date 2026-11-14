@@ -16,3 +16,18 @@ macro_rules! root {
         }
     };
 }
+
+// An internal helper, called by path as `$crate::declare!`.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! declare {
+    ($name:ident) => {
+        mod $name;
+    };
+}
+
+macro_rules! backend {
+    ($name:ident) => {
+        $crate::declare!($name);
+    };
+}

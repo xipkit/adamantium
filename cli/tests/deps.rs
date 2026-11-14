@@ -294,7 +294,8 @@ fn deps_reads_modules_the_crates_own_macros_declare() {
     let facade = dependency(&report, "facade").unwrap();
     // The `unsafe impl` in `root!` counts where it is called, not in the
     // definition's body, and the modules it declares are scanned, one where
-    // its `#[path]` may put it.
+    // its `#[path]` may put it, as is the one `backend!` declares through
+    // `$crate::declare!`.
     assert_eq!(
         facade["unsafe"],
         json!({
@@ -308,6 +309,15 @@ fn deps_reads_modules_the_crates_own_macros_declare() {
         })
     );
     assert_eq!(facade["unscanned"], json!([]));
+    let files: BTreeSet<String> = reported(facade)
+        .unwrap()
+        .into_iter()
+        .map(|(_, file, _)| file)
+        .collect();
+    assert_eq!(
+        files,
+        BTreeSet::from(["src/driver.rs", "src/macros.rs"].map(str::to_owned))
+    );
 }
 
 #[test]
@@ -368,7 +378,8 @@ fn deps_prints_a_table_and_each_call_as_text() {
         "  unresolved calls: leak 1, spawn 5",
         "  unscanned: src/lib.rs:11: module `missing` has no file: neither missing.rs nor missing/mod.rs",
         "  unscanned: src/lib.rs:22: module `hidden` is declared in a macro body the scan can't read",
-        "      3      1           0  facade 0.0.0",
+        "      3      2           0  facade 0.0.0",
+        "    src/driver.rs:2:5",
         "    src/macros.rs:15:13",
         "adamantium: 14 dependencies; 7 with unsafe code, 7 with disallowed calls, 1 with unresolved calls, 2 partly unscanned",
     ] {
