@@ -43,7 +43,10 @@ impl World {
         self.check();
         #[cfg(feature = "deterministic")]
         if self.execution.is_some() {
-            shuttle::thread::yield_now();
+            // Shuttle 0.9.10 yield_now wakes the current task, so using it
+            // inside a waiter poll would turn a deadlock into a busy loop.
+            // Its sleep shim only switches tasks; it does not model time.
+            shuttle::thread::sleep(std::time::Duration::ZERO);
         }
     }
 
