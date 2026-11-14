@@ -1426,7 +1426,8 @@ impl FileVisitor<'_, '_> {
     }
 
     /// Counts what can be seen in tokens syn can't parse as code: `unsafe`,
-    /// and calls to a name some disallowed path has.
+    /// and calls to a name some disallowed path has. A `mod name;` there
+    /// names a file the scan doesn't load, so it is listed as unscanned.
     fn tokens(&mut self, stream: TokenStream) {
         let mut previous: Option<TokenTree> = None;
         let mut before: Option<TokenTree> = None;
@@ -1434,6 +1435,20 @@ impl FileVisitor<'_, '_> {
             match &tree {
                 TokenTree::Ident(ident) if ident == "unsafe" => {
                     self.scanner.scan.unsafe_code.in_macros += 1;
+                }
+                TokenTree::Punct(punct) if punct.as_char() == ';' => {
+                    if let (Some(TokenTree::Ident(name)), Some(TokenTree::Ident(keyword))) =
+                        (&previous, &before)
+                        && keyword == "mod"
+                    {
+                        self.unscanned(
+                            name.span(),
+                            format!(
+                                "module `{}` is declared in a macro body the scan can't read",
+                                name.unraw()
+                            ),
+                        );
+                    }
                 }
                 TokenTree::Group(group) => {
                     if group.delimiter() == Delimiter::Bracket

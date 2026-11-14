@@ -135,6 +135,7 @@ fn deps_lists_runtime_and_build_dependencies_but_not_members_or_dev_dependencies
             ("ffi", "runtime"),
             ("helper", "build"),
             ("old", "runtime"),
+            ("platform", "runtime"),
             ("pool", "runtime"),
             ("safe", "runtime"),
             ("spawner", "runtime"),
@@ -250,6 +251,21 @@ fn deps_names_source_it_could_not_scan() {
 }
 
 #[test]
+fn deps_names_modules_declared_in_macro_bodies_it_could_not_read() {
+    let report = report(&[]).unwrap();
+    let platform = dependency(&report, "platform").unwrap();
+    assert_eq!(
+        platform["unscanned"],
+        json!([{
+            "file": "src/lib.rs",
+            "line": 10,
+            "reason": "module `hidden` is declared in a macro body the scan can't read",
+        }])
+    );
+    assert_eq!(platform["unsafe"]["functions"], 0);
+}
+
+#[test]
 fn deps_passes_features_to_cargo_metadata() {
     let off = ("tokio::spawn".to_owned(), "src/off.rs".to_owned(), 3);
     let without = report(&[]).unwrap();
@@ -281,7 +297,8 @@ fn deps_prints_a_table_and_each_call_as_text() {
         "    src/nested/deeper.rs:2:5",
         "  unresolved calls: leak 1, spawn 5",
         "  unscanned: src/lib.rs:11: module `missing` has no file: neither missing.rs nor missing/mod.rs",
-        "adamantium: 10 dependencies; 5 with unsafe code, 4 with disallowed calls, 1 with unresolved calls, 1 partly unscanned",
+        "  unscanned: src/lib.rs:10: module `hidden` is declared in a macro body the scan can't read",
+        "adamantium: 11 dependencies; 5 with unsafe code, 4 with disallowed calls, 1 with unresolved calls, 2 partly unscanned",
     ] {
         assert!(
             stdout.lines().any(|printed| printed == line),
