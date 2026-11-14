@@ -35,6 +35,9 @@ enum Command {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
         format: ReportFormat,
+        /// Also run the experimental lints from this explicitly built Dylint library.
+        #[arg(long)]
+        dylint_library: Option<PathBuf>,
         /// Include the strict rules, starting with arithmetic_side_effects.
         #[arg(long)]
         strict: bool,
@@ -193,7 +196,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
             strict,
             baseline,
             cargo_args,
-        } => check::run(&path, &cargo_args, format, strict, baseline.as_deref()),
+            dylint_library,
+        } => check::run(
+            &path,
+            &cargo_args,
+            format,
+            strict,
+            baseline.as_deref(),
+            dylint_library.as_deref(),
+        ),
         Command::Fix {
             path,
             dry_run,

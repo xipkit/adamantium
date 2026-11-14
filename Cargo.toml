@@ -1,6 +1,8 @@
 [workspace]
 members = ["cli"]
 exclude = [
+    "lints",
+    "lints/fixtures",
     "cli/tests/fixtures/violations",
     "cli/tests/fixtures/clean",
     "cli/tests/fixtures/workspace",

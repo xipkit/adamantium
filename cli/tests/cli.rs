@@ -1711,3 +1711,23 @@ fn rules_as_toml_are_the_workspace_tables() {
         );
     }
 }
+
+#[test]
+fn missing_experimental_library_is_an_incomplete_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = adamantium()
+        .args(["check", "--format", "json", "--dylint-library"])
+        .arg(temp.path().join("missing-library"))
+        .arg(fixture("clean"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "error");
+    assert!(report["errors"].as_array().unwrap().iter().any(|error| {
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("experimental check incomplete")
+    }));
+}

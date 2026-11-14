@@ -41,6 +41,12 @@ pub struct Example {
     pub after: &'static str,
 }
 
+/// Names registered by the opt-in Dylint library, excluded from `init`.
+pub const EXPERIMENTAL_LINTS: &[&str] = &[
+    "adamantium_blocking_in_async",
+    "adamantium_nested_actor_access",
+];
+
 /// The rule name for the release profile check, which is not a Clippy lint.
 pub const OVERFLOW_RULE: &str = "adamantium::overflow_checks";
 pub const OVERFLOW_WHY: &str = "the release profile must set overflow-checks = true, so integer overflow panics instead of wrapping";
