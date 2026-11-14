@@ -577,6 +577,9 @@ struct Scanner<'a> {
     /// The dependencies read for the macros they export, by the names the
     /// crate's code uses.
     libraries: HashMap<String, Scanner<'a>>,
+    /// The modules around the one being indexed, outermost first, with the
+    /// names bound in them so far, which `modules` doesn't have yet.
+    around: Vec<(Vec<String>, Scope)>,
     /// The sources, as [`Span::file`] names them, of the files read for
     /// other crates' macros. Code written there counts for the crate that
     /// wrote it, not for this one, where the macros are called.
@@ -758,6 +761,7 @@ impl<'a> Scanner<'a> {
             expansions: 0,
             prelude: Vec::new(),
             libraries: HashMap::new(),
+            around: Vec::new(),
             foreign: HashSet::new(),
             dollar_crates: HashMap::new(),
             exports: None,
@@ -875,7 +879,15 @@ impl<'a> Scanner<'a> {
         let mut indexed = Vec::with_capacity(items.len());
         for mut item in mem::take(items) {
             match &mut item {
-                Item::Mod(item) => self.child(item, place, textual),
+                Item::Mod(item) => {
+                    // Paths in the module it declares may lead through its
+                    // names, which `modules` has only once it is indexed.
+                    self.around.push((place.module.to_vec(), mem::take(scope)));
+                    self.child(item, place, textual);
+                    if let Some((_, around)) = self.around.pop() {
+                        *scope = around;
+                    }
+                }
                 Item::Macro(call) => match &call.ident {
                     Some(name) => self.define(call, name, place.rel, textual),
                     None => {
@@ -1897,11 +1909,21 @@ impl<'s, 'a> Resolver<'s, 'a> {
         self
     }
 
-    /// The names a module binds.
+    /// The names a module binds: so far, where it is being indexed or is
+    /// around the one that is.
     fn module(&self, module: &[String]) -> Option<&'s Scope> {
         match self.indexing {
             Some((indexing, scope)) if indexing == module => Some(scope),
-            _ => self.scanner.modules.get(module),
+            _ => {
+                let scanner = self.scanner;
+                scanner
+                    .around
+                    .iter()
+                    .rev()
+                    .find(|(around, _)| around == module)
+                    .map(|(_, scope)| scope)
+                    .or_else(|| scanner.modules.get(module))
+            }
         }
     }
 
@@ -4814,6 +4836,38 @@ crate::own! { yes { mod own; } }
         let listed = [(1, "other"), (2, "spawn"), (3, "missing"), (6, "own")]
             .map(|(line, name)| unscanned("src/lib.rs", line, &reason(name)));
         assert_eq!(scan.unscanned, listed);
+    }
+
+    /// A module's `use` of another crate's macro can be followed from the
+    /// modules it declares, as `use super::pick;`, before it is indexed.
+    #[test]
+    fn macros_a_parent_module_brings_in_are_followed() {
+        let picks = Library {
+            name: "picks",
+            features: &[],
+            files: &[(
+                "lib.rs",
+                "#[macro_export]\nmacro_rules! pick { (yes { $($yes:tt)* }) => { $($yes)* }; }\n",
+            )],
+        };
+        let scan = scan_with(
+            &[
+                (
+                    "lib.rs",
+                    "use picks::pick;\n\nmod child;\n\nmod inline {\n    use super::pick;\n    pick! { yes { mod body; } }\n}\n",
+                ),
+                (
+                    "child.rs",
+                    "use super::pick;\npick! { yes { mod body; } }\n",
+                ),
+                ("child/body.rs", "pub unsafe fn a() {}\n"),
+                ("inline/body.rs", "pub unsafe fn b() {}\n"),
+            ],
+            false,
+            &[picks],
+        );
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 2);
     }
 
     /// A macro that a call may reach two ways, by its name and by a
