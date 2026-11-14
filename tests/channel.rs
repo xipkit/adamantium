@@ -542,7 +542,7 @@ fn dropping_a_notified_receive_passes_the_message_to_the_next_waiter() {
     let first_wake = Arc::new(WakeCounter::default());
     let second_wake = Arc::new(WakeCounter::default());
     let mut first = Box::pin(receiver.receive());
-    let mut second = Box::pin(receiver.receive());
+    let mut second = pin!(receiver.receive());
     assert!(poll_once(first.as_mut(), &first_wake).is_pending());
     assert!(poll_once(second.as_mut(), &second_wake).is_pending());
     sender.try_send(7).unwrap();
@@ -563,7 +563,7 @@ fn dropping_a_notified_send_passes_room_without_sending_its_value() {
     let first_wake = Arc::new(WakeCounter::default());
     let second_wake = Arc::new(WakeCounter::default());
     let mut first = Box::pin(sender.send(1));
-    let mut second = Box::pin(sender.send(2));
+    let mut second = pin!(sender.send(2));
     assert!(poll_once(first.as_mut(), &first_wake).is_pending());
     assert!(poll_once(second.as_mut(), &second_wake).is_pending());
     assert_eq!(receiver.try_receive(), Ok(0));
