@@ -1,0 +1,43 @@
+name: Adamantium check
+description: Install cargo-adamantium and check a Rust project
+inputs:
+  rev:
+    description: Immutable adamantium git commit to install
+    required: true
+  working-directory:
+    description: Directory containing the project's Cargo.toml
+    required: false
+    default: .
+runs:
+  using: composite
+  steps:
+    - name: Identify binary cache
+      id: cache-key
+      shell: bash
+      env:
+        ADAMANTIUM_REV: ${{ inputs.rev }}
+      run: |
+        if [[ ! "$ADAMANTIUM_REV" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          echo 'rev must be a full, immutable git commit SHA' >&2
+          exit 1
+        fi
+        compiler=$(rustc -vV | git hash-object --stdin)
+        echo "key=adamantium-v1-${RUNNER_OS}-${RUNNER_ARCH}-${compiler}-${ADAMANTIUM_REV}" >> "$GITHUB_OUTPUT"
+    - name: Restore cargo-adamantium
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/adamantium/bin
+        key: ${{ steps.cache-key.outputs.key }}
+    - name: Install cargo-adamantium
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        ADAMANTIUM_REV: ${{ inputs.rev }}
+      run: cargo install --locked --git https://github.com/xipkit/adamantium --rev "$ADAMANTIUM_REV" --root "$RUNNER_TEMP/adamantium" cargo-adamantium
+    - name: Run adamantium check
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        export PATH="$RUNNER_TEMP/adamantium/bin:$PATH"
+        cargo adamantium check
