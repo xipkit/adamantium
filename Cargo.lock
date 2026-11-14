@@ -15,6 +15,7 @@ dependencies = [
  "futures-util",
  "im",
  "indexmap",
+ "pin-project-lite",
  "serde",
  "serde_json",
  "serde_yaml",

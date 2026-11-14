@@ -1,10 +1,16 @@
 use std::{fmt, sync::Arc};
+#[cfg(feature = "tokio")]
+use std::{
+    pin::{Pin, pin},
+    task::{Context, Poll},
+};
 
 use event_listener::Event;
 #[cfg(feature = "tokio")]
 use event_listener::EventListener;
 #[cfg(feature = "tokio")]
-use std::pin::pin;
+use futures_core::Stream;
+use pin_project_lite::pin_project;
 #[cfg(feature = "tokio")]
 use tokio::time::Instant;
 
@@ -67,15 +73,51 @@ pub struct Sender<T> {
     space: Arc<Event>,
 }
 
-/// The receiving half of a bounded channel, created by [`Channel::split`].
-///
-/// Clones compete for messages: each message goes to exactly one receiver.
-/// Dropping the last receiver closes the channel and wakes pending sends
-/// with [`Closed`]. A combined [`Channel`] also owns a receiver and keeps
-/// the receiving side alive.
-pub struct Receiver<T> {
-    inner: async_channel::Receiver<T>,
-    space: Arc<Event>,
+pin_project! {
+    /// The receiving half of a bounded channel, created by [`Channel::split`].
+    ///
+    /// Clones compete for messages: each message goes to exactly one receiver.
+    /// Dropping the last receiver closes the channel and wakes pending sends
+    /// with [`Closed`]. A combined [`Channel`] also owns a receiver and keeps
+    /// the receiving side alive.
+    ///
+    /// With the `tokio` feature, receivers implement `futures_core::Stream`,
+    /// yielding queued messages until the channel is closed and drained.
+    /// Pin the receiver before using `StreamExt::next`, as it is not `Unpin`.
+    ///
+    /// ```
+    /// # #[cfg(feature = "tokio")]
+    /// # #[tokio::main] async fn main() {
+    /// use adamantium::Channel;
+    /// use futures_util::StreamExt;
+    ///
+    /// let (sender, receiver) = Channel::bounded(2).split();
+    /// sender.send(1).await.unwrap();
+    /// sender.send(2).await.unwrap();
+    /// drop(sender);
+    ///
+    /// let mut receiver = std::pin::pin!(receiver);
+    /// assert_eq!(receiver.next().await, Some(1));
+    /// assert_eq!(receiver.next().await, Some(2));
+    /// assert_eq!(receiver.next().await, None);
+    /// # }
+    /// # #[cfg(not(feature = "tokio"))]
+    /// # fn main() {}
+    /// ```
+    pub struct Receiver<T> {
+        #[pin]
+        inner: async_channel::Receiver<T>,
+        space: Arc<Event>,
+    }
+
+    impl<T> PinnedDrop for Receiver<T> {
+        fn drop(_this: Pin<&mut Self>) {
+            #[cfg(feature = "deterministic")]
+            if !std::thread::panicking() {
+                crate::runtime::production_only("Channel");
+            }
+        }
+    }
 }
 
 /// Returned by [`Sender::try_send`] or [`Channel::try_send`].
@@ -563,6 +605,19 @@ impl<T> Clone for Sender<T> {
     }
 }
 
+#[cfg(feature = "tokio")]
+impl<T> Stream for Receiver<T> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        crate::runtime::production_only("Channel receiver stream");
+        match self.as_mut().project().inner.poll_next(cx) {
+            Poll::Ready(Some(value)) => Poll::Ready(Some(self.received(value))),
+            poll => poll,
+        }
+    }
+}
+
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
         crate::runtime::production_only("Channel");
@@ -647,15 +702,6 @@ impl std::error::Error for ReceiveError {}
 
 #[cfg(feature = "deterministic")]
 impl<T> Drop for Sender<T> {
-    fn drop(&mut self) {
-        if !std::thread::panicking() {
-            crate::runtime::production_only("Channel");
-        }
-    }
-}
-
-#[cfg(feature = "deterministic")]
-impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         if !std::thread::panicking() {
             crate::runtime::production_only("Channel");

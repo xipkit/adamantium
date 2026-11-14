@@ -422,3 +422,27 @@ fn dropping_foreign_task_and_cancellation_handles_is_rejected() {
     assert_eq!(failure.kind(), FailureKind::Panic);
     drop(scope);
 }
+
+#[test]
+fn foreign_receiver_stream_cannot_bypass_the_harness_boundary() {
+    use futures_util::StreamExt;
+    let (sender, receiver) = Channel::bounded(1).split();
+    sender.try_send(42).unwrap();
+    let worker = Mutex::new(Some(receiver.clone()));
+    let failure = testing::check(
+        Config {
+            iterations: 1,
+            ..config()
+        },
+        move || {
+            let reader = worker.lock().unwrap().take().unwrap();
+            async move {
+                let mut reader = std::pin::pin!(reader);
+                reader.next().await;
+            }
+        },
+    )
+    .unwrap_err();
+    assert_eq!(failure.kind(), FailureKind::Panic);
+    assert_eq!(receiver.try_receive(), Ok(42));
+}

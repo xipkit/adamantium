@@ -8,7 +8,7 @@ allow-indexing-slicing-in-tests = true
 allow-panic-in-tests = true
 allow-dbg-in-tests = true
 
-# Every entry outside std has `allow-invalid`, because Clippy warns about each
+# Every external-crate entry has `allow-invalid`, because Clippy warns about each
 # path it can't resolve in a crate the project uses, and most of these items
 # exist only behind a crate feature the project may leave off. A test resolves
 # every path with all of the crates' features on, so a misspelled path still
@@ -32,6 +32,11 @@ disallowed-types = [
 ]
 
 disallowed-methods = [
+  { path = "std::vec::Vec::remove", reason = "panics on a bad index; use adamantium::Array::remove, which returns Option" },
+  { path = "std::vec::Vec::insert", reason = "panics on a bad index; use adamantium::Array::insert, which returns Result" },
+  { path = "std::vec::Vec::swap_remove", reason = "panics on a bad index; use adamantium::Array::remove, which returns Option and preserves order" },
+  { path = "slice::split_at", reason = "panics on a bad index; use split_at_checked, which returns Option" },
+  { path = "slice::copy_from_slice", reason = "panics on unequal lengths; return an error on a length mismatch, then copy with iter_mut().zip(source)" },
   { path = "tokio::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks", allow-invalid = true },
   { path = "tokio::task::spawn", reason = "an unstructured task; spawn inside adamantium::Tasks", allow-invalid = true },
   { path = "tokio::task::spawn_local", reason = "every task must be Send; spawn inside adamantium::Tasks", allow-invalid = true },
