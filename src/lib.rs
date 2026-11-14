@@ -24,10 +24,13 @@ mod bytes;
 mod channel;
 mod deque;
 mod map;
+mod runtime;
 mod set;
 mod string;
 #[cfg(feature = "tokio")]
 mod tasks;
+#[cfg(feature = "deterministic")]
+pub mod testing;
 
 pub use actor::Actor;
 pub use array::Array;
