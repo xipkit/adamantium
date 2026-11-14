@@ -1455,7 +1455,15 @@ impl<'a> Walker<'a> {
         if let Some(reason) = inside.unfollowed {
             return Err(Reason::Unfollowed(reason));
         }
+        // The closure's parameter takes the binding's name, so the code that
+        // moves into the closure must not name the binding anywhere else.
         let substitute = |range: Range<usize>| -> Result<String, Reason> {
+            let region = self.text.get(range.clone()).ok_or(UNLOCATED)?;
+            if names_in(region, &name) != Some(1) {
+                return Err(Reason::Unfollowed(
+                    "a statement holding its guard names it again",
+                ));
+            }
             let before = self.text.get(range.start..guard_range.start);
             let after = self.text.get(guard_range.end..range.end);
             match (before, after) {
@@ -1466,7 +1474,10 @@ impl<'a> Walker<'a> {
         if let Some((expr, narrow)) = plan.narrow {
             let range = self.text.of(expr).ok_or(UNLOCATED)?;
             let replacement = match narrow {
-                Narrow::Snapshot => format!("{name}.snapshot()"),
+                Narrow::Snapshot => {
+                    substitute(range.clone())?;
+                    format!("{name}.snapshot()")
+                }
                 Narrow::Read => format!("{name}.read(|{name}| {})", substitute(range.clone())?),
             };
             return Ok(self.edit(range, replacement));
@@ -1678,6 +1689,33 @@ impl<'a> Walker<'a> {
             }
         }
     }
+}
+
+/// How many times `text` names `name`, as an identifier or as a variable
+/// that a string captures, or `None` if it doesn't tokenize.
+fn names_in(text: &str, name: &str) -> Option<usize> {
+    fn count(tokens: TokenStream, name: &str) -> usize {
+        tokens
+            .into_iter()
+            .map(|token| match token {
+                TokenTree::Group(group) => count(group.stream(), name),
+                TokenTree::Ident(ident) => usize::from(ident == name),
+                TokenTree::Literal(literal) => {
+                    match syn::parse2::<Lit>(TokenTree::Literal(literal).into()) {
+                        Ok(Lit::Str(string)) => format_captures(&string.value())
+                            .iter()
+                            .filter(|capture| *capture == name)
+                            .count(),
+                        _ => 0,
+                    }
+                }
+                TokenTree::Punct(_) => 0,
+            })
+            .sum()
+    }
+    TokenStream::from_str(text)
+        .ok()
+        .map(|tokens| count(tokens, name))
 }
 
 fn is_unwrap(call: &syn::ExprMethodCall) -> bool {
@@ -2411,6 +2449,24 @@ mod tests {
             fixed,
             "fn f() {\n    let m = ::adamantium::Actor::new(1);\n    drop(m);\n}\n"
         );
+    }
+
+    #[test]
+    fn a_statement_naming_the_binding_again_is_refused() {
+        for body in [
+            "fn f() { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().push({ let h = m.clone(); drop(h); 1 }); }",
+            "fn f() { let m = Arc::new(Mutex::new(vec![1])); m.lock().unwrap().push(format!(\"{m:?}\").len()); }",
+        ] {
+            let source = format!("use std::sync::{{Arc, Mutex}};\n{body}\n");
+            let (fixed, refusals) = fix(&source, &["Mutex"]);
+            assert_eq!(fixed, source);
+            assert!(
+                refusals.iter().any(|(name, reason)| name == "m"
+                    && *reason
+                        == Reason::Unfollowed("a statement holding its guard names it again")),
+                "{refusals:?}"
+            );
+        }
     }
 
     #[test]
