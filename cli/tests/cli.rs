@@ -951,6 +951,114 @@ fn rules_match_the_repository_manifest() {
 }
 
 #[test]
+fn explain_has_an_example_for_every_rule_in_text_and_json() {
+    let listed = adamantium()
+        .args(["rules", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let rules: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let mut names: Vec<(String, String, String)> = rules["lints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|lint| {
+            let name = lint["name"].as_str().unwrap();
+            let qualified = match lint["tool"].as_str().unwrap() {
+                "rust" => name.to_owned(),
+                "clippy" => format!("clippy::{name}"),
+                tool => panic!("unknown tool {tool}"),
+            };
+            (
+                name.to_owned(),
+                qualified,
+                lint["why"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    names.push((
+        "overflow_checks".into(),
+        "adamantium::overflow_checks".into(),
+        "the release profile must set overflow-checks = true, so integer overflow panics instead of wrapping".into(),
+    ));
+
+    // Run outside a Cargo project: explanations must work without loading one.
+    let dir = tempfile::tempdir().unwrap();
+    for (name, qualified, why) in names {
+        let output = adamantium()
+            .current_dir(dir.path())
+            .args(["adamantium", "explain", &qualified, "--format", "json"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{qualified}: {output:?}");
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.ends_with(b"\n"));
+        let explanation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(explanation["schema_version"], 1);
+        assert_eq!(explanation["rule"], qualified);
+        assert_eq!(explanation["why"], why);
+        for field in ["replacement", "before", "after"] {
+            assert!(
+                !explanation[field].as_str().unwrap().trim().is_empty(),
+                "{qualified} has no {field}"
+            );
+        }
+        assert_ne!(explanation["before"], explanation["after"], "{qualified}");
+
+        let bare = adamantium()
+            .current_dir(dir.path())
+            .args(["explain", &name, "--format", "json"])
+            .output()
+            .unwrap();
+        assert!(bare.status.success());
+        assert_eq!(bare.stdout, output.stdout);
+
+        let text = adamantium()
+            .current_dir(dir.path())
+            .args(["explain", &name])
+            .output()
+            .unwrap();
+        assert!(text.status.success());
+        assert!(text.stderr.is_empty());
+        let text = String::from_utf8(text.stdout).unwrap();
+        assert!(text.starts_with(&format!("{qualified}\n")));
+        assert!(text.contains(&format!("Why: {why}")));
+        for (label, field) in [
+            ("Replacement: ", "replacement"),
+            ("Before:\n", "before"),
+            ("After:\n", "after"),
+        ] {
+            assert!(text.contains(&format!("{label}{}", explanation[field].as_str().unwrap())));
+        }
+    }
+}
+
+#[test]
+fn explain_rejects_unknown_names_and_unsupported_formats() {
+    for format in ["text", "json"] {
+        for rule in ["not_a_rule", "rust::unwrap_used", "clippy::unsafe_code", ""] {
+            let output = adamantium()
+                .args(["explain", rule, "--format", format])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            assert!(output.stdout.is_empty());
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(stderr.contains(&format!("unknown rule `{rule}`")));
+            assert!(stderr.contains("cargo adamantium rules"));
+        }
+    }
+    for args in [
+        vec!["explain"],
+        vec!["explain", "unwrap_used", "--format", "toml"],
+    ] {
+        let output = adamantium().args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
 fn rules_as_toml_are_the_workspace_tables() {
     let output = adamantium()
         .args(["rules", "--format", "toml"])
