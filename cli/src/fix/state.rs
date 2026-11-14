@@ -1454,6 +1454,19 @@ impl<'a> Walker<'a> {
                         from_block = true;
                     }
                     Stmt::Macro(mac) => {
+                        // A braced macro with no semicolon at the end of a
+                        // block is the block's value, not a statement.
+                        let tail = mac.semi_token.is_none()
+                            && matches!(
+                                index.checked_sub(1).and_then(|below| self.stack.get(below)),
+                                Some(Node::Block(block, _))
+                                    if block.stmts.last().is_some_and(|last| std::ptr::eq(last, stmt))
+                            );
+                        if tail {
+                            return Err(Reason::Unfollowed(
+                                "a guard is in a macro whose value ends a block",
+                            ));
+                        }
                         return Ok(Root::Statement(
                             Full::Macro(&mac.mac),
                             mac.semi_token.is_some(),
@@ -3095,6 +3108,15 @@ mod tests {
         assert_eq!(
             fixed,
             "fn f() {\n    let r#m = ::adamantium::Actor::new(0);\n    r#m.with(|r#m| *r#m += 1);\n    let h = r#m.clone();\n    drop(h);\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_braced_macro_ending_a_block_keeps_its_value() {
+        refused(
+            "fn f() -> String { let m = Arc::new(Mutex::new(vec![1])); format! { \"{}\", m.lock().unwrap().len() } }",
+            "m",
+            Reason::Unfollowed("a guard is in a macro whose value ends a block"),
         );
     }
 
