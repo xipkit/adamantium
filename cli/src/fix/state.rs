@@ -292,10 +292,16 @@ struct Names {
     macros: BTreeSet<String>,
     /// Type aliases for unsized types, such as `type Bytes = [u8];`.
     unsized_aliases: BTreeSet<String>,
+    /// Every name an item or import binds anywhere in the file. A relative
+    /// path through one of these, as `std` after `use custom as std;`, may
+    /// not reach the crate of that name.
+    bound: BTreeSet<String>,
 }
 
 impl<'ast> Visit<'ast> for Names {
     fn visit_item(&mut self, item: &'ast Item) {
+        self.bound
+            .extend(ItemScope::bindings(item).into_iter().map(|(name, _)| name));
         match item {
             Item::Const(item) => {
                 self.constants.insert(item.ident.to_string());
@@ -502,7 +508,12 @@ impl ItemScope {
                 module,
             };
             if let Item::Use(item) = item {
-                own.import(&item.tree, &mut Vec::new());
+                // A leading `::` names a crate, never a local module.
+                let mut prefix = item
+                    .leading_colon
+                    .map(|_| vec!["::".to_owned()])
+                    .unwrap_or_default();
+                own.import(&item.tree, &mut prefix);
             } else {
                 own.names.extend(Self::bindings(item));
             }
@@ -567,7 +578,7 @@ impl ItemScope {
                 let name = item.rename.as_ref().map_or(&item.ident, |(_, name)| name);
                 vec![(
                     name.to_string(),
-                    Binding::Import(vec![item.ident.to_string()]),
+                    Binding::Import(vec!["::".to_owned(), item.ident.to_string()]),
                 )]
             }
             Item::Fn(item) => item_name(&item.sig.ident),
@@ -876,7 +887,7 @@ impl<'a> Walker<'a> {
             })
             .collect::<Option<_>>()?;
         if path.leading_colon.is_some() {
-            return Some(names);
+            return Some(std::iter::once("::".to_owned()).chain(names).collect());
         }
         let (first, rest) = names.split_first()?;
         let mut resolved = match self.resolve_name(first) {
@@ -893,16 +904,30 @@ impl<'a> Walker<'a> {
         let Some(count) = path.segments.len().checked_sub(skip) else {
             return false;
         };
-        self.resolve_path(path, count).is_some_and(|resolved| {
-            matches!(
-                resolved
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-                ["std" | "alloc", "sync", "Arc"]
-            )
-        })
+        self.resolve_path(path, count)
+            .and_then(|resolved| self.crate_path(resolved))
+            .is_some_and(|resolved| {
+                matches!(
+                    resolved
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                    ["std" | "alloc", "sync", "Arc"]
+                )
+            })
+    }
+
+    /// A resolved path as one starting from a crate, or `None` when its
+    /// first name might be a local alias rather than a crate.
+    fn crate_path(&self, resolved: Vec<String>) -> Option<Vec<String>> {
+        if resolved.first().is_some_and(|first| first == "::") {
+            return Some(resolved.into_iter().skip(1).collect());
+        }
+        (!resolved
+            .first()
+            .is_some_and(|first| self.names.bound.contains(first)))
+        .then_some(resolved)
     }
 
     /// Whether Clippy resolved the text at `range` to `std::sync::Mutex`.
@@ -1363,6 +1388,7 @@ impl<'a> Walker<'a> {
             }
             None => self
                 .resolve_path(&func.path, func.path.segments.len())
+                .and_then(|path| self.crate_path(path))
                 .is_some_and(|path| {
                     matches!(
                         path.iter()
@@ -3152,6 +3178,23 @@ mod tests {
         );
         assert_eq!(refusals, []);
         assert!(fixed.starts_with("use std::sync::Arc;\n"), "{fixed}");
+    }
+
+    #[test]
+    fn an_aliased_crate_root_is_not_the_standard_library() {
+        for source in [
+            "use custom as std;\nuse std::sync::Arc;\nuse ::std::sync::Mutex;\nfn f() { let m = Arc::new(Mutex::new(1)); drop(m); }\n",
+            "extern crate custom as std;\nuse ::std::sync::Mutex;\nfn f() { let m = std::sync::Arc::new(Mutex::new(1)); drop(m); }\n",
+        ] {
+            let (fixed, refusals) = fix(source, &["Mutex"]);
+            assert_eq!(fixed, source);
+            assert_eq!(refusals, []);
+        }
+        let (fixed, _) = fix(
+            "use ::std::sync::{Arc, Mutex};\nmod std {}\nfn f() { let m = Arc::new(Mutex::new(1)); drop(m); }\n",
+            &["Mutex"],
+        );
+        assert!(fixed.contains("::adamantium::Actor::new(1)"), "{fixed}");
     }
 
     #[test]
