@@ -494,13 +494,27 @@ impl Scanner<'_> {
         )
     }
 
+    /// A file's name relative to the package, with `/` between components,
+    /// or its full path if it is outside the package. A `#[path]` with `..`
+    /// is resolved first, so the name is the file the compiler reads.
     fn relative(&self, path: &Path) -> String {
-        let path = path.strip_prefix(self.krate.root).unwrap_or(path);
+        let mut normal = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir
+                    if matches!(normal.components().next_back(), Some(Component::Normal(_))) =>
+                {
+                    normal.pop();
+                }
+                component => normal.push(component),
+            }
+        }
+        let path = normal.strip_prefix(self.krate.root).unwrap_or(&normal);
         path.components()
-            .filter_map(|component| match component {
-                Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-                Component::RootDir => Some(String::new()),
-                _ => None,
+            .map(|component| match component {
+                Component::RootDir => String::new(),
+                component => component.as_os_str().to_string_lossy().into_owned(),
             })
             .collect::<Vec<_>>()
             .join("/")

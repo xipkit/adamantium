@@ -71,7 +71,7 @@ fn sources(root: &Path, dir: &Path, files: &mut Vec<(String, String)>) -> io::Re
 fn marked(name: &str) -> io::Result<(Sites, usize)> {
     let root = fixture().join("vendor").join(name);
     let mut files = Vec::new();
-    sources(&root, &root.join("src"), &mut files)?;
+    sources(&root, &root, &mut files)?;
     let mut sites = BTreeSet::new();
     let mut unresolved = 0;
     for (file, text) in files {
@@ -202,7 +202,7 @@ fn deps_names_source_it_could_not_scan() {
         dependency(&report, "spawner").unwrap()["unscanned"],
         json!([{
             "file": "src/lib.rs",
-            "line": 9,
+            "line": 11,
             "reason": "module `missing` has no file: neither missing.rs nor missing/mod.rs",
         }])
     );
@@ -235,13 +235,13 @@ fn deps_prints_a_table_and_each_call_as_text() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     for line in [
-        "      5     21           6  spawner 0.1.0 (partly unscanned)",
+        "      5     22           6  spawner 0.1.0 (partly unscanned)",
         "      0      0           0  safe 0.0.0 (forbids unsafe)",
         "      1      0           0  helper 0.0.0",
         "  tokio::task::spawn: an unstructured task; spawn inside adamantium::Tasks",
         "    src/nested/deeper.rs:2:5",
         "  unresolved calls: leak 1, spawn 5",
-        "  unscanned: src/lib.rs:9: module `missing` has no file: neither missing.rs nor missing/mod.rs",
+        "  unscanned: src/lib.rs:11: module `missing` has no file: neither missing.rs nor missing/mod.rs",
         "adamantium: 8 dependencies; 3 with unsafe code, 4 with disallowed calls, 1 with unresolved calls, 1 partly unscanned",
     ] {
         assert!(

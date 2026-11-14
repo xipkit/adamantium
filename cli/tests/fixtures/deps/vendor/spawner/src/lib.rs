@@ -5,6 +5,8 @@ mod dir;
 #[path = "elsewhere/renamed.rs"]
 mod renamed;
 mod globbed;
+#[path = "../shared.rs"]
+mod shared;
 mod nested;
 mod missing;
 #[cfg(test)]
