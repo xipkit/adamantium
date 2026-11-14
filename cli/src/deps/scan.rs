@@ -637,20 +637,27 @@ struct Scanner<'a> {
     /// may have. The last reading of the module tree's are kept, for a path
     /// to a macro the crate defines after the call.
     macro_paths: HashMap<Vec<String>, Vec<Named>>,
-    /// The fewest definitions a call by path found at each of `macro_paths`
-    /// in this reading of the module tree. Where a path has more by the end
-    /// of it, a call didn't see them all.
-    macro_calls: HashMap<Vec<String>, usize>,
     /// The names each module bound in the last reading of the module tree,
-    /// by module path, for paths through a module not yet indexed in this
-    /// one.
+    /// by module path, which paths are resolved through while the scan
+    /// reads it again.
     last_pass: HashMap<Vec<String>, Scope>,
-    /// Whether a call wasn't expanded because the scan didn't know yet all
-    /// the names its path may lead through.
-    pending: bool,
+    /// The calls by path, or by a name a `use` may bind, read so far in
+    /// this reading of the module tree, with the macros each was read as.
+    path_calls: Vec<PathCall>,
     /// How many of the crate's own `macro_rules!` definitions have been
     /// read, in every reading of the module tree, which numbers each.
     instances: usize,
+}
+
+/// A call of a macro by path, or by a bare name a `use` may bind, as the
+/// scan read it.
+struct PathCall {
+    /// The module it is in.
+    module: Vec<String>,
+    path: syn::Path,
+    /// What its path was resolved to name: `None` where it doesn't lead to
+    /// macros the scan can read.
+    found: Option<Vec<Found>>,
 }
 
 /// A definition of one of the crate's own macros that a path names.
@@ -743,7 +750,7 @@ enum Origin {
 }
 
 /// A macro that a macro path may name.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Found {
     /// Another crate's `#[macro_export]` macro.
     Export {
@@ -826,9 +833,9 @@ const MAX_EXPANSIONS: usize = 128;
 /// a macro whose expansion calls it more than once can't keep it going.
 const MAX_EXPANDED_CALLS: usize = 10_000;
 
-/// How many times the scan reads a crate's module tree, each time following
-/// the macro paths the last reading found, before it settles for what it
-/// has.
+/// How many times the scan reads a crate's module tree, each time resolving
+/// macro paths through the names the last reading bound, before it settles
+/// for what it has.
 const MAX_PASSES: usize = 8;
 
 impl<'a> Scanner<'a> {
@@ -861,22 +868,22 @@ impl<'a> Scanner<'a> {
             exports: None,
             crate_spans: Vec::new(),
             macro_paths: HashMap::new(),
-            macro_calls: HashMap::new(),
             last_pass: HashMap::new(),
-            pending: false,
+            path_calls: Vec::new(),
             instances: 0,
         }
     }
 
     /// Reads the module tree of `krate`: binds every module's names and
-    /// expands the calls of macros it can follow. A call by a path through a
-    /// module declared after it, or to a macro the crate defines after it,
-    /// can't be followed while the tree is read, so where such a call isn't
-    /// expanded, the tree is read again with the names and macros the last
-    /// reading found, until one finds no more, as rustc expands calls until
-    /// nothing changes. `krate` is the crate at `id` in `crates`, and
-    /// `exports` is whether it is read for another crate that calls its
-    /// macros.
+    /// expands the calls of macros it can follow. While the tree is read, a
+    /// call by path can't see the names bound after it, as through a module
+    /// declared later, or a macro defined later. So once it is read, each
+    /// call by path is resolved again in the whole tree, and where one would
+    /// name other macros, the tree is read again, resolving paths through the
+    /// names the last reading bound, until every call names what the tree it
+    /// is in does, as rustc expands calls until nothing changes. `krate` is
+    /// the crate at `id` in `crates`, and `exports` is whether it is read
+    /// for another crate that calls its macros.
     fn read(
         crates: &'a [Crate<'a>],
         id: usize,
@@ -889,20 +896,10 @@ impl<'a> Scanner<'a> {
         let mut passes = 0;
         loop {
             scanner.exports = exports.then(Vec::new);
-            let known = scanner.macro_definitions();
             scanner.load(krate.src, root.clone(), true, None, &mut Textual::default());
             passes += 1;
-            // A call that saw fewer definitions than its path has now, as one
-            // before a definition, may see them all in another reading.
-            scanner.pending |= scanner.macro_calls.iter().any(|(path, seen)| {
-                scanner
-                    .macro_paths
-                    .get(path)
-                    .is_some_and(|definitions| definitions.len() > *seen)
-            });
-            let settled =
-                scanner.modules == scanner.last_pass && scanner.macro_definitions() == known;
-            if !scanner.pending || settled || passes == MAX_PASSES {
+            scanner.last_pass.clear();
+            if scanner.calls_settled() || passes == MAX_PASSES {
                 break;
             }
             let mut next = Self::new(crates, id, krate, disallowed);
@@ -920,15 +917,49 @@ impl<'a> Scanner<'a> {
             next.last_pass = mem::take(&mut scanner.modules);
             scanner = next;
         }
-        scanner.last_pass.clear();
         scanner
     }
 
-    /// How many definitions of its own macros the crate's paths name. A
-    /// definition the last reading of the module tree found, read again,
-    /// replaces it, so the count grows only with new ones.
-    fn macro_definitions(&self) -> usize {
-        self.macro_paths.values().map(Vec::len).sum()
+    /// Whether each call by path in the module tree just read names the
+    /// macros it was read as, resolved in the whole tree.
+    fn calls_settled(&mut self) -> bool {
+        let calls = mem::take(&mut self.path_calls);
+        calls
+            .iter()
+            .all(|call| self.call_macros(&call.module, &call.path, None).0 == call.found)
+    }
+
+    /// The macros a call by `path` in `module` may name: by the path, or by
+    /// a `use` that binds its bare name, with whether every build has the
+    /// `use`. A bare name nothing binds names none. `None` where the path
+    /// doesn't lead to macros the scan can read. `indexing` has the names
+    /// the module binds so far, if it is being indexed.
+    fn call_macros(
+        &mut self,
+        module: &[String],
+        path: &syn::Path,
+        indexing: Option<&Scope>,
+    ) -> (Option<Vec<Found>>, bool) {
+        let mut resolver = Resolver::new(self, &[]);
+        if let Some(scope) = indexing {
+            resolver = resolver.indexing(module, scope);
+        }
+        let resolved = if is_bare(path) {
+            let bound = path.segments.first().and_then(|segment| {
+                let name = segment.ident.unraw().to_string();
+                resolver.module(module)?.bound(Namespace::Macros, &name)
+            });
+            let Some(bound) = bound else {
+                return (Some(Vec::new()), true);
+            };
+            let certain = bound.certain;
+            let resolved = resolver.binding(module, 0, Namespace::Macros, &bound.binding, 0);
+            (resolved, certain)
+        } else {
+            (resolver.syn_path(module, Namespace::Macros, path), true)
+        };
+        let (resolved, certain) = resolved;
+        (self.path_macros(&resolved), certain)
     }
 
     /// Notes that `path` names `definition`, among the definitions a build
@@ -1522,10 +1553,6 @@ impl<'a> Scanner<'a> {
                 }
                 _ if path.first().map(String::as_str) == Some(self.krate.name) => {
                     let count = self.macro_paths.get(path)?.len();
-                    self.macro_calls
-                        .entry(path.clone())
-                        .and_modify(|seen| *seen = (*seen).min(count))
-                        .or_insert(count);
                     for definition in 0..count {
                         let own = Found::Own {
                             path: path.clone(),
@@ -1784,45 +1811,35 @@ impl<'a> Scanner<'a> {
         if self.krate.cfg.enabled(&call.attrs) == Truth::False {
             return false;
         }
-        let bare = path.leading_colon.is_none() && path.segments.len() == 1;
+        let bare = is_bare(path);
         let unraw = name.unraw().to_string();
         // The macros that the path names, or that a `use` in the module
         // brings in by the bare name where textual scope doesn't hide it,
-        // with whether every build has the `use`. Where the path may lead
-        // through names the scan doesn't know yet, it may name a macro once
-        // they are known.
-        let found = if bare {
-            let bound = scope
-                .bound(Namespace::Macros, &unraw)
-                .filter(|_| !textual.hides(&unraw));
-            match bound {
-                Some(bound) => {
-                    let certain = bound.certain;
-                    let mut resolver = Resolver::new(self, &[]).indexing(place.module, scope);
-                    let resolved =
-                        resolver.binding(place.module, 0, Namespace::Macros, &bound.binding, 0);
-                    let incomplete = resolver.incomplete;
-                    let Some(found) = self.path_macros(&resolved) else {
-                        self.pending |= incomplete && self.may_lead_here(&resolved);
-                        return false;
-                    };
-                    // A `use` that brings in no macro doesn't hide any.
-                    (!found.is_empty()).then_some((found, certain))
-                }
-                None => None,
-            }
+        // with whether every build has the `use`. The call is noted, so that
+        // once the module tree is read, it can be resolved again in the
+        // whole of it.
+        let found = if bare && textual.hides(&unraw) {
+            None
         } else {
-            let mut resolver = Resolver::new(self, &[]).indexing(place.module, scope);
-            let resolved = resolver.syn_path(place.module, Namespace::Macros, path);
-            let incomplete = resolver.incomplete;
-            let Some(found) = self
-                .path_macros(&resolved)
-                .filter(|found| !found.is_empty())
-            else {
-                self.pending |= incomplete && self.may_lead_here(&resolved);
+            let (found, certain) = self.call_macros(place.module, path, Some(scope));
+            self.path_calls.push(PathCall {
+                module: place.module.to_vec(),
+                path: path.clone(),
+                found: found.clone(),
+            });
+            let Some(found) = found else {
                 return false;
             };
-            Some((found, true))
+            // A `use` that brings in no macro doesn't hide any; a path
+            // that leads to none names none.
+            if found.is_empty() {
+                if !bare {
+                    return false;
+                }
+                None
+            } else {
+                Some((found, certain))
+            }
         };
         let found = found
             .as_ref()
@@ -1949,24 +1966,6 @@ impl<'a> Scanner<'a> {
             });
         }
         true
-    }
-
-    /// Whether a path that resolved to `resolved` may lead to one of the
-    /// crate's own macros: into the crate, or where the scan can't tell. A
-    /// path into another crate leads to the same place whatever names the
-    /// crate binds later.
-    fn may_lead_here(&self, resolved: &Resolved) -> bool {
-        resolved
-            .alternatives()
-            .iter()
-            .any(|alternative| match alternative {
-                Resolved::Path { krate, path } => {
-                    krate.is_none_or(|id| id == self.id)
-                        && path.first().map(String::as_str) == Some(self.krate.name)
-                }
-                Resolved::Unknown => true,
-                Resolved::Local | Resolved::Either(_) => false,
-            })
     }
 
     /// Where a module's code is. Where its `#[path]` depends on a `cfg` the
@@ -2283,10 +2282,6 @@ struct Resolver<'s, 'a> {
     walks: HashMap<WalkKey, Resolved>,
     /// The `use` paths being resolved, outermost first.
     active: Vec<UseSite>,
-    /// Whether a lookup was in a module whose names aren't all known yet,
-    /// as one being indexed or not read yet, so that what it resolved may
-    /// change once they are.
-    incomplete: bool,
     /// The outermost of `active` that a way cut short reached, since the
     /// resolution that is under way started.
     circular: Option<usize>,
@@ -2328,7 +2323,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
             walks: HashMap::new(),
             active: Vec::new(),
             circular: None,
-            incomplete: false,
         }
     }
 
@@ -2339,66 +2333,27 @@ impl<'s, 'a> Resolver<'s, 'a> {
         self
     }
 
-    /// The names a module binds, and whether they are only those bound so
-    /// far: where it is being indexed or is around the one that is.
-    fn current(&self, module: &[String]) -> (Option<&'s Scope>, bool) {
+    /// The names a module binds: those the last reading of the module tree
+    /// found, while the scan reads it again, so that a path can lead
+    /// through names bound after it; or so far, where it is being indexed or
+    /// is around the one that is.
+    fn module(&self, module: &[String]) -> Option<&'s Scope> {
+        if let Some(scope) = self.scanner.last_pass.get(module) {
+            return Some(scope);
+        }
         match self.indexing {
-            Some((indexing, scope)) if indexing == module => (Some(scope), true),
+            Some((indexing, scope)) if indexing == module => Some(scope),
             _ => {
                 let scanner = self.scanner;
-                match scanner
+                scanner
                     .around
                     .iter()
                     .rev()
                     .find(|(around, _)| around == module)
-                {
-                    Some((_, scope)) => (Some(scope), true),
-                    None => (scanner.modules.get(module), false),
-                }
+                    .map(|(_, scope)| scope)
+                    .or_else(|| scanner.modules.get(module))
             }
         }
-    }
-
-    /// The binding of `name` in `namespace` in a module, or, where the
-    /// module's names aren't all known yet and it isn't among them, in the
-    /// last reading of the module tree.
-    fn get(&mut self, module: &[String], namespace: Namespace, name: &str) -> Option<&'s Binding> {
-        let (scope, partial) = self.current(module);
-        if let Some(binding) = scope.and_then(|scope| scope.get(namespace, name)) {
-            return Some(binding);
-        }
-        if scope.is_some() && !partial {
-            return None;
-        }
-        self.incomplete = true;
-        self.scanner.last_pass.get(module)?.get(namespace, name)
-    }
-
-    /// Whether a module has a glob import, in this reading of the module
-    /// tree or, where its names aren't all known yet, in the last.
-    fn globs(&mut self, module: &[String]) -> bool {
-        let (scope, partial) = self.current(module);
-        if scope.is_some_and(|scope| scope.globs) {
-            return true;
-        }
-        if scope.is_some() && !partial {
-            return false;
-        }
-        self.incomplete = true;
-        self.scanner
-            .last_pass
-            .get(module)
-            .is_some_and(|scope| scope.globs)
-    }
-
-    /// Whether `module` is a module, in this reading of the module tree or
-    /// the last, not a type or a function.
-    fn is_module(&mut self, module: &[String]) -> bool {
-        if self.current(module).0.is_some() {
-            return true;
-        }
-        self.incomplete = true;
-        self.scanner.last_pass.contains_key(module)
     }
 
     /// Runs `resolve`, and says whether what it resolves holds anywhere: not
@@ -2501,7 +2456,11 @@ impl<'s, 'a> Resolver<'s, 'a> {
         // A glob import shadows the prelude and may provide any name. It
         // could shadow a crate name too, but no crate exports an item named
         // like another crate, while a `Vec` or `Box` of its own is common.
-        let globs = self.blocks.iter().any(|scope| scope.globs) || self.globs(module);
+        let globs = self
+            .blocks
+            .iter()
+            .chain(self.module(module))
+            .any(|scope| scope.globs);
         if !globs && let Some((_, prelude)) = PRELUDE.iter().find(|(name, _)| name == first) {
             return Resolved::Path {
                 krate: None,
@@ -2517,7 +2476,7 @@ impl<'s, 'a> Resolver<'s, 'a> {
     /// count of blocks around the scope that binds it: a `use` resolves
     /// there, not where its name is used.
     fn lookup(
-        &mut self,
+        &self,
         module: &[String],
         blocks: usize,
         namespace: Namespace,
@@ -2529,7 +2488,8 @@ impl<'s, 'a> Resolver<'s, 'a> {
                 return Some((binding, index + 1));
             }
         }
-        self.get(module, namespace, name)
+        self.module(module)
+            .and_then(|scope| scope.get(namespace, name))
             .map(|binding| (binding, 0))
     }
 
@@ -2786,12 +2746,12 @@ impl<'s, 'a> Resolver<'s, 'a> {
             let (Some(module), Some(name)) = (path.get(..end), path.get(end)) else {
                 break;
             };
-            if !self.is_module(module) {
+            let Some(scope) = self.module(module) else {
                 // A type or a function, whose items are its own.
                 break;
-            }
+            };
             let name_namespace = self::namespace(path, end, namespace);
-            match self.get(module, name_namespace, name) {
+            match scope.get(name_namespace, name) {
                 Some(binding @ (Binding::Use { .. } | Binding::Either(_))) => {
                     let rest = path.get(end + 1..).unwrap_or_default();
                     return Resolved::either(binding.alternatives().iter().map(|alternative| {
@@ -2806,7 +2766,7 @@ impl<'s, 'a> Resolver<'s, 'a> {
                     }));
                 }
                 Some(_) => {}
-                None if self.globs(module) => return Resolved::Unknown,
+                None if scope.globs => return Resolved::Unknown,
                 None => break,
             }
         }
@@ -2909,6 +2869,11 @@ impl Scanner<'_> {
             }
         }
     }
+}
+
+/// Whether a macro path is a bare name, which textual scope may have.
+fn is_bare(path: &syn::Path) -> bool {
+    path.leading_colon.is_none() && path.segments.len() == 1
 }
 
 /// The names a `use` tree brings in by a bare name, as `use m;` or `use {m
@@ -5966,6 +5931,50 @@ macro_rules! pick {
 
 mod second {
     crate::pick!();
+}
+",
+        )]);
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 2);
+    }
+
+    /// A call by path through a module that a build may take from either
+    /// of two places reads the macro each one re-exports, also where the
+    /// call comes between them.
+    #[test]
+    fn calls_through_modules_of_one_path_read_each_reexport() {
+        let scan = scan_files(&[(
+            "lib.rs",
+            r"#[macro_export]
+macro_rules! safe {
+    () => {
+        pub fn f() {}
+    };
+}
+
+#[macro_export]
+macro_rules! danger {
+    () => {
+        pub unsafe fn f() {}
+    };
+}
+
+#[cfg(demo_custom)]
+mod choices {
+    pub use crate::safe as pick;
+}
+
+mod first {
+    crate::choices::pick!();
+}
+
+#[cfg(not(demo_custom))]
+mod choices {
+    pub use crate::danger as pick;
+}
+
+mod second {
+    crate::choices::pick!();
 }
 ",
         )]);
