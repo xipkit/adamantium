@@ -5,7 +5,7 @@ mod manifest;
 mod sarif;
 mod style;
 
-use std::{ffi::OsString, io::Write, path::PathBuf, process::ExitCode};
+use std::{io::Write, path::PathBuf, process::ExitCode};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -85,11 +85,12 @@ struct Rules {
 
 fn main() -> ExitCode {
     // Cargo runs `cargo-adamantium adamantium ...`; drop the repeated name.
-    let mut args: Vec<OsString> = std::env::args_os().collect();
-    if args.get(1).is_some_and(|arg| arg == "adamantium") {
-        args.remove(1);
+    let mut args = std::env::args_os().peekable();
+    let program = args.next();
+    if args.peek().is_some_and(|arg| arg == "adamantium") {
+        args.next();
     }
-    match run(Cli::parse_from(args)) {
+    match run(Cli::parse_from(program.into_iter().chain(args))) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error:#}");

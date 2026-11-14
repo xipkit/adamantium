@@ -15,6 +15,8 @@
 //! ordered and unordered concurrent streams, and `blocking`.
 //! Disable default features to use the values, actors, and channels
 //! without a Tokio dependency, including on WASI.
+//! Enable the optional `tracing` feature for named task spans and warnings
+//! identifying unfinished named tasks when a scope's deadline expires.
 
 #![forbid(unsafe_code)]
 
@@ -24,15 +26,20 @@ mod bytes;
 mod channel;
 mod deque;
 mod map;
+mod runtime;
 mod set;
 mod string;
 #[cfg(feature = "tokio")]
 mod tasks;
+#[cfg(feature = "deterministic")]
+pub mod testing;
 
 pub use actor::Actor;
 pub use array::Array;
 pub use bytes::Bytes;
 pub use channel::{Channel, Closed, Receiver, Sender, TryReceiveError, TrySendError};
+#[cfg(feature = "tokio")]
+pub use channel::{ReceiveError, SendError};
 pub use deque::Deque;
 pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
 pub use set::Set;

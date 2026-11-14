@@ -1,0 +1,16 @@
+# Panicking index methods beside their checked alternatives. Each line that
+# must be reported ends in `// disallowed`. Its own workspace, so Cargo does
+# not look for a parent.
+[workspace]
+
+[package]
+name = "indexing"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+adamantium = { path = "../../../..", default-features = false }
+
+[profile.release]
+overflow-checks = true
