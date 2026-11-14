@@ -486,10 +486,22 @@ struct Loaded {
     path_dir: PathBuf,
 }
 
+/// A file a module's code may be in.
+struct ModuleFile {
+    path: PathBuf,
+    mod_rs: bool,
+    /// The predicate of the `cfg`s that make a build take the module from
+    /// this file, where it may be in another.
+    condition: Option<TokenStream>,
+}
+
 /// Where a module's code is.
 enum Location {
-    Inline { dir: PathBuf },
-    File { path: PathBuf, mod_rs: bool },
+    Inline {
+        dir: PathBuf,
+    },
+    /// The files a build may take it from.
+    Files(Vec<ModuleFile>),
     Unscannable(String),
 }
 
@@ -713,9 +725,14 @@ impl Scanner<'_> {
                     self.add_scope(&child, scope);
                 }
             }
-            Location::File { path, mod_rs } => {
-                let from = Some((place.rel, item.ident.span()));
-                self.load(&path, child, mod_rs, from, textual);
+            Location::Files(files) => {
+                for file in files {
+                    let from = Some((place.rel, item.ident.span()));
+                    let outer = textual.conditions.len();
+                    textual.conditions.extend(file.condition);
+                    self.load(&file.path, child.clone(), file.mod_rs, from, textual);
+                    textual.conditions.truncate(outer);
+                }
             }
             Location::Unscannable(reason) => self.scan.unscanned.push(Unscanned {
                 file: place.rel.to_owned(),
@@ -860,10 +877,19 @@ impl Scanner<'_> {
         }
     }
 
+    /// Where a module's code is. Where its `#[path]` depends on a `cfg` the
+    /// scan can't know, a module declared with `mod name;` may be in the
+    /// file the path names or where it would be without it: each of those
+    /// that has a file may be the one built, and one that has none can't be.
     fn locate(&self, item: &ItemMod, mod_dir: &Path, path_dir: &Path) -> Location {
         let name = item.ident.unraw().to_string();
-        let mut path = None;
-        for (applies, meta) in self.krate.cfg.effective(&item.attrs) {
+        let span = item.ident.span();
+        // Each place a build may take the module from, `None` for where it
+        // is without a `#[path]`, with the predicate that selects it: of
+        // the `#[path]`s that apply, the last is the one taken.
+        let mut places = Vec::new();
+        let mut later = Vec::new();
+        for (conditions, meta) in conditional(&item.attrs).into_iter().rev() {
             let Meta::NameValue(value) = &meta else {
                 continue;
             };
@@ -876,41 +902,73 @@ impl Scanner<'_> {
             if !value.path.is_ident("path") {
                 continue;
             }
-            if applies == Truth::Unknown {
-                return Location::Unscannable(format!(
-                    "module `{name}` has a #[path] that depends on an unknown cfg"
-                ));
-            }
-            path = Some(lit.value());
+            let applies = cfg_call("all", conditions, span);
+            let none_later = cfg_call("not", [cfg_call("any", later.clone(), span)], span);
+            places.push((
+                Some(lit.value()),
+                cfg_call("all", [applies.clone(), none_later], span),
+            ));
+            later.push(applies);
         }
-        if item.content.is_some() {
-            return Location::Inline {
+        places.push((None, cfg_call("not", [cfg_call("any", later, span)], span)));
+        places.retain(|(_, selects)| self.krate.cfg.holds(selects.clone()) != Truth::False);
+        let default = || {
+            [
+                (mod_dir.join(format!("{name}.rs")), false),
+                (mod_dir.join(&name).join("mod.rs"), true),
+            ]
+            .into_iter()
+            .find(|(path, _)| path.is_file())
+        };
+        let file = |(path, mod_rs), condition| ModuleFile {
+            path,
+            mod_rs,
+            condition,
+        };
+        match (&item.content, &places[..]) {
+            (Some(_), [(path, _)]) => Location::Inline {
                 dir: match path {
                     Some(path) => path_dir.join(path),
                     None => mod_dir.join(&name),
                 },
-            };
-        }
-        if let Some(path) = path {
-            return Location::File {
-                path: path_dir.join(path),
-                mod_rs: true,
-            };
-        }
-        [
-            (mod_dir.join(format!("{name}.rs")), false),
-            (mod_dir.join(&name).join("mod.rs"), true),
-        ]
-        .into_iter()
-        .find(|(path, _)| path.is_file())
-        .map_or_else(
-            || {
-                Location::Unscannable(format!(
-                    "module `{name}` has no file: neither {name}.rs nor {name}/mod.rs"
-                ))
             },
-            |(path, mod_rs)| Location::File { path, mod_rs },
-        )
+            (Some(_), _) => Location::Unscannable(format!(
+                "module `{name}` has a #[path] that depends on an unknown cfg"
+            )),
+            (None, [(Some(path), _)]) => {
+                Location::Files(vec![file((path_dir.join(path), true), None)])
+            }
+            (None, [(None, _)]) => default().map_or_else(
+                || {
+                    Location::Unscannable(format!(
+                        "module `{name}` has no file: neither {name}.rs nor {name}/mod.rs"
+                    ))
+                },
+                |found| Location::Files(vec![file(found, None)]),
+            ),
+            (None, places) => {
+                let files: Vec<_> = places
+                    .iter()
+                    .filter_map(|(path, selects)| {
+                        let found = match path {
+                            Some(path) => {
+                                let path = path_dir.join(path);
+                                path.is_file().then_some((path, true))
+                            }
+                            None => default(),
+                        };
+                        found.map(|found| file(found, Some(selects.clone())))
+                    })
+                    .collect();
+                if files.is_empty() {
+                    Location::Unscannable(format!(
+                        "module `{name}` has no file at any place its #[path], which depends on an unknown cfg, may put it"
+                    ))
+                } else {
+                    Location::Files(files)
+                }
+            }
+        }
     }
 
     /// A file's name relative to the package, with `/` between components,
@@ -1655,26 +1713,28 @@ fn parse_empty_rule(input: ParseStream) -> syn::Result<Vec<Item>> {
     parse_items.parse2(transcriber.stream())
 }
 
-/// The predicates of the `cfg`s that attributes put on code, as written. A
-/// `cfg` that `#[cfg_attr(q, cfg(p))]` adds is `any(not(q), p)`. A
-/// `cfg_attr` that doesn't parse adds none.
-fn cfg_predicates(attrs: &[Attribute]) -> Vec<TokenStream> {
-    let mut predicates = Vec::new();
+/// The attributes as they apply after `cfg_attr` is expanded, each with the
+/// predicates, as written, of the `cfg_attr`s it is in. A `cfg_attr` that
+/// doesn't parse adds none.
+fn conditional(attrs: &[Attribute]) -> Vec<(Vec<TokenStream>, Meta)> {
+    let mut metas = Vec::new();
     for attr in attrs {
-        meta_predicates(&attr.meta, &mut predicates);
+        flatten(&mut Vec::new(), attr.meta.clone(), &mut metas);
     }
-    predicates
+    metas
 }
 
-fn meta_predicates(meta: &Meta, predicates: &mut Vec<TokenStream>) {
-    let Meta::List(list) = meta else {
+fn flatten(
+    conditions: &mut Vec<TokenStream>,
+    meta: Meta,
+    metas: &mut Vec<(Vec<TokenStream>, Meta)>,
+) {
+    let Meta::List(list) = &meta else {
+        metas.push((conditions.clone(), meta));
         return;
     };
-    if list.path.is_ident("cfg") {
-        predicates.push(list.tokens.clone());
-        return;
-    }
     if !list.path.is_ident("cfg_attr") {
+        metas.push((conditions.clone(), meta));
         return;
     }
     let parsed = list.parse_args_with(|input: ParseStream| {
@@ -1689,17 +1749,33 @@ fn meta_predicates(meta: &Meta, predicates: &mut Vec<TokenStream>) {
     let Ok((condition, inner)) = parsed else {
         return;
     };
-    let mut added = Vec::new();
-    for meta in &inner {
-        meta_predicates(meta, &mut added);
+    conditions.push(condition);
+    for meta in inner {
+        flatten(conditions, meta, metas);
     }
+    conditions.pop();
+}
+
+/// The predicates of the `cfg`s that attributes put on code, as written. A
+/// `cfg` that `#[cfg_attr(q, cfg(p))]` adds is `any(not(all(q)), p)`.
+fn cfg_predicates(attrs: &[Attribute]) -> Vec<TokenStream> {
     let span = Span::call_site();
-    let unless = cfg_call("not", [condition], span);
-    predicates.extend(
-        added
-            .into_iter()
-            .map(|predicate| cfg_call("any", [unless.clone(), predicate], span)),
-    );
+    conditional(attrs)
+        .into_iter()
+        .filter_map(|(conditions, meta)| {
+            let Meta::List(list) = meta else {
+                return None;
+            };
+            if !list.path.is_ident("cfg") {
+                return None;
+            }
+            if conditions.is_empty() {
+                return Some(list.tokens);
+            }
+            let unless = cfg_call("not", [cfg_call("all", conditions, span)], span);
+            Some(cfg_call("any", [unless, list.tokens], span))
+        })
+        .collect()
 }
 
 fn parse_items(input: ParseStream) -> syn::Result<Vec<Item>> {
@@ -2207,13 +2283,15 @@ impl FileVisitor<'_, '_> {
             // A module of a module was loaded with the module tree; one
             // declared inside a function is loaded now.
             (None, _) if self.blocks.is_empty() => {}
-            (None, Location::File { path, mod_rs }) => {
-                let from = (self.file.as_str(), item.ident.span());
+            (None, Location::Files(files)) => {
                 // The scan doesn't keep the macros in textual scope inside
                 // functions, so none of its calls are expanded.
                 let textual = &mut Textual::default();
-                self.scanner
-                    .load(&path, module, mod_rs, Some(from), textual);
+                for file in files {
+                    let from = (self.file.as_str(), item.ident.span());
+                    self.scanner
+                        .load(&file.path, module.clone(), file.mod_rs, Some(from), textual);
+                }
             }
             (None, Location::Unscannable(reason)) => self.unscanned(item.ident.span(), reason),
             (None, Location::Inline { .. }) => {}
@@ -3073,5 +3151,59 @@ maybe!();
         )]);
         let reason = "`again!` expands to more than 16 nested macro calls";
         assert_eq!(scan.unscanned, [unscanned("src/lib.rs", 1, reason)]);
+    }
+
+    /// A module whose `#[path]` depends on an unknown `cfg` is read from
+    /// each place a build may take it from that has a file, as rustix's
+    /// `backend` and the modules serde's `crate_root!` declares are.
+    #[test]
+    fn modules_are_read_from_each_place_a_cfg_dependent_path_may_name() {
+        let scan = scan_files(&[
+            (
+                "lib.rs",
+                r#"#[cfg_attr(demo_a, path = "backend/a.rs")]
+#[cfg_attr(demo_b, path = "backend/b.rs")]
+mod backend;
+#[cfg_attr(demo_a, path = "elsewhere.rs")]
+mod both;
+#[cfg_attr(demo_a, path = "nowhere.rs")]
+mod neither;
+#[cfg_attr(demo_a, path = "inline")]
+mod inline {}
+"#,
+            ),
+            ("backend/a.rs", "pub unsafe fn a() {}\n"),
+            ("backend/b.rs", "pub unsafe fn b() {}\n"),
+            ("elsewhere.rs", "pub unsafe fn c() {}\n"),
+            ("both.rs", "pub unsafe fn d() {}\n"),
+        ]);
+        let neither = "module `neither` has no file at any place its #[path], which depends on an unknown cfg, may put it";
+        let inline = "module `inline` has a #[path] that depends on an unknown cfg";
+        assert_eq!(
+            scan.unscanned,
+            [
+                unscanned("src/lib.rs", 7, neither),
+                unscanned("src/lib.rs", 9, inline)
+            ]
+        );
+        assert_eq!(scan.unsafe_code.functions, 4);
+    }
+
+    /// The `macro_rules!` of each file a `#[macro_use]` module may be in
+    /// may be the ones a later call names.
+    #[test]
+    fn macros_of_alternative_module_files_do_not_hide_each_other() {
+        let scan = scan_files(&[
+            (
+                "lib.rs",
+                "#[macro_use]\n#[cfg_attr(demo_a, path = \"other.rs\")]\nmod macros;\nroot!();\n",
+            ),
+            ("macros.rs", "macro_rules! root { () => { mod a; }; }\n"),
+            ("other.rs", "macro_rules! root { () => { mod b; }; }\n"),
+            ("a.rs", "pub unsafe fn a() {}\n"),
+            ("b.rs", "pub unsafe fn b() {}\n"),
+        ]);
+        assert_eq!(scan.unscanned, []);
+        assert_eq!(scan.unsafe_code.functions, 2);
     }
 }

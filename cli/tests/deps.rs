@@ -290,12 +290,13 @@ fn deps_reads_modules_the_crates_own_macros_declare() {
     let report = report(&[]).unwrap();
     let facade = dependency(&report, "facade").unwrap();
     // The `unsafe impl` in `root!` counts where it is called, not in the
-    // definition's body, and `engine.rs` is scanned.
+    // definition's body, and the modules it declares are scanned, one where
+    // its `#[path]` may put it.
     assert_eq!(
         facade["unsafe"],
         json!({
             "functions": 1,
-            "blocks": 0,
+            "blocks": 1,
             "impls": 1,
             "traits": 0,
             "extern_blocks": 0,
@@ -340,8 +341,8 @@ fn deps_prints_a_table_and_each_call_as_text() {
         "  unresolved calls: leak 1, spawn 5",
         "  unscanned: src/lib.rs:11: module `missing` has no file: neither missing.rs nor missing/mod.rs",
         "  unscanned: src/lib.rs:10: module `hidden` is declared in a macro body the scan can't read",
-        "      2      1           0  facade 0.0.0",
-        "    src/macros.rs:10:13",
+        "      3      1           0  facade 0.0.0",
+        "    src/macros.rs:15:13",
         "adamantium: 13 dependencies; 7 with unsafe code, 6 with disallowed calls, 1 with unresolved calls, 2 partly unscanned",
     ] {
         assert!(
