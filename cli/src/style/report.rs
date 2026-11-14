@@ -285,10 +285,16 @@ impl FileReport {
         if violated.is_empty() {
             return Ok(());
         }
-        let locations = provider.locate(&FileReview {
-            questions: &violated,
-            ..review
-        })?;
+        let locations = provider
+            .locate(&FileReview {
+                questions: &violated,
+                ..review
+            })
+            .inspect_err(|_| {
+                // A failed locate may have been billed for requests it made
+                // before failing, so the file's total is no longer known.
+                self.input_tokens = None;
+            })?;
         self.place(locations).map_err(ReviewError::Service)
     }
 
@@ -304,6 +310,10 @@ impl FileReport {
 
     /// Gives each finding the lines the provider located for it.
     fn place(&mut self, locations: Locations) -> Result<()> {
+        self.input_tokens = self
+            .input_tokens
+            .zip(locations.input_tokens)
+            .map(|(review, locate)| review + locate);
         ensure!(
             locations.lines.len() == self.findings.len(),
             "provider located {} findings of {}",
@@ -313,10 +323,6 @@ impl FileReport {
         for (finding, lines) in self.findings.iter_mut().zip(locations.lines) {
             finding.lines = lines;
         }
-        self.input_tokens = self
-            .input_tokens
-            .zip(locations.input_tokens)
-            .map(|(review, locate)| review + locate);
         Ok(())
     }
 
@@ -800,7 +806,7 @@ mod tests {
         assert_eq!(file.status, FileStatus::Error);
         assert_eq!(file.error.as_deref(), Some("service unavailable"));
         assert!(file.findings.is_empty());
-        assert_eq!(file.input_tokens, Some(123));
+        assert_eq!(file.input_tokens, None);
         assert_eq!(report.files[1].status, FileStatus::NotChecked);
         assert_eq!(fake.review_count(), 1);
     }
@@ -821,5 +827,6 @@ mod tests {
             Some("provider located 0 findings of 1")
         );
         assert!(report.files[0].findings.is_empty());
+        assert_eq!(report.files[0].input_tokens, Some(130));
     }
 }
