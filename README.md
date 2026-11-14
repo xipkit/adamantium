@@ -47,6 +47,20 @@ The rules also require `overflow-checks = true` in the release profile. Integer 
 
 `init` adds the rules to a project so plain `cargo clippy` applies them. It writes the `[lints]` tables, or `[workspace.lints]` in a workspace, the release profile's overflow check, and a `clippy.toml`. It excludes rules listed under `allow` or `exceptions` in the [skip list](#skipping-rules-and-paths). Running it again makes no changes, and it will not replace a different `clippy.toml` without `--force`.
 
+### Experimental execution-context checks
+
+An optional [Dylint prototype](lints/README.md) detects known blocking operations
+inside async execution and nested `Actor::with`/`read`/`snapshot` access. It needs
+an explicitly built library and a separate pinned nightly toolchain:
+
+```sh
+cargo adamantium check --dylint-library /absolute/path/to/the/built/library
+```
+
+Ordinary checks and `init` keep their existing toolchain. See the prototype's
+setup, coverage limits, and measurements before opting in. A failed experimental
+check returns exit 2; it never silently falls back to Clippy-only success.
+
 ## Skipping rules and paths
 
 To adopt the rules gradually, add a skip list to `Cargo.toml`:

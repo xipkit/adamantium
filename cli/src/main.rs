@@ -32,6 +32,9 @@ enum Command {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
         format: ReportFormat,
+        /// Also run the experimental lints from this explicitly built Dylint library.
+        #[arg(long)]
+        dylint_library: Option<PathBuf>,
         /// Arguments passed on to `cargo clippy`, such as `--release` or `-p name`.
         #[arg(last = true)]
         cargo_args: Vec<String>,
@@ -100,7 +103,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
             path,
             format,
             cargo_args,
-        } => check::run(&path, &cargo_args, matches!(format, ReportFormat::Json)),
+            dylint_library,
+        } => check::run(
+            &path,
+            &cargo_args,
+            matches!(format, ReportFormat::Json),
+            dylint_library.as_deref(),
+        ),
         Command::Init { path, force } => {
             let root = manifest::root(&path)?;
             let config = config::Config::load(&root)?;

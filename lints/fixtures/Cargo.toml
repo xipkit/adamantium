@@ -1,0 +1,17 @@
+[package]
+name = "lint-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+members = ["member"]
+
+[features]
+extra = []
+
+[dependencies]
+metal = { package = "adamantium", path = "../.." }
+
+[profile.release]
+overflow-checks = true

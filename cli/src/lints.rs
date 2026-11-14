@@ -33,6 +33,11 @@ pub struct Lint {
 
 /// The Clippy configuration, as shipped in the repository root.
 /// The rule name for the release profile check, which is not a Clippy lint.
+pub const EXPERIMENTAL_LINTS: &[&str] = &[
+    "adamantium_blocking_in_async",
+    "adamantium_nested_actor_access",
+];
+
 pub const OVERFLOW_RULE: &str = "adamantium::overflow_checks";
 
 pub const CLIPPY_TOML: &str = include_str!("../../clippy.toml");
