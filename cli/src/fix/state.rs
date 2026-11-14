@@ -2282,6 +2282,18 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
             Expr::MethodCall(call) if !self.computed_from_state(&call.receiver) => {
                 self.calls = true
             }
+            // Indexing, field access (through a custom `Deref`) and unary
+            // operators on another value call its trait implementations, and
+            // assigning to another place drops its old value.
+            Expr::Index(index) if !self.computed_from_state(&index.expr) => self.calls = true,
+            Expr::Field(field) if !self.computed_from_state(&field.base) => self.calls = true,
+            Expr::Unary(unary)
+                if !matches!(&*unary.expr, Expr::Lit(_))
+                    && !self.computed_from_state(&unary.expr) =>
+            {
+                self.calls = true;
+            }
+            Expr::Assign(assign) if !self.computed_from_state(&assign.left) => self.calls = true,
             // An operator calls its operands' trait implementation, such as
             // `PartialEq` or `AddAssign`, which might use an actor too, unless
             // both operands are the state's or literals.
@@ -2387,6 +2399,15 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
     }
 
     fn visit_item(&mut self, _: &'a Item) {}
+
+    /// A `let` drops its value at the end of the block, inside the callback,
+    /// and a `Drop` might use an actor.
+    fn visit_local(&mut self, local: &'a Local) {
+        if self.deferred == 0 {
+            self.calls = true;
+        }
+        syn::visit::visit_local(self, local);
+    }
 }
 
 /// Removes `std::sync::Mutex` and `std::sync::Arc` imports that the rewrite
@@ -2846,8 +2867,8 @@ mod tests {
     #[test]
     fn a_statement_naming_the_binding_again_is_refused() {
         for body in [
-            "fn f() { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().push({ let h = &m; 1 }); }",
-            "fn f() { let m = Arc::new(Mutex::new(Vec::new())); m.lock().unwrap().push({ let _c = || &m; 1 }); }",
+            "fn f() { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().push({ &m; 1 }); }",
+            "fn f() { let m = Arc::new(Mutex::new(Vec::new())); m.lock().unwrap().push({ || &m; 1 }); }",
         ] {
             let source = format!("use std::sync::{{Arc, Mutex}};\n{body}\n");
             let (fixed, refusals) = fix(&source, &["Mutex"]);
@@ -3222,6 +3243,31 @@ mod tests {
         );
         assert_eq!(refusals, []);
         assert!(fixed.contains("m.read(|m| *m == 2)"), "{fixed}");
+    }
+
+    #[test]
+    fn implicit_calls_on_other_values_are_refused() {
+        for body in [
+            "fn f(view: &[u8]) { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().push(view[0]); }",
+            "struct V { x: u8 }\nfn f(view: &V) { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().push(view.x); }",
+            "fn f(view: &u8) { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().push(*view); }",
+            "fn f(mut out: u8) { let m = Arc::new(Mutex::new(1u8)); out = *m.lock().unwrap(); drop(out); }",
+            "fn f(view: u8) { let m = Arc::new(Mutex::new(vec![])); m.lock().unwrap().push({ let v = view; 1 }); }",
+        ] {
+            let source = format!("use std::sync::{{Arc, Mutex}};\n{body}\n");
+            let (fixed, refusals) = fix(&source, &["Mutex"]);
+            assert_eq!(fixed, source);
+            assert!(
+                refusals.iter().any(|(name, _)| name == "m"),
+                "{refusals:?}\n{source}"
+            );
+        }
+        let (fixed, refusals) = fix(
+            "use std::sync::{Arc, Mutex};\nstruct S { items: Vec<u8> }\nfn f() -> u8 {\n    let m = Arc::new(Mutex::new(S { items: vec![1] }));\n    m.lock().unwrap().items[0] = 2;\n    -(m.lock().unwrap().items[0] as i8) as u8\n}\n",
+            &["Mutex"],
+        );
+        assert_eq!(refusals, []);
+        assert!(fixed.contains("m.with(|m| m.items[0] = 2);"), "{fixed}");
     }
 
     #[test]
