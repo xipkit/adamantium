@@ -390,6 +390,64 @@ fn check_reports_disallowed_methods() {
     }
 }
 
+/// `sync` must produce a finding on exactly the lines of `src/lib.rs` that end
+/// in `// disallowed_types` or `// disallowed_methods`, for that rule, and no
+/// other finding. Tokio's broadcast channel is reported; a `Semaphore` permit
+/// held across an await or forgotten, `watch`, and one `Channel` per receiver
+/// are not.
+#[test]
+fn check_reports_broadcast_and_allows_semaphore() {
+    let root = fixture("sync");
+    let mut marked = Vec::new();
+    for (index, line) in fs::read_to_string(root.join("src/lib.rs"))
+        .unwrap()
+        .lines()
+        .enumerate()
+    {
+        for rule in ["disallowed_types", "disallowed_methods"] {
+            if line.ends_with(&format!("// {rule}")) {
+                marked.push((format!("clippy::{rule}"), u64::try_from(index + 1).unwrap()));
+            }
+        }
+    }
+    marked.sort();
+    assert!(!marked.is_empty(), "sync marks no lines");
+
+    let output = adamantium()
+        .args(["adamantium", "check", "--format", "json"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["warnings"], serde_json::json!([]), "{stderr}");
+    assert_eq!(report["errors"], serde_json::json!([]), "{stderr}");
+    let findings = report["findings"].as_array().unwrap();
+    for finding in findings {
+        assert_eq!(finding["file"], "src/lib.rs", "{finding}");
+        assert!(
+            finding["message"]
+                .as_str()
+                .unwrap()
+                .contains("tokio::sync::broadcast::"),
+            "{finding}"
+        );
+    }
+    let mut reported: Vec<(String, u64)> = findings
+        .iter()
+        .map(|finding| {
+            (
+                finding["rule"].as_str().unwrap().to_owned(),
+                finding["line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    reported.sort();
+    reported.dedup();
+    assert_eq!(reported, marked, "{stderr}");
+}
+
 #[test]
 fn check_covers_every_workspace_member() {
     let output = adamantium()
