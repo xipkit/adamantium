@@ -2,8 +2,10 @@
 //! latest-value type stays available to crates that leave Tokio out.
 
 #[cfg(feature = "tokio")]
-use adamantium::{Cancellation, ReceiveError, Tasks};
+use adamantium::{Cancellation, ReceiveError, Tasks, time};
 use adamantium::{Closed, TryReceiveError, Watch, Watcher};
+#[cfg(feature = "tokio")]
+use std::time::Duration;
 use std::{
     future::Future,
     pin::{Pin, pin},
@@ -14,7 +16,7 @@ use std::{
     task::{Context, Poll, Wake, Waker},
 };
 #[cfg(feature = "tokio")]
-use tokio::time::{Duration, Instant};
+use tokio::time::Instant;
 
 #[derive(Default)]
 struct WakeCounter(AtomicUsize);
@@ -352,7 +354,7 @@ fn handles_cross_tasks_and_describe_themselves() {
 
 #[cfg(feature = "tokio")]
 fn past() -> Option<Instant> {
-    Some(Instant::now() - Duration::from_millis(1))
+    Some(time::now() - Duration::from_millis(1))
 }
 
 #[cfg(feature = "tokio")]
@@ -400,7 +402,7 @@ async fn receive_until_ends_at_the_deadline_and_leaves_later_values() {
     let watch = Watch::new(0);
     let mut watcher = watch.subscribe();
     let cancellation = Cancellation::new();
-    let start = Instant::now();
+    let start = time::now();
     assert_eq!(
         watcher
             .receive_until(&cancellation, Some(start + Duration::from_secs(5)))
@@ -423,12 +425,12 @@ async fn receive_until_ends_when_cancelled() {
     let watch = Watch::new(0);
     let mut watcher = watch.subscribe();
     let cancellation = Cancellation::new();
-    let start = Instant::now();
+    let start = time::now();
     let canceller = cancellation.clone();
     let (received, ()) = tokio::join!(
         watcher.receive_until(&cancellation, Some(start + Duration::from_secs(3600))),
         async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            time::sleep(Duration::from_secs(5)).await;
             canceller.cancel();
         },
     );

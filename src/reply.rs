@@ -144,12 +144,12 @@ impl<T> ReplyReceiver<T> {
     /// A reply left unreceived by ending early stays for the next receive.
     ///
     /// ```
-    /// use adamantium::{Cancellation, ReceiveError, Reply};
-    /// use tokio::time::{Duration, Instant};
+    /// use adamantium::{Cancellation, ReceiveError, Reply, time};
+    /// use std::time::Duration;
     /// # #[tokio::main] async fn main() {
     /// let (reply, answer) = Reply::<u32>::pair();
     /// let cancellation = Cancellation::new();
-    /// let soon = Some(Instant::now() + Duration::from_millis(10));
+    /// let soon = Some(time::now() + Duration::from_millis(10));
     /// assert_eq!(
     ///     answer.receive_until(&cancellation, soon).await,
     ///     Err(ReceiveError::DeadlineExceeded),

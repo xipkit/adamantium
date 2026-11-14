@@ -2,8 +2,10 @@
 //! reply stays available to crates that leave Tokio out.
 
 #[cfg(feature = "tokio")]
-use adamantium::{Cancellation, Channel, ReceiveError, Tasks};
+use adamantium::{Cancellation, Channel, ReceiveError, Tasks, time};
 use adamantium::{Closed, Reply, ReplyReceiver, TryReceiveError};
+#[cfg(feature = "tokio")]
+use std::time::Duration;
 use std::{
     future::Future,
     pin::{Pin, pin},
@@ -14,7 +16,7 @@ use std::{
     task::{Context, Poll, Wake, Waker},
 };
 #[cfg(feature = "tokio")]
-use tokio::time::{Duration, Instant};
+use tokio::time::Instant;
 
 #[derive(Default)]
 struct WakeCounter(AtomicUsize);
@@ -162,7 +164,7 @@ fn halves_cross_tasks_and_describe_themselves() {
 
 #[cfg(feature = "tokio")]
 fn past() -> Option<Instant> {
-    Some(Instant::now() - Duration::from_millis(1))
+    Some(time::now() - Duration::from_millis(1))
 }
 
 #[cfg(feature = "tokio")]
@@ -209,7 +211,7 @@ async fn requests_carry_their_replies_across_tasks() {
 async fn receive_until_ends_at_the_deadline_and_keeps_a_later_reply() {
     let (reply, answer) = Reply::pair();
     let cancellation = Cancellation::new();
-    let start = Instant::now();
+    let start = time::now();
     assert_eq!(
         answer
             .receive_until(&cancellation, Some(start + Duration::from_secs(5)))
@@ -230,12 +232,12 @@ async fn receive_until_ends_at_the_deadline_and_keeps_a_later_reply() {
 async fn receive_until_ends_when_cancelled() {
     let (_reply, answer) = Reply::<u8>::pair();
     let cancellation = Cancellation::new();
-    let start = Instant::now();
+    let start = time::now();
     let canceller = cancellation.clone();
     let (received, ()) = tokio::join!(
         answer.receive_until(&cancellation, Some(start + Duration::from_secs(3600))),
         async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            time::sleep(Duration::from_secs(5)).await;
             canceller.cancel();
         },
     );
