@@ -53,7 +53,7 @@ enum Command {
     },
     /// Review Rust files against the judgment-based parts of the Google Rust
     /// style guide, through a model provider (the OpenAI Decisions API by
-    /// default).
+    /// default, or Claude).
     #[command(subcommand)]
     Style(style::Command),
 }

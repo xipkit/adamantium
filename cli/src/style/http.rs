@@ -234,6 +234,11 @@ fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
         .map(|date| date.duration_since(now).unwrap_or_default())
 }
 
+/// For a service whose 429 responses are always temporary.
+pub(crate) fn never_exhausted(_body: &Value) -> bool {
+    false
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::{collections::VecDeque, io::Read};

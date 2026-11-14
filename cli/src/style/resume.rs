@@ -284,6 +284,13 @@ mod tests {
             check(&wrong)
                 .unwrap_err()
                 .to_string()
+                .contains("different provider")
+        );
+        wrong["provider"] = json!("not_a_provider");
+        assert!(
+            check(&wrong)
+                .unwrap_err()
+                .to_string()
                 .contains("invalid previous JSON report")
         );
         wrong = valid.clone();

@@ -4,7 +4,11 @@ use anyhow::Result;
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::style::{decisions::Decisions, rules::Question};
+use crate::style::{
+    claude::{self, Claude},
+    decisions::Decisions,
+    rules::{Question, RuleSet},
+};
 
 /// The service that answers the style questions for a file.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -14,14 +18,26 @@ pub enum ProviderKind {
     /// `openai-api-key` Keychain item.
     #[default]
     Decisions,
+    /// Claude through the Anthropic Messages API. Needs ANTHROPIC_API_KEY
+    /// or, on macOS, an `anthropic-api-key` Keychain item.
+    Claude,
 }
 
 impl ProviderKind {
+    /// The model this provider uses when `--model` is not given.
+    pub(crate) fn default_model(self, rules: &RuleSet) -> &str {
+        match self {
+            Self::Decisions => &rules.model,
+            Self::Claude => claude::DEFAULT_MODEL,
+        }
+    }
+
     /// Builds a client for this provider, reading its credentials.
     pub(crate) fn connect(self) -> Result<Box<dyn Provider>> {
-        match self {
-            Self::Decisions => Ok(Box::new(Decisions::connect()?)),
-        }
+        Ok(match self {
+            Self::Decisions => Box::new(Decisions::connect()?),
+            Self::Claude => Box::new(Claude::connect()?),
+        })
     }
 }
 

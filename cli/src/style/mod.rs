@@ -1,9 +1,11 @@
 //! Judgment-based review of Rust files against the Google Rust style guide,
-//! through a model provider, the OpenAI Decisions API by default. Formerly
+//! through a model provider: the OpenAI Decisions API by default, or Claude.
+//! Formerly
 //! the standalone `cargo rustoleum`; the rules, labeled cases and evaluation
 //! scripts live under `style/` in the repository.
 
 mod changed;
+mod claude;
 mod credentials;
 mod decisions;
 mod http;
@@ -29,8 +31,9 @@ use self::{
 #[derive(Subcommand)]
 pub enum Command {
     /// Review a Rust file or directory without modifying it. Sends each file
-    /// to the provider, which needs credentials: for the default Decisions
-    /// API, OPENAI_API_KEY or, on macOS, an `openai-api-key` Keychain item.
+    /// to the provider, which needs credentials: OPENAI_API_KEY for the
+    /// default Decisions API, ANTHROPIC_API_KEY for Claude, or on macOS an
+    /// `openai-api-key` or `anthropic-api-key` Keychain item.
     Check(CheckArgs),
     /// List the style rules.
     Rules {
@@ -50,6 +53,10 @@ pub struct CheckArgs {
     /// The service that answers the rules for each file.
     #[arg(long, value_enum, default_value_t = ProviderKind::Decisions)]
     provider: ProviderKind,
+    /// The provider's model. Defaults to the rule set's model for
+    /// Decisions and to claude-opus-5-5 for Claude.
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    model: Option<String>,
     /// Project context shared with the provider for each file.
     #[arg(long)]
     context: Option<String>,
@@ -107,24 +114,17 @@ pub fn run(command: Command) -> Result<ExitCode> {
         }
         Command::Check(args) => {
             let questions = rules.select(&args.rules)?;
-            let key = ReviewKey::new(
-                args.provider,
-                &rules.model,
-                &questions,
-                args.context.as_deref(),
-            )?;
+            let model = args
+                .model
+                .as_deref()
+                .unwrap_or_else(|| args.provider.default_model(&rules));
+            let key = ReviewKey::new(args.provider, model, &questions, args.context.as_deref())?;
             let mut scan = Scan::discover(&args.path)?;
             if let Some(base) = &args.changed {
                 changed::retain_changed(&mut scan, base)?;
             }
             if let Some(previous) = &args.retry_from {
-                resume::select_pending(
-                    &mut scan,
-                    previous,
-                    args.provider,
-                    &rules.model,
-                    &questions,
-                )?;
+                resume::select_pending(&mut scan, previous, args.provider, model, &questions)?;
             }
             let mut report = Report::planned(&scan, key, &questions);
             if let Some(previous) = &args.cache_from {

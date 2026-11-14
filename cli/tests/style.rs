@@ -150,8 +150,108 @@ fn style_check(dir: &std::path::Path, args: &[&str]) -> Command {
         .arg(dir)
         .args(["--rule", "glob_import_context"])
         .args(args)
-        .env_remove("OPENAI_API_KEY");
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY");
     command
+}
+
+#[test]
+fn each_provider_has_its_own_default_model_and_model_overrides_it() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+    let plan = |args: &[&str]| {
+        let output = style_check(dir.path(), &[&["--dry-run"], args].concat())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        (report["provider"].clone(), report["model"].clone())
+    };
+    assert_eq!(plan(&[]), ("decisions".into(), "gpt-6-luna".into()));
+    assert_eq!(
+        plan(&["--provider", "claude"]),
+        ("claude".into(), "claude-opus-5-5".into())
+    );
+    assert_eq!(
+        plan(&["--provider", "claude", "--model", "claude-sonnet-5-5"]),
+        ("claude".into(), "claude-sonnet-5-5".into())
+    );
+    assert_eq!(
+        plan(&["--model", "gpt-6-luna-mini"]),
+        ("decisions".into(), "gpt-6-luna-mini".into())
+    );
+
+    let output = style_check(dir.path(), &["--dry-run", "--model", ""])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--model"));
+}
+
+#[test]
+fn claude_needs_an_anthropic_key() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+    let output = style_check(dir.path(), &["--provider", "claude"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ANTHROPIC_API_KEY"), "{stderr}");
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn retry_from_compares_against_the_model_in_use() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+    let planned = style_check(
+        dir.path(),
+        &[
+            "--dry-run",
+            "--provider",
+            "claude",
+            "--model",
+            "claude-haiku-5-5",
+        ],
+    )
+    .output()
+    .unwrap();
+    let report_path = dir.path().join("previous.json");
+    fs::write(&report_path, &planned.stdout).unwrap();
+    let previous = report_path.to_str().unwrap();
+
+    let retry = |args: &[&str]| {
+        style_check(
+            dir.path(),
+            &[
+                &[
+                    "--dry-run",
+                    "--provider",
+                    "claude",
+                    "--retry-from",
+                    previous,
+                ],
+                args,
+            ]
+            .concat(),
+        )
+        .output()
+        .unwrap()
+    };
+    let output = retry(&["--model", "claude-haiku-5-5"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = retry(&[]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("different model"));
 }
 
 #[test]
