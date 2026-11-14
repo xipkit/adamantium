@@ -9,6 +9,7 @@ exclude = [
     "cli/tests/fixtures/unstable",
     "cli/tests/fixtures/paths",
     "cli/tests/fixtures/indexing",
+    "cli/tests/fixtures/strict",
 ]
 
 [workspace.package]
@@ -49,6 +50,11 @@ todo = "deny"
 unimplemented = "deny"
 unreachable = "deny"
 unwrap_used = "deny"
+
+# Optional additions listed by `cargo adamantium rules --strict`. These are
+# metadata so the repository itself continues to use the default tier.
+[workspace.metadata.adamantium-strict.lints.clippy]
+arithmetic_side_effects = "deny"
 
 [package]
 name = "adamantium"

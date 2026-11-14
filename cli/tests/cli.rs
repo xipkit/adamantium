@@ -20,6 +20,236 @@ fn repository_root() -> PathBuf {
 }
 
 #[test]
+fn check_only_reports_arithmetic_in_the_strict_tier() {
+    let marked: Vec<u64> = include_str!("fixtures/strict/src/lib.rs")
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.ends_with("// strict"))
+        .map(|(index, _)| u64::try_from(index + 1).unwrap())
+        .collect();
+    assert_eq!(marked.len(), 3);
+    for strict in [false, true] {
+        let mut command = adamantium();
+        command
+            .args(["check", "--format", "json"])
+            .arg(fixture("strict"));
+        if strict {
+            command.arg("--strict");
+        }
+        let output = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(i32::from(strict)), "{stderr}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["errors"], serde_json::json!([]), "{report}");
+        assert_eq!(report["warnings"], serde_json::json!([]), "{report}");
+        let findings = report["findings"].as_array().unwrap();
+        if strict {
+            let mut lines: Vec<u64> = findings
+                .iter()
+                .map(|finding| {
+                    assert_eq!(finding["rule"], "clippy::arithmetic_side_effects");
+                    assert_eq!(finding["file"], "src/lib.rs");
+                    finding["line"].as_u64().unwrap()
+                })
+                .collect();
+            lines.sort_unstable();
+            assert_eq!(lines, marked, "{report}");
+        } else {
+            assert!(findings.is_empty(), "{report}");
+        }
+    }
+}
+
+#[test]
+fn strict_findings_have_text_and_sarif_reports() {
+    let output = adamantium()
+        .args(["check", "--strict"])
+        .arg(fixture("strict"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("#arithmetic_side_effects"), "{stderr}");
+    assert!(stderr.contains("3 findings in src/lib.rs"), "{stderr}");
+
+    let output = adamantium()
+        .args(["check", "--strict", "--format", "sarif"])
+        .arg(fixture("strict"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let log: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(sarif_schema_errors(&log).unwrap().is_empty(), "{log}");
+    let run = &log["runs"][0];
+    assert_eq!(run["results"].as_array().unwrap().len(), 3, "{log}");
+    let rules = run["tool"]["driver"]["rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 1, "{log}");
+    assert_eq!(rules[0]["id"], "clippy::arithmetic_side_effects");
+    assert!(
+        rules[0]["shortDescription"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("checked, saturating or wrapping"),
+        "{log}"
+    );
+    assert!(
+        rules[0]["helpUri"]
+            .as_str()
+            .unwrap()
+            .ends_with("#arithmetic_side_effects")
+    );
+}
+
+/// A standalone crate with unchecked arithmetic and its checked alternatives.
+fn strict_project(workspace: bool) -> io::Result<tempfile::TempDir> {
+    let dir = tempfile::tempdir()?;
+    fs::create_dir(dir.path().join("src"))?;
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        include_str!("fixtures/strict/src/lib.rs"),
+    )?;
+    let mut manifest = fs::read_to_string(fixture("strict").join("Cargo.toml"))?;
+    if !workspace {
+        manifest = manifest.replace("[workspace]\n", "");
+    }
+    fs::write(dir.path().join("Cargo.toml"), manifest)?;
+    Ok(dir)
+}
+
+#[test]
+fn init_strict_upgrades_packages_and_workspaces_and_is_idempotent() {
+    for workspace in [false, true] {
+        let dir = strict_project(workspace).unwrap();
+        let output = adamantium().arg("init").arg(dir.path()).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let path = dir.path().join("Cargo.toml");
+        assert!(
+            !fs::read_to_string(&path)
+                .unwrap()
+                .contains("arithmetic_side_effects")
+        );
+
+        let output = adamantium()
+            .args(["init", "--strict"])
+            .arg(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let manifest = fs::read_to_string(&path).unwrap();
+        let doc: toml_edit::DocumentMut = manifest.parse().unwrap();
+        let parent = if workspace {
+            &doc["workspace"]
+        } else {
+            doc.as_item()
+        };
+        assert_eq!(
+            parent["lints"]["clippy"]["arithmetic_side_effects"].as_str(),
+            Some("deny")
+        );
+        assert_eq!(
+            parent["lints"]["clippy"]["unwrap_used"].as_str(),
+            Some("deny")
+        );
+        assert_eq!(
+            parent["lints"]["rust"]["unsafe_code"].as_str(),
+            Some("forbid")
+        );
+
+        for strict in [true, false] {
+            let mut command = adamantium();
+            command.arg("init").arg(dir.path());
+            if strict {
+                command.arg("--strict");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("already has the rules"));
+            assert_eq!(fs::read_to_string(&path).unwrap(), manifest);
+        }
+
+        let output = Command::new("cargo")
+            .current_dir(dir.path())
+            .args(["clippy", "--message-format=json"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{stderr}");
+        let findings: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|line| line["message"]["code"]["code"] == "clippy::arithmetic_side_effects")
+            .collect();
+        assert_eq!(findings.len(), 3, "{stderr}");
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding["message"]["level"] == "error")
+        );
+    }
+}
+
+#[test]
+fn strict_rules_respect_allow_exceptions_and_skipped_paths() {
+    for skip_list in [
+        "allow = [\"arithmetic_side_effects\"]",
+        "allow = [\"clippy::arithmetic_side_effects\"]",
+        "exceptions = { arithmetic_side_effects = [\"src/\"] }",
+        "skip = [\"src/\"]",
+    ] {
+        let dir = strict_project(false).unwrap();
+        let path = dir.path().join("Cargo.toml");
+        let manifest = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            format!("{manifest}\n[package.metadata.adamantium]\n{skip_list}\n"),
+        )
+        .unwrap();
+        let output = adamantium()
+            .args(["init", "--strict"])
+            .arg(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let doc: toml_edit::DocumentMut = fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(
+            doc["lints"]["clippy"]
+                .get("arithmetic_side_effects")
+                .is_some(),
+            skip_list.starts_with("skip"),
+            "{doc}"
+        );
+        let output = adamantium()
+            .args(["check", "--strict", "--format", "json"])
+            .arg(dir.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{stderr}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["findings"], serde_json::json!([]), "{report}");
+        assert_eq!(
+            report["skipped"],
+            serde_json::json!({"clippy::arithmetic_side_effects": 3}),
+            "{report}"
+        );
+    }
+}
+
+#[test]
 fn check_reports_every_rule_the_violations_fixture_breaks() {
     let output = adamantium()
         .args(["adamantium", "check", "--format", "json"])
@@ -921,58 +1151,78 @@ fn init_fails_before_writing_when_clippy_toml_cannot_be_read() {
 
 #[test]
 fn rules_match_the_repository_manifest() {
-    let output = adamantium()
-        .args(["rules", "--format", "json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let rules: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let mut listed: Vec<(String, String, String)> = rules["lints"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|lint| {
-            (
-                lint["tool"].as_str().unwrap().to_owned(),
-                lint["name"].as_str().unwrap().to_owned(),
-                lint["level"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect();
-    listed.sort();
-
     let manifest: toml_edit::DocumentMut = fs::read_to_string(repository_root().join("Cargo.toml"))
         .unwrap()
         .parse()
         .unwrap();
-    let mut declared = Vec::new();
-    for tool in ["rust", "clippy"] {
-        let table = manifest["workspace"]["lints"][tool].as_table().unwrap();
-        for (name, level) in table.iter() {
-            declared.push((
-                tool.to_owned(),
-                name.to_owned(),
-                level.as_str().unwrap().to_owned(),
-            ));
+    for strict in [false, true] {
+        let mut command = adamantium();
+        command.args(["rules", "--format", "json"]);
+        if strict {
+            command.arg("--strict");
         }
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        let rules: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let mut listed: Vec<(String, String, String)> = rules["lints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|lint| {
+                (
+                    lint["tool"].as_str().unwrap().to_owned(),
+                    lint["name"].as_str().unwrap().to_owned(),
+                    lint["level"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        listed.sort();
+
+        let mut tables = vec![&manifest["workspace"]["lints"]];
+        if strict {
+            tables.push(&manifest["workspace"]["metadata"]["adamantium-strict"]["lints"]);
+        }
+        let mut declared = Vec::new();
+        for tables in tables {
+            for tool in ["rust", "clippy"] {
+                if let Some(table) = tables.get(tool).and_then(toml_edit::Item::as_table) {
+                    for (name, level) in table.iter() {
+                        declared.push((
+                            tool.to_owned(),
+                            name.to_owned(),
+                            level.as_str().unwrap().to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+        declared.sort();
+        assert_eq!(listed, declared, "strict = {strict}");
+        assert_eq!(
+            rules["clippy_toml"].as_str().unwrap(),
+            fs::read_to_string(repository_root().join("clippy.toml")).unwrap()
+        );
     }
-    declared.sort();
-    assert_eq!(listed, declared);
-    assert_eq!(
-        rules["clippy_toml"].as_str().unwrap(),
-        fs::read_to_string(repository_root().join("clippy.toml")).unwrap()
-    );
 }
 
 #[test]
 fn rules_as_toml_are_the_workspace_tables() {
-    let output = adamantium()
-        .args(["rules", "--format", "toml"])
-        .output()
-        .unwrap();
-    let toml = String::from_utf8(output.stdout).unwrap();
-    assert!(toml.starts_with(
-        "[workspace.lints.rust]\nunsafe_code = \"forbid\"\nunused_must_use = \"deny\"\n\n[workspace.lints.clippy]\n"
-    ));
-    assert!(toml.contains("unwrap_used = \"deny\"\n"));
+    for strict in [false, true] {
+        let mut command = adamantium();
+        command.args(["rules", "--format", "toml"]);
+        if strict {
+            command.arg("--strict");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        let toml = String::from_utf8(output.stdout).unwrap();
+        assert!(toml.starts_with(
+            "[workspace.lints.rust]\nunsafe_code = \"forbid\"\nunused_must_use = \"deny\"\n\n[workspace.lints.clippy]\n"
+        ));
+        assert!(toml.contains("unwrap_used = \"deny\"\n"));
+        assert_eq!(
+            toml.contains("arithmetic_side_effects = \"deny\"\n"),
+            strict
+        );
+    }
 }

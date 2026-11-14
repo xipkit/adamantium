@@ -11,7 +11,7 @@ use toml_edit::{DocumentMut, Item, Table, value};
 
 use crate::{
     config::Config,
-    lints::{CLIPPY_TOML, LINTS, OVERFLOW_RULE, Tool},
+    lints::{self, CLIPPY_TOML, OVERFLOW_RULE, Tool},
 };
 
 /// The directory holding a project's `Cargo.toml`, from a path to either.
@@ -63,7 +63,7 @@ pub struct Changes {
 /// Rules the skip list allows or excepts are left out of the tables, since a
 /// `[lints]` table cannot scope a rule to a path. Running it again changes
 /// nothing.
-pub fn init(root: &Path, force: bool, config: &Config) -> Result<Changes> {
+pub fn init(root: &Path, force: bool, config: &Config, strict: bool) -> Result<Changes> {
     let mut changes = Changes::default();
     let manifest_path = root.join("Cargo.toml");
     let before = fs::read_to_string(&manifest_path)
@@ -109,7 +109,7 @@ pub fn init(root: &Path, force: bool, config: &Config) -> Result<Changes> {
     for tool in [Tool::Rust, Tool::Clippy] {
         let name = tool.to_string();
         let table = table_in(lints, &name, false)?;
-        for lint in LINTS.iter().filter(|lint| lint.tool == tool) {
+        for lint in lints::selected(strict).filter(|lint| lint.tool == tool) {
             if config.adopted(&lint.qualified()) {
                 table.insert(lint.name, value(lint.level.to_string()));
             } else {

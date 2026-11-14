@@ -1,6 +1,6 @@
 //! The rules `cargo adamantium` applies: lint levels passed to Clippy and the
 //! Clippy configuration file. The repository's own `Cargo.toml` carries the
-//! same levels, and a test keeps the two equal.
+//! default levels and a separate strict table, and a test keeps both in step.
 
 use std::fmt;
 
@@ -55,7 +55,7 @@ const fn clippy(name: &'static str, why: &'static str) -> Lint {
     }
 }
 
-/// Every lint, in the order the tables print them.
+/// The default lints, in the order the tables print them.
 pub const LINTS: &[Lint] = &[
     rust(
         "unsafe_code",
@@ -144,6 +144,19 @@ pub const LINTS: &[Lint] = &[
     ),
 ];
 
+/// Additional lints enabled by the strict tier.
+pub const STRICT_LINTS: &[Lint] = &[clippy(
+    "arithmetic_side_effects",
+    "arithmetic can overflow or divide by zero; use checked, saturating or wrapping methods",
+)];
+
+/// The default lints, plus the strict additions when requested.
+pub fn selected(strict: bool) -> impl Iterator<Item = &'static Lint> {
+    LINTS
+        .iter()
+        .chain(STRICT_LINTS.iter().filter(move |_| strict))
+}
+
 impl Lint {
     /// The lint's name as Clippy and rustc report it.
     pub fn qualified(&self) -> String {
@@ -174,7 +187,7 @@ impl fmt::Display for Tool {
 
 /// The lint tables as they appear in a `Cargo.toml`: under `workspace.lints`
 /// for a workspace, under `lints` for a single package.
-pub fn lints_toml(workspace: bool) -> String {
+pub fn lints_toml(workspace: bool, strict: bool) -> String {
     let prefix = if workspace { "workspace." } else { "" };
     let mut out = String::new();
     for tool in [Tool::Rust, Tool::Clippy] {
@@ -182,7 +195,7 @@ pub fn lints_toml(workspace: bool) -> String {
             out.push('\n');
         }
         out.push_str(&format!("[{prefix}lints.{tool}]\n"));
-        for lint in LINTS.iter().filter(|lint| lint.tool == tool) {
+        for lint in selected(strict).filter(|lint| lint.tool == tool) {
             out.push_str(&format!("{} = \"{}\"\n", lint.name, lint.level));
         }
     }
