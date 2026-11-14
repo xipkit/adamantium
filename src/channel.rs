@@ -109,6 +109,15 @@ pin_project! {
         inner: async_channel::Receiver<T>,
         space: Arc<Event>,
     }
+
+    impl<T> PinnedDrop for Receiver<T> {
+        fn drop(_this: Pin<&mut Self>) {
+            #[cfg(feature = "deterministic")]
+            if !std::thread::panicking() {
+                crate::runtime::production_only("Channel");
+            }
+        }
+    }
 }
 
 /// Returned by [`Sender::try_send`] or [`Channel::try_send`].
@@ -176,6 +185,7 @@ impl<T> Channel<T> {
     /// A channel that holds at most `capacity` messages. A capacity of zero
     /// is treated as one.
     pub fn bounded(capacity: usize) -> Self {
+        crate::runtime::production_only("Channel");
         let (sender, receiver) = async_channel::bounded(capacity.max(1));
         // A pending async_channel send owns its value and drops it when the
         // send is cancelled, so `send_until` waits for room on this event
@@ -214,18 +224,21 @@ impl<T> Channel<T> {
     /// assert_eq!(receiver.try_receive(), Err(TryReceiveError::Closed));
     /// ```
     pub fn split(self) -> (Sender<T>, Receiver<T>) {
+        crate::runtime::production_only("Channel");
         (self.sender, self.receiver)
     }
 
     /// Sends a value, waiting while the channel is full. Hands the value
     /// back if the channel is closed.
     pub async fn send(&self, value: T) -> Result<(), Closed<T>> {
-        self.sender.send(value).await
+        crate::runtime::production_future("Channel", async move { self.sender.send(value).await })
+            .await
     }
 
     /// Sends without waiting, returning the value if the channel is full
     /// or closed.
     pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
+        crate::runtime::production_only("Channel");
         self.sender.try_send(value)
     }
 
@@ -239,19 +252,24 @@ impl<T> Channel<T> {
         deadline: Option<Instant>,
         value: T,
     ) -> Result<(), SendError<T>> {
-        self.sender.send_until(cancellation, deadline, value).await
+        crate::runtime::production_future("Channel", async move {
+            self.sender.send_until(cancellation, deadline, value).await
+        })
+        .await
     }
 
     /// Receives the next value, waiting while the channel is empty. Returns
     /// `None` once the channel is closed and drained.
     pub async fn receive(&self) -> Option<T> {
-        self.receiver.receive().await
+        crate::runtime::production_future("Channel", async move { self.receiver.receive().await })
+            .await
     }
 
     /// Receives without waiting. Returns [`TryReceiveError::Empty`] while
     /// the channel is open and empty, or [`TryReceiveError::Closed`] once
     /// it is closed and drained.
     pub fn try_receive(&self) -> Result<T, TryReceiveError> {
+        crate::runtime::production_only("Channel");
         self.receiver.try_receive()
     }
 
@@ -264,39 +282,48 @@ impl<T> Channel<T> {
         cancellation: &Cancellation,
         deadline: Option<Instant>,
     ) -> Result<T, ReceiveError> {
-        self.receiver.receive_until(cancellation, deadline).await
+        crate::runtime::production_future("Channel", async move {
+            self.receiver.receive_until(cancellation, deadline).await
+        })
+        .await
     }
 
     /// Closes the channel. Sends fail from now on; receives drain what is
     /// queued and then return `None`. Returns `false` if it was already
     /// closed.
     pub fn close(&self) -> bool {
+        crate::runtime::production_only("Channel");
         self.sender.close()
     }
 
     /// Whether the channel is closed.
     pub fn is_closed(&self) -> bool {
+        crate::runtime::production_only("Channel");
         self.sender.is_closed()
     }
 
     /// The number of messages waiting.
     pub fn len(&self) -> usize {
+        crate::runtime::production_only("Channel");
         self.sender.len()
     }
 
     /// Whether no messages are waiting.
     pub fn is_empty(&self) -> bool {
+        crate::runtime::production_only("Channel");
         self.sender.is_empty()
     }
 
     /// The most messages the channel holds.
     pub fn capacity(&self) -> usize {
+        crate::runtime::production_only("Channel");
         self.sender.capacity()
     }
 }
 
 impl<T> Clone for Channel<T> {
     fn clone(&self) -> Self {
+        crate::runtime::production_only("Channel");
         Self {
             sender: self.sender.clone(),
             receiver: self.receiver.clone(),
@@ -327,15 +354,19 @@ impl<T> Sender<T> {
     /// in [`Closed`] if the channel is closed, including when all receivers
     /// have been dropped.
     pub async fn send(&self, value: T) -> Result<(), Closed<T>> {
-        self.inner
-            .send(value)
-            .await
-            .map_err(|error| Closed(error.into_inner()))
+        crate::runtime::production_future("Channel", async move {
+            self.inner
+                .send(value)
+                .await
+                .map_err(|error| Closed(error.into_inner()))
+        })
+        .await
     }
 
     /// Sends without waiting, returning the value if the channel is full
     /// or closed.
     pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
+        crate::runtime::production_only("Channel");
         self.inner.try_send(value).map_err(|error| match error {
             async_channel::TrySendError::Full(value) => TrySendError::Full(value),
             async_channel::TrySendError::Closed(value) => TrySendError::Closed(value),
@@ -354,13 +385,13 @@ impl<T> Sender<T> {
     /// returned future drops the value without sending it.
     ///
     /// ```
-    /// use adamantium::{Cancellation, Channel, SendError};
-    /// use tokio::time::{Duration, Instant};
+    /// use adamantium::{Cancellation, Channel, SendError, time};
+    /// use std::time::Duration;
     /// # #[tokio::main] async fn main() {
     /// let (sender, receiver) = Channel::bounded(1).split();
     /// let cancellation = Cancellation::new();
     /// sender.send_until(&cancellation, None, 1).await.unwrap();
-    /// let soon = Some(Instant::now() + Duration::from_millis(10));
+    /// let soon = Some(time::now() + Duration::from_millis(10));
     /// assert_eq!(
     ///     sender.send_until(&cancellation, soon, 2).await,
     ///     Err(SendError::DeadlineExceeded(2)),
@@ -375,65 +406,73 @@ impl<T> Sender<T> {
         deadline: Option<Instant>,
         value: T,
     ) -> Result<(), SendError<T>> {
-        let mut stop = pin!(shutdown(cancellation, deadline));
-        let mut value = value;
-        let mut space: Option<EventListener> = None;
-        loop {
-            // The first pass tries at once; later passes wait for a receive
-            // to make room or for the channel to close.
-            let room = async {
-                if let Some(space) = space.take() {
-                    tokio::select! {
-                        () = space => {}
-                        () = self.inner.closed() => {}
+        crate::runtime::production_future("Channel", async move {
+            let mut stop = pin!(shutdown(cancellation, deadline));
+            let mut value = value;
+            let mut space: Option<EventListener> = None;
+            loop {
+                // The first pass tries at once; later passes wait for a receive
+                // to make room or for the channel to close.
+                let room = async {
+                    if let Some(space) = space.take() {
+                        tokio::select! {
+                            () = space => {}
+                            () = self.inner.closed() => {}
+                        }
                     }
+                };
+                tokio::select! {
+                    biased;
+                    reason = &mut stop => {
+                        return Err(match reason {
+                            Shutdown::Cancelled => SendError::Cancelled(value),
+                            Shutdown::DeadlineExceeded => SendError::DeadlineExceeded(value),
+                        });
+                    }
+                    () = room => {}
                 }
-            };
-            tokio::select! {
-                biased;
-                reason = &mut stop => {
-                    return Err(match reason {
-                        Shutdown::Cancelled => SendError::Cancelled(value),
-                        Shutdown::DeadlineExceeded => SendError::DeadlineExceeded(value),
-                    });
-                }
-                () = room => {}
+                // Listen before trying, so room made after a failed try still
+                // wakes this send.
+                space = Some(self.space.listen());
+                value = match self.try_send(value) {
+                    Ok(()) => return Ok(()),
+                    Err(TrySendError::Closed(value)) => return Err(SendError::Closed(value)),
+                    Err(TrySendError::Full(value)) => value,
+                };
             }
-            // Listen before trying, so room made after a failed try still
-            // wakes this send.
-            space = Some(self.space.listen());
-            value = match self.try_send(value) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Closed(value)) => return Err(SendError::Closed(value)),
-                Err(TrySendError::Full(value)) => value,
-            };
-        }
+        })
+        .await
     }
 
     /// Closes the channel for every handle and wakes pending operations.
     /// Receivers drain queued messages before returning `None`. Returns
     /// `false` if the channel was already closed.
     pub fn close(&self) -> bool {
+        crate::runtime::production_only("Channel");
         self.inner.close()
     }
 
     /// Whether the channel is closed, possibly with messages still queued.
     pub fn is_closed(&self) -> bool {
+        crate::runtime::production_only("Channel");
         self.inner.is_closed()
     }
 
     /// The number of messages waiting.
     pub fn len(&self) -> usize {
+        crate::runtime::production_only("Channel");
         self.inner.len()
     }
 
     /// Whether no messages are waiting.
     pub fn is_empty(&self) -> bool {
+        crate::runtime::production_only("Channel");
         self.inner.is_empty()
     }
 
     /// The most messages the channel holds.
     pub fn capacity(&self) -> usize {
+        crate::runtime::production_only("Channel");
         self.inner.capacity().unwrap_or(usize::MAX)
     }
 }
@@ -443,17 +482,21 @@ impl<T> Receiver<T> {
     /// `None` once the channel is closed and drained, including after all
     /// senders have been dropped.
     pub async fn receive(&self) -> Option<T> {
-        self.inner
-            .recv()
-            .await
-            .ok()
-            .map(|value| self.received(value))
+        crate::runtime::production_future("Channel", async move {
+            self.inner
+                .recv()
+                .await
+                .ok()
+                .map(|value| self.received(value))
+        })
+        .await
     }
 
     /// Receives without waiting. Returns [`TryReceiveError::Empty`] while
     /// the channel is open and empty, or [`TryReceiveError::Closed`] once
     /// it is closed and drained.
     pub fn try_receive(&self) -> Result<T, TryReceiveError> {
+        crate::runtime::production_only("Channel");
         self.inner
             .try_recv()
             .map(|value| self.received(value))
@@ -474,12 +517,12 @@ impl<T> Receiver<T> {
     /// early, or dropping the returned future, loses nothing.
     ///
     /// ```
-    /// use adamantium::{Cancellation, Channel, ReceiveError};
-    /// use tokio::time::{Duration, Instant};
+    /// use adamantium::{Cancellation, Channel, ReceiveError, time};
+    /// use std::time::Duration;
     /// # #[tokio::main] async fn main() {
     /// let (sender, receiver) = Channel::<u32>::bounded(1).split();
     /// let cancellation = Cancellation::new();
-    /// let soon = Some(Instant::now() + Duration::from_millis(10));
+    /// let soon = Some(time::now() + Duration::from_millis(10));
     /// assert_eq!(
     ///     receiver.receive_until(&cancellation, soon).await,
     ///     Err(ReceiveError::DeadlineExceeded),
@@ -494,19 +537,22 @@ impl<T> Receiver<T> {
         cancellation: &Cancellation,
         deadline: Option<Instant>,
     ) -> Result<T, ReceiveError> {
-        let reason = tokio::select! {
-            biased;
-            reason = shutdown(cancellation, deadline) => reason,
-            received = self.inner.recv() => {
-                return received
-                    .map(|value| self.received(value))
-                    .map_err(|_| ReceiveError::Closed);
-            }
-        };
-        Err(match reason {
-            Shutdown::Cancelled => ReceiveError::Cancelled,
-            Shutdown::DeadlineExceeded => ReceiveError::DeadlineExceeded,
+        crate::runtime::production_future("Channel", async move {
+            let reason = tokio::select! {
+                biased;
+                reason = shutdown(cancellation, deadline) => reason,
+                received = self.inner.recv() => {
+                    return received
+                        .map(|value| self.received(value))
+                        .map_err(|_| ReceiveError::Closed);
+                }
+            };
+            Err(match reason {
+                Shutdown::Cancelled => ReceiveError::Cancelled,
+                Shutdown::DeadlineExceeded => ReceiveError::DeadlineExceeded,
+            })
         })
+        .await
     }
 
     /// Wakes one sender waiting in `send_until` for the place a received
@@ -520,32 +566,38 @@ impl<T> Receiver<T> {
     /// Receivers can still drain queued messages. Returns `false` if the
     /// channel was already closed.
     pub fn close(&self) -> bool {
+        crate::runtime::production_only("Channel");
         self.inner.close()
     }
 
     /// Whether the channel is closed, possibly with messages still queued.
     pub fn is_closed(&self) -> bool {
+        crate::runtime::production_only("Channel");
         self.inner.is_closed()
     }
 
     /// The number of messages waiting.
     pub fn len(&self) -> usize {
+        crate::runtime::production_only("Channel");
         self.inner.len()
     }
 
     /// Whether no messages are waiting.
     pub fn is_empty(&self) -> bool {
+        crate::runtime::production_only("Channel");
         self.inner.is_empty()
     }
 
     /// The most messages the channel holds.
     pub fn capacity(&self) -> usize {
+        crate::runtime::production_only("Channel");
         self.inner.capacity().unwrap_or(usize::MAX)
     }
 }
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
+        crate::runtime::production_only("Channel");
         Self {
             inner: self.inner.clone(),
             space: Arc::clone(&self.space),
@@ -558,6 +610,7 @@ impl<T> Stream for Receiver<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        crate::runtime::production_only("Channel receiver stream");
         match self.as_mut().project().inner.poll_next(cx) {
             Poll::Ready(Some(value)) => Poll::Ready(Some(self.received(value))),
             poll => poll,
@@ -567,6 +620,7 @@ impl<T> Stream for Receiver<T> {
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
+        crate::runtime::production_only("Channel");
         Self {
             inner: self.inner.clone(),
             space: Arc::clone(&self.space),
@@ -645,3 +699,12 @@ impl fmt::Display for ReceiveError {
 
 #[cfg(feature = "tokio")]
 impl std::error::Error for ReceiveError {}
+
+#[cfg(feature = "deterministic")]
+impl<T> Drop for Sender<T> {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            crate::runtime::production_only("Channel");
+        }
+    }
+}

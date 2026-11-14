@@ -1,11 +1,10 @@
 use std::{collections::BTreeMap, fs::File, io::Read, path::Path};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::Serialize;
-use serde_json::Value;
 
 use crate::style::{
-    api::{self, Decisions},
+    provider::{Answer, Evaluation, FileReview, Provider, ProviderKind, ReviewError, Verdict},
     rules::Question,
     scan::Scan,
 };
@@ -14,6 +13,7 @@ use crate::style::{
 pub(crate) struct Report {
     pub schema_version: u8,
     pub status: &'static str,
+    pub provider: ProviderKind,
     pub model: String,
     pub root: String,
     pub selected_rules: Vec<String>,
@@ -49,10 +49,16 @@ pub(crate) struct Unresolved {
 }
 
 impl Report {
-    pub fn planned(scan: &Scan, model: &str, questions: &[Question]) -> Self {
+    pub fn planned(
+        scan: &Scan,
+        provider: ProviderKind,
+        model: &str,
+        questions: &[Question],
+    ) -> Self {
         Self {
             schema_version: 1,
             status: "planned",
+            provider,
             model: model.to_owned(),
             root: scan.root.to_string_lossy().into_owned(),
             selected_rules: questions
@@ -69,57 +75,44 @@ impl Report {
 
     pub fn check(
         scan: &Scan,
+        kind: ProviderKind,
         model: &str,
         questions: &[Question],
         context: Option<&str>,
-        client: &impl Decisions,
+        provider: &dyn Provider,
     ) -> Self {
-        let mut report = Self::planned(scan, model, questions);
+        let mut report = Self::planned(scan, kind, model, questions);
         let mut service_failed = false;
         for (file, path) in report.files.iter_mut().zip(&scan.files) {
             if service_failed {
                 file.status = "not_checked";
                 continue;
             }
-            let source = match read_source(path) {
+            let source = match read_source(path, provider.max_source_bytes()) {
                 Ok(source) => source,
                 Err(error) => {
                     file.fail(format!("cannot read source: {error}"));
                     continue;
                 }
             };
-            let request = match api::request(model, questions, &file.path, &source, context) {
-                Ok(request) => request,
-                Err(error) => {
-                    file.fail(error.to_string());
-                    continue;
-                }
+            let review = FileReview {
+                model,
+                questions,
+                path: &file.path,
+                source: &source,
+                context,
             };
-            let response = match client.evaluate(&request) {
-                Ok(response) => response,
-                Err(error) => {
-                    file.fail(error.to_string());
-                    service_failed = true;
-                    continue;
+            let outcome = provider.review(&review);
+            match outcome {
+                Ok(evaluation) => {
+                    if let Err(error) = file.record(questions, evaluation) {
+                        file.fail(format!("{error:#}"));
+                        service_failed = true;
+                    }
                 }
-            };
-            match interpret(&response, questions) {
-                Ok(outcomes) => {
-                    file.status = if outcomes.unresolved.is_empty() {
-                        "checked"
-                    } else {
-                        "incomplete"
-                    };
-                    file.findings = outcomes.findings;
-                    file.unresolved = outcomes.unresolved;
-                    file.no_violation_count = outcomes.no_violation_count;
-                    file.input_tokens = response
-                        .get("usage")
-                        .and_then(|usage| usage.get("input_tokens"))
-                        .and_then(Value::as_u64);
-                }
-                Err(error) => {
-                    file.fail(format!("invalid Decisions response: {error}"));
+                Err(ReviewError::Input(error)) => file.fail(format!("{error:#}")),
+                Err(ReviewError::Service(error)) => {
+                    file.fail(format!("{error:#}"));
                     service_failed = true;
                 }
             }
@@ -143,14 +136,14 @@ impl Report {
     }
 }
 
-fn read_source(path: &Path) -> Result<String> {
+fn read_source(path: &Path, limit: usize) -> Result<String> {
     let file = File::open(path)?;
     let mut bytes = Vec::new();
-    file.take((api::MAX_JSON_INPUT_BYTES + 1) as u64)
+    file.take(u64::try_from(limit)?.saturating_add(1))
         .read_to_end(&mut bytes)?;
     ensure!(
-        bytes.len() <= api::MAX_JSON_INPUT_BYTES,
-        "file exceeds the Decisions API input limit"
+        bytes.len() <= limit,
+        "file exceeds the provider's input limit"
     );
     String::from_utf8(bytes).context("source is not UTF-8")
 }
@@ -173,97 +166,57 @@ impl FileReport {
         self.status = "error";
         self.error = Some(error);
     }
-}
 
-struct Outcomes {
-    findings: Vec<Finding>,
-    unresolved: Vec<Unresolved>,
-    no_violation_count: usize,
-}
-
-fn interpret(response: &Value, questions: &[Question]) -> Result<Outcomes> {
-    let answers = response["answers"]
-        .as_array()
-        .context("answers must be an array")?;
-    ensure!(answers.len() == questions.len(), "wrong number of answers");
-    let mut by_name = BTreeMap::new();
-    for answer in answers {
-        let name = answer["name"]
-            .as_str()
-            .context("answer is missing its name")?;
+    fn record(&mut self, questions: &[Question], evaluation: Evaluation) -> Result<()> {
         ensure!(
-            by_name.insert(name, answer).is_none(),
-            "duplicate answer: {name}"
+            evaluation.answers.len() == questions.len(),
+            "provider returned {} answers for {} questions",
+            evaluation.answers.len(),
+            questions.len()
         );
+        for (question, answer) in questions.iter().zip(evaluation.answers) {
+            let rule = question.name.clone();
+            match answer {
+                Answer::Refusal => self.unresolved.push(Unresolved {
+                    rule,
+                    reason: "refusal",
+                    confidence: None,
+                    probabilities: None,
+                }),
+                Answer::Choice {
+                    verdict: Verdict::Violation,
+                    confidence,
+                    probabilities,
+                } => self.findings.push(Finding {
+                    rule,
+                    guidance: question.instructions.clone(),
+                    confidence,
+                    probabilities,
+                }),
+                Answer::Choice {
+                    verdict: Verdict::NoViolation,
+                    ..
+                } => self.no_violation_count += 1,
+                Answer::Choice {
+                    verdict: Verdict::InsufficientContext,
+                    confidence,
+                    probabilities,
+                } => self.unresolved.push(Unresolved {
+                    rule,
+                    reason: "insufficient_context",
+                    confidence: Some(confidence),
+                    probabilities: Some(probabilities),
+                }),
+            }
+        }
+        self.status = if self.unresolved.is_empty() {
+            "checked"
+        } else {
+            "incomplete"
+        };
+        self.input_tokens = evaluation.input_tokens;
+        Ok(())
     }
-    let mut outcomes = Outcomes {
-        findings: Vec::new(),
-        unresolved: Vec::new(),
-        no_violation_count: 0,
-    };
-    for question in questions {
-        let answer = by_name
-            .remove(question.name.as_str())
-            .context("missing named answer")?;
-        if answer["type"] == "refusal" {
-            outcomes.unresolved.push(Unresolved {
-                rule: question.name.clone(),
-                reason: "refusal",
-                confidence: None,
-                probabilities: None,
-            });
-            continue;
-        }
-        ensure!(answer["type"] == "choice", "unexpected answer type");
-        let confidence = probability(&answer["confidence"])?;
-        let entries = answer["probabilities"]
-            .as_array()
-            .context("missing probabilities")?;
-        let mut probabilities = BTreeMap::new();
-        for entry in entries {
-            let name = entry["value"]
-                .as_str()
-                .context("invalid probability label")?;
-            ensure!(
-                question.choices.iter().any(|choice| choice.value == name),
-                "unexpected probability label"
-            );
-            ensure!(
-                probabilities
-                    .insert(name.to_owned(), probability(&entry["probability"])?)
-                    .is_none(),
-                "duplicate probability label"
-            );
-        }
-        ensure!(
-            probabilities.len() == question.choices.len(),
-            "missing choice probability"
-        );
-        match answer["choice"].as_str() {
-            Some("violation") => outcomes.findings.push(Finding {
-                rule: question.name.clone(),
-                guidance: question.instructions.clone(),
-                confidence,
-                probabilities,
-            }),
-            Some("no_violation") => outcomes.no_violation_count += 1,
-            Some("insufficient_context") => outcomes.unresolved.push(Unresolved {
-                rule: question.name.clone(),
-                reason: "insufficient_context",
-                confidence: Some(confidence),
-                probabilities: Some(probabilities),
-            }),
-            _ => bail!("invalid selected choice"),
-        }
-    }
-    ensure!(by_name.is_empty(), "unexpected named answer");
-    Ok(outcomes)
-}
-
-fn probability(value: &Value) -> Result<f64> {
-    let value = value.as_f64().context("missing probability")?;
-    ensure!((0.0..=1.0).contains(&value), "probability outside [0, 1]");
-    Ok(value)
 }
 
 #[cfg(test)]
@@ -271,81 +224,137 @@ mod tests {
     use std::fs;
 
     use adamantium::Actor;
-    use serde_json::json;
+    use anyhow::anyhow;
 
     use super::*;
     use crate::style::rules::RuleSet;
 
-    struct FakeDecisions {
-        response: Option<Value>,
-        requests: Actor<Vec<Value>>,
+    /// Answers every file with the same verdicts, or fails as configured.
+    struct FakeProvider {
+        answers: Option<Vec<Verdict>>,
+        refuse_input: bool,
+        reviews: Actor<Vec<(String, String, Option<String>)>>,
     }
 
-    impl Decisions for FakeDecisions {
-        fn evaluate(&self, request: &Value) -> Result<Value> {
-            self.requests
-                .with(|requests| requests.push(request.clone()));
-            self.response.clone().context("service unavailable")
+    impl FakeProvider {
+        fn answering(verdicts: &[Verdict]) -> Self {
+            Self {
+                answers: Some(verdicts.to_vec()),
+                refuse_input: false,
+                reviews: Actor::default(),
+            }
+        }
+
+        fn unavailable() -> Self {
+            Self {
+                answers: None,
+                refuse_input: false,
+                reviews: Actor::default(),
+            }
+        }
+
+        fn review_count(&self) -> usize {
+            self.reviews.with(|reviews| reviews.len())
         }
     }
 
-    fn choice(name: &str, selected: &str) -> Value {
-        json!({
-            "type": "choice", "name": name, "choice": selected, "confidence": 0.8,
-            "probabilities": [
-                { "value": "violation", "probability": 0.7 },
-                { "value": "no_violation", "probability": 0.2 },
-                { "value": "insufficient_context", "probability": 0.1 }
-            ]
-        })
+    impl Provider for FakeProvider {
+        fn max_source_bytes(&self) -> usize {
+            64
+        }
+
+        fn review(&self, file: &FileReview<'_>) -> Result<Evaluation, ReviewError> {
+            self.reviews.with(|reviews| {
+                reviews.push((
+                    file.path.to_owned(),
+                    file.source.to_owned(),
+                    file.context.map(str::to_owned),
+                ));
+            });
+            if self.refuse_input {
+                return Err(ReviewError::Input(anyhow!("too large for this model")));
+            }
+            let verdicts = self
+                .answers
+                .clone()
+                .ok_or_else(|| ReviewError::Service(anyhow!("service unavailable")))?;
+            Ok(Evaluation {
+                answers: verdicts
+                    .into_iter()
+                    .map(|verdict| Answer::Choice {
+                        verdict,
+                        confidence: 0.8,
+                        probabilities: BTreeMap::from([
+                            ("violation".to_owned(), 0.7),
+                            ("no_violation".to_owned(), 0.2),
+                            ("insufficient_context".to_owned(), 0.1),
+                        ]),
+                    })
+                    .collect(),
+                input_tokens: Some(123),
+            })
+        }
+    }
+
+    fn check(dir: &Path, questions: &[Question], provider: &FakeProvider) -> Report {
+        let scan = Scan::discover(dir).unwrap();
+        Report::check(
+            &scan,
+            ProviderKind::Decisions,
+            "test-model",
+            questions,
+            Some("library"),
+            provider,
+        )
     }
 
     #[test]
     fn reports_file_scoped_findings_and_uncertainty() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
-        let scan = Scan::discover(dir.path()).unwrap();
         let rules = RuleSet::load().unwrap();
         let questions = &rules.questions[..2];
-        let fake = FakeDecisions {
-            response: Some(json!({ "answers": [
-                choice(&questions[0].name, "violation"),
-                choice(&questions[1].name, "insufficient_context")
-            ], "usage": { "input_tokens": 123 } })),
-            requests: Actor::default(),
-        };
-        let report = Report::check(&scan, &rules.model, questions, Some("library"), &fake);
+        let fake = FakeProvider::answering(&[Verdict::Violation, Verdict::InsufficientContext]);
+        let report = check(dir.path(), questions, &fake);
         assert_eq!(report.status, "incomplete");
         assert_eq!(report.exit_code(), 2);
+        assert_eq!(report.provider, ProviderKind::Decisions);
+        assert_eq!(report.model, "test-model");
         assert_eq!(report.files[0].scope, "file");
         assert_eq!(report.files[0].path, "lib.rs");
         assert_eq!(report.files[0].findings[0].rule, questions[0].name);
+        assert_eq!(
+            report.files[0].findings[0].guidance,
+            questions[0].instructions
+        );
+        assert_eq!(report.files[0].unresolved[0].rule, questions[1].name);
         assert_eq!(report.files[0].unresolved[0].reason, "insufficient_context");
         assert_eq!(report.files[0].input_tokens, Some(123));
-        assert_eq!(fake.requests.with(|requests| requests.len()), 1);
-        let data = fake
-            .requests
-            .with(|requests| requests[0]["input"][1]["content"][0]["data"].clone());
-        assert_eq!(data["source"], "fn example() {}\n");
-        assert_eq!(data["project_context"], "library");
+        assert_eq!(
+            fake.reviews.with(|reviews| reviews.clone()),
+            [(
+                "lib.rs".to_owned(),
+                "fn example() {}\n".to_owned(),
+                Some("library".to_owned())
+            )]
+        );
     }
 
     #[test]
-    fn refusals_are_unresolved_and_invalid_answers_are_rejected() {
+    fn refusals_are_unresolved() {
         let rules = RuleSet::load().unwrap();
-        let question = &rules.questions[..1];
-        let refusal = json!({ "answers": [{ "type": "refusal", "name": question[0].name }] });
-        assert_eq!(
-            interpret(&refusal, question).unwrap().unresolved[0].reason,
-            "refusal"
-        );
-        let missing = json!({ "answers": [] });
-        assert!(interpret(&missing, question).is_err());
-        let wrong_name = json!({ "answers": [choice("wrong", "no_violation")] });
-        assert!(interpret(&wrong_name, question).is_err());
-        let mut bad_probability = choice(&question[0].name, "violation");
-        bad_probability["confidence"] = json!(1.5);
-        assert!(interpret(&json!({ "answers": [bad_probability] }), question).is_err());
+        let mut file = FileReport::new("lib.rs".into());
+        file.record(
+            &rules.questions[..1],
+            Evaluation {
+                answers: vec![Answer::Refusal],
+                input_tokens: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(file.status, "incomplete");
+        assert_eq!(file.unresolved[0].reason, "refusal");
+        assert_eq!(file.unresolved[0].confidence, None);
     }
 
     #[test]
@@ -353,17 +362,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
         fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
-        let scan = Scan::discover(dir.path()).unwrap();
         let rules = RuleSet::load().unwrap();
-        let fake = FakeDecisions {
-            response: None,
-            requests: Actor::default(),
-        };
-        let report = Report::check(&scan, &rules.model, &rules.questions[..1], None, &fake);
+        let fake = FakeProvider::unavailable();
+        let report = check(dir.path(), &rules.questions[..1], &fake);
         assert_eq!(report.exit_code(), 2);
         assert_eq!(report.files[0].status, "error");
+        assert_eq!(
+            report.files[0].error.as_deref(),
+            Some("service unavailable")
+        );
         assert_eq!(report.files[1].status, "not_checked");
-        assert_eq!(fake.requests.with(|requests| requests.len()), 1);
+        assert_eq!(fake.review_count(), 1);
+    }
+
+    #[test]
+    fn a_wrong_number_of_answers_stops_the_review() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let fake = FakeProvider::answering(&[Verdict::NoViolation]);
+        let report = check(dir.path(), &rules.questions[..2], &fake);
+        assert_eq!(report.files[0].status, "error");
+        assert_eq!(
+            report.files[0].error.as_deref(),
+            Some("provider returned 1 answers for 2 questions")
+        );
+        assert!(report.files[0].findings.is_empty());
+        assert_eq!(report.files[1].status, "not_checked");
+        assert_eq!(fake.review_count(), 1);
+    }
+
+    #[test]
+    fn input_errors_fail_only_their_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let fake = FakeProvider {
+            refuse_input: true,
+            ..FakeProvider::answering(&[Verdict::NoViolation])
+        };
+        let report = check(dir.path(), &rules.questions[..1], &fake);
+        assert_eq!(report.status, "incomplete");
+        for file in &report.files {
+            assert_eq!(file.status, "error");
+            assert_eq!(file.error.as_deref(), Some("too large for this model"));
+        }
+        assert_eq!(fake.review_count(), 2);
     }
 
     #[test]
@@ -372,35 +418,22 @@ mod tests {
         let questions = &rules.questions[..1];
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
-        let scan = Scan::discover(dir.path()).unwrap();
-        let run = |selected| {
-            let fake = FakeDecisions {
-                response: Some(json!({ "answers": [choice(&questions[0].name, selected)] })),
-                requests: Actor::default(),
-            };
-            Report::check(&scan, &rules.model, questions, None, &fake)
-        };
-        assert_eq!(run("violation").exit_code(), 1);
-        let clean = run("no_violation");
+        let run = |verdict| check(dir.path(), questions, &FakeProvider::answering(&[verdict]));
+        assert_eq!(run(Verdict::Violation).exit_code(), 1);
+        let clean = run(Verdict::NoViolation);
+        assert_eq!(clean.status, "complete");
         assert_eq!(clean.exit_code(), 0);
         assert_eq!(clean.files[0].no_violation_count, 1);
     }
 
     #[test]
-    fn oversized_files_are_reported_without_contacting_the_service() {
+    fn files_over_the_provider_limit_are_reported_without_contacting_it() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("large.rs"),
-            vec![b'x'; api::MAX_JSON_INPUT_BYTES + 1],
-        )
-        .unwrap();
-        let scan = Scan::discover(dir.path()).unwrap();
+        fs::write(dir.path().join("large.rs"), vec![b'x'; 65]).unwrap();
+        fs::write(dir.path().join("small.rs"), vec![b'x'; 64]).unwrap();
         let rules = RuleSet::load().unwrap();
-        let fake = FakeDecisions {
-            response: None,
-            requests: Actor::default(),
-        };
-        let report = Report::check(&scan, &rules.model, &rules.questions[..1], None, &fake);
+        let fake = FakeProvider::answering(&[Verdict::NoViolation]);
+        let report = check(dir.path(), &rules.questions[..1], &fake);
         assert_eq!(report.status, "incomplete");
         assert_eq!(report.files[0].status, "error");
         assert!(
@@ -410,6 +443,7 @@ mod tests {
                 .unwrap()
                 .contains("input limit")
         );
-        assert!(fake.requests.with(|requests| requests.is_empty()));
+        assert_eq!(report.files[1].status, "checked");
+        assert_eq!(fake.review_count(), 1);
     }
 }

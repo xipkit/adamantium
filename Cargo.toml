@@ -10,6 +10,7 @@ exclude = [
     "cli/tests/fixtures/paths",
     "cli/tests/fixtures/indexing",
     "cli/tests/fixtures/strict",
+    "cli/tests/fixtures/time",
 ]
 
 [workspace.package]
@@ -68,7 +69,9 @@ publish.workspace = true
 [features]
 default = ["tokio"]
 tokio = ["dep:tokio", "dep:async-stream", "dep:futures-core"]
+signal = ["tokio", "tokio/signal"]
 serde = ["dep:serde", "indexmap/serde"]
+deterministic = ["tokio", "dep:shuttle", "dep:shuttle-engine", "dep:shuttle-std", "dep:shuttle-schedulers", "dep:serde", "dep:serde_json"]
 tracing = ["dep:tracing"]
 
 [dependencies]
@@ -78,7 +81,13 @@ async-stream = { version = "0.3", optional = true }
 futures-core = { version = "0.3", optional = true }
 indexmap = "2"
 pin-project-lite = "0.2"
-serde = { version = "1", optional = true }
+serde = { version = "1", optional = true, features = ["derive"] }
+serde_json = { version = "1", optional = true }
+# Replay artifacts identify these versions; keep the engine's components pinned too.
+shuttle = { version = "=0.9.10", optional = true }
+shuttle-engine = { version = "=0.1.8", optional = true }
+shuttle-std = { version = "=0.1.5", optional = true }
+shuttle-schedulers = { version = "=0.1.1", optional = true }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"], optional = true }
 tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
 
