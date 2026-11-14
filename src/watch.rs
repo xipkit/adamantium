@@ -1,7 +1,4 @@
-use std::{
-    fmt,
-    sync::{Arc, MutexGuard, PoisonError},
-};
+use std::{fmt, sync::Arc};
 
 use event_listener::Event;
 #[cfg(feature = "tokio")]
@@ -11,7 +8,10 @@ use tokio::time::Instant;
 use crate::ReceiveError;
 #[cfg(feature = "tokio")]
 use crate::tasks::{Cancellation, Shutdown, shutdown};
-use crate::{Closed, TryReceiveError};
+use crate::{
+    Closed, TryReceiveError,
+    runtime::{Guard, Lock},
+};
 
 /// The latest value of some state, such as configuration, that tasks can
 /// read and wait to change.
@@ -61,16 +61,16 @@ pub struct Watch<T> {
 /// never returns the same one twice. A clone starts having seen what the
 /// original has seen, and from then on keeps its own place.
 pub struct Watcher<T> {
+    #[cfg(feature = "deterministic")]
+    _runtime: crate::runtime::execution::Production,
     shared: Arc<Shared<T>>,
     seen: u64,
 }
 
 struct Shared<T> {
-    #[allow(
-        clippy::disallowed_types,
-        reason = "held only inside this module's synchronous methods, which run no caller code but `T::clone` and `T::fmt`"
-    )]
-    state: std::sync::Mutex<State<T>>,
+    /// Held only inside this module's synchronous methods, which run no
+    /// caller code but `T::clone` and `T::fmt`.
+    state: Lock<State<T>>,
     /// Notified on every send and on close.
     changed: Event,
 }
@@ -86,12 +86,20 @@ struct State<T> {
 }
 
 impl<T> Shared<T> {
-    fn lock(&self) -> MutexGuard<'_, State<T>> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Every operation locks, so this is where a handle carried into the
+    /// deterministic harness is rejected.
+    fn lock(&self) -> Guard<'_, State<T>> {
+        crate::runtime::production_only("Watch");
+        self.state.lock()
     }
 
     fn close(&self) -> bool {
-        let was_open = !std::mem::replace(&mut self.lock().closed, true);
+        self.close_with(self.lock())
+    }
+
+    fn close_with(&self, mut state: Guard<'_, State<T>>) -> bool {
+        let was_open = !std::mem::replace(&mut state.closed, true);
+        drop(state);
         if was_open {
             self.changed.notify(usize::MAX);
         }
@@ -101,11 +109,11 @@ impl<T> Shared<T> {
 
 impl<T> Watch<T> {
     /// A watch holding `value`.
-    #[allow(clippy::disallowed_types, reason = "see the state field")]
     pub fn new(value: T) -> Self {
+        crate::runtime::production_only("Watch");
         Self {
             shared: Arc::new(Shared {
-                state: std::sync::Mutex::new(State {
+                state: Lock::new(State {
                     value,
                     version: 0,
                     closed: false,
@@ -140,6 +148,8 @@ impl<T> Watch<T> {
     /// [`receive`](Watcher::receive) waits for the next send.
     pub fn subscribe(&self) -> Watcher<T> {
         Watcher {
+            #[cfg(feature = "deterministic")]
+            _runtime: crate::runtime::execution::Production("Watch"),
             shared: Arc::clone(&self.shared),
             seen: self.shared.lock().version,
         }
@@ -194,18 +204,21 @@ impl<T: Clone> Watcher<T> {
     ///
     /// Dropping the returned future loses nothing: the value stays unseen.
     pub async fn receive(&mut self) -> Option<T> {
-        loop {
-            if let Some(received) = self.check() {
-                return received;
+        crate::runtime::production_future("Watch", async move {
+            loop {
+                if let Some(received) = self.check() {
+                    return received;
+                }
+                // Listen before checking again, so a send between the two
+                // checks still wakes this wait.
+                let listener = self.shared.changed.listen();
+                if let Some(received) = self.check() {
+                    return received;
+                }
+                listener.await;
             }
-            // Listen before checking again, so a send between the two
-            // checks still wakes this wait.
-            let listener = self.shared.changed.listen();
-            if let Some(received) = self.check() {
-                return received;
-            }
-            listener.await;
-        }
+        })
+        .await
     }
 
     /// Receives without waiting. Returns [`TryReceiveError::Empty`] while
@@ -263,15 +276,18 @@ impl<T: Clone> Watcher<T> {
         cancellation: &Cancellation,
         deadline: Option<Instant>,
     ) -> Result<T, ReceiveError> {
-        let reason = tokio::select! {
-            biased;
-            reason = shutdown(cancellation, deadline) => reason,
-            received = self.receive() => return received.ok_or(ReceiveError::Closed),
-        };
-        Err(match reason {
-            Shutdown::Cancelled => ReceiveError::Cancelled,
-            Shutdown::DeadlineExceeded => ReceiveError::DeadlineExceeded,
+        crate::runtime::production_future("Watch", async move {
+            let reason = tokio::select! {
+                biased;
+                reason = shutdown(cancellation, deadline) => reason,
+                received = self.receive() => return received.ok_or(ReceiveError::Closed),
+            };
+            Err(match reason {
+                Shutdown::Cancelled => ReceiveError::Cancelled,
+                Shutdown::DeadlineExceeded => ReceiveError::DeadlineExceeded,
+            })
         })
+        .await
     }
 
     /// `Some(Some(value))` for an unseen value, which it marks seen,
@@ -304,19 +320,26 @@ impl<T> Clone for Watch<T> {
 
 impl<T> Drop for Watch<T> {
     fn drop(&mut self) {
-        let mut state = self.shared.lock();
+        // While unwinding, skip the harness check, which would panic again,
+        // but still close the watch so watchers don't wait forever.
+        let mut state = if std::thread::panicking() {
+            self.shared.state.lock()
+        } else {
+            self.shared.lock()
+        };
         state.watches = state.watches.saturating_sub(1);
-        let last = state.watches == 0;
-        drop(state);
-        if last {
-            self.shared.close();
+        if state.watches == 0 {
+            self.shared.close_with(state);
         }
     }
 }
 
 impl<T> Clone for Watcher<T> {
     fn clone(&self) -> Self {
+        crate::runtime::production_only("Watch");
         Self {
+            #[cfg(feature = "deterministic")]
+            _runtime: crate::runtime::execution::Production("Watch"),
             shared: Arc::clone(&self.shared),
             seen: self.seen,
         }
@@ -343,7 +366,8 @@ fn debug_state<T: fmt::Debug>(
 ) -> fmt::Result {
     // `try_lock`, as in `Actor`'s `Debug`, so formatting from inside
     // `T::clone` or `T::fmt` can't deadlock.
-    let Ok(state) = shared.state.try_lock() else {
+    crate::runtime::production_only("Watch");
+    let Some(state) = shared.state.try_lock() else {
         return write!(f, "{name}(<in use>)");
     };
     let mut debug = f.debug_struct(name);

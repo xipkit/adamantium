@@ -357,9 +357,9 @@ inputs unchanged when replaying. Deadlock and step exhaustion are failures;
 passing exploration is not a proof of all executions.
 
 This first stage supports Actor only. `testing::parallel` provides independent
-test workers; it does not model Tasks' cleanup semantics. Channel, Tasks,
-Cancellation and blocking work reject use in the harness until their adapters
-land (ADAM-159 and ADAM-160); virtual deadlines follow in ADAM-161. Use `#[test]`,
+test workers; it does not model Tasks' cleanup semantics. Channel, Reply, Watch,
+Tasks, Cancellation and blocking work reject use in the harness until their
+adapters land (ADAM-159 and ADAM-160); virtual deadlines follow in ADAM-161. Use `#[test]`,
 not `#[tokio::test]`, and create actors inside the execution that uses them.
 Replace I/O, real time, uncontrolled randomness and foreign executors with
 deterministic fixtures. Arbitrary foreign futures cannot all be diagnosed, and

@@ -298,6 +298,19 @@ fn wait_for_sees_a_last_value_sent_before_closing() {
     );
 }
 
+#[test]
+fn a_watch_dropped_by_a_panic_still_closes() {
+    let watch = Watch::new(0);
+    let mut watcher = watch.subscribe();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _held = watch;
+        std::panic::panic_any("unwinding");
+    }));
+    assert!(unwound.is_err());
+    assert!(watcher.is_closed());
+    assert_eq!(watcher.try_receive(), Err(TryReceiveError::Closed));
+}
+
 /// A value whose destructor reads the watch it was stored in.
 #[derive(Clone)]
 struct ReadsOnDrop(Option<Watcher<ReadsOnDrop>>);
