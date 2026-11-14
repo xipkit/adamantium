@@ -93,7 +93,26 @@ impl<E: std::error::Error + 'static> std::error::Error for ScopeError<E> {
     }
 }
 
-async fn shutdown<E>(cancellation: &Cancellation, deadline: Option<Instant>) -> ScopeError<E> {
+/// Why a wait ended before its work did: the caller requested shutdown, or
+/// the deadline elapsed.
+pub(crate) enum Shutdown {
+    Cancelled,
+    DeadlineExceeded,
+}
+
+impl Shutdown {
+    fn scope_error<E>(self) -> ScopeError<E> {
+        match self {
+            Self::Cancelled => ScopeError::Cancelled,
+            Self::DeadlineExceeded => ScopeError::DeadlineExceeded,
+        }
+    }
+}
+
+/// Waits for cancellation or the deadline, whichever comes first. A request
+/// already present at a poll is reported by that poll, and cancellation wins
+/// over an equally ready deadline.
+pub(crate) async fn shutdown(cancellation: &Cancellation, deadline: Option<Instant>) -> Shutdown {
     let mut cancelled = pin!(cancellation.cancelled());
     let mut elapsed = pin!(async {
         match deadline {
@@ -103,14 +122,14 @@ async fn shutdown<E>(cancellation: &Cancellation, deadline: Option<Instant>) -> 
     });
     std::future::poll_fn(|cx| {
         if cancelled.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(ScopeError::Cancelled);
+            return Poll::Ready(Shutdown::Cancelled);
         }
         // Tokio timers round up to milliseconds. Check the clock as well so an
-        // expired deadline wins before polling the body on every scope poll.
+        // expired deadline wins before polling the waiter's work on every poll.
         if deadline.is_some_and(|deadline| deadline <= Instant::now())
             || elapsed.as_mut().poll(cx).is_ready()
         {
-            return Poll::Ready(ScopeError::DeadlineExceeded);
+            return Poll::Ready(Shutdown::DeadlineExceeded);
         }
         Poll::Pending
     })
@@ -317,7 +336,7 @@ impl<E: Send + 'static> Tasks<E> {
         tasks.cancellation = Some(cancellation.clone());
         let reason = tokio::select! {
             biased;
-            reason = shutdown(&cancellation, deadline) => reason,
+            reason = shutdown(&cancellation, deadline) => reason.scope_error(),
             result = body(&mut tasks) => return tasks.join_until(cancellation, deadline, result).await,
         };
         tasks.abort();
@@ -410,7 +429,7 @@ impl<E: Send + 'static> Tasks<E> {
         async move {
             let reason = tokio::select! {
                 biased;
-                reason = shutdown(&cancellation, deadline) => Some(reason),
+                reason = shutdown(&cancellation, deadline) => Some(reason.scope_error()),
                 () = self.settle(body.is_err()) => None,
             };
             if reason.is_some() {
