@@ -1,0 +1,11 @@
+[package]
+name = "old"
+version = "0.0.0"
+edition = "2015"
+publish = false
+
+[dependencies]
+tokio = { path = "../tokio" }
+
+[lints.rust]
+unsafe_code = "forbid"

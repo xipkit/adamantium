@@ -1,0 +1,13 @@
+[package]
+name = "spawner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+on = []
+off = []
+
+[dependencies]
+pool = { path = "../pool" }
+rt = { package = "tokio", path = "../tokio" }
