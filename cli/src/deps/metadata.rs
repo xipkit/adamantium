@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use super::cfg::Features;
+use super::cfg::{self, Features, Truth};
 
 /// When a dependency's code runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -60,7 +60,12 @@ pub struct Lib {
 /// test build would. `cargo tree` with only normal and build edges gives the
 /// packages and features of a normal build, so it decides which packages
 /// are built and with what features.
-pub fn dependencies(root: &Path, target: &str, cargo_args: &[String]) -> Result<Vec<Dependency>> {
+pub fn dependencies(
+    root: &Path,
+    triple: &str,
+    target: &cfg::Target,
+    cargo_args: &[String],
+) -> Result<Vec<Dependency>> {
     let metadata = cargo(
         root,
         &[
@@ -68,7 +73,7 @@ pub fn dependencies(root: &Path, target: &str, cargo_args: &[String]) -> Result<
             "--format-version",
             "1",
             "--filter-platform",
-            target,
+            triple,
         ],
         cargo_args,
     )?;
@@ -86,13 +91,13 @@ pub fn dependencies(root: &Path, target: &str, cargo_args: &[String]) -> Result<
             "--format",
             "|{p}|{f}|",
             "--target",
-            target,
+            triple,
         ],
         cargo_args,
     )?;
     let tree = String::from_utf8(tree).context("reading cargo tree's output")?;
     let built = tree.lines().filter_map(Built::parse).collect::<Vec<_>>();
-    resolve(metadata, &built)
+    resolve(metadata, &built, &Host { triple, target })
 }
 
 fn cargo(root: &Path, args: &[&str], cargo_args: &[String]) -> Result<Vec<u8>> {
@@ -207,6 +212,8 @@ struct NodeDep {
 #[derive(Deserialize)]
 struct DepKind {
     kind: Option<String>,
+    /// The platform the edge is for, as `cfg(...)` or a target triple.
+    target: Option<String>,
 }
 
 /// The crate kinds Cargo builds as a library another crate can use.
@@ -229,15 +236,30 @@ impl Package {
     }
 }
 
+/// The host a build is for, which decides which platform-specific
+/// dependency edges are active.
+struct Host<'a> {
+    triple: &'a str,
+    target: &'a cfg::Target,
+}
+
 impl NodeDep {
-    fn is(&self, kind: Option<&str>) -> bool {
-        self.dep_kinds
-            .iter()
-            .any(|dep_kind| dep_kind.kind.as_deref() == kind)
+    /// Whether the dependency has an edge of `kind` that is active on the
+    /// host. `--filter-platform` drops dependencies with no active edge, but
+    /// keeps every edge of a dependency with one, so a Windows-only normal
+    /// edge survives beside an active build edge. An edge whose platform
+    /// can't be decided counts as active.
+    fn is(&self, kind: Option<&str>, host: &Host) -> bool {
+        self.dep_kinds.iter().any(|dep_kind| {
+            dep_kind.kind.as_deref() == kind
+                && dep_kind.target.as_deref().is_none_or(|platform| {
+                    host.target.platform(host.triple, platform) != Truth::False
+                })
+        })
     }
 }
 
-fn resolve(metadata: Metadata, built: &[Built]) -> Result<Vec<Dependency>> {
+fn resolve(metadata: Metadata, built: &[Built], host: &Host) -> Result<Vec<Dependency>> {
     let resolve = metadata
         .resolve
         .ok_or_else(|| anyhow!("cargo metadata resolved no dependencies"))?;
@@ -282,10 +304,10 @@ fn resolve(metadata: Metadata, built: &[Built]) -> Result<Vec<Dependency>> {
     // Runtime code is what the members reach through normal dependencies
     // without passing through a procedural macro, which runs in the compiler.
     let runtime = reachable(&members, &nodes, |dep| {
-        dep.is(None) && !is_proc_macro(&dep.pkg) && is_built(&dep.pkg)
+        dep.is(None, host) && !is_proc_macro(&dep.pkg) && is_built(&dep.pkg)
     });
     let built = reachable(&members, &nodes, |dep| {
-        (dep.is(None) || dep.is(Some("build"))) && is_built(&dep.pkg)
+        (dep.is(None, host) || dep.is(Some("build"), host)) && is_built(&dep.pkg)
     });
 
     let mut dependencies = Vec::new();
@@ -299,7 +321,7 @@ fn resolve(metadata: Metadata, built: &[Built]) -> Result<Vec<Dependency>> {
         let externs = node
             .deps
             .iter()
-            .filter(|dep| dep.is(None))
+            .filter(|dep| dep.is(None, host))
             .filter_map(|dep| Some((dep.name.clone(), libs.get(dep.pkg.as_str())?.name.clone())))
             .collect();
         dependencies.push(Dependency {

@@ -8,8 +8,12 @@
 use std::collections::{BTreeSet, HashSet};
 
 use syn::{
-    Attribute, Ident, LitStr, Meta, Token, ext::IdentExt, parenthesized, parse::ParseStream,
-    punctuated::Punctuated, token,
+    Attribute, Ident, LitStr, Meta, Token,
+    ext::IdentExt,
+    parenthesized,
+    parse::{ParseStream, Parser},
+    punctuated::Punctuated,
+    token,
 };
 
 /// What is known about a predicate.
@@ -147,6 +151,30 @@ impl Features {
     }
 }
 
+impl Target {
+    /// Whether a dependency's platform holds for the host, `triple`. Cargo
+    /// writes the platform of a `[target.'cfg(unix)'.dependencies]` table as
+    /// `cfg(unix)`, and of a `[target.x86_64-pc-windows-msvc.dependencies]`
+    /// table as the triple.
+    pub fn platform(&self, triple: &str, platform: &str) -> Truth {
+        let Some(predicate) = platform
+            .strip_prefix("cfg(")
+            .and_then(|predicate| predicate.strip_suffix(')'))
+        else {
+            return Truth::from_bool(platform == triple);
+        };
+        let features = Features::default();
+        let cfg = Cfg {
+            target: self,
+            features: &features,
+            proc_macro: false,
+        };
+        (|input: ParseStream| cfg.predicate(input))
+            .parse_str(predicate)
+            .unwrap_or(Truth::Unknown)
+    }
+}
+
 /// Everything that decides which of one crate's `cfg`s hold.
 #[derive(Clone, Copy)]
 pub struct Cfg<'a> {
@@ -275,7 +303,6 @@ impl Cfg<'_> {
 
 #[cfg(test)]
 mod tests {
-    use syn::parse::Parser;
 
     use super::*;
 
@@ -300,6 +327,20 @@ mod tests {
             proc_macro: false,
         };
         assert_eq!(eval(&cfg, predicate).unwrap(), expected, "{predicate}");
+    }
+
+    #[test]
+    fn dependency_platforms_hold_for_the_host() {
+        let target = Target::parse(LINUX);
+        let host = "x86_64-unknown-linux-gnu";
+        assert_eq!(target.platform(host, "cfg(unix)"), Truth::True);
+        assert_eq!(target.platform(host, "cfg(windows)"), Truth::False);
+        assert_eq!(target.platform(host, "cfg(tokio_unstable)"), Truth::Unknown);
+        assert_eq!(target.platform(host, host), Truth::True);
+        assert_eq!(
+            target.platform(host, "x86_64-pc-windows-msvc"),
+            Truth::False
+        );
     }
 
     #[test]

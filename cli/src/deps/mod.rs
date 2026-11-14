@@ -90,7 +90,7 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
     let (triple, printed) = metadata::host(root)?;
     let target = Target::parse(&printed);
     let mut dependencies = Vec::new();
-    for dependency in metadata::dependencies(root, &triple, cargo_args)? {
+    for dependency in metadata::dependencies(root, &triple, &target, cargo_args)? {
         let scan = match &dependency.lib {
             Some(lib) => scan::scan(
                 &Crate {

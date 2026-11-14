@@ -22,6 +22,10 @@ spawner = { path = "vendor/spawner", features = ["on"] }
 [build-dependencies]
 builder = { path = "vendor/builder" }
 
+# Inactive on the hosts the tests run on, so builder stays build-only.
+[target.'cfg(any(windows, target_pointer_width = "8"))'.dependencies]
+builder = { path = "vendor/builder" }
+
 [dev-dependencies]
 devonly = { path = "vendor/devonly" }
 # Only tests turn on `dev`, so a normal build leaves it and `testonly` out.
