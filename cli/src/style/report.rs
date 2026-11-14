@@ -5,13 +5,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::style::{
-    provider::{Answer, Evaluation, FileReview, Provider, ProviderKind, ReviewError, Verdict},
+    provider::{
+        Answer, Evaluation, FileReview, LineRange, Locations, Provider, ProviderKind, ReviewError,
+        Verdict,
+    },
     rules::Question,
     scan::Scan,
 };
 
 /// The version of the JSON report this build writes.
-pub(crate) const SCHEMA_VERSION: u8 = 2;
+pub(crate) const SCHEMA_VERSION: u8 = 3;
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct Report {
@@ -47,7 +50,6 @@ pub(crate) enum ReportStatus {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct FileReport {
     pub path: String,
-    pub scope: Scope,
     pub status: FileStatus,
     /// Whether these results were carried over from a previous report
     /// instead of asking the provider again.
@@ -57,17 +59,10 @@ pub(crate) struct FileReport {
     pub findings: Vec<Finding>,
     pub unresolved: Vec<Unresolved>,
     pub no_violation_count: usize,
-    /// Input tokens spent on this file in this run; `None` for cached files.
+    /// Input tokens spent on this file in this run, including locating its
+    /// findings; `None` for cached files or when the provider didn't say.
     pub input_tokens: Option<u64>,
     pub error: Option<String>,
-}
-
-/// The part of a file a finding applies to. Providers give no reliable
-/// locations, so findings describe the whole file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Scope {
-    File,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -88,6 +83,10 @@ pub(crate) enum FileStatus {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Finding {
     pub rule: String,
+    /// The lines that break the rule. Absent when the violation concerns the
+    /// whole file or the provider gave no confident range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<LineRange>,
     pub guidance: String,
     pub confidence: f64,
     pub probabilities: BTreeMap<String, f64>,
@@ -159,9 +158,9 @@ impl Report {
             .any(|file| file.status == FileStatus::Planned)
     }
 
-    /// Sends each planned file to the provider, in scan order, then settles
-    /// the report's status. `scan` must be the scan the report was planned
-    /// from.
+    /// Sends each planned file to the provider, in scan order, asks it to
+    /// locate any findings, then settles the report's status. `scan` must be
+    /// the scan the report was planned from.
     pub fn check(
         &mut self,
         scan: &Scan,
@@ -186,21 +185,8 @@ impl Report {
                 }
             };
             file.source_sha256 = Some(sha256_hex(source.as_bytes()));
-            let review = FileReview {
-                model: &self.key.model,
-                questions,
-                path: &file.path,
-                source: &source,
-                context,
-            };
-            let outcome = provider.review(&review);
-            match outcome {
-                Ok(evaluation) => {
-                    if let Err(error) = file.record(questions, evaluation) {
-                        file.fail(format!("{error:#}"));
-                        service_failed = true;
-                    }
-                }
+            match file.review(provider, &self.key.model, questions, &source, context) {
+                Ok(()) => {}
                 Err(ReviewError::Input(error)) => file.fail(format!("{error:#}")),
                 Err(ReviewError::Service(error)) => {
                     file.fail(format!("{error:#}"));
@@ -253,7 +239,6 @@ impl FileReport {
     fn new(path: String) -> Self {
         Self {
             path,
-            scope: Scope::File,
             status: FileStatus::Planned,
             cached: false,
             source_sha256: None,
@@ -265,9 +250,74 @@ impl FileReport {
         }
     }
 
+    /// Marks the file unreviewed, discarding any answers it already has but
+    /// keeping the tokens they cost.
     fn fail(&mut self, error: String) {
         self.status = FileStatus::Error;
+        self.findings.clear();
+        self.unresolved.clear();
+        self.no_violation_count = 0;
         self.error = Some(error);
+    }
+
+    /// Asks `provider` about this file's `source` and to locate the rules it
+    /// breaks, and records the answers.
+    fn review(
+        &mut self,
+        provider: &dyn Provider,
+        model: &str,
+        questions: &[Question],
+        source: &str,
+        context: Option<&str>,
+    ) -> Result<(), ReviewError> {
+        let path = self.path.clone();
+        let review = FileReview {
+            model,
+            questions,
+            path: &path,
+            source,
+            context,
+        };
+        let evaluation = provider.review(&review)?;
+        self.record(questions, evaluation)
+            .map_err(ReviewError::Service)?;
+        let violated = self.violated(questions);
+        if violated.is_empty() {
+            return Ok(());
+        }
+        let locations = provider.locate(&FileReview {
+            questions: &violated,
+            ..review
+        })?;
+        self.place(locations).map_err(ReviewError::Service)
+    }
+
+    /// The questions whose rules this file's findings break, in finding
+    /// order.
+    fn violated(&self, questions: &[Question]) -> Vec<Question> {
+        self.findings
+            .iter()
+            .filter_map(|finding| questions.iter().find(|q| q.name == finding.rule))
+            .cloned()
+            .collect()
+    }
+
+    /// Gives each finding the lines the provider located for it.
+    fn place(&mut self, locations: Locations) -> Result<()> {
+        ensure!(
+            locations.lines.len() == self.findings.len(),
+            "provider located {} findings of {}",
+            locations.lines.len(),
+            self.findings.len()
+        );
+        for (finding, lines) in self.findings.iter_mut().zip(locations.lines) {
+            finding.lines = lines;
+        }
+        self.input_tokens = self
+            .input_tokens
+            .zip(locations.input_tokens)
+            .map(|(review, locate)| review + locate);
+        Ok(())
     }
 
     fn record(&mut self, questions: &[Question], evaluation: Evaluation) -> Result<()> {
@@ -292,6 +342,7 @@ impl FileReport {
                     probabilities,
                 } => self.findings.push(Finding {
                     rule,
+                    lines: None,
                     guidance: question.instructions.clone(),
                     confidence,
                     probabilities,
@@ -367,7 +418,19 @@ mod tests {
     struct FakeProvider {
         answers: Option<Vec<Verdict>>,
         refuse_input: bool,
+        locations: FakeLocations,
         reviews: Actor<Vec<(String, String, Option<String>)>>,
+        /// The rules each `locate` call was asked about.
+        locates: Actor<Vec<Vec<String>>>,
+    }
+
+    enum FakeLocations {
+        /// No location for any rule.
+        Unplaced,
+        /// These locations, whatever the rules.
+        Fixed(Vec<Option<LineRange>>),
+        /// A service failure.
+        Unavailable,
     }
 
     impl FakeProvider {
@@ -375,7 +438,9 @@ mod tests {
             Self {
                 answers: Some(verdicts.to_vec()),
                 refuse_input: false,
+                locations: FakeLocations::Unplaced,
                 reviews: Actor::default(),
+                locates: Actor::default(),
             }
         }
 
@@ -383,7 +448,9 @@ mod tests {
             Self {
                 answers: None,
                 refuse_input: false,
+                locations: FakeLocations::Unplaced,
                 reviews: Actor::default(),
+                locates: Actor::default(),
             }
         }
 
@@ -428,6 +495,23 @@ mod tests {
                 input_tokens: Some(123),
             })
         }
+
+        fn locate(&self, file: &FileReview<'_>) -> Result<Locations, ReviewError> {
+            self.locates.with(|locates| {
+                locates.push(file.questions.iter().map(|q| q.name.clone()).collect());
+            });
+            let lines = match &self.locations {
+                FakeLocations::Unplaced => vec![None; file.questions.len()],
+                FakeLocations::Fixed(lines) => lines.clone(),
+                FakeLocations::Unavailable => {
+                    return Err(ReviewError::Service(anyhow!("service unavailable")));
+                }
+            };
+            Ok(Locations {
+                lines,
+                input_tokens: Some(7),
+            })
+        }
     }
 
     fn check(dir: &Path, questions: &[Question], provider: &FakeProvider) -> Report {
@@ -456,7 +540,6 @@ mod tests {
         assert_eq!(report.exit_code(), 2);
         assert_eq!(report.key.provider, ProviderKind::Decisions);
         assert_eq!(report.key.model, "test-model");
-        assert_eq!(report.files[0].scope, Scope::File);
         assert_eq!(report.files[0].path, "lib.rs");
         assert_eq!(report.files[0].findings[0].rule, questions[0].name);
         assert_eq!(
@@ -468,7 +551,8 @@ mod tests {
             report.files[0].unresolved[0].reason,
             UnresolvedReason::InsufficientContext
         );
-        assert_eq!(report.files[0].input_tokens, Some(123));
+        assert_eq!(report.files[0].findings[0].lines, None);
+        assert_eq!(report.files[0].input_tokens, Some(130));
         assert_eq!(
             fake.reviews.with(|reviews| reviews.clone()),
             [(
@@ -647,5 +731,95 @@ mod tests {
         );
         assert_eq!(report.files[1].status, FileStatus::Checked);
         assert_eq!(fake.review_count(), 1);
+    }
+
+    #[test]
+    fn locates_only_the_rules_a_file_breaks() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let questions = &rules.questions[..3];
+        let lines = LineRange {
+            start_line: 4,
+            end_line: 6,
+        };
+        let fake = FakeProvider {
+            locations: FakeLocations::Fixed(vec![Some(lines), None]),
+            ..FakeProvider::answering(&[
+                Verdict::Violation,
+                Verdict::NoViolation,
+                Verdict::Violation,
+            ])
+        };
+        let report = check(dir.path(), questions, &fake);
+        assert_eq!(
+            fake.locates.with(|locates| locates.clone()),
+            [vec![questions[0].name.clone(), questions[2].name.clone()]]
+        );
+        let file = &report.files[0];
+        assert_eq!(file.status, FileStatus::Checked);
+        assert_eq!(file.findings[0].lines, Some(lines));
+        assert_eq!(file.findings[1].lines, None);
+        assert_eq!(file.input_tokens, Some(130));
+
+        let written = serde_json::to_value(&report).unwrap();
+        let findings = &written["files"][0]["findings"];
+        assert_eq!(
+            findings[0]["lines"],
+            serde_json::json!({ "start_line": 4, "end_line": 6 })
+        );
+        assert!(findings[1].get("lines").is_none());
+        let read: Report = serde_json::from_value(written).unwrap();
+        assert_eq!(read.files[0].findings[0].lines, Some(lines));
+        assert_eq!(read.files[0].findings[1].lines, None);
+    }
+
+    #[test]
+    fn a_file_without_findings_is_not_located() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let fake = FakeProvider::answering(&[Verdict::NoViolation, Verdict::InsufficientContext]);
+        let report = check(dir.path(), &rules.questions[..2], &fake);
+        assert_eq!(fake.locates.with(|locates| locates.len()), 0);
+        assert_eq!(report.files[0].input_tokens, Some(123));
+    }
+
+    #[test]
+    fn a_failure_to_locate_fails_the_file_and_stops_the_review() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let fake = FakeProvider {
+            locations: FakeLocations::Unavailable,
+            ..FakeProvider::answering(&[Verdict::Violation])
+        };
+        let report = check(dir.path(), &rules.questions[..1], &fake);
+        let file = &report.files[0];
+        assert_eq!(file.status, FileStatus::Error);
+        assert_eq!(file.error.as_deref(), Some("service unavailable"));
+        assert!(file.findings.is_empty());
+        assert_eq!(file.input_tokens, Some(123));
+        assert_eq!(report.files[1].status, FileStatus::NotChecked);
+        assert_eq!(fake.review_count(), 1);
+    }
+
+    #[test]
+    fn the_wrong_number_of_locations_fails_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+        let rules = RuleSet::load().unwrap();
+        let fake = FakeProvider {
+            locations: FakeLocations::Fixed(Vec::new()),
+            ..FakeProvider::answering(&[Verdict::Violation])
+        };
+        let report = check(dir.path(), &rules.questions[..1], &fake);
+        assert_eq!(report.files[0].status, FileStatus::Error);
+        assert_eq!(
+            report.files[0].error.as_deref(),
+            Some("provider located 0 findings of 1")
+        );
+        assert!(report.files[0].findings.is_empty());
     }
 }

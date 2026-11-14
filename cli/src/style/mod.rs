@@ -5,6 +5,7 @@
 
 mod changed;
 mod decisions;
+mod locate;
 mod provider;
 mod report;
 mod resume;
@@ -161,9 +162,16 @@ fn render_text(output: &mut impl Write, report: &Report) -> Result<()> {
         let cached = if file.cached { " (cached)" } else { "" };
         writeln!(output, "{}: {}{cached}", file.path, file.status)?;
         for finding in &file.findings {
+            let place = match finding.lines {
+                Some(lines) if lines.start_line == lines.end_line => {
+                    format!("line {}", lines.start_line)
+                }
+                Some(lines) => format!("lines {}-{}", lines.start_line, lines.end_line),
+                None => "file scope".to_owned(),
+            };
             writeln!(
                 output,
-                "  {} (confidence {:.3}, file scope)",
+                "  {} (confidence {:.3}, {place})",
                 finding.rule, finding.confidence
             )?;
             writeln!(output, "    {}", finding.guidance)?;
@@ -176,4 +184,55 @@ fn render_text(output: &mut impl Write, report: &Report) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::style::{
+        provider::LineRange,
+        report::{FileStatus, Finding},
+    };
+
+    #[test]
+    fn text_output_shows_each_finding_s_lines_or_file_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+        let scan = Scan::discover(dir.path()).unwrap();
+        let rules = RuleSet::load().unwrap();
+        let key = ReviewKey::new(ProviderKind::Decisions, &rules.model, &[], None).unwrap();
+        let mut report = Report::planned(&scan, key, &[]);
+        let finding = |rule: &str, lines| Finding {
+            rule: rule.to_owned(),
+            lines,
+            guidance: format!("Fix {rule}."),
+            confidence: 0.9,
+            probabilities: BTreeMap::new(),
+        };
+        let range = |start_line, end_line| {
+            Some(LineRange {
+                start_line,
+                end_line,
+            })
+        };
+        report.files[0].status = FileStatus::Checked;
+        report.files[0].findings = vec![
+            finding("spanning", range(4, 6)),
+            finding("single", range(9, 9)),
+            finding("whole", None),
+        ];
+        report.settle();
+        let mut output = Vec::new();
+        render_text(&mut output, &report).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(
+            text.split_once('\n').unwrap().1,
+            "lib.rs: checked\n  \
+             spanning (confidence 0.900, lines 4-6)\n    Fix spanning.\n  \
+             single (confidence 0.900, line 9)\n    Fix single.\n  \
+             whole (confidence 0.900, file scope)\n    Fix whole.\n"
+        );
+    }
 }

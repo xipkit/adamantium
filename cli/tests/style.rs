@@ -35,7 +35,6 @@ fn cargo_style_dry_run_is_machine_readable_without_an_api_key() {
     );
     assert_eq!(report["files"].as_array().unwrap().len(), 1);
     assert_eq!(report["files"][0]["path"], "src/main.rs");
-    assert_eq!(report["files"][0]["scope"], "file");
 }
 
 #[test]
@@ -227,19 +226,19 @@ fn a_fully_cached_run_needs_no_key_and_keeps_its_findings() {
     fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
     let planned = style_check(dir.path(), &["--dry-run"]).output().unwrap();
     let mut previous: serde_json::Value = serde_json::from_slice(&planned.stdout).unwrap();
-    assert_eq!(previous["schema_version"], 2);
+    assert_eq!(previous["schema_version"], 3);
     assert_eq!(previous["context_sha256"], serde_json::Value::Null);
     let rules_sha256 = previous["rules_sha256"].as_str().unwrap();
     assert_eq!(rules_sha256.len(), 64);
     previous["status"] = serde_json::json!("complete");
     previous["files"][0] = serde_json::json!({
         "path": "lib.rs",
-        "scope": "file",
         "status": "checked",
         "cached": false,
         "source_sha256": "d015582edda04972d731a817cf2012d58db46b9951e71f55c04e52804cd9ae71",
         "findings": [{
             "rule": "glob_import_context",
+            "lines": { "start_line": 1, "end_line": 1 },
             "guidance": "Use glob imports only where they are clearer.",
             "confidence": 0.9,
             "probabilities": { "violation": 0.9 }
@@ -270,6 +269,10 @@ fn a_fully_cached_run_needs_no_key_and_keeps_its_findings() {
     assert_eq!(
         report["files"][0]["findings"][0]["rule"],
         "glob_import_context"
+    );
+    assert_eq!(
+        report["files"][0]["findings"][0]["lines"],
+        serde_json::json!({ "start_line": 1, "end_line": 1 })
     );
 
     // A different context is a different review, so the file is sent again,
