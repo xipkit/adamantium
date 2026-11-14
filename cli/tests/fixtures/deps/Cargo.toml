@@ -18,6 +18,7 @@ codegen = { path = "vendor/codegen" }
 exports = { path = "vendor/exports" }
 ffi = { path = "vendor/ffi" }
 old = { path = "vendor/old" }
+platform = { path = "vendor/platform" }
 safe = { path = "vendor/safe" }
 spawner = { path = "vendor/spawner", features = ["on"] }
 
