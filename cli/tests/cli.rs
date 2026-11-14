@@ -495,6 +495,168 @@ fn check_applies_the_skip_list() {
     );
 }
 
+/// Runs `check` on `dir` with `args`, returning its exit code, stdout and
+/// stderr.
+fn check_with(dir: &Path, args: &[&str]) -> io::Result<(Option<i32>, Vec<u8>, String)> {
+    let output = adamantium()
+        .args(["adamantium", "check"])
+        .args(args)
+        .arg(dir)
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    Ok((output.status.code(), output.stdout, stderr))
+}
+
+#[test]
+fn check_with_a_baseline_fails_only_on_new_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("src")).unwrap();
+    // No overflow-checks, so the baseline also covers a finding without a line.
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    let lib = dir.path().join("src/lib.rs");
+    fs::write(
+        &lib,
+        "pub fn first(v: Option<i32>) -> i32 {\n    v.unwrap()\n}\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = check_with(dir.path(), &["--format", "json"]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    let baseline = dir.path().join("baseline.json");
+    fs::write(&baseline, stdout).unwrap();
+    let baseline = baseline.to_str().unwrap();
+
+    // Code added above the old finding moves and reindents it, and adds one.
+    fs::write(
+        &lib,
+        "pub fn second(v: Option<i32>) -> i32 {\n    v.expect(\"set\")\n}\n\npub mod inner {\n    pub fn first(v: Option<i32>) -> i32 {\n        v.unwrap()\n    }\n}\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) =
+        check_with(dir.path(), &["--format", "json", "--baseline", baseline]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(report["status"], "findings", "{report}");
+    let findings = report["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "{report}");
+    assert_eq!(findings[0]["rule"], "clippy::expect_used", "{report}");
+    assert_eq!(findings[0]["line"], 2, "{report}");
+    assert_eq!(
+        report["baselined"],
+        serde_json::json!({
+            "adamantium::overflow_checks": 1,
+            "clippy::unwrap_used": 1,
+        }),
+        "{report}"
+    );
+    assert_eq!(report["baseline_unmatched"], 0, "{report}");
+
+    // Text output shows only the new finding's diagnostic.
+    let (code, _, stderr) = check_with(dir.path(), &["--baseline", baseline]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("expect_used"), "{stderr}");
+    assert!(!stderr.contains("unwrap_used"), "{stderr}");
+    assert!(!stderr.contains("overflow-checks"), "{stderr}");
+    assert!(
+        stderr.contains("adamantium: 1 finding in src/lib.rs (2 in the baseline)"),
+        "{stderr}"
+    );
+
+    // Fixing both leaves the check clean and says the baseline is stale.
+    fs::write(
+        &lib,
+        "pub fn first(v: Option<i32>) -> i32 {\n    v.unwrap_or(0)\n}\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) =
+        check_with(dir.path(), &["--format", "json", "--baseline", baseline]).unwrap();
+    assert_eq!(code, Some(0), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(report["status"], "clean", "{report}");
+    assert_eq!(report["baseline_unmatched"], 1, "{report}");
+    let (code, _, stderr) = check_with(dir.path(), &["--baseline", baseline]).unwrap();
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        stderr.contains("adamantium: clean (1 in the baseline)\nadamantium: 1 finding in the baseline no longer occurs"),
+        "{stderr}"
+    );
+
+    // Without a baseline, every finding counts and none is matched.
+    let (code, stdout, stderr) = check_with(dir.path(), &["--format", "json"]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(report["baselined"], serde_json::json!({}), "{report}");
+    assert_eq!(
+        report["baseline_unmatched"],
+        serde_json::Value::Null,
+        "{report}"
+    );
+}
+
+#[test]
+fn check_with_a_baseline_keeps_the_skip_list() {
+    let (code, stdout, stderr) = check_with(&fixture("skips"), &["--format", "json"]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    let dir = tempfile::tempdir().unwrap();
+    let baseline = dir.path().join("baseline.json");
+    fs::write(&baseline, stdout).unwrap();
+    let (code, stdout, stderr) = check_with(
+        &fixture("skips"),
+        &["--format", "json", "--baseline", baseline.to_str().unwrap()],
+    )
+    .unwrap();
+    assert_eq!(code, Some(0), "{stderr}");
+    let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(report["findings"], serde_json::json!([]), "{report}");
+    assert_eq!(
+        report["skipped"],
+        serde_json::json!({
+            "clippy::cast_possible_truncation": 1,
+            "clippy::indexing_slicing": 1,
+            "clippy::string_slice": 1,
+        }),
+        "{report}"
+    );
+    assert_eq!(
+        report["baselined"],
+        serde_json::json!({
+            "clippy::string_slice": 1,
+            "clippy::unwrap_used": 1,
+        }),
+        "{report}"
+    );
+}
+
+#[test]
+fn check_refuses_an_unusable_baseline_before_running_clippy() {
+    let dir = tempfile::tempdir().unwrap();
+    let baseline = dir.path().join("old.json");
+    fs::write(
+        &baseline,
+        r#"{"schema_version": 2, "root": "/p", "status": "findings", "findings": []}"#,
+    )
+    .unwrap();
+    let missing = dir.path().join("missing.json");
+    for (path, expected) in [
+        (&baseline, "it has schema version 2"),
+        (&missing, "reading"),
+    ] {
+        let (code, stdout, stderr) = check_with(
+            &fixture("clean"),
+            &["--format", "json", "--baseline", path.to_str().unwrap()],
+        )
+        .unwrap();
+        assert_eq!(code, Some(2), "{stderr}");
+        assert!(stdout.is_empty());
+        assert!(stderr.starts_with("error: "), "{stderr}");
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(!stderr.contains("Checking"), "{stderr}");
+    }
+}
+
 #[test]
 fn check_rejects_an_unknown_rule_in_the_skip_list() {
     let dir = tempfile::tempdir().unwrap();

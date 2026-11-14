@@ -98,6 +98,19 @@ For a single package, use `[package.metadata.adamantium]`. Paths are globs relat
 
 `check` summarizes skipped findings and reports counts by rule in the JSON report's `skipped` map. Remove a rule from `allow` to see its findings. Projects with a skip list should run `cargo adamantium check` in CI because a `[lints]` table cannot scope a rule to a path.
 
+## Baselines
+
+The skip list adopts rules by path or by rule. To adopt them everywhere at once without fixing every existing finding first, save a report and check against it:
+
+```sh
+cargo adamantium check --format json > adamantium-baseline.json
+cargo adamantium check --baseline adamantium-baseline.json
+```
+
+With `--baseline`, findings that the earlier report already has are left out, so only new findings fail the check. The status, the exit code, and the findings in JSON and SARIF reports cover only new findings, and text output shows diagnostics only for them. The JSON report counts the matched findings by rule in its `baselined` map, and `baseline_unmatched` is the number of findings in the baseline that the check did not find, or `null` without a baseline. Regenerate the baseline after fixing findings so they cannot come back.
+
+A finding matches the baseline when its rule, its path relative to the project root, and its source text are the same. Line numbers, columns, and messages are ignored, so edits elsewhere in a file and a different Clippy version do not bring findings back, and the baseline can be written on another machine. Editing the line of a finding, or moving it to another file, makes it new. When findings share a rule, path, and source text, only those beyond the baseline's count are new. The skip list applies first. The baseline must be a `schema_version: 3` report from a check that built; `check` refuses older reports and reports from failed builds.
+
 For a machine-readable list of rules and their reasons, run `cargo adamantium rules --format json`.
 
 `cargo adamantium explain <rule>` prints the rule's reasoning, recommended replacement, and before-and-after example without loading a project or accessing the network. It accepts the bare or qualified rule name, including `overflow_checks` or `adamantium::overflow_checks` for the release profile check. With `--format json`, it prints an object with `schema_version: 1`, `rule` (the qualified name), `why`, `replacement`, `before`, and `after`. Successful explanations exit with `0`; unknown rule names exit with `2` and an error on stderr.

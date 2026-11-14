@@ -319,6 +319,8 @@ mod tests {
             status: Status::Findings,
             findings,
             skipped: BTreeMap::new(),
+            baselined: BTreeMap::new(),
+            baseline_unmatched: None,
             warnings: Vec::new(),
             errors: Vec::new(),
         }
