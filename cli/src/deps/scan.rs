@@ -19,9 +19,10 @@ use std::{
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use serde::Serialize;
 use syn::{
-    Arm, Attribute, Block, Expr, ExprCall, ExprLit, ExprMethodCall, ExprPath, ExprUnsafe,
-    FieldValue, File, ImplItem, ImplItemFn, Item, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemTrait,
-    Lit, Macro, Meta, Safety, Stmt, Token, TraitItem, TraitItemFn, Type, UseTree,
+    Arm, Attribute, Block, Expr, ExprCall, ExprClosure, ExprForLoop, ExprIf, ExprLit,
+    ExprMethodCall, ExprPath, ExprUnsafe, ExprWhile, FieldValue, File, FnArg, ImplItem, ImplItemFn,
+    Item, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemTrait, Lit, Macro, Meta, Pat, PatIdent, Safety,
+    Signature, Stmt, Token, TraitItem, TraitItemFn, Type, UseTree,
     ext::IdentExt,
     parse::ParseStream,
     punctuated::Punctuated,
@@ -1215,8 +1216,72 @@ impl FileVisitor<'_, '_> {
         self.blocks.push(scope);
         for stmt in stmts {
             self.visit_stmt(stmt);
+            // A `let` binds its names for the statements after it.
+            if let Stmt::Local(local) = stmt
+                && self.enabled(&local.attrs)
+                && let Some(block) = self.blocks.last_mut()
+            {
+                for name in pattern_names([&local.pat]) {
+                    block.define(Namespace::Values, name, Binding::Opaque);
+                }
+            }
         }
         self.blocks.pop();
+    }
+
+    /// Visits code with the names some patterns bind in scope, such as a
+    /// function's parameters or a match arm's pattern.
+    fn with_patterns<'p>(
+        &mut self,
+        patterns: impl IntoIterator<Item = &'p Pat>,
+        visit: impl FnOnce(&mut Self),
+    ) {
+        let mut scope = Scope::default();
+        for name in pattern_names(patterns) {
+            scope.define(Namespace::Values, name, Binding::Opaque);
+        }
+        self.blocks.push(scope);
+        visit(self);
+        self.blocks.pop();
+    }
+}
+
+/// The names that patterns bind.
+fn pattern_names<'p>(patterns: impl IntoIterator<Item = &'p Pat>) -> Vec<String> {
+    struct Names(Vec<String>);
+    impl<'ast> Visit<'ast> for Names {
+        fn visit_pat_ident(&mut self, pat: &'ast PatIdent) {
+            self.0.push(pat.ident.unraw().to_string());
+            visit::visit_pat_ident(self, pat);
+        }
+    }
+    let mut names = Names(Vec::new());
+    for pattern in patterns {
+        names.visit_pat(pattern);
+    }
+    names.0
+}
+
+/// The patterns of a signature's parameters.
+fn parameters(sig: &Signature) -> impl Iterator<Item = &Pat> {
+    sig.inputs.iter().filter_map(|input| match input {
+        FnArg::Typed(typed) => Some(&*typed.pat),
+        FnArg::Receiver(_) => None,
+    })
+}
+
+/// The patterns of the `let`s in a condition, such as `if let Some(x) = y &&
+/// let Ok(z) = x`, whose names the condition's block sees.
+fn condition_patterns(condition: &Expr) -> Vec<&Pat> {
+    match condition {
+        Expr::Let(expr) => vec![&*expr.pat],
+        Expr::Binary(expr) => {
+            let mut patterns = condition_patterns(&expr.left);
+            patterns.extend(condition_patterns(&expr.right));
+            patterns
+        }
+        Expr::Paren(expr) => condition_patterns(&expr.expr),
+        _ => Vec::new(),
     }
 }
 
@@ -1256,7 +1321,9 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         if is_unsafe(&item.sig.safety) {
             self.scanner.scan.unsafe_code.functions += 1;
         }
-        visit::visit_item_fn(self, item);
+        self.with_patterns(parameters(&item.sig), |this| {
+            visit::visit_item_fn(this, item);
+        });
     }
 
     fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
@@ -1290,7 +1357,9 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         if is_unsafe(&item.sig.safety) {
             self.scanner.scan.unsafe_code.functions += 1;
         }
-        visit::visit_impl_item_fn(self, item);
+        self.with_patterns(parameters(&item.sig), |this| {
+            visit::visit_impl_item_fn(this, item);
+        });
     }
 
     fn visit_trait_item(&mut self, item: &'ast TraitItem) {
@@ -1310,7 +1379,9 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         if is_unsafe(&item.sig.safety) {
             self.scanner.scan.unsafe_code.functions += 1;
         }
-        visit::visit_trait_item_fn(self, item);
+        self.with_patterns(parameters(&item.sig), |this| {
+            visit::visit_trait_item_fn(this, item);
+        });
     }
 
     fn visit_block(&mut self, block: &'ast Block) {
@@ -1345,8 +1416,34 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
 
     fn visit_arm(&mut self, arm: &'ast Arm) {
         if self.enabled(&arm.attrs) {
-            visit::visit_arm(self, arm);
+            self.with_patterns([&arm.pat], |this| visit::visit_arm(this, arm));
         }
+    }
+
+    fn visit_expr_closure(&mut self, expr: &'ast ExprClosure) {
+        self.with_patterns(&expr.inputs, |this| visit::visit_expr_closure(this, expr));
+    }
+
+    fn visit_expr_for_loop(&mut self, expr: &'ast ExprForLoop) {
+        self.visit_expr(&expr.expr);
+        self.with_patterns([&*expr.pat], |this| this.visit_block(&expr.body));
+    }
+
+    fn visit_expr_if(&mut self, expr: &'ast ExprIf) {
+        self.with_patterns(condition_patterns(&expr.cond), |this| {
+            this.visit_expr(&expr.cond);
+            this.visit_block(&expr.then_branch);
+        });
+        if let Some((_, otherwise)) = &expr.else_branch {
+            self.visit_expr(otherwise);
+        }
+    }
+
+    fn visit_expr_while(&mut self, expr: &'ast ExprWhile) {
+        self.with_patterns(condition_patterns(&expr.cond), |this| {
+            this.visit_expr(&expr.cond);
+            this.visit_block(&expr.body);
+        });
     }
 
     fn visit_expr_unsafe(&mut self, expr: &'ast ExprUnsafe) {

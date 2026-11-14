@@ -114,6 +114,30 @@ pub fn with_a_local_module() {
     child::run();
 }
 
+// Parameters and locals named `blocking` shadow the import.
+pub fn shadowed(blocking: fn(())) {
+    blocking(());
+}
+
+pub fn shadowed_by_patterns(callbacks: Option<fn(())>) {
+    if let Some(blocking) = callbacks {
+        blocking(());
+    }
+    match callbacks {
+        Some(blocking) => blocking(()),
+        None => {}
+    }
+    for blocking in callbacks {
+        blocking(());
+    }
+    let _ = |blocking: fn(())| blocking(());
+    {
+        let blocking = |_: ()| ();
+        blocking(());
+    }
+    blocking(()); // tokio::task::spawn_blocking
+}
+
 pub fn blocks() {
     unsafe { rt::task::raw() };
     println!("{:?}", task::spawn(())); // tokio::task::spawn
