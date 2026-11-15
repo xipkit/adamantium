@@ -7,9 +7,10 @@
 //! a time ([`Actor`]), a bounded channel ([`Channel`]), a channel that sends
 //! each message to every subscriber ([`Topic`]), a one-shot reply
 //! ([`Reply`]), the latest value of shared state ([`Watch`]), [`race`] to wait
-//! for the first of several events, and `blocking` for code that must block a
-//! thread. The `cargo adamantium` subcommand applies the Clippy rules that
-//! keep a crate inside the fragment.
+//! for the first of several events, a limit on how many calls run at once
+//! ([`Limit`]), and `blocking` for code that must block a thread. The
+//! `cargo adamantium` subcommand applies the Clippy rules that keep a crate
+//! inside the fragment.
 //!
 //! Everything here is `Send + Sync + 'static` when its element types are, so
 //! a value of any of these types can be handed to a task without ceremony.
@@ -39,6 +40,7 @@ mod async_actor;
 mod bytes;
 mod channel;
 mod deque;
+mod limit;
 mod map;
 mod race;
 #[cfg(feature = "tokio")]
@@ -67,6 +69,7 @@ pub use channel::{Channel, Closed, Receiver, Sender, TryReceiveError, TrySendErr
 #[cfg(feature = "tokio")]
 pub use channel::{ReceiveError, SendError};
 pub use deque::Deque;
+pub use limit::Limit;
 pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
 pub use race::{Race, race};
 #[cfg(feature = "tokio")]
