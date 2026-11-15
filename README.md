@@ -59,6 +59,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `Actor` | Shared state. Each access is a synchronous closure, so no lock is held across an `await`. |
 | `AsyncActor` | One worker that owns its state and handles one message at a time. Use it when the state must `await`. |
 | `Channel`, `Reply`, `Watch` | A bounded queue, a one-shot reply, and the latest value of some state. |
+| `race` | Waits for the first of several futures and drops the others. Use it in place of `select!`. |
 | `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. |
 | `retry`, `RateLimit` | Retries with backoff, and a limit on calls in a time window. |
 | `blocking` | Runs blocking code on the blocking pool. |
