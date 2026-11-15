@@ -81,7 +81,7 @@ With `default-features = false`, the values, `Actor`, `Channel`, `Reply`, and `W
 
 The library builds on `wasm32-wasip1` with and without the `tokio` feature. CI tests both. WASI has one thread and no panic unwinding, so these differences apply:
 
-- `blocking` and `Tasks::spawn_blocking` panic, because they need a second thread.
+- `blocking` and `Tasks::spawn_blocking` run the closure on the one thread. Other tasks wait until it returns.
 - A panic stops the program. On other targets, a scope reports the panic.
 - The `signal` and `deterministic` features do not build.
 
