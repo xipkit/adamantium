@@ -168,6 +168,26 @@ mod paused {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn the_window_counts_from_the_restart_and_not_from_the_failure() {
+        let began = time::now();
+        let backoff = Backoff::constant(Duration::from_secs(8));
+        let restarts = Restarts::new(1, Duration::from_secs(10)).backoff(backoff);
+        let result = Tasks::run(async |tasks| {
+            let worker = tasks.spawn_supervised(restarts, move |error: Option<u64>| async move {
+                // Fails at 0 seconds, restarts at 8, and fails again at 13:
+                // 13 seconds after the failure, but 5 after the restart.
+                if error.is_some() {
+                    time::sleep(Duration::from_secs(5)).await;
+                }
+                Err::<(), _>((time::now() - began).as_secs())
+            });
+            tasks.value(worker).await
+        })
+        .await;
+        assert_eq!(result, Err(13));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn the_backoff_attempts_are_ignored() {
         let starts = Actor::new(0);
         let count = starts.clone();

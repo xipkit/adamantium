@@ -144,13 +144,15 @@ impl<E: Send + 'static> Tasks<E> {
                 if restarted.len() >= restarts.limit {
                     return Err(error);
                 }
-                restarted.push_back(now);
-                let delay = restarts.delay(restarted.len());
+                let delay = restarts.delay(restarted.len().saturating_add(1));
                 if delay.is_zero() {
                     yield_once().await;
                 } else {
                     time::sleep(delay).await;
                 }
+                // The window counts from when the task restarts, so a wait
+                // that ends late cannot give the budget back early.
+                restarted.push_back(time::now());
                 last = Some(error);
             }
         })
