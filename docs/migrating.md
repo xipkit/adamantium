@@ -30,6 +30,7 @@ changes behavior in a way to check.
 | `JoinSet::join_next` | `concurrently_unordered` | No |
 | `select!` racing futures for the first success | `first_ok` | Mostly |
 | `select!` waiting for the first of several events | `race` | Mostly |
+| `tokio::sync::broadcast` | `Topic` | Mostly |
 | A detached worker fed by a channel | A worker task in the scope that sends to it | No |
 | `JoinHandle::abort` on a long-lived task | `Tasks::run_until` with a `Cancellation` | No |
 | `tokio::spawn` inside a task | A scope inside the task | No |
@@ -741,6 +742,48 @@ As with `select!`, a future that loses is dropped at the await where it was
 waiting. Race only futures that lose nothing by that, such as a receive or a
 sleep. To stop on a `Cancellation` or a deadline, prefer `receive_until` and
 `send_until`, which need no race.
+
+### Messages for every receiver
+
+A `broadcast` channel gives each receiver every message, until a receiver
+falls behind. Then it drops the oldest messages and that receiver gets a
+`Lagged` error. `Topic` drops nothing: `send` waits until every subscriber has
+room. The change to check is that a subscriber that stops receiving now
+stops the sender, so bound the wait with `send_until` where that matters.
+
+Before:
+
+```rust
+#[tokio::main]
+async fn main() {
+    let (prices, mut display) = tokio::sync::broadcast::channel(8);
+    let mut log = prices.subscribe();
+
+    prices.send(42).ok();
+    assert_eq!(display.recv().await.ok(), Some(42));
+    assert_eq!(log.recv().await.ok(), Some(42));
+}
+```
+
+After:
+
+```rust
+use adamantium::Topic;
+
+#[tokio::main]
+async fn main() {
+    let mut prices = Topic::new(8);
+    let display = prices.subscribe();
+    let log = prices.subscribe();
+
+    assert_eq!(prices.send(42).await, 2);
+    assert_eq!(display.receive().await, Some(42));
+    assert_eq!(log.receive().await, Some(42));
+}
+```
+
+A topic has one sender, where a `broadcast::Sender` can be cloned. To publish
+from several tasks, send to one task that owns the topic through a `Channel`.
 
 ### Blocking work
 
