@@ -10,9 +10,8 @@ The `cargo adamantium` subcommand checks projects against these rules. It also o
 
 Add the library to a project:
 
-```toml
-[dependencies]
-adamantium = { git = "https://github.com/xipkit/adamantium.git", rev = "..." }
+```sh
+cargo add adamantium
 ```
 
 The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, `first_ok`, the
@@ -23,7 +22,7 @@ feature can be enabled independently.
 Install the subcommand:
 
 ```sh
-cargo install --locked --git https://github.com/xipkit/adamantium cargo-adamantium
+cargo install --locked cargo-adamantium
 ```
 
 Adamantium requires Rust 1.96 or later. This repository uses the library and follows the same rules.
@@ -68,7 +67,7 @@ permissions:
   security-events: write
 steps:
   - uses: actions/checkout@v4
-  - run: cargo install --locked --git https://github.com/xipkit/adamantium cargo-adamantium
+  - run: cargo install --locked cargo-adamantium
   # Findings exit with 1; let them through so code scanning can show them.
   - run: cargo adamantium check --format sarif > adamantium.sarif || [ $? -eq 1 ]
   - uses: github/codeql-action/upload-sarif@v4
