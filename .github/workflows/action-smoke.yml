@@ -2,10 +2,16 @@ name: Action smoke test
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
+
+# A newer push to a pull request replaces the run for the older one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   cold:
