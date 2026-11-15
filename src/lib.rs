@@ -5,8 +5,9 @@
 //! copy-on-write values ([`Str`], [`Bytes`], [`Array`], [`Deque`], [`Map`], [`Set`]), a
 //! structured task scope (`Tasks`), shared state whose methods run one at
 //! a time ([`Actor`]), a bounded channel ([`Channel`]), a one-shot reply
-//! ([`Reply`]), the latest value of shared state ([`Watch`]), and `blocking`
-//! for code that must block a thread. The `cargo adamantium` subcommand applies
+//! ([`Reply`]), the latest value of shared state ([`Watch`]), [`race`] to wait
+//! for the first of several events, and `blocking` for code that must block a
+//! thread. The `cargo adamantium` subcommand applies
 //! the Clippy rules that keep a crate inside the fragment.
 //!
 //! Everything here is `Send + Sync + 'static` when its element types are, so
@@ -38,6 +39,7 @@ mod bytes;
 mod channel;
 mod deque;
 mod map;
+mod race;
 #[cfg(feature = "tokio")]
 mod rate_limit;
 mod reply;
@@ -64,6 +66,7 @@ pub use channel::{Channel, Closed, Receiver, Sender, TryReceiveError, TrySendErr
 pub use channel::{ReceiveError, SendError};
 pub use deque::Deque;
 pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
+pub use race::{Race, race};
 #[cfg(feature = "tokio")]
 pub use rate_limit::RateLimit;
 pub use reply::{Reply, ReplyReceiver};
