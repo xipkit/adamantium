@@ -64,6 +64,34 @@ The buffer of Serde reports that it is human-readable, so `Bytes` requests a seq
 
 `blocking` runs a closure on the blocking pool. A panic in the closure resumes on the calling task.
 
+WASI has one thread. On WASI, `blocking` and `Tasks::spawn_blocking` run the closure on that thread, and other tasks wait until the closure returns.
+
+### `race`
+
+`race` waits for the first of several futures and returns its output. Use it in place of `select!` to wait for a message, a timer, or a shutdown request.
+
+```rust
+use adamantium::{Channel, race};
+
+enum Event {
+    Job(Option<u32>),
+    Stop,
+}
+
+let event = race((
+    async { stop.receive().await; Event::Stop },
+    async { Event::Job(jobs.receive().await) },
+))
+.await;
+```
+
+- `race` takes a tuple of two to eight futures. The futures must have the same output. To wait for different events, make each future return one variant of an enum.
+- The futures run inside `race`, on the task that awaits it. They can borrow from the caller, and they do not have to be `Send` or `'static`.
+- `race` needs no runtime. It works without the `tokio` feature.
+- `race` polls the futures in the order written. If two futures are ready at the same time, the earlier one wins.
+- When one future finishes, `race` drops the others at the `await` where they wait. Race only futures that lose nothing when dropped, such as a receive or a sleep.
+- To run work in parallel, or to keep the first success and ignore failures, use `first_ok`.
+
 ## Actors
 
 ### `Actor`
