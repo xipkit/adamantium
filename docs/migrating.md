@@ -7,7 +7,7 @@ the code as it was and the code as the rules want it. Every block runs as a
 doctest of the library, so the rewrites track the current API.
 
 To adopt the rules one module at a time, skip the paths you haven't migrated
-yet with the [skip list](../README.md#skipping-rules-and-paths).
+yet with the [skip list](cli.md#skip-list).
 
 A rewrite is mechanical when it needs no decision about what the program
 should do. "Mostly" means it is mechanical in the common case shown, but
