@@ -341,6 +341,29 @@ Unnamed tasks create no spans and no diagnostic records.
 
 Without `tracing`, the named methods behave as the unnamed methods do. They do not convert or store names, and the library has no tracing dependency.
 
+## Limit
+
+`Limit::new(places)` lets at most `places` calls run at the same time. Clones share the limit, so give a clone to each task that must count against it.
+
+```rust
+use adamantium::Limit;
+
+let connections = Limit::new(4);
+let rows = connections.run(|| query(7)).await;
+```
+
+- `run(work)` waits for a place, runs the work, and returns its output. It calls `work` only when a place is free.
+- The place becomes free when the work finishes or when the future is dropped.
+- Waiting calls do not get places in the order of their arrival.
+- `run_until(&cancellation, deadline, work)` stops the wait or the work on a `Cancellation` or at a deadline. It returns `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExceeded`. It needs the `tokio` feature.
+- `available()` returns the number of free places.
+
+The work of one call must not start a second call on any limit. That call panics. A task that holds one place and waits for a second place can deadlock.
+
+The check finds only a call that the work makes itself. It does not find a call in a task that the work spawns. Do not let such a task use a limit that the work holds.
+
+To limit the items of one collection, use `concurrently`. It needs no shared limit.
+
 ## Retries and rate limits
 
 ### `retry`
