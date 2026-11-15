@@ -52,6 +52,43 @@ The buffer of Serde reports that it is human-readable, so `Bytes` requests a seq
 - A failure stops it from taking more items.
 - The iterator and the closure must be `Send`. They run inside the poll of the returned future.
 
+### Supervised tasks
+
+`tasks.spawn_supervised(restarts, work)` starts a task that restarts when it fails. Use it for a long-lived worker, such as a connection that can drop.
+
+```rust
+use adamantium::{Backoff, Restarts, Tasks};
+use std::time::Duration;
+
+let restarts = Restarts::new(5, Duration::from_secs(60))
+    .backoff(Backoff::exponential(Duration::from_millis(100), Duration::from_secs(5)));
+
+Tasks::run(async |tasks| {
+    let worker = tasks.spawn_supervised(restarts, |error| async move {
+        if let Some(error) = error {
+            eprintln!("restarting after: {error}");
+        }
+        serve().await
+    });
+    tasks.value(worker).await
+})
+.await?;
+```
+
+- `work` makes the future of the task. The first call gets `None`.
+- When the future returns `Err`, `work` is called again with that error. Log the error there, and start the new attempt from clean state.
+- When the future returns `Ok`, the task ends with that value. It does not restart.
+- A panic does not restart the task. The scope resumes the panic.
+- The scope aborts a supervised task like any other task. It does not wait for a restart.
+
+`Restarts::new(limit, per)` allows at most `limit` restarts in any window of length `per`.
+
+- A restart that is older than the window does not count. A task that fails occasionally continues to run.
+- A task that fails with no restart left ends with that error. The scope handles the error like the error of any other task.
+- `.backoff(backoff)` adds a wait before each restart. Each further restart in the same window waits longer. Only the delays of the `Backoff` apply. Its limit on attempts does not.
+
+`retry` is for one operation that must succeed one time. `spawn_supervised` is for a task that runs for a long time and can fail many times.
+
 ### `first_ok`
 
 `first_ok` takes items in the same way as `concurrently`. It returns the first success, then aborts and drains the items that still run.

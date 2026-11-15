@@ -54,7 +54,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | Type | Purpose |
 | --- | --- |
 | `Str`, `Bytes`, `Array`, `Deque`, `Map`, `Set` | Copy-on-write values. A clone shares storage until one side writes. |
-| `Tasks` | A scope that owns its tasks. It waits for them. If one fails, it aborts the others. |
+| `Tasks` | A scope that owns its tasks. It waits for them. If one fails, it aborts the others. `spawn_supervised` restarts a task that fails, within a `Restarts` budget. |
 | `concurrently`, `first_ok` | Run a function on many items with a concurrency limit. |
 | `Actor` | Shared state. Each access is a synchronous closure, so no lock is held across an `await`. |
 | `AsyncActor` | One worker that owns its state and handles one message at a time. Use it when the state must `await`. |
@@ -71,7 +71,7 @@ The [library guide](docs/library.md) describes each type.
 
 | Feature | Default | Adds |
 | --- | --- | --- |
-| `tokio` | Yes | `Tasks`, `concurrently`, `first_ok`, the concurrent streams, `AsyncActor`, `blocking`, `time`, `retry`, and `RateLimit` |
+| `tokio` | Yes | `Tasks`, `concurrently`, `first_ok`, the concurrent streams, `AsyncActor`, `blocking`, `time`, `retry`, `Restarts`, and `RateLimit` |
 | `serde` | No | Serialization for the values |
 | `signal` | No | `Cancellation::cancel_on_signal` for SIGINT, SIGTERM, and Ctrl-C |
 | `tracing` | No | Named task spans, and a warning that lists unfinished tasks when a deadline expires |
