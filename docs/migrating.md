@@ -29,6 +29,7 @@ changes behavior in a way to check.
 | A loop of spawns, or results pushed into an `Arc<Mutex<Vec<T>>>` | `concurrently` | Mostly |
 | `JoinSet::join_next` | `concurrently_unordered` | No |
 | `select!` racing futures for the first success | `first_ok` | Mostly |
+| `select!` waiting for the first of several events | `race` | Mostly |
 | A detached worker fed by a channel | A worker task in the scope that sends to it | No |
 | `JoinHandle::abort` on a long-lived task | `Tasks::run_until` with a `Cancellation` | No |
 | `tokio::spawn` inside a task | A scope inside the task | No |
@@ -678,6 +679,68 @@ async fn main() -> Result<(), Vec<String>> {
 
 Each item runs as a task, so its future must be `'static`. A limit of one
 tries the items in turn, which replaces a chain of fallbacks.
+
+### The first event
+
+A `select!` that waits for a message, a timer, or a shutdown request, and
+acts on whichever comes first, becomes `race`. `race` is a function, so the
+branches are ordinary futures and the result is an ordinary value. It polls
+the futures in the order written, where `select!` picks a branch at random,
+so put the event that must win a tie first.
+
+Before:
+
+```rust
+use adamantium::Channel;
+
+enum Event {
+    Job(u32),
+    Stop,
+}
+
+#[tokio::main]
+async fn main() {
+    let jobs = Channel::<u32>::bounded(4);
+    let stop = Channel::<()>::bounded(1);
+    jobs.send(7).await.ok();
+
+    let event = tokio::select! {
+        _ = stop.receive() => Event::Stop,
+        job = jobs.receive() => job.map_or(Event::Stop, Event::Job),
+    };
+    assert!(matches!(event, Event::Job(7)));
+}
+```
+
+After:
+
+```rust
+use adamantium::{Channel, race};
+
+enum Event {
+    Job(u32),
+    Stop,
+}
+
+#[tokio::main]
+async fn main() {
+    let jobs = Channel::<u32>::bounded(4);
+    let stop = Channel::<()>::bounded(1);
+    jobs.send(7).await.ok();
+
+    let event = race((
+        async { stop.receive().await.map_or(Event::Stop, |()| Event::Stop) },
+        async { jobs.receive().await.map_or(Event::Stop, Event::Job) },
+    ))
+    .await;
+    assert!(matches!(event, Event::Job(7)));
+}
+```
+
+As with `select!`, a future that loses is dropped at the await where it was
+waiting. Race only futures that lose nothing by that, such as a receive or a
+sleep. To stop on a `Cancellation` or a deadline, prefer `receive_until` and
+`send_until`, which need no race.
 
 ### Blocking work
 
