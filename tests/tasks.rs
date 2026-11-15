@@ -142,7 +142,6 @@ macro_rules! on_both_runtimes {
 }
 
 on_both_runtimes! {
-    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
     async fn an_error_from_a_dropped_blocking_handle_is_reported_at_join() {
         let mut tasks = Tasks::<&str>::new();
         let (release, released) = std::sync::mpsc::sync_channel(1);

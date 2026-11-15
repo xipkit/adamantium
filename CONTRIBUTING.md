@@ -23,7 +23,7 @@ cargo test --locked --target wasm32-wasip1 -p adamantium --lib --tests --no-defa
 cargo test --locked --target wasm32-wasip1 -p adamantium --lib --tests --features serde,tracing
 ```
 
-Tokio on WASI has no multi-threaded runtime and no paused clock, so tests that need either are compiled out there with `#[cfg(not(target_os = "wasi"))]`. Tests that need a thread or catch a panic are marked `#[cfg_attr(target_os = "wasi", ignore = "...")]`. Doctests and examples are not run on WASI.
+Tokio on WASI has no multi-threaded runtime and no paused clock, so tests that need either are compiled out there with `#[cfg(not(target_os = "wasi"))]`. Tests that need a second thread or catch a panic are marked `#[cfg_attr(target_os = "wasi", ignore = "...")]`. Doctests and examples are not run on WASI.
 
 The repository follows its own rules. Where the library needs restricted features, such as the `JoinSet` inside `Tasks` and the `Mutex` inside `Actor`, the code uses an `allow` with a reason. The CLI tests run `cargo adamantium check` against fixture crates with and without rule violations. They require Clippy and network access on the first run.
 

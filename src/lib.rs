@@ -20,9 +20,9 @@
 //! and watches without a Tokio dependency.
 //!
 //! Both configurations build and are tested on `wasm32-wasip1`. WASI has one
-//! thread and aborts on a panic, so `blocking` and `Tasks::spawn_blocking`
-//! panic there, and a panic ends the program where other targets would report
-//! it to the scope.
+//! thread and aborts on a panic, so `blocking` and `Tasks::spawn_blocking` run
+//! their closure on that thread while other tasks wait, and a panic ends the
+//! program where other targets would report it to the scope.
 //! The opt-in `signal` feature adds `Cancellation::cancel_on_signal` on Unix
 //! and Windows and enables Tokio's process signal support.
 //! Enable the optional `tracing` feature for named task spans and warnings

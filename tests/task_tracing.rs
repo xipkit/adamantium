@@ -262,7 +262,6 @@ async fn panicked_tasks_are_excluded_and_their_panic_still_propagates() {
     );
 }
 
-#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 #[tokio::test]
 async fn spans_follow_async_polls_and_blocking_closures_and_keep_the_parent() {
     check_spans().await;
