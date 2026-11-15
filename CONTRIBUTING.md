@@ -14,6 +14,17 @@ node --test style/scripts/evaluate-decisions.test.mjs
 
 [GitHub Actions](.github/workflows/ci.yml) runs the same commands on pull requests and pushes to `main`.
 
+CI also runs the library's tests on `wasm32-wasip1` under Wasmtime, with and without Tokio. To run them locally, install the target and Wasmtime:
+
+```sh
+export CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime run"
+cargo test --locked --target wasm32-wasip1 -p adamantium --lib --tests
+cargo test --locked --target wasm32-wasip1 -p adamantium --lib --tests --no-default-features
+cargo test --locked --target wasm32-wasip1 -p adamantium --lib --tests --features serde,tracing
+```
+
+Tokio on WASI has no multi-threaded runtime and no paused clock, so tests that need either are compiled out there with `#[cfg(not(target_os = "wasi"))]`. Tests that need a thread or catch a panic are marked `#[cfg_attr(target_os = "wasi", ignore = "...")]`. Doctests and examples are not run on WASI.
+
 The repository follows its own rules. Where the library needs restricted features, such as the `JoinSet` inside `Tasks` and the `Mutex` inside `Actor`, the code uses an `allow` with a reason. The CLI tests run `cargo adamantium check` against fixture crates with and without rule violations. They require Clippy and network access on the first run.
 
 ## Releasing

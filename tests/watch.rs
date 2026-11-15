@@ -303,6 +303,7 @@ fn wait_for_sees_a_last_value_sent_before_closing() {
     );
 }
 
+#[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
 #[test]
 fn a_watch_dropped_by_a_panic_still_closes() {
     let watch = Watch::new(0);
@@ -361,6 +362,7 @@ fn past() -> Option<Instant> {
 }
 
 #[cfg(feature = "tokio")]
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn every_watcher_ends_on_the_last_value() {
     let watch = Watch::new(0_u32);
@@ -400,6 +402,7 @@ async fn every_watcher_ends_on_the_last_value() {
 }
 
 #[cfg(feature = "tokio")]
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(start_paused = true)]
 async fn receive_until_ends_at_the_deadline_and_leaves_later_values() {
     let watch = Watch::new(0);
@@ -423,6 +426,7 @@ async fn receive_until_ends_at_the_deadline_and_leaves_later_values() {
 }
 
 #[cfg(feature = "tokio")]
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(start_paused = true)]
 async fn receive_until_ends_when_cancelled() {
     let watch = Watch::new(0);
@@ -467,6 +471,7 @@ async fn receive_until_prefers_shutdown_to_an_unseen_value() {
 }
 
 #[cfg(feature = "tokio")]
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_send_racing_a_new_wait_is_never_missed() {
     // A wait that checks, then listens, can miss a send made between the

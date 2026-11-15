@@ -35,13 +35,15 @@ async fn begin<F: Future + Send>(mut future: Pin<&mut F>) {
 }
 
 macro_rules! on_both_runtimes {
-    ($(async fn $name:ident() $body:block)*) => {$(
+    ($($(#[$attribute:meta])* async fn $name:ident() $body:block)*) => {$(
         mod $name {
             use super::*;
 
+            $(#[$attribute])*
             #[tokio::test]
             async fn current_thread() $body
 
+            #[cfg(not(target_os = "wasi"))]
             #[tokio::test(flavor = "multi_thread")]
             async fn multi_thread() $body
         }
@@ -178,6 +180,7 @@ on_both_runtimes! {
         assert_eq!(result, Err(ScopeError::Failed("child")));
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
     async fn started_blocking_work_is_awaited_and_its_error_wins() {
         let cancel = Cancellation::new();
         let token = cancel.clone();
@@ -203,6 +206,7 @@ on_both_runtimes! {
         assert!(dropped.load(Ordering::SeqCst));
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
     async fn a_body_error_signals_cooperative_blocking_work() {
         let cancel = Cancellation::new();
         let token = cancel.clone();
@@ -222,6 +226,7 @@ on_both_runtimes! {
             Err(ScopeError::Failed("body")));
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
     async fn blocking_panic_during_cleanup_wins_and_drains_siblings() {
         let cancel = Cancellation::new();
         let (started, running) = oneshot::channel();
@@ -253,6 +258,7 @@ on_both_runtimes! {
         assert!(dropped.load(Ordering::SeqCst));
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
     async fn dropping_the_scope_signals_but_does_not_wait_for_blocking_work() {
         let cancel = Cancellation::new();
         let token = cancel.clone();
@@ -292,6 +298,7 @@ on_both_runtimes! {
         assert!(timeout(HUNG, dropped).await.unwrap().is_err());
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
     async fn successful_scope_preserves_values_and_claimed_errors() {
         let cancel = Cancellation::new();
         let result = Tasks::run_until(cancel.clone(), None, async |t| {
@@ -304,6 +311,7 @@ on_both_runtimes! {
         assert!(cancel.is_cancelled());
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
     async fn cancellation_cannot_discard_a_panic_already_being_drained() {
         for use_value in [false, true] {
             let cancel = Cancellation::new();
@@ -345,6 +353,7 @@ on_both_runtimes! {
         }
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
     async fn body_panic_signals_shutdown_without_waiting_for_blocking_work() {
         let cancel = Cancellation::new();
         let (started, running) = oneshot::channel();
@@ -372,6 +381,7 @@ on_both_runtimes! {
     }
 }
 
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 #[test]
 fn cancellation_prevents_queued_blocking_work_from_starting() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -408,6 +418,7 @@ fn cancellation_prevents_queued_blocking_work_from_starting() {
     });
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(start_paused = true)]
 async fn deadline_interrupts_body_and_drains_children() {
     let cancel = Cancellation::new();
@@ -434,6 +445,7 @@ async fn deadline_interrupts_body_and_drains_children() {
     assert!(dropped.load(Ordering::SeqCst));
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(start_paused = true)]
 async fn deadline_during_join_waits_for_blocking_cleanup_and_keeps_its_reason() {
     let cancel = Cancellation::new();

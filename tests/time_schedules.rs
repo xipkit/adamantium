@@ -103,6 +103,7 @@ fn oversized_sleeps_and_retry_backoffs_finish_and_replay() {
     });
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[test]
 fn modeled_relative_sleep_delays_match_tokio() {
     let runtime = tokio::runtime::Builder::new_current_thread()

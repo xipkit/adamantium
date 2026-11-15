@@ -55,6 +55,7 @@ async fn receive_until_returns_queued_values_then_closed() {
     );
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(start_paused = true)]
 async fn receive_until_ends_at_the_deadline() {
     let (_sender, receiver) = Channel::<u8>::bounded(1).split();
@@ -114,6 +115,7 @@ async fn send_until_sends_when_there_is_room() {
     assert_eq!(ch.try_receive(), Ok(4));
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(start_paused = true)]
 async fn send_until_hands_the_value_back_at_the_deadline() {
     let (sender, receiver) = Channel::bounded(1).split();
@@ -272,6 +274,7 @@ async fn send_until_hands_the_value_back_when_the_channel_closes() {
     );
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn cancellation_stops_producers_and_consumers_without_losing_values() {
     let ch = Channel::<u64>::bounded(2);

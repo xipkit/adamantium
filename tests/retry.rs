@@ -1,4 +1,5 @@
-#![cfg(feature = "tokio")]
+// Every test here pauses the clock, which Tokio cannot do on WASI.
+#![cfg(all(feature = "tokio", not(target_os = "wasi")))]
 
 use adamantium::time::{self, sleep, sleep_until};
 use adamantium::{Backoff, Cancellation, ScopeError, retry, retry_if};

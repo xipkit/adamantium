@@ -33,6 +33,7 @@ fn poll_once<F: Future>(future: Pin<&mut F>, counter: &Arc<WakeCounter>) -> Poll
 }
 
 #[cfg(feature = "tokio")]
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn one_producer_many_consumers_each_message_once() {
     let numbers = Channel::<u64>::bounded(4);
@@ -551,6 +552,7 @@ mod stream {
         }
     }
 
+    #[cfg(not(target_os = "wasi"))]
     #[tokio::test(flavor = "multi_thread")]
     async fn composes_with_concurrent_results_under_backpressure() {
         use adamantium::concurrently_ordered;

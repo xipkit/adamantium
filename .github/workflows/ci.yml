@@ -52,6 +52,30 @@ jobs:
         if: matrix.toolchain != '1.96.0'
       - run: cargo test --locked -p adamantium --no-default-features
 
+  wasi:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime run
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+          components: clippy
+      - name: Install Wasmtime 48.0.2
+        run: |
+          archive=wasmtime-v48.0.2-x86_64-linux.tar.xz
+          curl --fail --location --retry 3 "https://github.com/bytecodealliance/wasmtime/releases/download/v48.0.2/$archive" --output "$RUNNER_TEMP/$archive"
+          echo "f2b0ad1ce9253f2f9a38793c2c42cd1cba4e90b27dc40d685eaf723dc8438d94  $RUNNER_TEMP/$archive" | sha256sum --check
+          tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/wasmtime-v48.0.2-x86_64-linux" >> "$GITHUB_PATH"
+      - run: wasmtime --version
+      - run: cargo clippy --locked --target wasm32-wasip1 -p adamantium -- -D warnings
+      - run: cargo clippy --locked --target wasm32-wasip1 -p adamantium --no-default-features -- -D warnings
+      - run: cargo test --locked --target wasm32-wasip1 -p adamantium --lib --tests
+      - run: cargo test --locked --target wasm32-wasip1 -p adamantium --lib --tests --no-default-features
+      - run: cargo test --locked --target wasm32-wasip1 -p adamantium --lib --tests --features serde,tracing
+
   style:
     runs-on: ubuntu-latest
     steps:
