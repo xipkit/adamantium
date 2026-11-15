@@ -57,21 +57,23 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
         package: [adamantium, cargo-adamantium]
+    env:
+      PACKAGE: ${{ matrix.package }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
       - name: Publish to crates.io
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
-            echo '::error::Set CARGO_REGISTRY_TOKEN in the protected crates-io environment before publishing.'
-            exit 1
-          fi
-          cargo publish --locked --registry crates-io -p "${{ matrix.package }}"
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked --registry crates-io -p "$PACKAGE"
