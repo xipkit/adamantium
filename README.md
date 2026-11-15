@@ -562,7 +562,7 @@ a step bound cannot interrupt a loop that makes no scheduling calls.
 
 ## The rules
 
-The default lint levels are in this repository's `[workspace.lints]`, and the Clippy configuration is in `clippy.toml`. `cargo adamantium rules` prints both. The optional strict additions are recorded separately in `[workspace.metadata.adamantium-strict.lints]` and printed with `rules --strict`; they do not apply to this repository itself. The rules and library provide the following properties for code that follows them:
+The default lint levels are in this repository's `[workspace.lints]`, and the Clippy configuration is in [`cli/clippy.toml`](cli/clippy.toml). The repository's Cargo configuration points Clippy at that same bundled file. `cargo adamantium rules` prints both. The optional strict additions are recorded separately in `[workspace.metadata.adamantium-strict.lints]` and printed with `rules --strict`; they do not apply to this repository itself. The rules and library provide the following properties for code that follows them:
 
 | Property | Enforced by |
 | --- | --- |
@@ -611,7 +611,7 @@ Each request is billable, so two options keep a run to the files that need it. `
 
 Set `OPENAI_API_KEY`. On macOS, the `openai-api-key` Keychain item is used when the variable is unset. Source files and context are sent to OpenAI. Results are model estimates. Evaluate them on labeled examples before using them as a blocking check. The questions instruct the model to treat source comments and strings as untrusted evidence, but this does not guarantee resistance to adversarial input.
 
-The rules are in [`style/rules/google-rust-decisions.json`](style/rules/google-rust-decisions.json), with their guide coverage in [`style/rules/coverage.md`](style/rules/coverage.md) and labeled examples in [`style/fixtures/google-rust-cases.json`](style/fixtures/google-rust-cases.json). Run `node style/scripts/evaluate-decisions.mjs` to evaluate the examples against the API. It also accepts `--dry-run` and `--rule`. The full run makes 114 billable requests.
+The rules are bundled in [`cli/src/style/google-rust-decisions.json`](cli/src/style/google-rust-decisions.json), with their guide coverage in [`style/rules/coverage.md`](style/rules/coverage.md) and labeled examples in [`style/fixtures/google-rust-cases.json`](style/fixtures/google-rust-cases.json). Run `node style/scripts/evaluate-decisions.mjs` to evaluate the examples against the API. It also accepts `--dry-run` and `--rule`. The full run makes 114 billable requests.
 
 ## Development
 
@@ -628,3 +628,53 @@ node --test style/scripts/evaluate-decisions.test.mjs
 [GitHub Actions](.github/workflows/ci.yml) runs the same commands on pull requests and pushes to `main`.
 
 The repository follows its own rules. Where the library needs restricted features, such as the `JoinSet` inside `Tasks` and the `Mutex` inside `Actor`, the code uses an `allow` with a reason. The CLI tests run `cargo adamantium check` against fixture crates with and without rule violations. They require Clippy and network access on the first run.
+
+## Releasing
+
+Both crates use the MIT license and share the version in `[workspace.package]`.
+Pull requests run `cargo publish --dry-run` for each crate to verify that its
+archive builds independently of this checkout. To inspect the archives locally:
+
+```sh
+cargo package --list -p adamantium
+cargo package --list -p cargo-adamantium
+cargo publish --locked --registry crates-io -p adamantium --all-features --dry-run
+cargo publish --locked --registry crates-io -p cargo-adamantium --dry-run
+```
+
+Pushing a tag named `v` followed by the workspace version, such as `v0.1.0`,
+starts the [publish workflow](.github/workflows/publish.yml). It checks the tag
+against both crate versions, requires its commit to have been merged into
+`main`, runs the Rust tests and Clippy, and verifies both archives before
+publishing. Verification and publishing both check out the triggering commit
+SHA, so moving the tag cannot change the source between jobs. Each crate
+publishes in its own job so a failed upload can be retried without uploading
+the other crate again.
+
+The publish jobs use the `crates-io` environment. Before adding credentials, a
+repository administrator must configure the release protections in GitHub:
+
+- Protect `main` so release commits enter it through reviewed pull requests
+  with passing checks.
+- Create an active tag ruleset for `v*` that restricts tag creation, updates and
+  deletion to authorized release maintainers.
+- Create the `crates-io` environment with authorized release maintainers as
+  required reviewers, disable protection-rule bypasses, and restrict deployment
+  refs to selected **tags** matching `v*`.
+- Store `CARGO_REGISTRY_TOKEN` only as a secret of that environment. A
+  repository or organization secret is available to other workflows and would
+  bypass the release approval boundary.
+
+An environment reviewer must check that the pending job's commit SHA is the
+approved release commit before allowing either publish job to run. GitHub
+withholds environment secrets until its protection rules pass. Referencing an
+environment in YAML does not configure these protections: GitHub automatically
+creates a missing environment without reviewers or secrets. See GitHub's
+[environment setup](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
+and [tag rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets).
+
+The first publication, protection setup and credential setup are tracked by
+ADAM-136 and require Mauricio's go-ahead. Prepare and review the release before
+pushing its tag:
+published crate versions cannot be overwritten or deleted. Crate-name checks
+and dry runs do not reserve a name.
