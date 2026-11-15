@@ -91,7 +91,7 @@ fn work_cannot_call_the_same_limit() {
     let limit = Limit::new(2);
     let inner = limit.clone();
     let mut call = pin!(limit.run(|| async move { inner.run(|| ready(())).await }));
-    drop(poll_once(call.as_mut()));
+    assert!(poll_once(call.as_mut()).is_pending());
 }
 
 #[test]
@@ -100,7 +100,7 @@ fn work_cannot_call_another_limit() {
     let outer = Limit::new(1);
     let inner = Limit::new(1);
     let mut call = pin!(outer.run(|| async move { inner.run(|| ready(())).await }));
-    drop(poll_once(call.as_mut()));
+    assert!(poll_once(call.as_mut()).is_pending());
 }
 
 #[test]
