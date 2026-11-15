@@ -94,6 +94,27 @@ async fn a_panic_is_not_restarted() {
     assert_eq!(result, Ok(()), "the panic was not resumed");
 }
 
+#[tokio::test]
+async fn a_task_that_restarts_with_no_wait_lets_the_scope_end() {
+    let starts = Actor::new(0_u64);
+    let count = starts.clone();
+    // No restart stays in a window of no length, so the task restarts forever.
+    let restarts = Restarts::new(1, Duration::ZERO);
+    let result = Tasks::run(async |tasks| {
+        drop(tasks.spawn_supervised(restarts, move |_| {
+            count.with(|starts| *starts += 1);
+            async { Err::<(), _>("task") }
+        }));
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        Err::<(), _>("body")
+    })
+    .await;
+    assert_eq!(result, Err("body"));
+    assert!(starts.snapshot() > 1);
+}
+
 #[cfg(not(target_os = "wasi"))]
 mod paused {
     use super::*;

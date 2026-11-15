@@ -1,6 +1,11 @@
 //! Restarting a task that fails.
 
-use std::{collections::VecDeque, future::Future, time::Duration};
+use std::{
+    collections::VecDeque,
+    future::{Future, poll_fn},
+    task::Poll,
+    time::Duration,
+};
 
 use tokio::time::Instant;
 
@@ -60,6 +65,21 @@ impl Restarts {
         }
         delay
     }
+}
+
+/// Lets other tasks run once, so a task that restarts with no wait cannot
+/// keep its thread and can still be aborted.
+async fn yield_once() {
+    let mut yielded = false;
+    poll_fn(|context| {
+        if yielded {
+            return Poll::Ready(());
+        }
+        yielded = true;
+        context.waker().wake_by_ref();
+        Poll::Pending
+    })
+    .await;
 }
 
 impl<E: Send + 'static> Tasks<E> {
@@ -126,7 +146,9 @@ impl<E: Send + 'static> Tasks<E> {
                 }
                 restarted.push_back(now);
                 let delay = restarts.delay(restarted.len());
-                if !delay.is_zero() {
+                if delay.is_zero() {
+                    yield_once().await;
+                } else {
                     time::sleep(delay).await;
                 }
                 last = Some(error);
