@@ -59,6 +59,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `Actor` | Shared state. Each access is a synchronous closure, so no lock is held across an `await`. |
 | `AsyncActor` | One worker that owns its state and handles one message at a time. Use it when the state must `await`. |
 | `Channel`, `Reply`, `Watch` | A bounded queue, a one-shot reply, and the latest value of some state. |
+| `Topic` | Sends each message to every subscriber. It waits for a slow subscriber and drops no message. |
 | `race` | Waits for the first of several futures and drops the others. Use it in place of `select!`. |
 | `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. |
 | `retry`, `RateLimit` | Retries with backoff, and a limit on calls in a time window. |
@@ -76,7 +77,7 @@ The [library guide](docs/library.md) describes each type.
 | `tracing` | No | Named task spans, and a warning that lists unfinished tasks when a deadline expires |
 | `deterministic` | No | A test harness that explores task interleavings from a seed. See [Deterministic tests](docs/testing.md). |
 
-With `default-features = false`, the values, `Actor`, `Channel`, `Reply`, and `Watch` work without Tokio.
+With `default-features = false`, the values, `Actor`, `Channel`, `Topic`, `Reply`, `Watch`, and `race` work without Tokio.
 
 ### WASI
 
@@ -137,7 +138,7 @@ Code that follows the rules has these properties:
 | No task outlives its scope | `tokio::spawn`, `JoinSet`, and `std::thread::spawn` are not allowed. Use `Tasks`. |
 | No lock is held across an `await` or inside another lock | `Mutex` and `RwLock` are not allowed. Use `Actor`. |
 | No queue grows without a limit | Unbounded channels are not allowed. Use `Channel`. |
-| No channel drops messages | Tokio's `broadcast` channel is not allowed. |
+| No channel drops messages | Tokio's `broadcast` channel is not allowed. Use `Topic`. |
 | No worker thread is blocked | `std::thread::sleep`, `block_in_place`, and `spawn_blocking` are not allowed. Use `blocking`. |
 | No timeout drops a future in the middle of its work | `tokio::time::timeout` is not allowed. Use `Tasks::run_until` or the `_until` methods. |
 | No result or future is discarded by accident | A discard must be an explicit `drop`. |

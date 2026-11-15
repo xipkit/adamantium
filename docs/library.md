@@ -203,6 +203,37 @@ With the `tokio` feature, `Receiver<T>` implements `futures_core::Stream<Item = 
 
 `Receiver<T>` is not `Unpin`. Use `std::pin::pin!` before you call `StreamExt::next`.
 
+## Topic
+
+`Topic<T>` sends each message to every subscriber. No subscriber misses a message.
+
+```rust
+use adamantium::Topic;
+
+let mut prices = Topic::new(8);
+let display = prices.subscribe();
+let log = prices.subscribe();
+
+assert_eq!(prices.send(42).await, 2);
+assert_eq!(display.receive().await, Some(42));
+assert_eq!(log.receive().await, Some(42));
+```
+
+- Each subscriber is a `Receiver<T>` with its own queue of `capacity` messages.
+- `send(value)` waits until every subscriber has room. Then it gives each subscriber a clone of the value. It returns the number of subscribers that received the value.
+- A slow subscriber slows the topic down. Use `send_until` to stop the wait on a `Cancellation` or at a deadline.
+- If a send stops before delivery, no subscriber receives the value. `send_until` returns the value in the error.
+- Every subscriber receives the messages in the order they were sent.
+- A subscriber receives the messages sent after it subscribed.
+- Dropping a `Receiver` removes that subscriber.
+- Dropping the topic closes every subscriber. Each one receives its queued messages, then `None`.
+
+A topic has one sender. `send` takes `&mut self`, so two sends cannot overlap. To publish from several tasks, send to one task that owns the topic through a `Channel`.
+
+`topic.subscriptions()` returns a `Subscriptions<T>` handle. Clone it and call `subscribe()` to add subscribers from other tasks.
+
+`Topic` works with `default-features = false`. `send_until` needs the `tokio` feature.
+
 ## Reply
 
 `Reply::pair()` makes a one-shot `Reply<T>` and the `ReplyReceiver<T>` that waits for it. Use the pair for a request and a reply between tasks.
