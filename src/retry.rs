@@ -14,7 +14,7 @@ use crate::{Cancellation, ScopeError, tasks::shutdown, time};
 /// cancellation and deadline given to [`retry`] bound it either way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Backoff {
-    first: Duration,
+    pub(crate) first: Duration,
     max: Duration,
     factor: u32,
     attempts: Option<u32>,
@@ -52,7 +52,7 @@ impl Backoff {
         }
     }
 
-    fn after(&self, delay: Duration) -> Duration {
+    pub(crate) fn after(&self, delay: Duration) -> Duration {
         delay.saturating_mul(self.factor).min(self.max)
     }
 }

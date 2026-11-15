@@ -18,7 +18,8 @@
 //! The default `tokio` feature provides `Task`, `Tasks`, `concurrently`,
 //! `first_ok`, `AsyncActor`, the ordered and unordered concurrent streams, `blocking`, the
 //! `time` module, and `retry` and `RateLimit`, whose waits all end when a
-//! `Cancellation` is requested.
+//! `Cancellation` is requested. `Tasks::spawn_supervised` restarts a task
+//! that fails, as often as a [`Restarts`] allows.
 //! Disable default features to use the values, synchronous actors, channels, replies,
 //! and watches without a Tokio dependency.
 //!
@@ -46,6 +47,8 @@ mod race;
 #[cfg(feature = "tokio")]
 mod rate_limit;
 mod reply;
+#[cfg(feature = "tokio")]
+mod restarts;
 #[cfg(feature = "tokio")]
 mod retry;
 mod runtime;
@@ -75,6 +78,8 @@ pub use race::{Race, race};
 #[cfg(feature = "tokio")]
 pub use rate_limit::RateLimit;
 pub use reply::{Reply, ReplyReceiver};
+#[cfg(feature = "tokio")]
+pub use restarts::Restarts;
 #[cfg(feature = "tokio")]
 pub use retry::{Backoff, retry, retry_if};
 pub use set::Set;
