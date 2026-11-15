@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use adamantium::{Cancellation, ScopeError, Tasks, time};
+use adamantium::{Actor, Backoff, Cancellation, Restarts, ScopeError, Tasks, time};
 use tokio::sync::oneshot;
 use tracing::{
     Event, Subscriber,
@@ -371,4 +371,109 @@ async fn cancellation_and_unnamed_scopes_produce_no_diagnostics() {
     .with_subscriber(subscriber)
     .await;
     assert!(capture.events.lock().unwrap().is_empty());
+}
+
+/// A worker that fails on its first two starts.
+fn flaky(starts: &Actor<u32>) -> impl FnMut(Option<&'static str>) -> FlakyStart + Send + use<> {
+    let starts = starts.clone();
+    move |_| {
+        let start = starts.with(|starts| {
+            *starts += 1;
+            *starts
+        });
+        Box::pin(async move { if start < 3 { Err("lost") } else { Ok(start) } })
+    }
+}
+
+type FlakyStart = Pin<Box<dyn Future<Output = Result<u32, &'static str>> + Send>>;
+
+#[tokio::test]
+async fn a_named_supervised_task_keeps_one_span_and_reports_each_restart() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    let starts = Actor::new(0);
+    let result = async {
+        Tasks::run(async |tasks| {
+            let restarts = Restarts::new(5, Duration::from_secs(60));
+            let worker = tasks.spawn_supervised_named("worker", restarts, flaky(&starts));
+            tasks.value(worker).await
+        })
+        .await
+    }
+    .with_subscriber(subscriber)
+    .await;
+    assert_eq!(result, Ok(3));
+
+    let entered = capture.entered.lock().unwrap();
+    assert!(!entered.is_empty());
+    assert!(
+        entered
+            .iter()
+            .all(|span| span.fields.0["task.name"] == "worker")
+    );
+    let events = capture.events.lock().unwrap();
+    let restarts: Vec<_> = events
+        .iter()
+        .map(|event| (event.0["message"].as_str(), event.0["restart"].as_str()))
+        .collect();
+    assert_eq!(
+        restarts,
+        [
+            ("supervised task restarting", "1"),
+            ("supervised task restarting", "2"),
+        ]
+    );
+    assert!(events.iter().all(|event| event.0["delay"] == "0ns"));
+}
+
+#[tokio::test]
+async fn an_unnamed_supervised_task_reports_nothing() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    let starts = Actor::new(0);
+    let result = async {
+        Tasks::run(async |tasks| {
+            let restarts = Restarts::new(5, Duration::from_secs(60));
+            let worker = tasks.spawn_supervised(restarts, flaky(&starts));
+            tasks.value(worker).await
+        })
+        .await
+    }
+    .with_subscriber(subscriber)
+    .await;
+    assert_eq!(result, Ok(3));
+    assert!(capture.entered.lock().unwrap().is_empty());
+    assert!(capture.events.lock().unwrap().is_empty());
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[tokio::test(start_paused = true)]
+async fn a_deadline_reports_a_supervised_task_that_is_waiting_to_restart() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    let result = async {
+        let deadline = time::now() + Duration::from_secs(10);
+        Tasks::run_until(Cancellation::new(), Some(deadline), async |tasks| {
+            let restarts = Restarts::new(5, Duration::from_secs(60))
+                .backoff(Backoff::constant(Duration::from_secs(3600)));
+            tasks.spawn_supervised_named("worker", restarts, |_| async { Err::<(), _>("lost") });
+            forever().await
+        })
+        .await
+    }
+    .with_subscriber(subscriber)
+    .await;
+    assert_eq!(result, Err(ScopeError::DeadlineExceeded));
+
+    let events = capture.events.lock().unwrap();
+    let messages: Vec<_> = events
+        .iter()
+        .map(|event| event.0["message"].as_str())
+        .collect();
+    assert_eq!(
+        messages,
+        ["supervised task restarting", "scope deadline exceeded"]
+    );
+    assert_eq!(events[0].0["delay"], "3600s");
+    assert_eq!(events[1].0["running_tasks"], "[\"worker\"]");
 }
