@@ -4,11 +4,12 @@
 //! The crate has two halves. The library gives that fragment its vocabulary:
 //! copy-on-write values ([`Str`], [`Bytes`], [`Array`], [`Deque`], [`Map`], [`Set`]), a
 //! structured task scope (`Tasks`), shared state whose methods run one at
-//! a time ([`Actor`]), a bounded channel ([`Channel`]), a one-shot reply
+//! a time ([`Actor`]), a bounded channel ([`Channel`]), a channel that sends
+//! each message to every subscriber ([`Topic`]), a one-shot reply
 //! ([`Reply`]), the latest value of shared state ([`Watch`]), [`race`] to wait
 //! for the first of several events, and `blocking` for code that must block a
-//! thread. The `cargo adamantium` subcommand applies
-//! the Clippy rules that keep a crate inside the fragment.
+//! thread. The `cargo adamantium` subcommand applies the Clippy rules that
+//! keep a crate inside the fragment.
 //!
 //! Everything here is `Send + Sync + 'static` when its element types are, so
 //! a value of any of these types can be handed to a task without ceremony.
@@ -54,6 +55,7 @@ mod tasks;
 pub mod testing;
 #[cfg(feature = "tokio")]
 pub mod time;
+mod topic;
 mod watch;
 
 pub use actor::Actor;
@@ -79,6 +81,7 @@ pub use tasks::{
     Cancellation, ScopeError, Task, Tasks, blocking, concurrently, concurrently_ordered,
     concurrently_ordered_until, concurrently_unordered, concurrently_unordered_until, first_ok,
 };
+pub use topic::{Subscriptions, Topic};
 pub use watch::{Watch, Watcher};
 
 // Runs the migration guide's examples as doctests, so its rewrites keep

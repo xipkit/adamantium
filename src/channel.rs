@@ -350,6 +350,26 @@ impl<T> Sender<T> {
         }
     }
 
+    /// Waits until the channel has room for a message or is closed. The room
+    /// lasts only while nothing else sends on the channel.
+    pub(crate) async fn room(&self) {
+        loop {
+            if self.has_room() {
+                return;
+            }
+            let waiter = self.queue.space.listen();
+            // Registration precedes the recheck, so a receive cannot be lost.
+            if self.has_room() {
+                return;
+            }
+            waiter.await;
+        }
+    }
+
+    fn has_room(&self) -> bool {
+        self.is_closed() || self.len() < self.capacity()
+    }
+
     /// Sends without waiting, returning the value if the channel is full
     /// or closed.
     pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
