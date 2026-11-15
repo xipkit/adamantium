@@ -334,6 +334,44 @@ fn shared_state_fix_cannot_follow_is_reported_and_left_unchanged() {
     assert!(stderr.contains("migrating.md#rwlock"), "{stderr}");
 }
 
+#[test]
+fn fixes_that_break_the_build_are_restored() {
+    // Every rewrite here is sound by itself, but the library asserts the
+    // length of a module's source, so any rewrite of that module stops the
+    // build, the way a rewrite that syntax alone can't vet would.
+    let module = "pub async fn wait() { tokio::time::sleep(std::time::Duration::ZERO).await; }\n";
+    let library = format!(
+        "mod wait;\nconst _: () = assert!(include_str!(\"wait.rs\").len() == {}, \"wait.rs changed\");\npub fn value() -> u32 {{ dbg!(7) }}\n",
+        module.len()
+    );
+    let dir = project(&library);
+    let wait = dir.path().join("src/wait.rs");
+    fs::write(&wait, module).unwrap();
+
+    let preview = run(&["fix", "--dry-run"], dir.path());
+    let diff = String::from_utf8_lossy(&preview.stdout);
+    assert!(diff.contains("+++ b/src/lib.rs"), "{diff}");
+    assert!(diff.contains("+++ b/src/wait.rs"), "{diff}");
+
+    let output = run(&["fix"], dir.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("src/lib.rs:2: error: evaluation panicked: wait.rs changed"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("the fixed project no longer builds, so no fixes were applied; restored the 2 file(s) it wrote"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("adamantium: fixed"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+        library
+    );
+    assert_eq!(fs::read_to_string(&wait).unwrap(), module);
+}
+
 /// A project whose only target is a binary with `main` as its main file, so
 /// no other crate can call its functions.
 #[allow(clippy::unwrap_used, reason = "a failed fixture setup fails the test")]
