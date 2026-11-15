@@ -33,6 +33,7 @@ The rules and the library give these properties to code that follows them:
 Tokio's `Semaphore` is allowed. A task can hold a permit across an `await`, because a permit guards no data.
 
 - To limit how many items run at one time, use `concurrently` or the streaming variants.
+- To share one limit between tasks, use `Limit`. Its work cannot take a second place, so it cannot deadlock in that way.
 - Do not acquire a second permit while you hold one. Two tasks that do so in opposite orders deadlock.
 
 ### Tests
