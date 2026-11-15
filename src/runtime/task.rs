@@ -83,6 +83,12 @@ impl JoinSet {
     pub(crate) fn spawn_blocking(&mut self, f: impl FnOnce() + Send + 'static) {
         self.world.step();
         match &mut self.inner {
+            // WASI has one thread, so the closure runs inside a task of its own.
+            #[cfg(target_os = "wasi")]
+            Set::Production(set) => {
+                set.spawn(async move { f() });
+            }
+            #[cfg(not(target_os = "wasi"))]
             Set::Production(set) => {
                 set.spawn_blocking(f);
             }
@@ -194,6 +200,10 @@ pub(crate) fn spawn_blocking<T: Send + 'static>(
             std::sync::Arc::new(super::wait::WaitQueue::new()),
         ));
     }
+    // WASI has one thread, so the closure runs inside a task of its own.
+    #[cfg(target_os = "wasi")]
+    return Blocking::Production(tokio::task::spawn(async move { f() }));
+    #[cfg(not(target_os = "wasi"))]
     Blocking::Production(tokio::task::spawn_blocking(f))
 }
 

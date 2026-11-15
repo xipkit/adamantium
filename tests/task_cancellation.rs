@@ -180,7 +180,7 @@ on_both_runtimes! {
         assert_eq!(result, Err(ScopeError::Failed("child")));
     }
 
-    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+    #[cfg_attr(target_os = "wasi", ignore = "the closure waits for a second thread")]
     async fn started_blocking_work_is_awaited_and_its_error_wins() {
         let cancel = Cancellation::new();
         let token = cancel.clone();
@@ -206,7 +206,7 @@ on_both_runtimes! {
         assert!(dropped.load(Ordering::SeqCst));
     }
 
-    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+    #[cfg_attr(target_os = "wasi", ignore = "the closure waits for a second thread")]
     async fn a_body_error_signals_cooperative_blocking_work() {
         let cancel = Cancellation::new();
         let token = cancel.clone();
@@ -226,7 +226,7 @@ on_both_runtimes! {
             Err(ScopeError::Failed("body")));
     }
 
-    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+    #[cfg_attr(target_os = "wasi", ignore = "the closure waits for a second thread")]
     async fn blocking_panic_during_cleanup_wins_and_drains_siblings() {
         let cancel = Cancellation::new();
         let (started, running) = oneshot::channel();
@@ -258,7 +258,7 @@ on_both_runtimes! {
         assert!(dropped.load(Ordering::SeqCst));
     }
 
-    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+    #[cfg_attr(target_os = "wasi", ignore = "the closure waits for a second thread")]
     async fn dropping_the_scope_signals_but_does_not_wait_for_blocking_work() {
         let cancel = Cancellation::new();
         let token = cancel.clone();
@@ -298,7 +298,6 @@ on_both_runtimes! {
         assert!(timeout(HUNG, dropped).await.unwrap().is_err());
     }
 
-    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
     async fn successful_scope_preserves_values_and_claimed_errors() {
         let cancel = Cancellation::new();
         let result = Tasks::run_until(cancel.clone(), None, async |t| {
@@ -311,7 +310,7 @@ on_both_runtimes! {
         assert!(cancel.is_cancelled());
     }
 
-    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+    #[cfg_attr(target_os = "wasi", ignore = "the closure waits for a second thread")]
     async fn cancellation_cannot_discard_a_panic_already_being_drained() {
         for use_value in [false, true] {
             let cancel = Cancellation::new();
@@ -353,7 +352,7 @@ on_both_runtimes! {
         }
     }
 
-    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+    #[cfg_attr(target_os = "wasi", ignore = "the closure waits for a second thread")]
     async fn body_panic_signals_shutdown_without_waiting_for_blocking_work() {
         let cancel = Cancellation::new();
         let (started, running) = oneshot::channel();
@@ -381,7 +380,7 @@ on_both_runtimes! {
     }
 }
 
-#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
+#[cfg_attr(target_os = "wasi", ignore = "the closure waits for a second thread")]
 #[test]
 fn cancellation_prevents_queued_blocking_work_from_starting() {
     let runtime = tokio::runtime::Builder::new_current_thread()

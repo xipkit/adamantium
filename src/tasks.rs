@@ -936,6 +936,9 @@ where
 /// it for code that blocks the thread it runs on, such as synchronous file
 /// or network calls. A panic in `f` is resumed here.
 ///
+/// WASI has one thread, so there `f` runs on it and other tasks wait until
+/// `f` returns.
+///
 /// Dropping this future detaches a started closure: it cannot be forcibly
 /// aborted, even inside an async task owned by a scope. Use
 /// [`Tasks::spawn_blocking`] when scope shutdown must wait for blocking work.
