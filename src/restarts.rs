@@ -119,42 +119,83 @@ impl<E: Send + 'static> Tasks<E> {
     /// assert_eq!(served, Ok(3));
     /// # }
     /// ```
-    pub fn spawn_supervised<T, F, Fut>(&mut self, restarts: Restarts, mut work: F) -> Task<T, E>
+    pub fn spawn_supervised<T, F, Fut>(&mut self, restarts: Restarts, work: F) -> Task<T, E>
     where
         T: Send + 'static,
         F: FnMut(Option<E>) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
-        self.spawn(async move {
-            // When each restart in the window happened, oldest first.
-            let mut restarted: VecDeque<Instant> = VecDeque::new();
-            let mut last = None;
-            loop {
-                let error = match work(last.take()).await {
-                    Ok(value) => return Ok(value),
-                    Err(error) => error,
-                };
-                let now = time::now();
-                while restarted
-                    .front()
-                    .is_some_and(|at| now.saturating_duration_since(*at) >= restarts.per)
-                {
-                    restarted.pop_front();
-                }
-                if restarted.len() >= restarts.limit {
-                    return Err(error);
-                }
-                let delay = restarts.delay(restarted.len().saturating_add(1));
-                if delay.is_zero() {
-                    yield_once().await;
-                } else {
-                    time::sleep(delay).await;
-                }
-                // The window counts from when the task restarts, so a wait
-                // that ends late cannot give the budget back early.
-                restarted.push_back(time::now());
-                last = Some(error);
-            }
-        })
+        self.spawn(supervise(restarts, work, false))
+    }
+
+    /// Starts a named task that is restarted when it fails, with the restart
+    /// contract of [`spawn_supervised`](Self::spawn_supervised).
+    ///
+    /// With the `tracing` feature, every start of the task runs inside one
+    /// `adamantium.task` span, as for [`spawn_named`](Self::spawn_named), and
+    /// the task is reported at a scope deadline until it ends for good. Each
+    /// restart emits a warning in that span with `restart`, its number in
+    /// the current window, and `delay`, the wait before it. Without
+    /// `tracing`, this behaves as `spawn_supervised` without converting or
+    /// storing the name.
+    pub fn spawn_supervised_named<T, F, Fut>(
+        &mut self,
+        name: impl Into<crate::Str>,
+        restarts: Restarts,
+        work: F,
+    ) -> Task<T, E>
+    where
+        T: Send + 'static,
+        F: FnMut(Option<E>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+    {
+        self.spawn_named(name, supervise(restarts, work, true))
+    }
+}
+
+/// Runs the futures that `work` makes, one after another, until one succeeds
+/// or fails with no restart left. `report` says whether to emit a tracing
+/// event for each restart.
+async fn supervise<T, E, F, Fut>(restarts: Restarts, mut work: F, report: bool) -> Result<T, E>
+where
+    F: FnMut(Option<E>) -> Fut + Send,
+    Fut: Future<Output = Result<T, E>> + Send,
+    E: Send,
+{
+    // When each restart in the window happened, oldest first.
+    let mut restarted: VecDeque<Instant> = VecDeque::new();
+    let mut last = None;
+    loop {
+        let error = match work(last.take()).await {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        let now = time::now();
+        while restarted
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) >= restarts.per)
+        {
+            restarted.pop_front();
+        }
+        if restarted.len() >= restarts.limit {
+            return Err(error);
+        }
+        let restart = restarted.len().saturating_add(1);
+        let delay = restarts.delay(restart);
+        #[cfg(feature = "tracing")]
+        if report {
+            tracing::warn!(restart, ?delay, "supervised task restarting");
+        }
+        #[cfg(not(feature = "tracing"))]
+        let _ = report;
+        if delay.is_zero() {
+            yield_once().await;
+        } else {
+            time::sleep(delay).await;
+        }
+        // The window counts from when the task restarts, so a wait that
+        // ends late cannot give the budget back early.
+        restarted.push_back(time::now());
+        last = Some(error);
     }
 }
