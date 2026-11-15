@@ -174,18 +174,41 @@ impl<T> Subscriptions<T> {
     /// topic has been dropped, the receiver is already closed.
     pub fn subscribe(&self) -> Receiver<T> {
         let (sender, receiver) = Channel::bounded(self.capacity).split();
-        let mut subscribers = self.subscribers.lock();
-        if subscribers.open {
-            subscribers.senders.push(sender);
-        }
+        let left = {
+            let mut subscribers = self.subscribers.lock();
+            let left = subscribers.remove_closed();
+            if subscribers.open {
+                subscribers.senders.push(sender);
+            }
+            left
+        };
+        drop(left);
         receiver
     }
 
     /// The senders of the subscribers that still hold their receiver.
     fn current(&self) -> Vec<Sender<T>> {
-        let mut subscribers = self.subscribers.lock();
-        subscribers.senders.retain(|sender| !sender.is_closed());
-        subscribers.senders.clone()
+        let (current, left) = {
+            let mut subscribers = self.subscribers.lock();
+            let left = subscribers.remove_closed();
+            (subscribers.senders.clone(), left)
+        };
+        drop(left);
+        current
+    }
+}
+
+impl<T> Subscribers<T> {
+    /// Removes the senders whose receiver is gone and returns them. Dropping
+    /// one drops the messages still in its queue, which can run code of the
+    /// caller's, so drop them after releasing the lock.
+    #[must_use]
+    fn remove_closed(&mut self) -> Vec<Sender<T>> {
+        let (open, closed) = std::mem::take(&mut self.senders)
+            .into_iter()
+            .partition(|sender| !sender.is_closed());
+        self.senders = open;
+        closed
     }
 }
 

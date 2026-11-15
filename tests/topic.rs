@@ -163,6 +163,68 @@ fn the_message_is_cloned_once_for_each_subscriber_but_the_last() {
     assert_eq!(clones.load(Ordering::Relaxed), 2);
 }
 
+/// Counts its drops, and can subscribe to a topic when it is dropped.
+struct Message {
+    drops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    resubscribe: Option<adamantium::Subscriptions<Message>>,
+}
+
+impl Clone for Message {
+    fn clone(&self) -> Self {
+        Self {
+            drops: std::sync::Arc::clone(&self.drops),
+            resubscribe: self.resubscribe.clone(),
+        }
+    }
+}
+
+impl Drop for Message {
+    fn drop(&mut self) {
+        self.drops
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(subscriptions) = &self.resubscribe {
+            drop(subscriptions.subscribe());
+        }
+    }
+}
+
+#[test]
+fn subscribing_frees_the_queues_of_subscribers_that_left() {
+    use std::sync::atomic::Ordering;
+
+    let drops = std::sync::Arc::default();
+    let mut topic = Topic::new(2);
+    let leaves = topic.subscribe();
+    let message = Message {
+        drops: std::sync::Arc::clone(&drops),
+        resubscribe: None,
+    };
+    assert_eq!(send_now(&mut topic, message), 1);
+    drop(leaves);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+    let _stays = topic.subscribe();
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_message_that_subscribes_when_dropped_does_not_deadlock() {
+    use std::sync::atomic::Ordering;
+
+    let drops = std::sync::Arc::default();
+    let mut topic = Topic::new(2);
+    let leaves = topic.subscribe();
+    let message = Message {
+        drops: std::sync::Arc::clone(&drops),
+        resubscribe: Some(topic.subscriptions()),
+    };
+    assert_eq!(send_now(&mut topic, message), 1);
+    drop(leaves);
+
+    assert_eq!(topic.subscriber_count(), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
 #[cfg(feature = "tokio")]
 mod until {
     use super::*;
