@@ -56,8 +56,8 @@ pub const OVERFLOW_EXAMPLE: Example = example(
     "[profile.release]\noverflow-checks = true",
 );
 
-/// The Clippy configuration, as shipped in the repository root.
-pub const CLIPPY_TOML: &str = include_str!("../../clippy.toml");
+/// The Clippy configuration bundled with the CLI and used by this repository.
+pub const CLIPPY_TOML: &str = include_str!("../clippy.toml");
 
 const fn example(replacement: &'static str, before: &'static str, after: &'static str) -> Example {
     Example {

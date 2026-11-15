@@ -64,6 +64,31 @@ pub fn macro_use() -> u8 {
     value
 }
 
+/// Locked in a closure, which might run inside an actor's callback.
+fn deferred() -> u32 {
+    let deferred = Arc::new(Mutex::new(1u32));
+    let bump = || *deferred.lock().unwrap() += 1;
+    bump();
+    let value = *deferred.lock().unwrap();
+    value
+}
+
+/// Locked in async code, which fix doesn't follow yet.
+pub async fn pending() -> u32 {
+    let pending = Arc::new(Mutex::new(deferred()));
+    *pending.lock().unwrap() += 1;
+    let value = *pending.lock().unwrap();
+    value
+}
+
+/// Another crate might call this inside an actor's callback.
+pub fn public() -> u32 {
+    let public = Arc::new(Mutex::new(1u32));
+    *public.lock().unwrap() += 1;
+    let value = *public.lock().unwrap();
+    value
+}
+
 pub fn routes() -> usize {
     let routes = Arc::new(RwLock::new(vec!["/"]));
     routes.write().unwrap().push("/about");

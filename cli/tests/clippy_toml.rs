@@ -49,7 +49,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn shipped() -> Result<DocumentMut> {
-    let text = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../clippy.toml"))?;
+    let text = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("clippy.toml"))?;
     Ok(text.parse()?)
 }
 

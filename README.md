@@ -47,7 +47,13 @@ cargo adamantium deps               # show which dependencies use unsafe code or
 
 `fix` uses the same Clippy pipeline and skip configuration. It applies `MachineApplicable` suggestions first, then rewrites immediately awaited calls that Clippy resolves to `tokio::time::sleep` and immediate `tokio::task::spawn_blocking(f).await.unwrap()` expressions (including imported aliases). Migration rewrites require a nonoptional, noninherited dependency named `adamantium`; the Tokio rewrites also need default features or an explicit `tokio` feature. Compound callees, stored sleep futures, and blocking calls with explicit type arguments are left for review. It leaves macro expansions, external source files, conflicting suggestions, and decisions about task scopes or lock lifetimes for review, with links to the [migration guide](docs/migrating.md).
 
-`fix` also turns a local `Arc<Mutex<T>>` into an `Actor<T>` when every use of it, and of every clone of it, is one the guide marks as mechanical: the constructor, `Arc::clone`, a guard used within one statement (as `with`, or `read` when it only reads; a method called on the guard is called on `(*m)`, which keeps its method lookup), `lock().unwrap().clone()` (as a guard statement, such as `with(|m| (*m).clone())`; shorten it to `snapshot()` when the state itself is `Clone`), and `Arc::try_unwrap` or `Arc::into_inner` followed by `into_inner` (as `into_inner`). It follows a binding through imports, `use ... as` aliases, clones, moves and shadowing. Anything else leaves the binding and all of its clones unchanged, and `fix` names the binding and the section of the guide to read: a guard held across statements, a lock held across an await, two locks held at once, a call under the guard to a function or to a method of anything but the state, or formatting anything but the state and literals (an actor's callback panics if it uses an actor, and such a call might), or a use it can't follow, such as passing the binding to a function, storing it in a field, or naming it in a macro it can't read. Fields, parameters and `RwLock` are left for review. The state's own methods and trait implementations, and operators and dereferences on any value, are assumed not to use an actor.
+`fix` also turns a local `Arc<Mutex<T>>` into an `Actor<T>` when every use of it, and of every clone of it, is one the guide marks as mechanical: the constructor, `Arc::clone`, a guard used within one statement (as `with`, or `read` when it only reads; a method called on the guard is called on `(*m)`, which keeps its method lookup), `lock().unwrap().clone()` (as a guard statement, such as `with(|m| (*m).clone())`; shorten it to `snapshot()` when the state itself is `Clone`), and `Arc::try_unwrap` or `Arc::into_inner` followed by `into_inner` (as `into_inner`). It follows a binding through imports, `use ... as` aliases, clones, moves and shadowing. Anything else leaves the binding and all of its clones unchanged, and `fix` names the binding and the section of the guide to read: a guard held across statements, a lock held across an await, two locks held at once, a call under the guard to a function or to a method of anything but the state, or formatting anything but the state and literals (an actor's callback panics if it uses an actor, and such a call might), or a use it can't follow, such as passing the binding to a function, storing it in a field `fix` doesn't rewrite, or naming it in a macro it can't read. The state's own methods and trait implementations, and operators and dereferences on any value, are assumed not to use an actor. Because the function that locks a binding might itself be called inside an actor's callback, where the binding's new actor would panic, `fix` also scans the whole package and leaves the binding for review if a function that locks it might run there: when it is locked in a closure, an unproved future or a trait method, through a public function of a library, or by a function used as a value; when an existing actor callback in the package calls anything; or when a statement that becomes a callback calls a function that locks it. A binary's functions can't be called from another crate, so their locals are the easiest to rewrite.
+
+Async functions and immediately awaited async blocks have a separate polling-context proof. Every use of each uniquely named private async function or method must be a direct `f(...).await`; every enclosing future must satisfy the same rule. The chain must end at the actual binary entry using the real crates.io Tokio 1 / tokio-macros 2 `main` macro. This first pass accepts only a sole binary target, no modules or shadowing imports, no other entry attributes or uses, and either the default macro options or just `flavor = "current_thread"` / `"multi_thread"`. Cargo identity must be resolvable offline from the lockfile. Opaque macros, custom executors, spawn/block_on boundaries, stored/returned/boxed futures, function values, closures and public library entry points remain manual. An unproved path refuses the connected field, locals and clones together, with the first unproved future boundary in the diagnostic. This does not provide general async-library coverage; it never puts an await inside an actor callback or permits a guard spanning await.
+
+A private struct field of type `Arc<Mutex<T>>` becomes an `Actor<T>` the same way, together with the locals it is cloned into or set from. Its struct must be declared once in its file and derive nothing but `Clone` and `Default`, and no other field in the package may share its name. Its uses are followed through `self` in the struct's own `impl` blocks and through parameters and locals declared as the struct or a reference to it; a struct literal may set it to a constructor, a clone or a local. The same package scan leaves it for review if a function that locks it, or one of those locals, might run inside an actor's callback.
+
+A parameter of type `Arc<Mutex<T>>`, `&Arc<Mutex<T>>` or `&Mutex<T>`, and a return type of `Arc<Mutex<T>>`, become `Actor<T>`, `&Actor<T>` or `Actor<T>` when the function is private and isn't async, `extern` or a trait's. Every call must name the function directly in its file: `f(..)`, or `self.f(..)`, `Self::f(..)` or `Type::f(..)` in an `impl` of its type. Each argument must be a local or field `fix` follows, moved, cloned or borrowed; the result must be bound by a `let`, set a field `fix` rewrites or be returned; and the function must return a constructor or a value `fix` follows. The parameter, the return value and every value passed or taken stand or fall together, so a lock reached through a parameter counts for the caller's state too. A function named anywhere else in its package, even in another file, a macro or a string, is left for review, and so is `clone` on a `&Mutex<T>`, which copies the reference where an actor's would copy the actor. `RwLock` is left for review.
 
 `fix --dry-run` prints a unified diff to stdout and leaves source files unchanged; Cargo may still update its lockfile and build artifacts. Both forms accept `--strict` and Cargo arguments after `--`. `fix` changes nothing in a project that doesn't build. A real fix runs `check` again: exit status is `0` when clean and `1` for remaining findings. If the rewritten project no longer builds, or can't be checked, `fix` prints the errors, writes every file it changed back to its original text and exits with `2`; a file that something else edited, moved or deleted while `fix` was checking is left as it is and named. Dry runs report the status before fixes. Review the diff and test the result before committing.
 
@@ -556,7 +562,7 @@ a step bound cannot interrupt a loop that makes no scheduling calls.
 
 ## The rules
 
-The default lint levels are in this repository's `[workspace.lints]`, and the Clippy configuration is in `clippy.toml`. `cargo adamantium rules` prints both. The optional strict additions are recorded separately in `[workspace.metadata.adamantium-strict.lints]` and printed with `rules --strict`; they do not apply to this repository itself. The rules and library provide the following properties for code that follows them:
+The default lint levels are in this repository's `[workspace.lints]`, and the Clippy configuration is in [`cli/clippy.toml`](cli/clippy.toml). The repository's Cargo configuration points Clippy at that same bundled file. `cargo adamantium rules` prints both. The optional strict additions are recorded separately in `[workspace.metadata.adamantium-strict.lints]` and printed with `rules --strict`; they do not apply to this repository itself. The rules and library provide the following properties for code that follows them:
 
 | Property | Enforced by |
 | --- | --- |
@@ -605,7 +611,7 @@ Each request is billable, so two options keep a run to the files that need it. `
 
 Set `OPENAI_API_KEY`. On macOS, the `openai-api-key` Keychain item is used when the variable is unset. Source files and context are sent to OpenAI. Results are model estimates. Evaluate them on labeled examples before using them as a blocking check. The questions instruct the model to treat source comments and strings as untrusted evidence, but this does not guarantee resistance to adversarial input.
 
-The rules are in [`style/rules/google-rust-decisions.json`](style/rules/google-rust-decisions.json), with their guide coverage in [`style/rules/coverage.md`](style/rules/coverage.md) and labeled examples in [`style/fixtures/google-rust-cases.json`](style/fixtures/google-rust-cases.json). Run `node style/scripts/evaluate-decisions.mjs` to evaluate the examples against the API. It also accepts `--dry-run` and `--rule`. The full run makes 114 billable requests.
+The rules are bundled in [`cli/src/style/google-rust-decisions.json`](cli/src/style/google-rust-decisions.json), with their guide coverage in [`style/rules/coverage.md`](style/rules/coverage.md) and labeled examples in [`style/fixtures/google-rust-cases.json`](style/fixtures/google-rust-cases.json). Run `node style/scripts/evaluate-decisions.mjs` to evaluate the examples against the API. It also accepts `--dry-run` and `--rule`. The full run makes 114 billable requests.
 
 ## Development
 
@@ -622,3 +628,53 @@ node --test style/scripts/evaluate-decisions.test.mjs
 [GitHub Actions](.github/workflows/ci.yml) runs the same commands on pull requests and pushes to `main`.
 
 The repository follows its own rules. Where the library needs restricted features, such as the `JoinSet` inside `Tasks` and the `Mutex` inside `Actor`, the code uses an `allow` with a reason. The CLI tests run `cargo adamantium check` against fixture crates with and without rule violations. They require Clippy and network access on the first run.
+
+## Releasing
+
+Both crates use the MIT license and share the version in `[workspace.package]`.
+Pull requests run `cargo publish --dry-run` for each crate to verify that its
+archive builds independently of this checkout. To inspect the archives locally:
+
+```sh
+cargo package --list -p adamantium
+cargo package --list -p cargo-adamantium
+cargo publish --locked --registry crates-io -p adamantium --all-features --dry-run
+cargo publish --locked --registry crates-io -p cargo-adamantium --dry-run
+```
+
+Pushing a tag named `v` followed by the workspace version, such as `v0.1.0`,
+starts the [publish workflow](.github/workflows/publish.yml). It checks the tag
+against both crate versions, requires its commit to have been merged into
+`main`, runs the Rust tests and Clippy, and verifies both archives before
+publishing. Verification and publishing both check out the triggering commit
+SHA, so moving the tag cannot change the source between jobs. Each crate
+publishes in its own job so a failed upload can be retried without uploading
+the other crate again.
+
+The publish jobs use the `crates-io` environment. Before adding credentials, a
+repository administrator must configure the release protections in GitHub:
+
+- Protect `main` so release commits enter it through reviewed pull requests
+  with passing checks.
+- Create an active tag ruleset for `v*` that restricts tag creation, updates and
+  deletion to authorized release maintainers.
+- Create the `crates-io` environment with authorized release maintainers as
+  required reviewers, disable protection-rule bypasses, and restrict deployment
+  refs to selected **tags** matching `v*`.
+- Store `CARGO_REGISTRY_TOKEN` only as a secret of that environment. A
+  repository or organization secret is available to other workflows and would
+  bypass the release approval boundary.
+
+An environment reviewer must check that the pending job's commit SHA is the
+approved release commit before allowing either publish job to run. GitHub
+withholds environment secrets until its protection rules pass. Referencing an
+environment in YAML does not configure these protections: GitHub automatically
+creates a missing environment without reviewers or secrets. See GitHub's
+[environment setup](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
+and [tag rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets).
+
+The first publication, protection setup and credential setup are tracked by
+ADAM-136 and require Mauricio's go-ahead. Prepare and review the release before
+pushing its tag:
+published crate versions cannot be overwritten or deleted. Crate-name checks
+and dry runs do not reserve a name.

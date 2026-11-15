@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Checks that a crate stays inside the adamantium fragment of Rust"
 repository.workspace = true
+license.workspace = true
+readme.workspace = true
 publish.workspace = true
 
 [[bin]]
@@ -19,6 +21,7 @@ globset = "0.4"
 httpdate = "1"
 ignore = "0.4"
 proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
+quote = { version = "1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
 serde_stacker = "0.1"

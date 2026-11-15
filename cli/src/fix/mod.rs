@@ -13,6 +13,7 @@ use syn::{spanned::Spanned, visit::Visit};
 
 use crate::{check, manifest};
 
+mod scan;
 mod state;
 
 const GUIDE: &str = "https://github.com/xipkit/adamantium/blob/main/docs/migrating.md";
@@ -23,6 +24,12 @@ struct Edit {
     start: usize,
     end: usize,
     replacement: String,
+}
+
+struct StateSource {
+    file: PathBuf,
+    source: String,
+    mutexes: BTreeSet<(usize, usize)>,
 }
 
 pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<ExitCode> {
@@ -56,28 +63,49 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
         }
     }
     // A shared-state rewrite changes every use of a binding at once, so it
-    // plans a whole file and its edits stand or fall together.
+    // plans a whole file and its edits stand or fall together. A field's
+    // rewrite also depends on the rest of its package.
+    let mut packages: BTreeMap<PathBuf, Vec<StateSource>> = BTreeMap::new();
     for (file, mutexes) in mutexes(&diagnostics, &root) {
         if !migration_available(&file, &root, Api::Core)? {
             continue;
         }
+        let Some(package) = package(&file, &root) else {
+            continue;
+        };
         let source = fs::read_to_string(&file)?;
-        let outcome = state::plan(&file, &source, &mutexes);
-        for refusal in &outcome.refusals {
-            eprintln!(
-                "{}:{}: `{}` stays an `Arc<Mutex<_>>`: {}\n  Review {GUIDE}#{}",
-                file.strip_prefix(&root).unwrap_or(&file).display(),
-                refusal.line,
-                refusal.name,
-                refusal.reason.describe(),
-                refusal.reason.section()
-            );
-        }
-        if !accept(&mut edits, outcome.edits) {
-            eprintln!(
-                "adamantium: {}: shared-state rewrites overlap another fix; run fix again once it applies",
-                file.display()
-            );
+        packages.entry(package).or_default().push(StateSource {
+            file,
+            source,
+            mutexes,
+        });
+    }
+    for (package, drafts) in packages {
+        let krate = scan::Crate::scan(&package)?;
+        let drafts = drafts
+            .into_iter()
+            .map(|input| state::plan(&input.file, &input.source, &input.mutexes, &krate))
+            .collect();
+        for (file, outcome) in state::settle(drafts, &krate) {
+            for refusal in &outcome.refusals {
+                eprintln!(
+                    "{}:{}: `{}` stays an `Arc<Mutex<_>>`: {}\n  Review {GUIDE}#{}",
+                    file.strip_prefix(&root).unwrap_or(&file).display(),
+                    refusal.line,
+                    refusal.name,
+                    refusal
+                        .boundary
+                        .as_deref()
+                        .unwrap_or(refusal.reason.describe()),
+                    refusal.reason.section()
+                );
+            }
+            if !accept(&mut edits, outcome.edits) {
+                eprintln!(
+                    "adamantium: {}: shared-state rewrites overlap another fix; run fix again once it applies",
+                    file.display()
+                );
+            }
         }
     }
     edits.sort();
@@ -456,49 +484,51 @@ fn migration_available(file: &Path, root: &Path, needs: Api) -> Result<bool> {
     Ok(available)
 }
 
+/// The directory of the package whose manifest is nearest above `file`.
+fn package(file: &Path, root: &Path) -> Option<PathBuf> {
+    file.ancestors()
+        .skip(1)
+        .take_while(|path| path.starts_with(root))
+        .find(|ancestor| ancestor.join("Cargo.toml").is_file())
+        .map(Path::to_path_buf)
+}
+
 // A migration must not introduce an unresolved crate path. Aliased dependencies
 // are left for review rather than guessing which name is available in scope.
 fn adamantium_api(file: &Path, root: &Path) -> Result<Api> {
-    for ancestor in file
-        .ancestors()
-        .skip(1)
-        .take_while(|path| path.starts_with(root))
+    let Some(package) = package(file, root) else {
+        return Ok(Api::None);
+    };
+    let doc: toml_edit::DocumentMut = fs::read_to_string(package.join("Cargo.toml"))?.parse()?;
+    let Some(dependency) = doc
+        .get("dependencies")
+        .and_then(|deps| deps.get("adamantium"))
+    else {
+        return Ok(Api::None);
+    };
+    // Optional and inherited dependencies need feature/activation
+    // resolution for the selected build. Leave those for review.
+    let flag = |name| dependency.get(name).and_then(toml_edit::Item::as_bool);
+    let renamed = dependency.get("package").and_then(toml_edit::Item::as_str);
+    let tokio = dependency
+        .get("features")
+        .and_then(toml_edit::Item::as_array)
+        .is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| feature.as_str() == Some("tokio"))
+        });
+    if flag("optional") == Some(true)
+        || flag("workspace") == Some(true)
+        || renamed.is_some_and(|name| name != "adamantium")
     {
-        let manifest = ancestor.join("Cargo.toml");
-        if manifest.is_file() {
-            let doc: toml_edit::DocumentMut = fs::read_to_string(manifest)?.parse()?;
-            let Some(dependency) = doc
-                .get("dependencies")
-                .and_then(|deps| deps.get("adamantium"))
-            else {
-                return Ok(Api::None);
-            };
-            // Optional and inherited dependencies need feature/activation
-            // resolution for the selected build. Leave those for review.
-            let flag = |name| dependency.get(name).and_then(toml_edit::Item::as_bool);
-            let package = dependency.get("package").and_then(toml_edit::Item::as_str);
-            let tokio = dependency
-                .get("features")
-                .and_then(toml_edit::Item::as_array)
-                .is_some_and(|features| {
-                    features
-                        .iter()
-                        .any(|feature| feature.as_str() == Some("tokio"))
-                });
-            if flag("optional") == Some(true)
-                || flag("workspace") == Some(true)
-                || package.is_some_and(|name| name != "adamantium")
-            {
-                return Ok(Api::None);
-            }
-            return Ok(if flag("default-features") != Some(false) || tokio {
-                Api::Tokio
-            } else {
-                Api::Core
-            });
-        }
+        return Ok(Api::None);
     }
-    Ok(Api::None)
+    Ok(if flag("default-features") != Some(false) || tokio {
+        Api::Tokio
+    } else {
+        Api::Core
+    })
 }
 
 struct Mechanical<'a> {

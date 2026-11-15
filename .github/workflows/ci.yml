@@ -8,6 +8,17 @@ permissions:
   contents: read
 
 jobs:
+  packages:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [adamantium, cargo-adamantium]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --locked --registry crates-io -p "${{ matrix.package }}" --all-features --dry-run
+
   rust:
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.toolchain == 'beta' }}
