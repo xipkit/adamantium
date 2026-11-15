@@ -168,6 +168,7 @@ fn past() -> Option<Instant> {
 }
 
 #[cfg(feature = "tokio")]
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn requests_carry_their_replies_across_tasks() {
     struct Double {
@@ -207,6 +208,7 @@ async fn requests_carry_their_replies_across_tasks() {
 }
 
 #[cfg(feature = "tokio")]
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(start_paused = true)]
 async fn receive_until_ends_at_the_deadline_and_keeps_a_later_reply() {
     let (reply, answer) = Reply::pair();
@@ -228,6 +230,7 @@ async fn receive_until_ends_at_the_deadline_and_keeps_a_later_reply() {
 }
 
 #[cfg(feature = "tokio")]
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(start_paused = true)]
 async fn receive_until_ends_when_cancelled() {
     let (_reply, answer) = Reply::<u8>::pair();

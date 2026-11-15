@@ -61,13 +61,15 @@ async fn pending<S: Stream + Send>(mut stream: Pin<&mut S>) {
 }
 
 macro_rules! on_both_runtimes {
-    ($(async fn $name:ident() $body:block)*) => {$(
+    ($($(#[$attribute:meta])* async fn $name:ident() $body:block)*) => {$(
         mod $name {
             use super::*;
 
+            $(#[$attribute])*
             #[tokio::test]
             async fn current_thread() $body
 
+            #[cfg(not(target_os = "wasi"))]
             #[tokio::test(flavor = "multi_thread")]
             async fn multi_thread() $body
         }
@@ -213,6 +215,7 @@ on_both_runtimes! {
         }
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn later_panic_drains_before_resuming() {
         let dropped = Arc::new(AtomicUsize::new(0));
         let count = dropped.clone();
@@ -420,6 +423,7 @@ async fn recorded_error_wins_over_cancellation_and_buffered_success() {
     assert_eq!(stream.next().await, None);
 }
 
+#[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
 #[tokio::test]
 async fn recorded_panic_wins_over_error_and_cancellation() {
     let cancel = Cancellation::new();
@@ -498,6 +502,7 @@ async fn cancellation_discards_ready_successes_before_refilling() {
     assert_eq!(stream.next().await, None);
 }
 
+#[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
 #[tokio::test]
 async fn synchronous_panics_abort_and_leave_parent_uncancelled() {
     for iterator_panics in [true, false] {
@@ -537,6 +542,7 @@ async fn synchronous_panics_abort_and_leave_parent_uncancelled() {
     }
 }
 
+#[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
 #[test]
 fn runtime_shutdown_panics_without_taking_more_items() {
     let runtime = || {
@@ -597,6 +603,7 @@ async fn exhausted_cooperative_budget_pauses_intake_and_preserves_results() {
     assert_eq!(stream.next().await, None);
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancellation_waits_for_synchronous_destructors() {
     struct Cleanup {

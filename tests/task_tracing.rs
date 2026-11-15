@@ -84,6 +84,7 @@ async fn forever() -> Result<(), &'static str> {
     std::future::pending().await
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(start_paused = true)]
 async fn deadlines_report_only_unfinished_named_tasks_in_body_and_join() {
     for pending_body in [false, true] {
@@ -149,6 +150,7 @@ async fn deadlines_report_only_unfinished_named_tasks_in_body_and_join() {
     }
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(start_paused = true)]
 async fn deadline_reports_blocking_work_before_waiting_for_cleanup() {
     let capture = Capture::default();
@@ -184,6 +186,7 @@ async fn deadline_reports_blocking_work_before_waiting_for_cleanup() {
     .await;
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(start_paused = true)]
 async fn deadline_includes_named_work_that_has_not_been_polled() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -216,6 +219,7 @@ async fn deadline_includes_named_work_that_has_not_been_polled() {
     );
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(start_paused = true)]
 async fn panicked_tasks_are_excluded_and_their_panic_still_propagates() {
     use futures_util::FutureExt;
@@ -258,11 +262,13 @@ async fn panicked_tasks_are_excluded_and_their_panic_still_propagates() {
     );
 }
 
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 #[tokio::test]
 async fn spans_follow_async_polls_and_blocking_closures_and_keep_the_parent() {
     check_spans().await;
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn spans_follow_tasks_onto_worker_threads() {
     check_spans().await;
@@ -335,6 +341,7 @@ async fn check_spans() {
     assert!(capture.events.lock().unwrap().is_empty());
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(start_paused = true)]
 async fn cancellation_and_unnamed_scopes_produce_no_diagnostics() {
     let capture = Capture::default();

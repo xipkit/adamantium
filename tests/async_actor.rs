@@ -47,13 +47,15 @@ async fn pending<F: Future + Send>(mut future: Pin<&mut F>) {
 }
 
 macro_rules! on_both_runtimes {
-    ($(async fn $name:ident() $body:block)*) => {$(
+    ($($(#[$attribute:meta])* async fn $name:ident() $body:block)*) => {$(
         mod $name {
             use super::*;
 
+            $(#[$attribute])*
             #[tokio::test]
             async fn current_thread() $body
 
+            #[cfg(not(target_os = "wasi"))]
             #[tokio::test(flavor = "multi_thread")]
             async fn multi_thread() $body
         }
@@ -167,6 +169,7 @@ on_both_runtimes! {
         assert_eq!(dropped.load(Ordering::SeqCst), 4);
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn panic_closes_mailbox_and_releases_queue() {
         let started = Channel::bounded(1);
         let release = Channel::bounded(1);

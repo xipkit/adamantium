@@ -89,6 +89,7 @@ fn breaking_a_self_reference_allows_actor_state_to_drop() {
 }
 
 #[cfg(feature = "tokio")]
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn methods_run_one_at_a_time() {
     let tally = Actor::new(Tally::default());
@@ -133,6 +134,7 @@ fn a_method_cannot_reenter_its_own_actor() {
     a.with(|_| a.with(|_| ()));
 }
 
+#[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
 #[test]
 fn a_panic_inside_a_method_does_not_poison_the_actor() {
     let a = Actor::new(Tally::default());

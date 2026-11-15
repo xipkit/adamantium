@@ -2,6 +2,7 @@
 
 use adamantium::Tasks;
 
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 #[tokio::test]
 async fn named_tasks_preserve_values_and_error_handling() {
     let mut tasks = Tasks::<&str>::new();
@@ -15,6 +16,7 @@ async fn named_tasks_preserve_values_and_error_handling() {
     assert_eq!(tasks.join(Ok(())).await, Err("unclaimed"));
 }
 
+#[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
 #[cfg(not(feature = "tracing"))]
 #[tokio::test]
 async fn names_are_not_converted_without_tracing() {

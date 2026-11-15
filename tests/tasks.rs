@@ -126,13 +126,15 @@ fn one_thread_runtime() -> tokio::runtime::Runtime {
 
 /// Writes each test twice, once per runtime flavor.
 macro_rules! on_both_runtimes {
-    ($(async fn $name:ident() $body:block)*) => {$(
+    ($($(#[$attribute:meta])* async fn $name:ident() $body:block)*) => {$(
         mod $name {
             use super::*;
 
+            $(#[$attribute])*
             #[tokio::test]
             async fn current_thread() $body
 
+            #[cfg(not(target_os = "wasi"))]
             #[tokio::test(flavor = "multi_thread")]
             async fn multi_thread() $body
         }
@@ -140,6 +142,7 @@ macro_rules! on_both_runtimes {
 }
 
 on_both_runtimes! {
+    #[cfg_attr(target_os = "wasi", ignore = "WASI has no threads")]
     async fn an_error_from_a_dropped_blocking_handle_is_reported_at_join() {
         let mut tasks = Tasks::<&str>::new();
         let (release, released) = std::sync::mpsc::sync_channel(1);
@@ -286,6 +289,7 @@ on_both_runtimes! {
         assert_eq!(tasks.join(Err::<(), _>("body")).await, Err("body"));
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn a_panic_during_join_wins_over_an_error() {
         let mut tasks = Tasks::<&str>::new();
         let (sent, received) = oneshot::channel();
@@ -305,6 +309,7 @@ on_both_runtimes! {
         assert_eq!(payload.downcast_ref(), Some(&"kaboom after an error"));
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn a_panic_during_join_aborts_and_drains_siblings() {
         let mut tasks = Tasks::<&str>::new();
         let dropped = Arc::new(AtomicBool::new(false));
@@ -343,6 +348,7 @@ on_both_runtimes! {
         assert!(dropped.load(Ordering::SeqCst), "the pending item was not drained");
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn concurrently_resumes_a_later_panic_while_an_earlier_item_is_pending() {
         let dropped = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&dropped);
@@ -473,6 +479,7 @@ on_both_runtimes! {
         assert_eq!(timeout(HUNG, work).await.unwrap(), Ok((0..100).collect()));
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn concurrently_aborts_its_items_if_f_panics() {
         let (held, dropped) = oneshot::channel::<()>();
         let mut held = Some(held);
@@ -581,6 +588,7 @@ on_both_runtimes! {
         assert_eq!(result, Err((0..8).collect()));
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn first_ok_resumes_a_panic_and_drains_the_rest() {
         let dropped = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&dropped);
@@ -602,6 +610,7 @@ on_both_runtimes! {
 
     // The loser can only panic once it is aborted, which happens after the
     // winner has succeeded.
+    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn first_ok_resumes_a_panic_from_a_loser_drained_after_a_success() {
         let succeeded = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&succeeded);
@@ -624,6 +633,7 @@ on_both_runtimes! {
         assert!(succeeded.load(Ordering::SeqCst), "the winner never succeeded");
     }
 
+    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn first_ok_aborts_its_items_if_f_panics() {
         let (held, dropped) = oneshot::channel::<()>();
         let mut held = Some(held);
@@ -699,6 +709,7 @@ async fn the_first_error_recorded_wins_whatever_the_spawn_order() {
 // A handle dropped just as its task delivers a result must not take the error
 // with it. A barrier lines the two up, but the window is too small to hit every
 // round, so this leans on repetition.
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_handle_dropped_as_its_task_fails_does_not_lose_the_error() {
     for _ in 0..10_000 {
@@ -715,6 +726,7 @@ async fn a_handle_dropped_as_its_task_fails_does_not_lose_the_error() {
     }
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn values_come_back_in_the_order_asked() {
     let result = Tasks::<&str>::run(async |t| {
@@ -729,6 +741,7 @@ async fn values_come_back_in_the_order_asked() {
     assert_eq!(result, Ok(("slow", "fast")));
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_task_error_reaches_the_body_and_aborts_siblings() {
     let dropped = Arc::new(AtomicBool::new(false));
@@ -746,6 +759,7 @@ async fn a_task_error_reaches_the_body_and_aborts_siblings() {
     );
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn an_error_nobody_asked_for_is_reported_at_join() {
     let result = Tasks::<&str>::run(async |t| {
@@ -756,6 +770,7 @@ async fn an_error_nobody_asked_for_is_reported_at_join() {
     assert_eq!(result, Err("dropped handle"));
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn an_error_in_a_finished_task_whose_handle_is_dropped_later_is_reported() {
     let result = Tasks::<&str>::run(async |t| {
@@ -768,6 +783,7 @@ async fn an_error_in_a_finished_task_whose_handle_is_dropped_later_is_reported()
     assert_eq!(result, Err("finished then dropped"));
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_body_error_wins_and_aborts_tasks() {
     let dropped = Arc::new(AtomicBool::new(false));
@@ -780,6 +796,7 @@ async fn a_body_error_wins_and_aborts_tasks() {
     assert!(dropped.load(Ordering::SeqCst));
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_successful_scope_waits_for_every_task() {
     let finished = Arc::new(AtomicUsize::new(0));
@@ -799,6 +816,7 @@ async fn a_successful_scope_waits_for_every_task() {
     assert_eq!(finished.load(Ordering::SeqCst), 8);
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 #[should_panic(expected = "kaboom")]
 async fn a_panic_resumes_where_the_value_is_asked_for() {
@@ -810,6 +828,7 @@ async fn a_panic_resumes_where_the_value_is_asked_for() {
     .unwrap();
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 #[should_panic(expected = "kaboom at join")]
 async fn a_panic_in_an_unwatched_task_resumes_at_join() {
@@ -821,6 +840,7 @@ async fn a_panic_in_an_unwatched_task_resumes_at_join() {
     .unwrap();
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_manual_form_works_too() {
     let mut tasks = Tasks::<String>::new();
@@ -831,6 +851,7 @@ async fn the_manual_form_works_too() {
     assert_eq!(tasks.join(body).await, Ok(3));
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrently_keeps_input_order_and_honors_the_limit() {
     let active = Arc::new(AtomicUsize::new(0));
@@ -851,6 +872,7 @@ async fn concurrently_keeps_input_order_and_honors_the_limit() {
     assert!(peak.load(Ordering::SeqCst) <= 3, "peak was {peak:?}");
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrently_stops_at_the_first_error() {
     let dropped = Arc::new(AtomicBool::new(false));
@@ -904,6 +926,7 @@ async fn concurrently_reports_the_first_error_to_happen_not_the_first_input() {
 // The future is first polled on the first runtime, so its task lives there and
 // shutting it down cancels the task with nobody having aborted it and no error
 // to report. The second item must not start on the runtime that is left.
+#[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
 #[test]
 fn concurrently_panics_if_the_runtime_cancels_its_items() {
     let called = Arc::new(AtomicUsize::new(0));
@@ -934,6 +957,7 @@ fn concurrently_panics_if_the_runtime_cancels_its_items() {
 // The first item is stuck on a runtime that shuts down. The second finishes
 // there, so the third starts on the runtime that is left, and only an abort can
 // end it.
+#[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
 #[test]
 fn concurrently_aborts_its_other_items_if_the_runtime_cancels_one() {
     let finished = Arc::new(AtomicBool::new(false));
@@ -1076,6 +1100,7 @@ fn first_ok_does_nothing_until_polled() {
 
 // As for `concurrently`: the runtime that spawned the first item shuts down,
 // cancelling it with no success and no error to report.
+#[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
 #[test]
 fn first_ok_panics_if_the_runtime_cancels_its_items() {
     let called = Arc::new(AtomicUsize::new(0));
@@ -1103,11 +1128,13 @@ fn first_ok_panics_if_the_runtime_cancels_its_items() {
     assert_eq!(called.load(Ordering::SeqCst), 1);
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn blocking_returns_the_closure_result() {
     assert_eq!(blocking(|| 6 * 7).await, 42);
 }
 
+#[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 #[should_panic(expected = "blocked and broke")]
 async fn blocking_resumes_a_panic() {
