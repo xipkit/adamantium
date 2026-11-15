@@ -124,9 +124,14 @@ impl<T: Clone> Topic<T> {
     ) -> Result<usize, SendError<T>> {
         let senders = self.subscriptions.current();
         let mut stop = pin!(shutdown(cancellation, deadline));
-        for sender in &senders {
+        // The first wait is for nothing, so a request already present is seen
+        // even with no subscribers.
+        let waits = std::iter::once(None).chain(senders.iter().map(Some));
+        for sender in waits {
             let stopped = race((async { Some(stop.as_mut().await) }, async {
-                sender.room().await;
+                if let Some(sender) = sender {
+                    sender.room().await;
+                }
                 None
             }))
             .await;

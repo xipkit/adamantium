@@ -197,6 +197,21 @@ mod until {
     }
 
     #[tokio::test]
+    async fn a_request_already_present_wins_with_no_subscribers() {
+        let mut topic = Topic::new(1);
+        let cancellation = Cancellation::new();
+        cancellation.cancel();
+        let result = topic.send_until(&cancellation, None, 1).await;
+        assert_eq!(result, Err(SendError::Cancelled(1)));
+
+        let expired = time::now();
+        let result = topic
+            .send_until(&Cancellation::new(), Some(expired), 2)
+            .await;
+        assert_eq!(result, Err(SendError::DeadlineExceeded(2)));
+    }
+
+    #[tokio::test]
     async fn the_deadline_returns_the_value() {
         let mut topic = Topic::new(1);
         let _slow = topic.subscribe();
