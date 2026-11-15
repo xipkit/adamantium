@@ -87,6 +87,8 @@ Tasks::run(async |tasks| {
 - A task that fails with no restart left ends with that error. The scope handles the error like the error of any other task.
 - `.backoff(backoff)` adds a wait before each restart. Each further restart in the same window waits longer. Only the delays of the `Backoff` apply. Its limit on attempts does not.
 
+`tasks.spawn_supervised_named(name, restarts, work)` gives the task a name for the `tracing` feature. See [Task names and tracing](#task-names-and-tracing).
+
 `retry` is for one operation that must succeed one time. `spawn_supervised` is for a task that runs for a long time and can fail many times.
 
 ### `first_ok`
@@ -372,6 +374,7 @@ Use the optional `tracing` feature to find work that does not finish. Start task
 - When the deadline expires, the scope emits a warning with `running_tasks`. This is a snapshot of the unfinished named tasks in spawn order. The scope emits it before it requests cancellation or waits for cleanup.
 - The snapshot includes queued work and started blocking closures. It excludes completed tasks, including tasks whose handles were never awaited.
 - Duplicate names are kept.
+- `tasks.spawn_supervised_named("worker", restarts, work)` names a supervised task. All its starts run inside one span, and the snapshot includes the task until it ends. Each restart emits a warning in that span with `restart`, the number of the restart in the current window, and `delay`, the wait before it.
 - To collect the spans and warnings, install a tracing subscriber in the application.
 
 Unnamed tasks create no spans and no diagnostic records.
