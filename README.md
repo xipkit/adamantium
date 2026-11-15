@@ -16,8 +16,12 @@ cargo add adamantium
 
 The default `tokio` feature provides `Task`, `Tasks`, `concurrently`, `first_ok`, the
 concurrent streams, `AsyncActor`, and `blocking`. Set `default-features = false` to use `Actor`, `Str`, `Bytes`,
-`Array`, `Deque`, `Map`, `Set`, `Channel`, `Reply`, and `Watch` without Tokio, including on WASI. The `serde`
+`Array`, `Deque`, `Map`, `Set`, `Channel`, `Reply`, and `Watch` without Tokio. The `serde`
 feature can be enabled independently.
+
+Both configurations build and are tested on `wasm32-wasip1`. WASI has one thread and aborts on a panic, so with
+the `tokio` feature `blocking` and `Tasks::spawn_blocking` panic there, and a panic ends the program
+where other targets would report it to the scope. The `signal` and `deterministic` features are not available on WASI.
 
 Install the subcommand:
 
