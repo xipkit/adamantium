@@ -12,8 +12,10 @@ use crate::{Channel, Closed, Tasks};
 /// Call [`close`](Self::close) before waiting for successful scope completion:
 /// it rejects new sends and lets the worker drain accepted messages. Dropping
 /// all mailbox handles does **not** close the worker's channel. A handler error
-/// stops the worker and reaches the scope at join, using [`Tasks`]' existing
-/// error semantics; it does not interrupt a still-running scope body.
+/// stops the worker and fails the scope. Nobody holds the worker's [`Task`](crate::Task)
+/// handle, so the error is [orphaned](crate::Task): under [`Tasks::run`] or
+/// [`Tasks::run_until`] it also stops a still-running scope body at its next
+/// `await`.
 ///
 /// Failure, panic, or scope cancellation closes the mailbox and discards queued
 /// messages, even if handles survive or the worker has never been polled.

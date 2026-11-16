@@ -815,6 +815,118 @@ async fn a_successful_scope_waits_for_every_task() {
     assert_eq!(finished.load(Ordering::SeqCst), 8);
 }
 
+on_both_runtimes! {
+    async fn an_orphaned_error_stops_a_body_that_never_finishes() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let scope = Tasks::<&str>::run(async |t| {
+            t.spawn(forever(&dropped));
+            t.spawn(async { Err::<(), _>("orphaned") });
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        assert_eq!(timeout(HUNG, scope).await.unwrap(), Err("orphaned"));
+        assert!(dropped.load(Ordering::SeqCst), "the sibling was not drained");
+    }
+
+    async fn an_orphaned_blocking_error_stops_the_body() {
+        let scope = Tasks::<&str>::run(async |t| {
+            t.spawn_blocking(|| Err::<(), _>("blocking"));
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        assert_eq!(timeout(HUNG, scope).await.unwrap(), Err("blocking"));
+    }
+
+    async fn an_error_the_body_takes_with_value_does_not_stop_it() {
+        let scope = Tasks::<&str>::run(async |t| {
+            let failed = t.spawn(async { Err::<(), _>("handled") });
+            assert_eq!(t.value(failed).await, Err("handled"));
+            // Give a wrongly orphaned error time to stop the body.
+            sleep(Duration::from_millis(20)).await;
+            let retried = t.spawn(async { Ok("recovered") });
+            t.value(retried).await
+        });
+        assert_eq!(timeout(HUNG, scope).await.unwrap(), Ok("recovered"));
+    }
+
+    async fn dropping_a_handle_whose_error_arrived_stops_the_body() {
+        let (sent, received) = oneshot::channel();
+        let scope = Tasks::<&str>::run(async |t| {
+            let failed = t.spawn(async move {
+                sent.send(()).unwrap();
+                Err::<(), _>("arrived first")
+            });
+            received.await.unwrap();
+            // On one thread the task has delivered its error by now; on
+            // several, this drop races the delivery, and either order counts.
+            drop(failed);
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        assert_eq!(timeout(HUNG, scope).await.unwrap(), Err("arrived first"));
+    }
+
+    async fn a_kept_handle_leaves_the_body_running_until_join() {
+        let (sent, received) = oneshot::channel();
+        let finished = AtomicBool::new(false);
+        let scope = Tasks::<&str>::run(async |t| {
+            let kept = t.spawn(async move {
+                sent.send(()).unwrap();
+                Err::<(), _>("kept")
+            });
+            received.await.unwrap();
+            sleep(Duration::from_millis(20)).await;
+            finished.store(true, Ordering::SeqCst);
+            // The body returns before its next await, so this drop can't stop it.
+            drop(kept);
+            Ok(())
+        });
+        assert_eq!(timeout(HUNG, scope).await.unwrap(), Err("kept"));
+        assert!(finished.load(Ordering::SeqCst), "the body was stopped");
+    }
+}
+
+// One thread at a time, so the kept task's error is recorded by the time the
+// body runs again.
+#[tokio::test]
+async fn the_oldest_unclaimed_error_wins_over_the_orphan() {
+    let (sent, received) = oneshot::channel();
+    let scope = Tasks::<&str>::run(async |t| {
+        let _kept = t.spawn(async move {
+            sent.send(()).unwrap();
+            Err::<(), _>("older and kept")
+        });
+        received.await.unwrap();
+        t.spawn(async { Err::<(), _>("newer and orphaned") });
+        std::future::pending::<()>().await;
+        Ok(())
+    });
+    assert_eq!(timeout(HUNG, scope).await.unwrap(), Err("older and kept"));
+}
+
+// The handle is dropped just as its task fails. Whichever happens second must
+// see the first, or the body waits forever. The window is small, so this leans
+// on repetition.
+#[cfg(not(target_os = "wasi"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handle_dropped_as_its_task_fails_still_stops_the_body() {
+    for _ in 0..10_000 {
+        let barrier = Arc::new(Barrier::new(2));
+        let scope = Tasks::<&str>::run(async |t| {
+            let at_barrier = Arc::clone(&barrier);
+            let failed = t.spawn(async move {
+                at_barrier.wait().await;
+                Err::<(), _>("raced")
+            });
+            barrier.wait().await;
+            drop(failed);
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        assert_eq!(timeout(HUNG, scope).await.unwrap(), Err("raced"));
+    }
+}
+
 #[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 #[should_panic(expected = "kaboom")]

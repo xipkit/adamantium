@@ -374,10 +374,10 @@ that a Tokio `JoinHandle` returns, and the `unwrap` that usually follows it,
 go away.
 
 A task's error ends the scope, aborting the other tasks, once the scope sees
-it: when `value` returns it to the body and the body passes it on, or when the
-body has returned and the scope joins. Until then a failed task doesn't
-interrupt the body. A body waiting on `value` for a task that never finishes
-keeps waiting after a sibling fails, so bound such waits with `run_until`.
+it. A task whose handle was dropped has nobody to give its error to, so the
+error stops the body at its next `await`, as in a Trio nursery. A task whose
+handle the body keeps hands its error to `value`. If the body never asks, the
+error waits until the body drops the handle or returns and the scope joins.
 
 Dropping a scope's future before it finishes, such as by aborting the task that
 awaits it, requests aborts of its tasks but can't wait for them.

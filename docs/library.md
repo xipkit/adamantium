@@ -40,6 +40,7 @@ The buffer of Serde reports that it is human-readable, so `Bytes` requests a seq
 - `join` and `Tasks::run` wait for the remaining tasks.
 - `join` returns the task errors that nothing observed.
 - If the body or an unobserved task returns an error, the scope aborts the remaining tasks.
+- In `Tasks::run` and `Tasks::run_until`, a task error that nobody can claim stops the body at its next `await`. An error is unclaimable once the task has failed and its handle has been dropped, in either order. The scope then aborts and drains the other tasks and returns the oldest unclaimed error. A handle that the body keeps can still claim its error, so that error waits until the handle is passed to `value` or dropped.
 - A task panic resumes in the scope.
 - When the error type cannot be inferred, specify it with `Tasks::<E>::run`. This occurs when all errors pass through `?`.
 
@@ -196,7 +197,7 @@ The mailbox:
 Close and failure:
 
 - Call `close()` before the scope completes successfully. `close()` rejects new sends and drains the accepted work. Dropping the mailbox handles does not close the mailbox.
-- A handler error closes the mailbox and discards the queued messages. The error propagates at scope join through `Tasks`. It does not interrupt a pending scope body.
+- A handler error closes the mailbox and discards the queued messages. The error fails the scope through `Tasks`. Nothing holds the worker's handle, so under `Tasks::run` or `Tasks::run_until` the error also stops a pending scope body.
 - A panic or a cancellation also closes the mailbox and discards the queue. This is true before the first poll of the worker, and while mailbox handles remain.
 - Cancellation can interrupt I/O. It cannot roll back external effects or guarantee delivery.
 - To wait for cleanup, await the shutdown of the scope. Dropping a scope requests aborts but does not wait.
@@ -327,7 +328,7 @@ These methods return `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExcee
 - If cancellation and the deadline are both ready, cancellation wins.
 - After shutdown starts, its reason stays the same during cleanup.
 - A scope that is already cancelled or expired does not poll its body.
-- As with `run`, child failures are collected when the body asks for a value or joins. They do not interrupt a body that is otherwise pending.
+- As with `run`, a child error that nobody can claim stops the body and cancels the signal. If a shutdown request is ready at the same poll, shutdown still starts cleanup, but the child error is the result.
 
 ### Cleanup
 

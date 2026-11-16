@@ -169,6 +169,20 @@ on_both_runtimes! {
         assert_eq!(dropped.load(Ordering::SeqCst), 4);
     }
 
+    async fn a_handler_error_stops_a_running_scope_body() {
+        let result = timeout(HUNG, Tasks::<&str>::run(async |tasks| {
+            let actor = AsyncActor::new(tasks, (), 1, |(), (): ()| {
+                Box::pin(async { Err("handler failed") })
+            });
+            actor.send(()).await.unwrap();
+            std::future::pending::<()>().await;
+            Ok(())
+        }))
+        .await
+        .unwrap();
+        assert_eq!(result, Err("handler failed"));
+    }
+
     #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn panic_closes_mailbox_and_releases_queue() {
         let started = Channel::bounded(1);
