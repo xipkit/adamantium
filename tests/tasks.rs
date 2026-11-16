@@ -13,7 +13,7 @@ use std::{
 };
 
 use adamantium::time::sleep;
-use adamantium::{Tasks, blocking, concurrently, first_ok};
+use adamantium::{Cancellation, Tasks, blocking, concurrently, first_ok};
 use support::timeout;
 use tokio::sync::{Barrier, Semaphore, oneshot};
 
@@ -987,6 +987,40 @@ async fn a_panic_in_a_handler_fails_the_scope() {
     })
     .await
     .unwrap();
+}
+
+on_both_runtimes! {
+    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
+    async fn a_task_panic_stops_a_body_that_never_finishes() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let sibling = forever(&dropped);
+        let scope = Tasks::<&str>::run(async move |t| {
+            t.spawn(sibling);
+            t.spawn_handled(async { panic!("kaboom in a connection") }, |(): ()| {});
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        #[allow(clippy::disallowed_methods, reason = "the way to catch the resumed panic")]
+        let scope = tokio::spawn(scope);
+        let payload = timeout(HUNG, scope).await.unwrap().unwrap_err().into_panic();
+        assert_eq!(payload.downcast_ref(), Some(&"kaboom in a connection"));
+        assert!(dropped.load(Ordering::SeqCst), "the sibling was not drained");
+    }
+
+    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
+    async fn a_task_panic_stops_a_cancellable_body_and_cancels_its_signal() {
+        let signal = Cancellation::new();
+        let scope = Tasks::<&str>::run_until(signal.clone(), None, async |t| {
+            t.spawn_handled(async { panic!("kaboom in a connection") }, |(): ()| {});
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        #[allow(clippy::disallowed_methods, reason = "the way to catch the resumed panic")]
+        let scope = tokio::spawn(scope);
+        let payload = timeout(HUNG, scope).await.unwrap().unwrap_err().into_panic();
+        assert_eq!(payload.downcast_ref(), Some(&"kaboom in a connection"));
+        assert!(signal.is_cancelled());
+    }
 }
 
 // One thread at a time, so the kept task's error is recorded by the time the

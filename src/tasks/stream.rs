@@ -6,7 +6,7 @@ use std::{
 
 use futures_core::Stream;
 
-use super::{Cancellation, ScopeError, Tasks, lock, no_result, shared};
+use super::{Cancellation, ScopeError, Tasks, join_next, lock, no_result, shared};
 
 /// Maps items concurrently and yields successful results in input order.
 ///
@@ -219,16 +219,16 @@ where
             }
             // Join readiness can lag result publication. Bound unjoined handles
             // too, even if their values have already been yielded.
-            let can_start = !exhausted && outstanding < limit && tasks.set.len() < limit;
+            let can_start = !exhausted && outstanding < limit && lock(&tasks.set).len() < limit;
             let can_yield = lock(&results).contains(yielded);
-            if tasks.set.is_empty() && !can_start && !can_yield {
+            if lock(&tasks.set).is_empty() && !can_start && !can_yield {
                 missing = outstanding != 0;
                 break cancellation.is_cancelled().then_some(ScopeError::Cancelled);
             }
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => break Some(ScopeError::Cancelled),
-                joined = tasks.set.join_next(), if !tasks.set.is_empty() => {
+                joined = join_next(&tasks.set), if !lock(&tasks.set).is_empty() => {
                     if let Some(Err(error)) = joined {
                         tasks.remember_panic(error);
                         missing = true;

@@ -16,7 +16,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 
 pub(crate) enum JoinError {
@@ -43,6 +43,8 @@ fn production_error(error: tokio::task::JoinError) -> JoinError {
 pub(crate) struct JoinSet {
     inner: Set,
     world: World,
+    /// Who polled the set while it was empty, woken by the next spawn.
+    idle: Option<Waker>,
 }
 
 enum Set {
@@ -54,6 +56,9 @@ enum Set {
     Model {
         tasks: Vec<model::Task<()>>,
         changed: std::sync::Arc<super::wait::WaitQueue>,
+        /// Kept across polls, so a task that finishes between them wakes
+        /// the next one.
+        waiter: Option<super::wait::Waiter>,
     },
 }
 
@@ -107,7 +112,9 @@ impl JoinSet {
                 inner: Set::Model {
                     tasks: Vec::new(),
                     changed: std::sync::Arc::new(super::wait::WaitQueue::new()),
+                    waiter: None,
                 },
+                idle: None,
             };
         }
         Self {
@@ -116,6 +123,7 @@ impl JoinSet {
                 tasks: tokio::task::JoinSet::new(),
                 unfinished: Arc::new(AtomicUsize::new(0)),
             },
+            idle: None,
         }
     }
 
@@ -129,8 +137,9 @@ impl JoinSet {
                 });
             }
             #[cfg(feature = "deterministic")]
-            Set::Model { tasks, changed } => tasks.push(model::spawn(future, changed.clone())),
+            Set::Model { tasks, changed, .. } => tasks.push(model::spawn(future, changed.clone())),
         }
+        self.wake_idle();
     }
 
     pub(crate) fn spawn_blocking(&mut self, f: impl FnOnce() + Send + 'static) {
@@ -156,13 +165,20 @@ impl JoinSet {
             // entered, f runs synchronously to completion even if a modeled
             // lock switches tasks inside it; abort cannot interrupt that poll.
             #[cfg(feature = "deterministic")]
-            Set::Model { tasks, changed } => tasks.push(model::spawn(
+            Set::Model { tasks, changed, .. } => tasks.push(model::spawn(
                 async move {
                     shuttle::future::yield_now().await;
                     f()
                 },
                 changed.clone(),
             )),
+        }
+        self.wake_idle();
+    }
+
+    fn wake_idle(&mut self) {
+        if let Some(idle) = self.idle.take() {
+            idle.wake();
         }
     }
 
@@ -220,29 +236,54 @@ impl JoinSet {
         }
     }
 
-    pub(crate) async fn join_next(&mut self) -> Option<Result<(), JoinError>> {
-        super::in_world(self.world, async {
-            match &mut self.inner {
-                Set::Production { tasks, .. } => {
-                    tasks.join_next().await.map(|r| r.map_err(production_error))
+    /// Polls for a finished task and takes it out of the set, returning
+    /// `Ready(None)` if the set is empty. Whatever it returns, `cx` is woken
+    /// when there may be something new to take: when a task finishes, or,
+    /// unlike Tokio's set, when the next task is spawned into an empty set.
+    /// So a caller can keep polling for finished tasks while others are
+    /// spawned. As with Tokio, only the waker of the latest poll is kept.
+    pub(crate) fn poll_join_next(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<(), JoinError>>> {
+        self.world.check();
+        self.idle = None;
+        let polled = match &mut self.inner {
+            Set::Production { tasks, .. } => tasks
+                .poll_join_next(cx)
+                .map(|joined| joined.map(|result| result.map_err(production_error))),
+            #[cfg(feature = "deterministic")]
+            Set::Model {
+                tasks,
+                changed,
+                waiter,
+            } => loop {
+                if tasks.is_empty() {
+                    *waiter = None;
+                    break Poll::Ready(None);
                 }
-                #[cfg(feature = "deterministic")]
-                Set::Model { tasks, changed } => loop {
-                    if tasks.is_empty() {
-                        return None;
-                    }
-                    let listener = changed.listen();
-                    for (index, task) in tasks.iter().enumerate() {
-                        if let Some(result) = task.take() {
-                            tasks.remove(index);
-                            return Some(result);
-                        }
-                    }
-                    listener.await;
-                },
-            }
-        })
-        .await
+                // Listen before looking, so a task that finishes in between
+                // still wakes this poll.
+                let listener = waiter.get_or_insert_with(|| changed.listen());
+                let finished = tasks
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, task)| task.take().map(|result| (index, result)));
+                if let Some((index, result)) = finished {
+                    tasks.remove(index);
+                    *waiter = None;
+                    break Poll::Ready(Some(result));
+                }
+                if Pin::new(listener).poll(cx).is_pending() {
+                    break Poll::Pending;
+                }
+                *waiter = None;
+            },
+        };
+        if let Poll::Ready(None) = polled {
+            self.idle = Some(cx.waker().clone());
+        }
+        polled
     }
 }
 

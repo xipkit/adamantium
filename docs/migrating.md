@@ -378,6 +378,8 @@ it. A task whose handle was dropped has nobody to give its error to, so the
 error stops the body at its next `await`, as in a Trio nursery. A task whose
 handle the body keeps hands its error to `value`. If the body never asks, the
 error waits until the body drops the handle or returns and the scope joins.
+A task's panic stops the body at its next `await` whether or not the body kept
+the handle, and then resumes in the scope.
 
 Dropping a scope's future before it finishes, such as by aborting the task that
 awaits it, requests aborts of its tasks but can't wait for them.
