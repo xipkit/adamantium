@@ -238,13 +238,24 @@ struct Errors<E> {
     /// Whether a recorded error has lost its handle, so that nothing but the
     /// scope can ever report it.
     orphaned: bool,
+    /// Whether reaping found a task cancelled that the scope never aborted.
+    /// Its runtime is shutting down, and its result is gone.
+    reaped_cancelled: bool,
+}
+
+impl<E> Errors<E> {
+    /// Whether a child failure has to stop a running body: an error nobody
+    /// can claim, or a panic.
+    fn must_stop(&self) -> bool {
+        self.orphaned || self.panic.is_some()
+    }
 }
 
 /// What a scope shares with its tasks and their handles.
 struct Ledger<E> {
     errors: Lock<Errors<E>>,
-    /// Woken when an error is first orphaned.
-    on_orphan: WaitQueue,
+    /// Woken when a running body first has to stop.
+    on_stop: WaitQueue,
 }
 
 impl<E> Ledger<E> {
@@ -280,36 +291,54 @@ fn claim<E>(errors: &SharedErrors<E>, receipt: Receipt) -> Option<E> {
     errors.lock().recorded.remove(&receipt.0)
 }
 
-fn any_recorded<E>(errors: &SharedErrors<E>) -> bool {
-    !errors.lock().recorded.is_empty()
-}
-
 fn take_oldest<E>(errors: &SharedErrors<E>) -> Option<E> {
     errors.lock().recorded.pop_first().map(|(_, error)| error)
 }
 
 /// Marks that a recorded error can no longer reach anyone through its handle,
-/// and wakes a body waiting in [`orphaned`].
+/// and wakes a body waiting in [`stopped`].
 fn orphan<E>(errors: &SharedErrors<E>) {
-    let first = !std::mem::replace(&mut errors.lock().orphaned, true);
+    let first = {
+        let mut errors = errors.lock();
+        let first = !errors.must_stop();
+        errors.orphaned = true;
+        first
+    };
     if first {
-        errors.on_orphan.notify_all();
+        errors.on_stop.notify_all();
     }
 }
 
-/// Waits until some error is orphaned, returning at once if one already is.
-async fn orphaned<E>(errors: &SharedErrors<E>) {
-    loop {
-        if errors.lock().orphaned {
-            return;
+/// Keeps the first panic among the scope's join errors, and wakes a body
+/// waiting in [`stopped`]. Returns whether `join_error` was a panic.
+fn keep_panic<E>(errors: &SharedErrors<E>, join_error: JoinError) -> bool {
+    let Ok(payload) = join_error.try_into_panic() else {
+        return false;
+    };
+    let first = {
+        let mut errors = errors.lock();
+        let first = !errors.must_stop();
+        if errors.panic.is_none() {
+            errors.panic = Some(payload);
         }
-        // Listen before checking again, so an orphan between the two checks
-        // still wakes this wait.
-        let listener = errors.on_orphan.listen();
-        if errors.lock().orphaned {
-            return;
+        first
+    };
+    if first {
+        errors.on_stop.notify_all();
+    }
+    true
+}
+
+/// Notes what a task taken out of the set early, before the scope joins,
+/// left behind. Returns whether it panicked.
+fn reaped<E>(errors: &SharedErrors<E>, result: Result<(), JoinError>) -> bool {
+    match result {
+        Ok(()) => false,
+        Err(JoinError::Cancelled) => {
+            errors.lock().reaped_cancelled = true;
+            false
         }
-        listener.await;
+        Err(join_error) => keep_panic(errors, join_error),
     }
 }
 
@@ -319,32 +348,16 @@ async fn join_next(set: &Shared<JoinSet>) -> Option<Result<(), JoinError>> {
     poll_fn(|cx| lock(set).poll_join_next(cx)).await
 }
 
-/// Keeps the first panic among the scope's join errors. Returns whether
-/// `join_error` was a panic.
-fn keep_panic<E>(errors: &SharedErrors<E>, join_error: JoinError) -> bool {
-    let Ok(payload) = join_error.try_into_panic() else {
-        return false;
-    };
-    let mut errors = errors.lock();
-    if errors.panic.is_none() {
-        errors.panic = Some(payload);
-    }
-    true
-}
-
-/// Takes tasks out of `set` as they finish while a body runs, so a scope
-/// that lives as long as a server holds only its live tasks. Returns once a
-/// task has panicked, with the panic kept for the scope to resume. A task
-/// cancelled here was not aborted by the scope, so its runtime is shutting
-/// down, and whoever waits for its result finds out.
+/// Takes tasks out of `set` as they finish while a body runs, so the scope
+/// lets go of them even if the body never spawns again. Returns once a task
+/// has panicked, with the panic kept for the scope to resume.
 async fn reap<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
     poll_fn(|cx| {
         let mut set = lock(set);
         loop {
             match set.poll_join_next(cx) {
-                Poll::Ready(Some(Ok(()))) => {}
-                Poll::Ready(Some(Err(join_error))) => {
-                    if keep_panic(errors, join_error) {
+                Poll::Ready(Some(result)) => {
+                    if reaped(errors, result) {
                         return Poll::Ready(());
                     }
                 }
@@ -356,12 +369,27 @@ async fn reap<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
     .await
 }
 
-/// Waits until a child failure has to stop the body: an error is orphaned,
-/// or a task panics.
+/// Reaps finished tasks until a child failure has to stop the body: an
+/// error is orphaned, or a task panics, wherever the panic was found.
+/// Returns at once if one already has.
 async fn stopped<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
+    let must_stop = async {
+        loop {
+            if errors.lock().must_stop() {
+                return;
+            }
+            // Listen before checking again, so a failure between the two
+            // checks still wakes this wait.
+            let listener = errors.on_stop.listen();
+            if errors.lock().must_stop() {
+                return;
+            }
+            listener.await;
+        }
+    };
     tokio::select! {
         biased;
-        () = orphaned(errors) => {},
+        () = must_stop => {},
         () = reap(set, errors) => {},
     }
 }
@@ -408,9 +436,7 @@ fn no_orphan() -> ! {
 /// [`run_until`](Self::run_until), an error that nobody can ask for any more
 /// also ends the body at once: see [`Task`]. A panic in a task is resumed in the
 /// scope, as a thread panic is resumed by a scoped thread. Under `run` or
-/// `run_until` the panic also stops the body at its next `await`, and the
-/// scope lets go of each task as it finishes, so a scope that lives as long
-/// as a server holds only its live tasks. Dropping a scope
+/// `run_until` the panic also stops the body at its next `await`. Dropping a scope
 /// without joining aborts its async tasks without waiting for them. Started
 /// blocking closures continue running. See [`run_until`](Self::run_until)
 /// for cancellation, deadlines, and the cleanup contract.
@@ -464,8 +490,9 @@ impl<E: Send + 'static> Tasks<E> {
                     recorded: BTreeMap::new(),
                     panic: None,
                     orphaned: false,
+                    reaped_cancelled: false,
                 }),
-                on_orphan: WaitQueue::new(),
+                on_stop: WaitQueue::new(),
             }),
             cancellation: None,
             #[cfg(feature = "tracing")]
@@ -478,7 +505,7 @@ impl<E: Send + 'static> Tasks<E> {
     /// next `await` and becomes the scope's error. A task panic stops the body
     /// the same way: the other tasks are aborted and drained, and the panic is
     /// resumed. Tasks that finish while the body runs are let go of at once,
-    /// so [`len`](Self::len) counts only the ones still running.
+    /// even if the body spawns nothing more.
     ///
     /// ```
     /// # use adamantium::Tasks;
@@ -604,6 +631,7 @@ impl<E: Send + 'static> Tasks<E> {
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
         self.world.check();
+        self.reap();
         let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
         lock(&self.set).spawn(async move {
@@ -729,6 +757,7 @@ impl<E: Send + 'static> Tasks<E> {
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
         self.world.check();
+        self.reap();
         let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
         lock(&self.set).spawn_blocking(move || {
@@ -845,7 +874,7 @@ impl<E: Send + 'static> Tasks<E> {
         loop {
             // A task records its error just before it ends, so the end of
             // any task is the moment to look for a new one.
-            if !aborted && (body_failed || any_recorded(&self.errors)) {
+            if !aborted && (body_failed || self.failed()) {
                 self.abort();
                 aborted = true;
             }
@@ -877,22 +906,43 @@ impl<E: Send + 'static> Tasks<E> {
         }
     }
 
-    /// The number of tasks the scope still holds. Under [`run`](Self::run)
-    /// or [`run_until`](Self::run_until), that is the tasks still running,
-    /// plus any that finished since the body last awaited. A scope used by
-    /// hand holds its tasks until it joins.
+    /// The number of unfinished tasks, including work being dropped on abort.
     pub fn len(&self) -> usize {
         self.world.check();
-        lock(&self.set).len()
+        lock(&self.set).unfinished()
     }
 
-    /// Whether the scope holds no tasks, as counted by [`len`](Self::len).
+    /// Whether every spawned task has finished.
     pub fn is_empty(&self) -> bool {
-        self.world.check();
-        lock(&self.set).is_empty()
+        self.len() == 0
+    }
+
+    fn reap(&mut self) {
+        loop {
+            let next = lock(&self.set).try_join_next();
+            let Some(result) = next else {
+                break;
+            };
+            if reaped(&self.errors, result) {
+                self.abort();
+            }
+        }
+    }
+
+    fn failed(&self) -> bool {
+        let errors = self.errors.lock();
+        errors.reaped_cancelled || !errors.recorded.is_empty() || errors.panic.is_some()
     }
 
     async fn resume_first_panic<T>(&mut self) -> T {
+        let reaped_failure = {
+            let errors = self.errors.lock();
+            errors.reaped_cancelled || errors.panic.is_some()
+        };
+        if reaped_failure {
+            self.abort();
+            self.drain().await;
+        }
         while let Some(next) = join_next(&self.set).await {
             if let Err(join_error) = next {
                 self.remember_panic(join_error);
@@ -1038,8 +1088,8 @@ where
         let mut started = 0;
         // Fill the window, then wait for a place to open. A task records its
         // error just before it ends, so this stops before taking another item.
-        while !any_recorded(&tasks.errors) {
-            if tasks.len() < limit
+        while !tasks.failed() {
+            if lock(&tasks.set).len() < limit
                 && let Some(item) = items.next()
             {
                 let index = started;
@@ -1138,8 +1188,8 @@ where
         let mut started = 0;
         // A task reports just before it ends, so this stops before taking
         // another item once one has succeeded.
-        while lock(&outcomes).winner.is_none() {
-            if tasks.len() < limit
+        while lock(&outcomes).winner.is_none() && !tasks.failed() {
+            if lock(&tasks.set).len() < limit
                 && let Some(item) = items.next()
             {
                 let index = started;
@@ -1216,6 +1266,256 @@ where
     .await
 }
 
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use futures_util::FutureExt;
+    use std::panic::AssertUnwindSafe;
+
+    async fn yield_now() {
+        #[cfg(feature = "deterministic")]
+        if World::current().is_model() {
+            shuttle::future::yield_now().await;
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    struct Dropped(crate::Actor<bool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.with(|dropped| *dropped = true);
+        }
+    }
+
+    enum Reap {
+        Spawn,
+        SpawnBlocking,
+    }
+
+    #[tokio::test]
+    async fn aborted_work_stays_unfinished_until_it_is_dropped() {
+        let mut tasks = Tasks::<()>::new();
+        tasks.spawn(std::future::pending::<Result<(), ()>>());
+        tasks.spawn(std::future::pending::<Result<(), ()>>());
+        assert_eq!(tasks.len(), 2);
+        tasks.abort();
+        assert_eq!(tasks.len(), 2);
+        tasks.drain().await;
+        assert!(tasks.is_empty());
+    }
+
+    async fn panic_scenario() {
+        for blocking in [false, true] {
+            for through_value in [false, true] {
+                for reaper in [Reap::Spawn, Reap::SpawnBlocking] {
+                    let mut tasks = Tasks::<&str>::new();
+                    let failed = if blocking {
+                        tasks.spawn_blocking::<(), _>(|| panic!("reaped panic"))
+                    } else {
+                        tasks.spawn::<(), _>(async { panic!("reaped panic") })
+                    };
+                    while !failed.rx.is_closed() {
+                        yield_now().await;
+                    }
+                    while tasks.errors.lock().panic.is_none() {
+                        match reaper {
+                            Reap::Spawn => drop(tasks.spawn(async { Ok(()) })),
+                            Reap::SpawnBlocking => drop(tasks.spawn_blocking(|| Ok(()))),
+                        }
+                        yield_now().await;
+                    }
+
+                    // Work added after reaping must also be drained before the
+                    // saved panic is resumed.
+                    let dropped = crate::Actor::new(false);
+                    let guard = Dropped(dropped.clone());
+                    tasks.spawn(async move {
+                        let _guard = guard;
+                        std::future::pending::<()>().await;
+                        Ok(())
+                    });
+                    let panic = AssertUnwindSafe(async move {
+                        if through_value {
+                            tasks.value(failed).await
+                        } else {
+                            tasks.join(Err::<(), _>("body error")).await
+                        }
+                    })
+                    .catch_unwind()
+                    .await
+                    .unwrap_err();
+                    assert_eq!(panic.downcast_ref::<&str>(), Some(&"reaped panic"));
+                    assert!(dropped.snapshot());
+                }
+            }
+        }
+    }
+
+    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
+    #[tokio::test]
+    async fn reaped_panics_reach_value_and_join_after_cleanup() {
+        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
+        tokio::time::timeout(std::time::Duration::from_secs(30), panic_scenario())
+            .await
+            .unwrap();
+    }
+
+    #[cfg(feature = "deterministic")]
+    #[test]
+    fn reaped_panics_survive_deterministic_replay() {
+        let config = crate::testing::Config {
+            seed: 187,
+            iterations: 100,
+            max_steps: 30_000,
+        };
+        let replay = crate::testing::check(config, panic_scenario).unwrap();
+        assert_eq!(
+            crate::testing::replay(&replay, panic_scenario).unwrap(),
+            replay
+        );
+    }
+
+    #[tokio::test]
+    async fn spawning_keeps_retained_entries_bounded_across_100_000_tasks() {
+        Tasks::<()>::run(async |tasks| {
+            for _ in 0..1_000 {
+                let handles: Vec<_> = (0..100).map(|_| tasks.spawn(async { Ok(()) })).collect();
+                assert!(
+                    lock(&tasks.set).len() <= 100,
+                    "completed entries accumulated"
+                );
+                for handle in handles {
+                    tasks.value(handle).await?;
+                }
+            }
+            assert_eq!(tasks.len(), 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Spawns connections that finish at once, then waits without spawning
+    /// again: only the running scope's own reaping can let go of them.
+    async fn idle_server_scenario() {
+        Tasks::<()>::run(async |tasks| {
+            let served = crate::Actor::new(0);
+            for _ in 0..100 {
+                let served = served.clone();
+                tasks.spawn_handled(
+                    async move {
+                        served.with(|served| *served += 1);
+                        Ok::<_, ()>(())
+                    },
+                    |()| panic!("the connection succeeded"),
+                );
+            }
+            while served.snapshot() < 100 || !lock(&tasks.set).is_empty() {
+                crate::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_running_scope_reaps_tasks_without_another_spawn() {
+        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
+        tokio::time::timeout(std::time::Duration::from_secs(30), idle_server_scenario())
+            .await
+            .unwrap();
+    }
+
+    #[cfg(feature = "deterministic")]
+    #[test]
+    fn a_running_scope_reaps_tasks_without_another_spawn_under_replay() {
+        let config = crate::testing::Config {
+            seed: 195,
+            iterations: 50,
+            max_steps: 100_000,
+        };
+        let replay = crate::testing::check(config, idle_server_scenario).unwrap();
+        assert_eq!(
+            crate::testing::replay(&replay, idle_server_scenario).unwrap(),
+            replay
+        );
+    }
+
+    /// The scope's loop and the next spawn race to reap the same panic.
+    /// Whichever finds it, the body stops and the sibling is drained.
+    async fn panic_reaped_by_either_scenario() {
+        let dropped = crate::Actor::new(false);
+        let guard = Dropped(dropped.clone());
+        let scope = Tasks::<()>::run(async move |tasks| {
+            tasks.spawn(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+                Ok(())
+            });
+            let failed = tasks.spawn::<(), _>(async { panic!("reaped panic") });
+            while !failed.rx.is_closed() {
+                yield_now().await;
+            }
+            drop(tasks.spawn(async { Ok(()) }));
+            std::future::pending::<Result<(), ()>>().await
+        });
+        let panic = AssertUnwindSafe(scope).catch_unwind().await.unwrap_err();
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"reaped panic"));
+        assert!(dropped.snapshot());
+    }
+
+    #[cfg(feature = "deterministic")]
+    #[test]
+    fn a_panic_reaped_by_a_spawn_still_stops_the_body() {
+        let config = crate::testing::Config {
+            seed: 195,
+            iterations: 200,
+            max_steps: 30_000,
+        };
+        let replay = crate::testing::check(config, panic_reaped_by_either_scenario).unwrap();
+        assert_eq!(
+            crate::testing::replay(&replay, panic_reaped_by_either_scenario).unwrap(),
+            replay
+        );
+    }
+
+    #[cfg(feature = "deterministic")]
+    #[test]
+    fn finished_tasks_are_reaped_across_many_modeled_batches() {
+        async fn scenario() {
+            Tasks::<()>::run(async |tasks| {
+                for _ in 0..100 {
+                    let retained = tasks.spawn(async { Ok(42) });
+                    let blocking = tasks.spawn_blocking(|| Ok(7));
+                    while !tasks.is_empty() {
+                        yield_now().await;
+                    }
+                    let trigger = tasks.spawn(async { Ok(()) });
+                    assert_eq!(lock(&tasks.set).len(), 1);
+                    // Reaping only releases the scope's bookkeeping. Handles
+                    // continue to own their results until value is requested.
+                    assert_eq!(tasks.value(retained).await, Ok(42));
+                    assert_eq!(tasks.value(blocking).await, Ok(7));
+                    assert_eq!(tasks.value(trigger).await, Ok(()));
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+        let config = crate::testing::Config {
+            seed: 187,
+            iterations: 20,
+            max_steps: 100_000,
+        };
+        let replay = crate::testing::check(config, scenario).unwrap();
+        assert_eq!(crate::testing::replay(&replay, scenario).unwrap(), replay);
+    }
+}
+
 #[cfg(all(test, feature = "deterministic"))]
 mod schedule_tests {
     use super::*;
@@ -1244,7 +1544,7 @@ mod schedule_tests {
 
             let mut tasks = Tasks::<&str>::new();
             let child = tasks.spawn(async { Err::<(), _>("child") });
-            while !any_recorded(&tasks.errors) {
+            while !tasks.failed() {
                 shuttle::future::yield_now().await;
             }
             assert_eq!(tasks.join(Err::<(), _>("body")).await, Err("body"));

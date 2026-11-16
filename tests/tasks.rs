@@ -142,6 +142,31 @@ macro_rules! on_both_runtimes {
 }
 
 on_both_runtimes! {
+    async fn len_counts_only_unfinished_tasks() {
+        let mut tasks = Tasks::<()>::new();
+        tasks.spawn(std::future::pending::<Result<(), ()>>());
+        let finished = tasks.spawn(async { Ok(42) });
+        assert_eq!(tasks.value(finished).await, Ok(42));
+        timeout(HUNG, async {
+            while tasks.len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert!(!tasks.is_empty());
+        assert_eq!(tasks.join(Err::<(), _>(())).await, Err(()));
+
+        let mut tasks = Tasks::<()>::new();
+        let finished = tasks.spawn_blocking(|| Ok(42));
+        assert_eq!(tasks.value(finished).await, Ok(42));
+        timeout(HUNG, async {
+            while !tasks.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert_eq!(tasks.len(), 0);
+        assert_eq!(tasks.join(Ok(())).await, Ok(()));
+    }
+
     async fn an_error_from_a_dropped_blocking_handle_is_reported_at_join() {
         let mut tasks = Tasks::<&str>::new();
         let (release, released) = std::sync::mpsc::sync_channel(1);
@@ -965,31 +990,6 @@ async fn a_panic_in_a_handler_fails_the_scope() {
 }
 
 on_both_runtimes! {
-    async fn a_long_running_scope_lets_go_of_finished_tasks() {
-        const CONNECTIONS: u32 = 1000;
-        let scope = Tasks::<&str>::run(async |t| {
-            let served = Arc::new(Semaphore::new(0));
-            for _ in 0..CONNECTIONS {
-                let served = Arc::clone(&served);
-                t.spawn_handled(
-                    async move {
-                        served.add_permits(1);
-                        Ok::<_, &str>(())
-                    },
-                    |_| panic!("the connection succeeded"),
-                );
-            }
-            served.acquire_many(CONNECTIONS).await.unwrap().forget();
-            // A connection that has just served may still be ending, and the
-            // scope sees it end at a later await.
-            while !t.is_empty() {
-                sleep(Duration::from_millis(1)).await;
-            }
-            Ok(())
-        });
-        assert_eq!(timeout(HUNG, scope).await.unwrap(), Ok(()));
-    }
-
     #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn a_task_panic_stops_a_body_that_never_finishes() {
         let dropped = Arc::new(AtomicBool::new(false));
@@ -1094,7 +1094,6 @@ async fn the_manual_form_works_too() {
     let mut tasks = Tasks::<String>::new();
     let a = tasks.spawn(async { Ok(1) });
     let b = tasks.spawn(async { Ok(2) });
-    assert_eq!(tasks.len(), 2);
     let body = async { Ok(tasks.value(a).await? + tasks.value(b).await?) }.await;
     assert_eq!(tasks.join(body).await, Ok(3));
 }

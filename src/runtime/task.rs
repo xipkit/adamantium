@@ -12,6 +12,10 @@ use std::{
     any::Any,
     future::Future,
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     task::{Context, Poll, Waker},
 };
 
@@ -44,7 +48,10 @@ pub(crate) struct JoinSet {
 }
 
 enum Set {
-    Production(tokio::task::JoinSet<()>),
+    Production {
+        tasks: tokio::task::JoinSet<()>,
+        unfinished: Arc<AtomicUsize>,
+    },
     #[cfg(feature = "deterministic")]
     Model {
         tasks: Vec<model::Task<()>>,
@@ -53,6 +60,46 @@ enum Set {
         /// the next one.
         waiter: Option<super::wait::Waiter>,
     },
+}
+
+struct Running(Arc<AtomicUsize>);
+
+impl Running {
+    fn new(unfinished: &Arc<AtomicUsize>) -> Self {
+        unfinished.fetch_add(1, Ordering::Relaxed);
+        Self(unfinished.clone())
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+pin_project_lite::pin_project! {
+    struct Counted<F> {
+        // Fields drop in declaration order: include destruction of the work
+        // in the unfinished count, even on panic or abort before first poll.
+        #[pin]
+        work: F,
+        _running: Running,
+    }
+}
+
+impl<F: Future> Future for Counted<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.project().work.poll(cx)
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+impl<F: FnOnce()> Counted<F> {
+    fn run(self) {
+        (self.work)();
+    }
 }
 
 impl JoinSet {
@@ -72,7 +119,10 @@ impl JoinSet {
         }
         Self {
             world,
-            inner: Set::Production(tokio::task::JoinSet::new()),
+            inner: Set::Production {
+                tasks: tokio::task::JoinSet::new(),
+                unfinished: Arc::new(AtomicUsize::new(0)),
+            },
             idle: None,
         }
     }
@@ -80,8 +130,11 @@ impl JoinSet {
     pub(crate) fn spawn(&mut self, future: impl Future<Output = ()> + Send + 'static) {
         self.world.step();
         match &mut self.inner {
-            Set::Production(set) => {
-                set.spawn(future);
+            Set::Production { tasks, unfinished } => {
+                tasks.spawn(Counted {
+                    work: future,
+                    _running: Running::new(unfinished),
+                });
             }
             #[cfg(feature = "deterministic")]
             Set::Model { tasks, changed, .. } => tasks.push(model::spawn(future, changed.clone())),
@@ -94,12 +147,19 @@ impl JoinSet {
         match &mut self.inner {
             // WASI has one thread, so the closure runs inside a task of its own.
             #[cfg(target_os = "wasi")]
-            Set::Production(set) => {
-                set.spawn(async move { f() });
+            Set::Production { tasks, unfinished } => {
+                tasks.spawn(Counted {
+                    work: async move { f() },
+                    _running: Running::new(unfinished),
+                });
             }
             #[cfg(not(target_os = "wasi"))]
-            Set::Production(set) => {
-                set.spawn_blocking(f);
+            Set::Production { tasks, unfinished } => {
+                let counted = Counted {
+                    work: f,
+                    _running: Running::new(unfinished),
+                };
+                tasks.spawn_blocking(move || counted.run());
             }
             // Queue before entering the closure, as a blocking pool does. Once
             // entered, f runs synchronously to completion even if a modeled
@@ -125,7 +185,7 @@ impl JoinSet {
     pub(crate) fn len(&self) -> usize {
         self.world.check();
         match &self.inner {
-            Set::Production(set) => set.len(),
+            Set::Production { tasks, .. } => tasks.len(),
             #[cfg(feature = "deterministic")]
             Set::Model { tasks, .. } => tasks.len(),
         }
@@ -135,15 +195,43 @@ impl JoinSet {
         self.len() == 0
     }
 
+    pub(crate) fn unfinished(&self) -> usize {
+        self.world.step();
+        match &self.inner {
+            Set::Production { unfinished, .. } => unfinished.load(Ordering::Relaxed),
+            #[cfg(feature = "deterministic")]
+            Set::Model { tasks, .. } => tasks.iter().filter(|task| !task.is_finished()).count(),
+        }
+    }
+
     pub(crate) fn abort_all(&mut self) {
         self.world.step_unless_panicking();
         match &mut self.inner {
-            Set::Production(set) => set.abort_all(),
+            Set::Production { tasks, .. } => tasks.abort_all(),
             #[cfg(feature = "deterministic")]
             Set::Model { tasks, .. } => {
                 for task in tasks {
                     task.abort();
                 }
+            }
+        }
+    }
+
+    pub(crate) fn try_join_next(&mut self) -> Option<Result<(), JoinError>> {
+        self.world.step();
+        match &mut self.inner {
+            Set::Production { tasks, .. } => {
+                tasks.try_join_next().map(|r| r.map_err(production_error))
+            }
+            #[cfg(feature = "deterministic")]
+            Set::Model { tasks, .. } => {
+                for (index, task) in tasks.iter().enumerate() {
+                    if let Some(result) = task.take() {
+                        drop(tasks.swap_remove(index));
+                        return Some(result);
+                    }
+                }
+                None
             }
         }
     }
@@ -161,7 +249,7 @@ impl JoinSet {
         self.world.check();
         self.idle = None;
         let polled = match &mut self.inner {
-            Set::Production(set) => set
+            Set::Production { tasks, .. } => tasks
                 .poll_join_next(cx)
                 .map(|joined| joined.map(|result| result.map_err(production_error))),
             #[cfg(feature = "deterministic")]
@@ -275,6 +363,10 @@ mod model {
     }
 
     impl<T> Task<T> {
+        pub(super) fn is_finished(&self) -> bool {
+            self.completion.result.lock().is_some()
+        }
+
         pub(super) fn abort(&self) {
             self.abort.abort();
         }

@@ -17,6 +17,9 @@ cargo install --locked cargo-adamantium   # the command
 
 Adamantium requires Rust 1.96 or later.
 
+See the [changelog](https://github.com/xipkit/adamantium/blob/main/CHANGELOG.md)
+for changes to both crates between releases.
+
 ## Use the library
 
 ```rust

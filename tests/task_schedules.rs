@@ -10,7 +10,6 @@ use adamantium::{
     concurrently_ordered, concurrently_ordered_until, concurrently_unordered,
     concurrently_unordered_until, first_ok,
     testing::{self, Config, FailureKind},
-    time,
 };
 use futures_util::{FutureExt, StreamExt};
 use std::{
@@ -18,7 +17,6 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 type Scenario = fn() -> Pin<Box<dyn Future<Output = ()>>>;
@@ -613,35 +611,6 @@ fn orphaned_errors_stop_the_body_and_claimed_or_kept_ones_do_not() {
             assert_eq!(result, Err(ScopeError::Failed("orphaned")));
             assert_eq!(dropped.snapshot(), 1);
             assert!(signal.is_cancelled());
-        })
-    });
-}
-
-#[test]
-fn running_scopes_let_go_of_finished_tasks() {
-    check(|| {
-        Box::pin(async {
-            let served = Actor::new(0);
-            let result = Tasks::<&str>::run(async |tasks| {
-                for _ in 0..3 {
-                    let served = served.clone();
-                    tasks.spawn_handled(
-                        async move {
-                            served.with(|served| *served += 1);
-                            Ok::<_, &str>(())
-                        },
-                        |_| panic!("the connection succeeded"),
-                    );
-                }
-                // Virtual time moves only once every task is idle, so by now
-                // each connection has ended and the scope has seen it end.
-                time::sleep(Duration::from_secs(1)).await;
-                assert_eq!(served.snapshot(), 3);
-                assert_eq!(tasks.len(), 0);
-                Ok(())
-            })
-            .await;
-            assert_eq!(result, Ok(()));
         })
     });
 }
