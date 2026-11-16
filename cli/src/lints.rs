@@ -45,6 +45,7 @@ pub struct Example {
 pub const EXPERIMENTAL_LINTS: &[&str] = &[
     "adamantium_blocking_in_async",
     "adamantium_nested_actor_access",
+    "adamantium_race_with_timer",
 ];
 
 /// The rule name for the release profile check, which is not a Clippy lint.

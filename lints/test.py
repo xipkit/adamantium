@@ -15,7 +15,11 @@ parser.add_argument("--library", type=Path, required=True)
 args = parser.parse_args()
 cli, library = args.cli.resolve(), args.library.resolve()
 fixture = Path(__file__).resolve().parent / "fixtures"
-rules = {"blocking": "adamantium_blocking_in_async", "nested": "adamantium_nested_actor_access"}
+rules = {
+    "blocking": "adamantium_blocking_in_async",
+    "nested": "adamantium_nested_actor_access",
+    "race": "adamantium_race_with_timer",
+}
 
 
 def check(root, *extra, expected=1, lib=library, env=None, options=()):
@@ -75,11 +79,12 @@ with tempfile.TemporaryDirectory(prefix="adamantium-lints-") as temporary:
     assert diagnostics(check(root, "--package=lint-consumer", "--bin=lint-consumer")) == marked(root, member=False, targets=False), "--bin checked extra targets"
     assert not diagnostics(check(root, lib=None)), "ordinary check loaded experimental lints"
 
-    manifest.write_text(original + '\n[workspace.metadata.adamantium]\nskip = ["member/", "tests/"]\nallow = ["adamantium_blocking_in_async"]\n[workspace.metadata.adamantium.exceptions]\nadamantium_nested_actor_access = ["src/"]\n')
+    manifest.write_text(original + '\n[workspace.metadata.adamantium]\nskip = ["member/", "tests/"]\nallow = ["adamantium_blocking_in_async", "adamantium_race_with_timer"]\n[workspace.metadata.adamantium.exceptions]\nadamantium_nested_actor_access = ["src/"]\n')
     skipped = check(root)
     assert not diagnostics(skipped), skipped
     assert skipped["skipped"][rules["blocking"]] == len([x for x in marked(root) if x[0] == rules["blocking"]]), skipped
     assert skipped["skipped"][rules["nested"]] == len([x for x in marked(root) if x[0] == rules["nested"]]), skipped
+    assert skipped["skipped"][rules["race"]] == len([x for x in marked(root) if x[0] == rules["race"]]), skipped
     manifest.write_text(original)
 
     missing = check(root, expected=2, lib=root / "missing.dylib")

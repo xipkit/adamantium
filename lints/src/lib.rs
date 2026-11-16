@@ -9,7 +9,7 @@ extern crate rustc_session;
 use std::collections::HashSet;
 
 use rustc_hir::{
-    Body, Expr, ExprKind, HirId,
+    Body, Expr, ExprKind, HirId, MatchSource,
     def::DefKind,
     def_id::DefId,
     intravisit::{self, Visitor},
@@ -30,18 +30,40 @@ declare_lint! {
     Warn,
     "actor access executes inside another actor callback"
 }
+declare_lint! {
+    pub ADAMANTIUM_RACE_WITH_TIMER,
+    Warn,
+    "adamantium::race pairs a timer with a future that may not be drop-safe"
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum LintKind {
+    Blocking,
+    NestedActor,
+    RaceWithTimer,
+}
 
 #[derive(Default)]
 struct Execution {
-    reported: HashSet<(HirId, bool)>,
+    reported: HashSet<(HirId, LintKind)>,
     visited: HashSet<(HirId, bool, bool)>,
 }
-impl_lint_pass!(Execution => [ADAMANTIUM_BLOCKING_IN_ASYNC, ADAMANTIUM_NESTED_ACTOR_ACCESS]);
+impl_lint_pass!(
+    Execution => [
+        ADAMANTIUM_BLOCKING_IN_ASYNC,
+        ADAMANTIUM_NESTED_ACTOR_ACCESS,
+        ADAMANTIUM_RACE_WITH_TIMER,
+    ]
+);
 
 /// Registers the experimental execution-context lints with Dylint.
 #[unsafe(no_mangle)]
 pub fn register_lints(_: &rustc_session::Session, store: &mut rustc_lint::LintStore) {
-    store.register_lints(&[ADAMANTIUM_BLOCKING_IN_ASYNC, ADAMANTIUM_NESTED_ACTOR_ACCESS]);
+    store.register_lints(&[
+        ADAMANTIUM_BLOCKING_IN_ASYNC,
+        ADAMANTIUM_NESTED_ACTOR_ACCESS,
+        ADAMANTIUM_RACE_WITH_TIMER,
+    ]);
     store.register_late_lint_pass(Box::new(|_| Box::<Execution>::default()));
 }
 
@@ -75,7 +97,7 @@ impl<'tcx> LateLintPass<'tcx> for Execution {
 
 struct Walker<'a, 'tcx> {
     cx: &'a LateContext<'tcx>,
-    reported: &'a mut HashSet<(HirId, bool)>,
+    reported: &'a mut HashSet<(HirId, LintKind)>,
     visited: &'a mut HashSet<(HirId, bool, bool)>,
     asynchronous: bool,
     actor: bool,
@@ -125,7 +147,7 @@ impl<'tcx> Walker<'_, 'tcx> {
         let owner_path = owner.and_then(|ty| adt_path(cx, ty));
         let actor = owner_path.as_deref() == Some("adamantium::actor::Actor")
             && matches!(name.as_str(), "with" | "read" | "snapshot");
-        if actor && self.actor && self.reported.insert((expr.hir_id, true)) {
+        if actor && self.actor && self.reported.insert((expr.hir_id, LintKind::NestedActor)) {
             cx.tcx.emit_node_span_lint(
                 ADAMANTIUM_NESTED_ACTOR_ACCESS,
                 expr.hir_id,
@@ -139,7 +161,7 @@ impl<'tcx> Walker<'_, 'tcx> {
         let receiver_ty = receiver.map(|r| self.types(r).expr_ty(r));
         if self.asynchronous
             && blocking(cx, &path, &name, owner, receiver_ty)
-            && self.reported.insert((expr.hir_id, false))
+            && self.reported.insert((expr.hir_id, LintKind::Blocking))
         {
             cx.tcx.emit_node_span_lint(
                 ADAMANTIUM_BLOCKING_IN_ASYNC,
@@ -149,6 +171,22 @@ impl<'tcx> Walker<'_, 'tcx> {
                     diag.primary_message("blocking operation executes inside async code");
                     diag.help(
                         "use adamantium::blocking or Tasks::spawn_blocking for blocking work",
+                    );
+                }),
+            );
+        }
+        if let Some(arms) = race_arms(&path, receiver, args)
+            && race_has_unsafe_timer(cx, arms)
+            && self.reported.insert((expr.hir_id, LintKind::RaceWithTimer))
+        {
+            cx.tcx.emit_node_span_lint(
+                ADAMANTIUM_RACE_WITH_TIMER,
+                expr.hir_id,
+                expr.span.source_callsite(),
+                rustc_errors::DiagDecorator(|diag| {
+                    diag.primary_message("racing a timer against a future that may not be drop-safe");
+                    diag.help(
+                        "use adamantium::until or a *_until method, or race only documented drop-safe operations",
                     );
                 }),
             );
@@ -363,5 +401,182 @@ fn blocking(
         Some("std::process::Child") => matches!(name, "wait" | "wait_with_output"),
         Some("std::thread::join_handle::JoinHandle") => name == "join",
         _ => false,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FutureSafety {
+    Timer,
+    DropSafe,
+    Other,
+}
+
+struct ArmKind {
+    has_timer: bool,
+    all_drop_safe: bool,
+}
+
+fn peel_wrappers<'tcx>(mut expr: &'tcx Expr<'tcx>) -> &'tcx Expr<'tcx> {
+    loop {
+        expr = match expr.kind {
+            ExprKind::DropTemps(inner) => inner,
+            ExprKind::Block(block, _) if block.stmts.is_empty() => match block.expr {
+                Some(inner) => inner,
+                None => return expr,
+            },
+            _ => return expr,
+        };
+    }
+}
+
+fn race_arms<'tcx>(
+    path: &str,
+    receiver: Option<&'tcx Expr<'tcx>>,
+    args: &'tcx [Expr<'tcx>],
+) -> Option<&'tcx [Expr<'tcx>]> {
+    let tuple = match path {
+        "adamantium::race::race" if args.len() == 1 => &args[0],
+        "adamantium::race::Race::race" => {
+            if args.is_empty() {
+                receiver?
+            } else if args.len() == 1 {
+                &args[0]
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    match peel_wrappers(tuple).kind {
+        ExprKind::Tup(arms) => Some(arms),
+        _ => None,
+    }
+}
+
+fn race_has_unsafe_timer<'tcx>(cx: &LateContext<'tcx>, arms: &'tcx [Expr<'tcx>]) -> bool {
+    let mut any_timer = false;
+    let mut all_drop_safe = true;
+    for arm in arms {
+        let kind = classify_race_arm(cx, arm);
+        any_timer |= kind.has_timer;
+        all_drop_safe &= kind.all_drop_safe;
+    }
+    any_timer && !all_drop_safe
+}
+
+fn classify_race_arm<'tcx>(cx: &LateContext<'tcx>, arm: &'tcx Expr<'tcx>) -> ArmKind {
+    let arm = peel_wrappers(arm);
+    if let ExprKind::Closure(closure) = arm.kind
+        && cx
+            .tcx
+            .coroutine_kind(closure.def_id)
+            .is_some_and(|kind| kind.is_async_desugaring())
+    {
+        let body = cx.tcx.hir_body(closure.body);
+        let mut scanner = AwaitScanner {
+            cx,
+            has_timer: false,
+            all_drop_safe: true,
+        };
+        scanner.visit_expr(body.value);
+        return ArmKind {
+            has_timer: scanner.has_timer,
+            all_drop_safe: scanner.all_drop_safe,
+        };
+    }
+    match classify_future(cx, arm) {
+        FutureSafety::Timer => ArmKind {
+            has_timer: true,
+            all_drop_safe: true,
+        },
+        FutureSafety::DropSafe => ArmKind {
+            has_timer: false,
+            all_drop_safe: true,
+        },
+        FutureSafety::Other => ArmKind {
+            has_timer: false,
+            all_drop_safe: false,
+        },
+    }
+}
+
+struct AwaitScanner<'a, 'tcx> {
+    cx: &'a LateContext<'tcx>,
+    has_timer: bool,
+    all_drop_safe: bool,
+}
+
+impl<'tcx> Visitor<'tcx> for AwaitScanner<'_, 'tcx> {
+    fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
+        if let ExprKind::Closure(_) = expr.kind {
+            return;
+        }
+        if let ExprKind::Match(scrutinee, _, MatchSource::AwaitDesugar) = expr.kind
+            && let ExprKind::Call(func, [future]) = scrutinee.kind
+            && let ty::FnDef(id, _) = self
+                .cx
+                .tcx
+                .typeck(scrutinee.hir_id.owner.def_id)
+                .expr_ty(func)
+                .kind()
+            && definition_path(self.cx, *id) == "core::future::into_future::IntoFuture::into_future"
+        {
+            match classify_future(self.cx, future) {
+                FutureSafety::Timer => self.has_timer = true,
+                FutureSafety::DropSafe => {}
+                FutureSafety::Other => self.all_drop_safe = false,
+            }
+            self.visit_expr(future);
+            return;
+        }
+        intravisit::walk_expr(self, expr);
+    }
+}
+
+fn classify_future<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> FutureSafety {
+    let expr = peel_wrappers(expr);
+    let typeck = cx.tcx.typeck(expr.hir_id.owner.def_id);
+    let id = match expr.kind {
+        ExprKind::Call(function, _) => match typeck.expr_ty(function).kind() {
+            ty::FnDef(id, _) => *id,
+            _ => return FutureSafety::Other,
+        },
+        ExprKind::MethodCall(_, _, _, _) => match typeck.type_dependent_def_id(expr.hir_id) {
+            Some(id) => id,
+            None => return FutureSafety::Other,
+        },
+        _ => return FutureSafety::Other,
+    };
+    let path = definition_path(cx, id);
+    if matches!(
+        path.as_str(),
+        "adamantium::time::sleep" | "adamantium::time::sleep_until"
+    ) {
+        return FutureSafety::Timer;
+    }
+    let name = cx.tcx.item_name(id);
+    let owner_path = cx
+        .tcx
+        .inherent_impl_of_assoc(id)
+        .map(|impl_id| {
+            cx.tcx
+                .type_of(impl_id)
+                .instantiate_identity()
+                .skip_norm_wip()
+        })
+        .and_then(|ty| adt_path(cx, ty));
+    let drop_safe = matches!(
+        (owner_path.as_deref(), name.as_str()),
+        (Some("adamantium::channel::Channel"), "receive")
+            | (Some("adamantium::channel::Receiver"), "receive")
+            | (Some("adamantium::reply::ReplyReceiver"), "receive")
+            | (Some("adamantium::reply::Reply"), "closed")
+            | (Some("adamantium::watch::Watcher"), "receive" | "wait_for")
+            | (Some("adamantium::tasks::Cancellation"), "cancelled")
+    );
+    if drop_safe {
+        FutureSafety::DropSafe
+    } else {
+        FutureSafety::Other
     }
 }

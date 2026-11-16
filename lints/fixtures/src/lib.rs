@@ -154,3 +154,44 @@ async fn const_arguments() {
     let _: [u8; length("value")] = [0; length("value")];
     let _ = NAME;
 }
+
+async fn custom_work() {}
+
+async fn race_with_timer(
+    ch: &metal::Channel<()>,
+    rx: &metal::Receiver<()>,
+    reply_rx: &metal::ReplyReceiver<()>,
+    reply: &metal::Reply<()>,
+    watcher: &mut metal::Watcher<u8>,
+    cancel: &metal::Cancellation,
+) {
+    use metal::{Race, race, time};
+    let delay = Duration::from_millis(1);
+    let deadline = time::now() + delay;
+
+    // Flagged: timer arm paired with non-drop-safe futures.
+    race((time::sleep(delay), custom_work())).await; // race
+    race((async { time::sleep(delay).await; 1 }, async { custom_work().await; 2 })).await; // race
+    race((async { time::sleep_until(deadline).await; 1 }, async { custom_work().await; 2 })).await; // race
+    (time::sleep(delay), custom_work()).race().await; // race
+    race((time::sleep(delay), async { rx.receive().await; }, async { custom_work().await })).await; // race
+    race((async { time::sleep(delay).await }, async { rx.receive().await; custom_work().await })).await; // race
+    race((time::sleep(delay), async { (async { rx.receive().await; }).await; })).await; // race
+
+    // Allowed: every arm is on the documented drop-safe list.
+    race((time::sleep(delay), async { ch.receive().await; })).await;
+    race((time::sleep(delay), async { rx.receive().await; })).await;
+    race((time::sleep(delay), async { reply_rx.receive().await; })).await;
+    race((time::sleep(delay), reply.closed())).await;
+    race((time::sleep(delay), async { watcher.receive().await; })).await;
+    race((time::sleep(delay), async { watcher.wait_for(|v| *v > 0).await; })).await;
+    race((time::sleep(delay), time::sleep(delay))).await;
+    race((time::sleep(delay), time::sleep_until(deadline))).await;
+    race((time::sleep(delay), cancel.cancelled())).await;
+    race((async { time::sleep(delay).await; 1 }, async { rx.receive().await; 2 })).await;
+
+    // Allowed: no timer arm, or explicitly allowed.
+    race((custom_work(), custom_work())).await;
+    #[allow(adamantium_race_with_timer)]
+    race((time::sleep(delay), custom_work())).await;
+}
