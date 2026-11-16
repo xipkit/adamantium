@@ -42,6 +42,7 @@ The buffer of Serde reports that it is human-readable, so `Bytes` requests a seq
 - If the body or an unobserved task returns an error, the scope aborts the remaining tasks.
 - In `Tasks::run` and `Tasks::run_until`, a task error that nobody can claim stops the body at its next `await`. An error is unclaimable once the task has failed and its handle has been dropped, in either order. The scope then aborts and drains the other tasks and returns the oldest unclaimed error. A handle that the body keeps can still claim its error, so that error waits until the handle is passed to `value` or dropped.
 - A task panic resumes in the scope.
+- Finished task entries are reaped without waiting when new async or blocking work is spawned. `len()` counts unfinished tasks and `is_empty()` reports whether all work has finished; neither waits for joining.
 - When the error type cannot be inferred, specify it with `Tasks::<E>::run`. This occurs when all errors pass through `?`.
 
 ### `concurrently`

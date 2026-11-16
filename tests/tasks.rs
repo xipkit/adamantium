@@ -142,6 +142,31 @@ macro_rules! on_both_runtimes {
 }
 
 on_both_runtimes! {
+    async fn len_counts_only_unfinished_tasks() {
+        let mut tasks = Tasks::<()>::new();
+        tasks.spawn(std::future::pending::<Result<(), ()>>());
+        let finished = tasks.spawn(async { Ok(42) });
+        assert_eq!(tasks.value(finished).await, Ok(42));
+        timeout(HUNG, async {
+            while tasks.len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert!(!tasks.is_empty());
+        assert_eq!(tasks.join(Err::<(), _>(())).await, Err(()));
+
+        let mut tasks = Tasks::<()>::new();
+        let finished = tasks.spawn_blocking(|| Ok(42));
+        assert_eq!(tasks.value(finished).await, Ok(42));
+        timeout(HUNG, async {
+            while !tasks.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert_eq!(tasks.len(), 0);
+        assert_eq!(tasks.join(Ok(())).await, Ok(()));
+    }
+
     async fn an_error_from_a_dropped_blocking_handle_is_reported_at_join() {
         let mut tasks = Tasks::<&str>::new();
         let (release, released) = std::sync::mpsc::sync_channel(1);
@@ -957,7 +982,6 @@ async fn the_manual_form_works_too() {
     let mut tasks = Tasks::<String>::new();
     let a = tasks.spawn(async { Ok(1) });
     let b = tasks.spawn(async { Ok(2) });
-    assert_eq!(tasks.len(), 2);
     let body = async { Ok(tasks.value(a).await? + tasks.value(b).await?) }.await;
     assert_eq!(tasks.join(body).await, Ok(3));
 }
