@@ -1,7 +1,9 @@
 # Experimental execution-context lints
 
 This opt-in prototype checks operations that Clippy's path lists cannot express:
-blocking work in async execution and actor access nested inside an actor callback.
+blocking work in async execution, actor access nested inside an actor callback,
+and `adamantium::race` calls that pair a timer with a future that may not be
+drop-safe.
 Ordinary `cargo adamantium check`, `init`, and library builds do not install or
 load it. Actor-cycle detection is outside its scope. Keep the runtime nesting guard.
 
@@ -42,7 +44,7 @@ an invalid library, or compilation failure produces exit **2** and JSON
 `status: "error"`, even if the other pass found violations. Findings use exit
 **1**, clean checks **0**, and the existing schema-version-3 report. Baselines and SARIF include the experimental findings. Consumer
 Dylint metadata is ignored; only the explicitly selected library is loaded,
-and both expected lint registrations are checked before compilation.
+and all expected lint registrations are checked before compilation.
 
 Package, feature, target, and other Cargo arguments after `--` go to both passes.
 The default is the workspace and all targets; explicit package/target selection
@@ -55,6 +57,7 @@ Use the existing `skip`, `allow`, and `exceptions` metadata with the exact names
 
 - `adamantium_blocking_in_async`
 - `adamantium_nested_actor_access`
+- `adamantium_race_with_timer`
 
 These names are experimental, separate from the standard `rules` list. `init`
 does not write them into Rust's lint tables. Source-level `#[allow(...)]` also
@@ -82,6 +85,15 @@ inside either access callback, on the same actor or a different actor. A closure
 merely created inside a callback does not inherit its actor context; calling that
 closure inline does. A future returned for later polling starts a fresh actor
 context. Its body still gets the async blocking check.
+
+`adamantium_race_with_timer` checks `adamantium::race` (and `Race::race`) calls
+on tuple literals when at least one arm is a timer (`time::sleep` or
+`time::sleep_until`), flagging the call unless every arm is on the documented
+drop-safe library operations list (`Channel::receive`, `Receiver::receive`,
+`ReplyReceiver::receive`, `Reply::closed`, `Watcher::receive`,
+`Watcher::wait_for`, `time::sleep`, `time::sleep_until`,
+`Cancellation::cancelled`). Arms may be direct future calls or `async { ... }`
+blocks whose awaited calls are all on that list.
 
 Inline closure calls (including locally aliased closures), actor callbacks,
 `Option`/`Result` mapping and fallback callbacks, and the listed eager `Iterator`
