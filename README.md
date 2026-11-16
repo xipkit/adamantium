@@ -68,7 +68,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `retry`, `RateLimit`, `Limit` | Retries with backoff, a limit on calls in a time window, and a limit on calls that run at the same time. |
 | `blocking` | Runs blocking code on the blocking pool. |
 
-The [library guide](docs/library.md) describes each type.
+The [library guide](docs/library.md) describes each type, and [`examples/server.rs`](examples/server.rs) puts them together in a TCP server.
 
 ### Features
 

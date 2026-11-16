@@ -712,6 +712,7 @@ impl<E: Send + 'static> Tasks<E> {
         H: FnOnce(X) + Send + 'static,
     {
         self.world.check();
+        self.reap();
         lock(&self.set).spawn(handled(future, on_error));
     }
 
@@ -734,6 +735,7 @@ impl<E: Send + 'static> Tasks<E> {
         self.world.check();
         #[cfg(feature = "tracing")]
         {
+            self.reap();
             let task = self.instrument(name.into(), handled(future, on_error));
             lock(&self.set).spawn(task);
         }
@@ -1391,6 +1393,18 @@ mod retention_tests {
                 }
             }
             assert_eq!(tasks.len(), 0);
+            for _ in 0..1_000 {
+                for _ in 0..100 {
+                    tasks.spawn_handled(async { Ok::<_, ()>(()) }, |()| {});
+                }
+                assert!(
+                    lock(&tasks.set).len() <= 100,
+                    "completed handled entries accumulated"
+                );
+                while !tasks.is_empty() {
+                    yield_now().await;
+                }
+            }
             Ok(())
         })
         .await

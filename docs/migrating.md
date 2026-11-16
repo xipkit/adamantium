@@ -895,7 +895,7 @@ A task that runs until it's aborted, such as a timer, becomes a task in a
 scope run with `Tasks::run_until`. Cancelling the scope's `Cancellation`
 aborts the task and waits for it to stop. The scope then returns
 `ScopeError::Cancelled`, which here is the expected way to end. In a server,
-a signal handler would call `cancel`.
+a signal handler would call `cancel`; see [`examples/server.rs`](../examples/server.rs).
 
 Before:
 
