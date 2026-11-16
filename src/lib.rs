@@ -76,6 +76,8 @@ pub use limit::Limit;
 pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
 pub use race::{Race, race};
 #[cfg(feature = "tokio")]
+pub use race::{UntilError, until};
+#[cfg(feature = "tokio")]
 pub use rate_limit::RateLimit;
 pub use reply::{Reply, ReplyReceiver};
 #[cfg(feature = "tokio")]

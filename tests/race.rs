@@ -175,3 +175,101 @@ async fn a_task_wakes_when_a_raced_receive_gets_a_message() {
     .await;
     assert_eq!(result, Ok(Some(3)));
 }
+
+#[cfg(feature = "tokio")]
+mod until_tests {
+    use super::*;
+    use adamantium::{Cancellation, UntilError, time, until};
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    fn past() -> Option<Instant> {
+        Some(time::now() - Duration::from_millis(1))
+    }
+
+    #[tokio::test]
+    async fn returns_output_when_future_completes() {
+        let cancellation = Cancellation::new();
+        let ch = Channel::bounded(1);
+        ch.try_send(42).unwrap();
+        assert_eq!(until(&cancellation, None, ch.receive()).await, Ok(Some(42)));
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[tokio::test(start_paused = true)]
+    async fn ends_at_deadline_and_drops_the_future() {
+        let cancellation = Cancellation::new();
+        let (watched, _polls, drops) = Watched::new();
+        let start = time::now();
+        let deadline = start + Duration::from_secs(5);
+        assert_eq!(
+            until(&cancellation, Some(deadline), watched).await,
+            Err(UntilError::DeadlineExceeded)
+        );
+        assert!(time::now() >= deadline);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn ends_when_cancelled_and_prefers_cancellation_to_ready_future() {
+        let cancellation = Cancellation::new();
+        let (watched, polls, drops) = Watched::new();
+        {
+            let mut bounded = pin!(until(&cancellation, None, watched));
+            assert_eq!(poll_once(bounded.as_mut()), Poll::Pending);
+            assert_eq!(polls.load(Ordering::Relaxed), 1);
+            assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+            cancellation.cancel();
+            assert_eq!(
+                poll_once(bounded.as_mut()),
+                Poll::Ready(Err(UntilError::Cancelled))
+            );
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+        }
+
+        // A cancellation already present wins without polling the wrapped future.
+        let (watched, polls, _) = Watched::new();
+        assert_eq!(
+            until(&cancellation, None, watched).await,
+            Err(UntilError::Cancelled)
+        );
+        assert_eq!(polls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            until(&cancellation, None, ready(7)).await,
+            Err(UntilError::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn prefers_cancellation_to_a_passed_deadline() {
+        let cancellation = Cancellation::new();
+        cancellation.cancel();
+        assert_eq!(
+            until(&cancellation, past(), pending::<()>()).await,
+            Err(UntilError::Cancelled)
+        );
+        assert_eq!(
+            until(&Cancellation::new(), past(), pending::<()>()).await,
+            Err(UntilError::DeadlineExceeded)
+        );
+    }
+
+    #[test]
+    fn is_send_when_wrapped_future_is_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        let cancellation = Cancellation::new();
+        let ch = Channel::<u32>::bounded(1);
+        let bounded = until(&cancellation, None, ch.receive());
+        assert_send(&bounded);
+    }
+
+    #[test]
+    fn error_display_messages() {
+        assert_eq!(UntilError::Cancelled.to_string(), "wait cancelled");
+        assert_eq!(
+            UntilError::DeadlineExceeded.to_string(),
+            "wait deadline exceeded"
+        );
+    }
+}
