@@ -58,8 +58,11 @@ Atomics, and `OnceLock` and `LazyLock` statics, are allowed.
 
 The rules do not allow `tokio::time::timeout`. When the time expires, it drops the future in the middle of an `await`.
 
+`race` with a timer (`time::sleep` or `time::sleep_until`) is also a timeout: when the timer wins, it drops the other future in the middle of an `await`.
+
 - For scoped work, use `Tasks::run_until` with a `Cancellation` and a deadline.
 - For channel operations, use `receive_until` and `send_until`.
+- For a single drop-safe future (such as a receive, `Reply::closed`, `Watcher::wait_for`, or a socket read that loses nothing on drop), use `until` with a `Cancellation` and a deadline. Only race or pass to `until` futures that lose nothing when dropped.
 
 ## Limits
 

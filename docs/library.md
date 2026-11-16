@@ -131,6 +131,14 @@ let event = race((
 - When one future finishes, `race` drops the others at the `await` where they wait. Race only futures that lose nothing when dropped, such as a receive or a sleep.
 - To run work in parallel, or to keep the first success and ignore failures, use `first_ok`.
 
+### `until`
+
+With the `tokio` feature, `until(&cancellation, deadline, future)` waits for one drop-safe future until `cancellation` is requested or `deadline` passes (`None` for no deadline).
+
+- It returns `Ok(output)` if `future` finishes first, or `Err(UntilError::Cancelled)` / `Err(UntilError::DeadlineExceeded)` if shutdown wins.
+- As with `receive_until` and `Tasks::run_until`, a request already present wins over a ready future, and cancellation wins over an equally ready deadline.
+- When it stops early, `until` drops `future` at its current `await`. Pass only futures that lose nothing when dropped, such as `Channel::receive`, `Receiver::receive`, `ReplyReceiver::receive`, `Reply::closed`, `Watcher::receive`, `Watcher::wait_for`, `time::sleep`, `time::sleep_until`, or `Cancellation::cancelled`. Do not pass `send` futures (use `send_until`).
+
 ## Actors
 
 ### `Actor`
