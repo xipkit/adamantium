@@ -84,6 +84,7 @@ include = [
     "examples/**",
     "benches/**/*.rs",
     "docs/migrating.md",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE",
     "assets/adamantium-mark.svg",
