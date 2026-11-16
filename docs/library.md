@@ -42,7 +42,8 @@ The buffer of Serde reports that it is human-readable, so `Bytes` requests a seq
 - `join` returns the task errors that nothing observed.
 - If the body or an unobserved task returns an error, the scope aborts the remaining tasks.
 - In `Tasks::run` and `Tasks::run_until`, a task error that nobody can claim stops the body at its next `await`. An error is unclaimable once the task has failed and its handle has been dropped, in either order. The scope then aborts and drains the other tasks and returns the oldest unclaimed error. A handle that the body keeps can still claim its error, so that error waits until the handle is passed to `value` or dropped.
-- A task panic resumes in the scope.
+- A task panic resumes in the scope. In `Tasks::run` and `Tasks::run_until`, a task panic also stops the body at its next `await`. The scope then aborts and drains the other tasks and resumes the panic.
+- In `Tasks::run` and `Tasks::run_until`, the scope lets go of each task when the task finishes. A scope that runs as long as a server thus holds only its running tasks, and `len` counts only those. A scope that you use with `new` and `join` keeps its tasks until it joins.
 - When the error type cannot be inferred, specify it with `Tasks::<E>::run`. This occurs when all errors pass through `?`.
 
 ### Handled tasks
@@ -66,7 +67,7 @@ Tasks::run_until(shutdown, None, async |tasks| {
 - `on_error` runs in the task after the future fails. Log the error, count it, or drop it.
 - The error does not stop the body, does not abort the other tasks, and does not fail `join`.
 - The task has no handle. Its error type can be different from the error type of the scope.
-- A panic in the future or in `on_error` resumes in the scope, as for any task.
+- A panic in the future or in `on_error` resumes in the scope, as for any task. In `run` and `run_until`, the panic stops the server when the task ends, not at shutdown.
 - The scope aborts a handled task like any other task. An aborted task does not call `on_error`.
 - `tasks.spawn_handled_named(name, future, on_error)` gives the task a name for the `tracing` feature. `on_error` runs inside the span of the task. See [Task names and tracing](#task-names-and-tracing).
 
@@ -361,7 +362,7 @@ The deadline is an optional `tokio::time::Instant`. Build it from `adamantium::t
 These methods return `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExceeded`.
 
 - A completed body error wins over an unclaimed child error, which wins over shutdown.
-- Child panics resume after the scope drains its tasks.
+- A child panic stops the body at its next `await`, as a child error that nobody can claim does. The panic resumes after the scope drains its tasks.
 - If cancellation and the deadline are both ready, cancellation wins.
 - After shutdown starts, its reason stays the same during cleanup.
 - A scope that is already cancelled or expired does not poll its body.

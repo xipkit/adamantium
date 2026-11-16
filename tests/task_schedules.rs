@@ -10,6 +10,7 @@ use adamantium::{
     concurrently_ordered, concurrently_ordered_until, concurrently_unordered,
     concurrently_unordered_until, first_ok,
     testing::{self, Config, FailureKind},
+    time,
 };
 use futures_util::{FutureExt, StreamExt};
 use std::{
@@ -17,6 +18,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 type Scenario = fn() -> Pin<Box<dyn Future<Output = ()>>>;
@@ -611,6 +613,116 @@ fn orphaned_errors_stop_the_body_and_claimed_or_kept_ones_do_not() {
             assert_eq!(result, Err(ScopeError::Failed("orphaned")));
             assert_eq!(dropped.snapshot(), 1);
             assert!(signal.is_cancelled());
+        })
+    });
+}
+
+#[test]
+fn running_scopes_let_go_of_finished_tasks() {
+    check(|| {
+        Box::pin(async {
+            let served = Actor::new(0);
+            let result = Tasks::<&str>::run(async |tasks| {
+                for _ in 0..3 {
+                    let served = served.clone();
+                    tasks.spawn_handled(
+                        async move {
+                            served.with(|served| *served += 1);
+                            Ok::<_, &str>(())
+                        },
+                        |_| panic!("the connection succeeded"),
+                    );
+                }
+                // Virtual time moves only once every task is idle, so by now
+                // each connection has ended and the scope has seen it end.
+                time::sleep(Duration::from_secs(1)).await;
+                assert_eq!(served.snapshot(), 3);
+                assert_eq!(tasks.len(), 0);
+                Ok(())
+            })
+            .await;
+            assert_eq!(result, Ok(()));
+        })
+    });
+}
+
+#[test]
+fn a_task_panic_stops_a_running_body_after_draining_its_siblings() {
+    check(|| {
+        Box::pin(async {
+            let dropped = Actor::new(0);
+            let guard = Dropped(dropped.clone());
+            let scope = Tasks::<&str>::run(async move |tasks| {
+                tasks.spawn(async move {
+                    let _guard = guard;
+                    pending::<()>().await;
+                    Ok(())
+                });
+                tasks.spawn_handled(async { panic!("connection") }, |(): ()| {});
+                pending::<Result<(), &str>>().await
+            });
+            let panic = AssertUnwindSafe(scope).catch_unwind().await.unwrap_err();
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"connection"));
+            assert_eq!(dropped.snapshot(), 1);
+
+            // Reaping races value for the same panic. Whichever finds it, the
+            // sibling is drained and the panic is resumed.
+            let dropped = Actor::new(0);
+            let guard = Dropped(dropped.clone());
+            let scope = Tasks::<&str>::run(async move |tasks| {
+                tasks.spawn(async move {
+                    let _guard = guard;
+                    pending::<()>().await;
+                    Ok(())
+                });
+                let failed = tasks.spawn(async {
+                    panic!("awaited");
+                    #[allow(unreachable_code)]
+                    Ok(())
+                });
+                tasks.value(failed).await
+            });
+            let panic = AssertUnwindSafe(scope).catch_unwind().await.unwrap_err();
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"awaited"));
+            assert_eq!(dropped.snapshot(), 1);
+
+            let signal = Cancellation::new();
+            let dropped = Actor::new(0);
+            let guard = Dropped(dropped.clone());
+            let scope = Tasks::<&str>::run_until(signal.clone(), None, async move |tasks| {
+                tasks.spawn(async move {
+                    let _guard = guard;
+                    pending::<()>().await;
+                    Ok(())
+                });
+                tasks.spawn_handled(async { panic!("connection") }, |(): ()| {});
+                pending::<Result<(), &str>>().await
+            });
+            let panic = AssertUnwindSafe(scope).catch_unwind().await.unwrap_err();
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"connection"));
+            assert_eq!(dropped.snapshot(), 1);
+            assert!(signal.is_cancelled());
+
+            // A shutdown requested once the task has panicked may win the
+            // poll, but the panic still wins the result.
+            let signal = Cancellation::new();
+            let request = signal.clone();
+            let scope = Tasks::<&str>::run_until(signal, None, async move |tasks| {
+                let panicking = Watch::new(false);
+                let sender = panicking.clone();
+                tasks.spawn_handled(
+                    async move {
+                        sender.send(true).unwrap();
+                        panic!("before shutdown")
+                    },
+                    |(): ()| {},
+                );
+                panicking.subscribe().wait_for(|panicking| *panicking).await;
+                request.cancel();
+                pending::<Result<(), &str>>().await
+            });
+            let panic = AssertUnwindSafe(scope).catch_unwind().await.unwrap_err();
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"before shutdown"));
         })
     });
 }

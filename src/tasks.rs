@@ -332,6 +332,40 @@ fn keep_panic<E>(errors: &SharedErrors<E>, join_error: JoinError) -> bool {
     true
 }
 
+/// Takes tasks out of `set` as they finish while a body runs, so a scope
+/// that lives as long as a server holds only its live tasks. Returns once a
+/// task has panicked, with the panic kept for the scope to resume. A task
+/// cancelled here was not aborted by the scope, so its runtime is shutting
+/// down, and whoever waits for its result finds out.
+async fn reap<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
+    poll_fn(|cx| {
+        let mut set = lock(set);
+        loop {
+            match set.poll_join_next(cx) {
+                Poll::Ready(Some(Ok(()))) => {}
+                Poll::Ready(Some(Err(join_error))) => {
+                    if keep_panic(errors, join_error) {
+                        return Poll::Ready(());
+                    }
+                }
+                // An empty set wakes this poll at the next spawn.
+                Poll::Ready(None) | Poll::Pending => return Poll::Pending,
+            }
+        }
+    })
+    .await
+}
+
+/// Waits until a child failure has to stop the body: an error is orphaned,
+/// or a task panics.
+async fn stopped<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
+    tokio::select! {
+        biased;
+        () = orphaned(errors) => {},
+        () = reap(set, errors) => {},
+    }
+}
+
 /// Sends a task's result to its handle. An error the handle is no longer
 /// there to take stays recorded, now orphaned.
 fn deliver<T, E>(
@@ -373,7 +407,10 @@ fn no_orphan() -> ! {
 /// scope joins, so it is never lost. Under [`run`](Self::run) or
 /// [`run_until`](Self::run_until), an error that nobody can ask for any more
 /// also ends the body at once: see [`Task`]. A panic in a task is resumed in the
-/// scope, as a thread panic is resumed by a scoped thread. Dropping a scope
+/// scope, as a thread panic is resumed by a scoped thread. Under `run` or
+/// `run_until` the panic also stops the body at its next `await`, and the
+/// scope lets go of each task as it finishes, so a scope that lives as long
+/// as a server holds only its live tasks. Dropping a scope
 /// without joining aborts its async tasks without waiting for them. Started
 /// blocking closures continue running. See [`run_until`](Self::run_until)
 /// for cancellation, deadlines, and the cleanup contract.
@@ -382,8 +419,9 @@ fn no_orphan() -> ! {
 /// [`run`](Self::run) for the common shape, or [`new`](Self::new),
 /// [`spawn`](Self::spawn) and [`join`](Self::join) by hand.
 pub struct Tasks<E> {
-    /// Locked for each poll rather than borrowed, so finished tasks can be
-    /// taken out of it by whoever shares it.
+    /// Shared with the loop of [`run`](Self::run) or
+    /// [`run_until`](Self::run_until), which reaps finished tasks while the
+    /// body holds the scope.
     set: Shared<JoinSet>,
     world: World,
     errors: SharedErrors<E>,
@@ -437,7 +475,10 @@ impl<E: Send + 'static> Tasks<E> {
 
     /// Runs `body` with a scope, then joins the scope. This is the usual
     /// way to use `Tasks`. An [orphaned](Task) task error stops the body at its
-    /// next `await` and becomes the scope's error.
+    /// next `await` and becomes the scope's error. A task panic stops the body
+    /// the same way: the other tasks are aborted and drained, and the panic is
+    /// resumed. Tasks that finish while the body runs are let go of at once,
+    /// so [`len`](Self::len) counts only the ones still running.
     ///
     /// ```
     /// # use adamantium::Tasks;
@@ -464,10 +505,11 @@ impl<E: Send + 'static> Tasks<E> {
     {
         crate::runtime::in_world(World::current(), async move {
             let mut tasks = Self::new();
+            let set = Arc::clone(&tasks.set);
             let errors = Arc::clone(&tasks.errors);
             tokio::select! {
                 biased;
-                () = orphaned(&errors) => {},
+                () = stopped(&set, &errors) => {},
                 result = body(&mut tasks) => return tasks.join(result).await,
             }
             tasks.fail().await
@@ -493,8 +535,11 @@ impl<E: Send + 'static> Tasks<E> {
     /// selected shutdown reason. Once cleanup starts its reason is fixed.
     /// As in [`run`](Self::run), an [orphaned](Task) child error stops the body
     /// at its next `await`, which also cancels the signal, and the scope fails
-    /// with the oldest unclaimed error. A shutdown request present at the same
-    /// poll still wins the poll, but that error then wins the result.
+    /// with the oldest unclaimed error. A child panic stops the body the same
+    /// way, and is resumed once the other children are drained. A shutdown
+    /// request present at the same poll still wins the poll, but that error or
+    /// panic then wins the result. Finished children are let go of while the
+    /// body runs, as in `run`.
     ///
     /// Dropping this future after it starts, or panicking in its body, signals
     /// cancellation and requests aborts, but cannot wait for cleanup. Started
@@ -535,11 +580,12 @@ impl<E: Send + 'static> Tasks<E> {
         crate::runtime::in_world(World::current(), async move {
             let mut tasks = Self::new();
             tasks.cancellation = Some(cancellation.clone());
+            let set = Arc::clone(&tasks.set);
             let errors = Arc::clone(&tasks.errors);
             let reason = tokio::select! {
                 biased;
                 reason = shutdown(&cancellation, deadline) => reason,
-                () = orphaned(&errors) => return tasks.fail().await.map_err(ScopeError::Failed),
+                () = stopped(&set, &errors) => return tasks.fail().await.map_err(ScopeError::Failed),
                 result = body(&mut tasks) => return tasks.join_until(cancellation, deadline, result).await,
             };
             #[cfg(feature = "tracing")]
@@ -605,7 +651,10 @@ impl<E: Send + 'static> Tasks<E> {
     /// fails the join. There is no handle: nothing waits for the task, and
     /// the task's error type need not be the scope's. A panic, in `future`
     /// or in `on_error`, still fails the scope as any task panic does, and
-    /// the task is aborted with the others when the scope ends.
+    /// the task is aborted with the others when the scope ends. Under
+    /// [`run`](Self::run) or [`run_until`](Self::run_until) the panic stops
+    /// the body as soon as the task ends, so a server whose connection
+    /// panics stops then, not at shutdown.
     ///
     /// ```
     /// use adamantium::{Actor, Tasks};
@@ -809,8 +858,9 @@ impl<E: Send + 'static> Tasks<E> {
         self.propagate_panic();
     }
 
-    /// Ends a scope whose body an orphaned error stopped.
+    /// Ends a scope whose body an orphaned error or a task panic stopped.
     async fn fail<R>(mut self) -> Result<R, E> {
+        // A panic is resumed here, once the other tasks are drained.
         self.settle(true).await;
         match take_oldest(&self.errors) {
             Some(error) => Err(error),
@@ -827,13 +877,16 @@ impl<E: Send + 'static> Tasks<E> {
         }
     }
 
-    /// The number of tasks that have not been joined.
+    /// The number of tasks the scope still holds. Under [`run`](Self::run)
+    /// or [`run_until`](Self::run_until), that is the tasks still running,
+    /// plus any that finished since the body last awaited. A scope used by
+    /// hand holds its tasks until it joins.
     pub fn len(&self) -> usize {
         self.world.check();
         lock(&self.set).len()
     }
 
-    /// Whether every spawned task has been joined.
+    /// Whether the scope holds no tasks, as counted by [`len`](Self::len).
     pub fn is_empty(&self) -> bool {
         self.world.check();
         lock(&self.set).is_empty()
