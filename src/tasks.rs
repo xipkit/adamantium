@@ -1,5 +1,12 @@
 use std::{
-    any::Any, collections::BTreeMap, fmt, future::Future, panic, pin::pin, sync::Arc, task::Poll,
+    any::Any,
+    collections::BTreeMap,
+    fmt,
+    future::{Future, poll_fn},
+    panic,
+    pin::pin,
+    sync::Arc,
+    task::Poll,
 };
 
 use crate::runtime::{
@@ -306,6 +313,25 @@ async fn orphaned<E>(errors: &SharedErrors<E>) {
     }
 }
 
+/// Waits for a task of `set` to finish and takes it out of the set, or
+/// returns `None` once the set is empty.
+async fn join_next(set: &Shared<JoinSet>) -> Option<Result<(), JoinError>> {
+    poll_fn(|cx| lock(set).poll_join_next(cx)).await
+}
+
+/// Keeps the first panic among the scope's join errors. Returns whether
+/// `join_error` was a panic.
+fn keep_panic<E>(errors: &SharedErrors<E>, join_error: JoinError) -> bool {
+    let Ok(payload) = join_error.try_into_panic() else {
+        return false;
+    };
+    let mut errors = errors.lock();
+    if errors.panic.is_none() {
+        errors.panic = Some(payload);
+    }
+    true
+}
+
 /// Sends a task's result to its handle. An error the handle is no longer
 /// there to take stays recorded, now orphaned.
 fn deliver<T, E>(
@@ -356,7 +382,9 @@ fn no_orphan() -> ! {
 /// [`run`](Self::run) for the common shape, or [`new`](Self::new),
 /// [`spawn`](Self::spawn) and [`join`](Self::join) by hand.
 pub struct Tasks<E> {
-    set: JoinSet,
+    /// Locked for each poll rather than borrowed, so finished tasks can be
+    /// taken out of it by whoever shares it.
+    set: Shared<JoinSet>,
     world: World,
     errors: SharedErrors<E>,
     cancellation: Option<Cancellation>,
@@ -390,7 +418,7 @@ impl<E: Send + 'static> Tasks<E> {
     /// An empty scope.
     pub fn new() -> Self {
         Self {
-            set: JoinSet::new(),
+            set: shared(JoinSet::new()),
             world: World::current(),
             errors: Arc::new(Ledger {
                 errors: Lock::new(Errors {
@@ -532,7 +560,7 @@ impl<E: Send + 'static> Tasks<E> {
         self.world.check();
         let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
-        self.set.spawn(async move {
+        lock(&self.set).spawn(async move {
             let result = future.await.map_err(|error| record(&errors, error));
             // Without a handle to take it, a value is dropped.
             deliver(&errors, tx, result);
@@ -607,7 +635,7 @@ impl<E: Send + 'static> Tasks<E> {
         H: FnOnce(X) + Send + 'static,
     {
         self.world.check();
-        self.set.spawn(handled(future, on_error));
+        lock(&self.set).spawn(handled(future, on_error));
     }
 
     /// Starts a named task whose error goes to `on_error`, with the contract
@@ -630,7 +658,7 @@ impl<E: Send + 'static> Tasks<E> {
         #[cfg(feature = "tracing")]
         {
             let task = self.instrument(name.into(), handled(future, on_error));
-            self.set.spawn(task);
+            lock(&self.set).spawn(task);
         }
         #[cfg(not(feature = "tracing"))]
         {
@@ -654,7 +682,7 @@ impl<E: Send + 'static> Tasks<E> {
         self.world.check();
         let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
-        self.set.spawn_blocking(move || {
+        lock(&self.set).spawn_blocking(move || {
             let result = f().map_err(|error| record(&errors, error));
             // A dropped handle discards the value.
             deliver(&errors, tx, result);
@@ -772,7 +800,7 @@ impl<E: Send + 'static> Tasks<E> {
                 self.abort();
                 aborted = true;
             }
-            match self.set.join_next().await {
+            match join_next(&self.set).await {
                 Some(Ok(())) => {}
                 Some(Err(join_error)) => self.remember_panic(join_error),
                 None => break,
@@ -802,17 +830,17 @@ impl<E: Send + 'static> Tasks<E> {
     /// The number of tasks that have not been joined.
     pub fn len(&self) -> usize {
         self.world.check();
-        self.set.len()
+        lock(&self.set).len()
     }
 
     /// Whether every spawned task has been joined.
     pub fn is_empty(&self) -> bool {
         self.world.check();
-        self.set.is_empty()
+        lock(&self.set).is_empty()
     }
 
     async fn resume_first_panic<T>(&mut self) -> T {
-        while let Some(next) = self.set.join_next().await {
+        while let Some(next) = join_next(&self.set).await {
             if let Err(join_error) = next {
                 self.remember_panic(join_error);
                 let panicked = self.errors.lock().panic.is_some();
@@ -827,13 +855,7 @@ impl<E: Send + 'static> Tasks<E> {
     // Keep the payload in the scope: cancellation can interrupt value or settle
     // while they drain, and must not discard an already observed panic.
     fn remember_panic(&mut self, join_error: JoinError) {
-        if let Ok(payload) = join_error.try_into_panic() {
-            {
-                let mut errors = self.errors.lock();
-                if errors.panic.is_none() {
-                    errors.panic = Some(payload);
-                }
-            }
+        if keep_panic(&self.errors, join_error) {
             self.abort();
         }
     }
@@ -849,11 +871,11 @@ impl<E: Send + 'static> Tasks<E> {
         if let Some(cancellation) = &self.cancellation {
             cancellation.cancel();
         }
-        self.set.abort_all();
+        lock(&self.set).abort_all();
     }
 
     async fn drain(&mut self) {
-        while let Some(next) = self.set.join_next().await {
+        while let Some(next) = join_next(&self.set).await {
             if let Err(error) = next {
                 self.remember_panic(error);
             }
@@ -888,7 +910,7 @@ impl<E> fmt::Debug for Tasks<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.world.check();
         f.debug_struct("Tasks")
-            .field("len", &self.set.len())
+            .field("len", &lock(&self.set).len())
             .finish()
     }
 }
@@ -978,7 +1000,7 @@ where
                 });
                 continue;
             }
-            match tasks.set.join_next().await {
+            match join_next(&tasks.set).await {
                 Some(Ok(())) => {}
                 Some(Err(join_error)) => {
                     // Nothing here has aborted a task, so a cancellation means
@@ -1086,7 +1108,7 @@ where
                 });
                 continue;
             }
-            match tasks.set.join_next().await {
+            match join_next(&tasks.set).await {
                 Some(Ok(())) => {}
                 Some(Err(join_error)) => {
                     // Nothing here has aborted a task yet, so a cancellation

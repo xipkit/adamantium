@@ -6,7 +6,7 @@ use std::{
 
 use futures_core::Stream;
 
-use super::{Cancellation, ScopeError, Tasks, any_recorded, lock, no_result, shared};
+use super::{Cancellation, ScopeError, Tasks, any_recorded, join_next, lock, no_result, shared};
 
 /// Maps items concurrently and yields successful results in input order.
 ///
@@ -228,7 +228,7 @@ where
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => break Some(ScopeError::Cancelled),
-                joined = tasks.set.join_next(), if !tasks.is_empty() => {
+                joined = join_next(&tasks.set), if !tasks.is_empty() => {
                     if let Some(Err(error)) = joined {
                         tasks.remember_panic(error);
                         missing = true;
