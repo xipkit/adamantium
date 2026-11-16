@@ -886,6 +886,84 @@ on_both_runtimes! {
     }
 }
 
+on_both_runtimes! {
+    async fn a_handled_error_leaves_the_body_and_its_siblings_running() {
+        let (handled, handled_rx) = oneshot::channel();
+        let (release, released) = oneshot::channel::<()>();
+        let scope = Tasks::<&str>::run(async |t| {
+            let sibling = t.spawn(async move {
+                released.await.unwrap();
+                Ok("sibling finished")
+            });
+            // The handled task's error type need not be the scope's.
+            t.spawn_handled(async { Err(String::from("connection reset")) }, move |error| {
+                handled.send(error).unwrap();
+            });
+            assert_eq!(handled_rx.await.unwrap(), "connection reset");
+            // Give a wrongly recorded error time to stop the body.
+            sleep(Duration::from_millis(20)).await;
+            release.send(()).unwrap();
+            t.value(sibling).await
+        });
+        assert_eq!(timeout(HUNG, scope).await.unwrap(), Ok("sibling finished"));
+    }
+
+    async fn handled_errors_do_not_fail_the_join() {
+        let handled = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Tasks::<&str>::new();
+        for _ in 0..3 {
+            let handled = Arc::clone(&handled);
+            tasks.spawn_handled(async { Err("bad connection") }, move |error| {
+                assert_eq!(error, "bad connection");
+                handled.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        tasks.spawn_handled(async { Ok::<_, &str>(()) }, |_| panic!("the task succeeded"));
+        assert_eq!(timeout(HUNG, tasks.join(Ok(()))).await.unwrap(), Ok(()));
+        assert_eq!(handled.load(Ordering::SeqCst), 3);
+    }
+
+    async fn a_scope_error_aborts_handled_tasks_without_calling_the_handler() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let scope = Tasks::<&str>::run(async |t| {
+            t.spawn_handled(forever(&dropped), |_| panic!("an aborted task has no error"));
+            t.spawn(async { Err::<(), _>("failed") });
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        assert_eq!(timeout(HUNG, scope).await.unwrap(), Err("failed"));
+        assert!(dropped.load(Ordering::SeqCst), "the handled task was not drained");
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[tokio::test(flavor = "multi_thread")]
+#[should_panic(expected = "kaboom in a handled task")]
+async fn a_panic_in_a_handled_task_still_fails_the_scope() {
+    Tasks::<&str>::run(async |t| {
+        t.spawn_handled(async { panic!("kaboom in a handled task") }, |(): ()| {
+            panic!("a panic is not an error")
+        });
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[tokio::test(flavor = "multi_thread")]
+#[should_panic(expected = "kaboom in a handler")]
+async fn a_panic_in_a_handler_fails_the_scope() {
+    Tasks::<&str>::run(async |t| {
+        t.spawn_handled(async { Err("bad connection") }, |_| {
+            panic!("kaboom in a handler")
+        });
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
 // One thread at a time, so the kept task's error is recorded by the time the
 // body runs again.
 #[tokio::test]

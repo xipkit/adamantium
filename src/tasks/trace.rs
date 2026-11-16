@@ -38,6 +38,24 @@ impl<E> Tasks<E> {
         (registration, span)
     }
 
+    /// Runs `future` inside its own `adamantium.task` span, under the current
+    /// subscriber, and reports it as running at a deadline until it ends.
+    pub(super) fn instrument<F: Future + Send>(
+        &mut self,
+        name: Str,
+        future: F,
+    ) -> impl Future<Output = F::Output> + Send + use<F, E> {
+        use tracing::{Instrument, instrument::WithSubscriber};
+
+        let (running, span) = self.track(name);
+        async move {
+            let _running = running;
+            future.await
+        }
+        .instrument(span)
+        .with_current_subscriber()
+    }
+
     pub(super) fn report_deadline(&self, reason: &Shutdown) {
         if !matches!(reason, Shutdown::DeadlineExceeded) {
             return;

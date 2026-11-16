@@ -147,6 +147,10 @@ required-features = ["tokio", "tracing"]
 name = "async_actor"
 required-features = ["tokio"]
 
+[[example]]
+name = "server"
+required-features = ["tokio"]
+
 [profile.release]
 overflow-checks = true
 

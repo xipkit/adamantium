@@ -318,6 +318,14 @@ fn deliver<T, E>(
     }
 }
 
+/// Runs a task of [`Tasks::spawn_handled`]: its error goes to `on_error`, in
+/// place of the scope's record, so it never fails the scope.
+async fn handled<X>(future: impl Future<Output = Result<(), X>>, on_error: impl FnOnce(X)) {
+    if let Err(error) = future.await {
+        on_error(error);
+    }
+}
+
 fn no_result() -> ! {
     panic::resume_unwind(Box::new(
         "adamantium: a task ended without a result and without a panic",
@@ -549,22 +557,85 @@ impl<E: Send + 'static> Tasks<E> {
         self.world.check();
         #[cfg(feature = "tracing")]
         {
-            use tracing::{Instrument, instrument::WithSubscriber};
-
-            let (running, span) = self.track(name.into());
-            self.spawn(
-                async move {
-                    let _running = running;
-                    future.await
-                }
-                .instrument(span)
-                .with_current_subscriber(),
-            )
+            let future = self.instrument(name.into(), future);
+            self.spawn(future)
         }
         #[cfg(not(feature = "tracing"))]
         {
             let _ = name;
             self.spawn(future)
+        }
+    }
+
+    /// Starts `future` as a task whose error goes to `on_error` instead of
+    /// to the scope. Use it for work whose failure is its own business, such
+    /// as one connection of a server: a failed connection is logged or
+    /// counted, and the scope and the other connections keep running.
+    ///
+    /// `on_error` runs in the task, after `future` fails, with the error.
+    /// The error never reaches the scope, so it neither stops the body nor
+    /// fails the join. There is no handle: nothing waits for the task, and
+    /// the task's error type need not be the scope's. A panic, in `future`
+    /// or in `on_error`, still fails the scope as any task panic does, and
+    /// the task is aborted with the others when the scope ends.
+    ///
+    /// ```
+    /// use adamantium::{Actor, Tasks};
+    /// # async fn serve(id: u32) -> Result<(), String> {
+    /// #     if id == 2 { Err(format!("connection {id} reset")) } else { Ok(()) }
+    /// # }
+    /// # #[tokio::main] async fn main() -> Result<(), std::io::Error> {
+    /// let failed = Actor::new(0);
+    /// Tasks::<std::io::Error>::run(async |tasks| {
+    ///     for id in 1..=3 {
+    ///         let failed = failed.clone();
+    ///         tasks.spawn_handled(serve(id), move |error| {
+    ///             eprintln!("{error}");
+    ///             failed.with(|failed| *failed += 1);
+    ///         });
+    ///     }
+    ///     Ok(())
+    /// })
+    /// .await?;
+    /// assert_eq!(failed.read(|failed| *failed), 1);
+    /// # Ok(()) }
+    /// ```
+    pub fn spawn_handled<X, F, H>(&mut self, future: F, on_error: H)
+    where
+        X: 'static,
+        F: Future<Output = Result<(), X>> + Send + 'static,
+        H: FnOnce(X) + Send + 'static,
+    {
+        self.world.check();
+        self.set.spawn(handled(future, on_error));
+    }
+
+    /// Starts a named task whose error goes to `on_error`, with the contract
+    /// of [`spawn_handled`](Self::spawn_handled). With the `tracing` feature,
+    /// the task, `on_error` included, runs inside an `adamantium.task` span
+    /// as for [`spawn_named`](Self::spawn_named), and is reported at scope
+    /// deadlines until it ends. Without `tracing`, this behaves as
+    /// `spawn_handled` without converting or storing the name.
+    pub fn spawn_handled_named<X, F, H>(
+        &mut self,
+        name: impl Into<crate::Str>,
+        future: F,
+        on_error: H,
+    ) where
+        X: 'static,
+        F: Future<Output = Result<(), X>> + Send + 'static,
+        H: FnOnce(X) + Send + 'static,
+    {
+        self.world.check();
+        #[cfg(feature = "tracing")]
+        {
+            let task = self.instrument(name.into(), handled(future, on_error));
+            self.set.spawn(task);
+        }
+        #[cfg(not(feature = "tracing"))]
+        {
+            let _ = name;
+            self.spawn_handled(future, on_error);
         }
     }
 

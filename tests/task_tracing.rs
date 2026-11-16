@@ -65,9 +65,17 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Capture {
         }
     }
 
-    fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let mut fields = Fields::default();
         event.record(&mut fields);
+        // Name the task whose span the event is in, as `in task`.
+        let task = ctx.event_span(event).and_then(|span| {
+            let extensions = span.extensions();
+            extensions.get::<Fields>()?.0.get("task.name").cloned()
+        });
+        if let Some(task) = task {
+            fields.0.insert("in task".to_owned(), task);
+        }
         self.events.lock().unwrap().push(fields);
     }
 }
@@ -476,4 +484,46 @@ async fn a_deadline_reports_a_supervised_task_that_is_waiting_to_restart() {
     );
     assert_eq!(events[0].0["delay"], "3600s");
     assert_eq!(events[1].0["running_tasks"], "[\"worker\"]");
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[tokio::test(start_paused = true)]
+async fn a_named_handled_task_runs_its_handler_in_its_span_and_is_reported_until_it_ends() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    let deadline = time::now() + Duration::from_secs(10);
+    let result = async {
+        Tasks::<&str>::run_until(Cancellation::new(), Some(deadline), async |tasks| {
+            let (handled, handled_rx) = oneshot::channel();
+            tasks.spawn_handled_named("failed", async { Err("reset") }, move |error| {
+                tracing::warn!(error, "connection failed");
+                handled.send(()).unwrap();
+            });
+            tasks.spawn_handled_named("stuck", forever(), |_| {});
+            handled_rx.await.unwrap();
+            forever().await
+        })
+        .await
+    }
+    .with_subscriber(subscriber)
+    .await;
+    assert_eq!(result, Err(ScopeError::DeadlineExceeded));
+
+    let entered = capture.entered.lock().unwrap();
+    let names: Vec<_> = entered
+        .iter()
+        .map(|span| span.fields.0["task.name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"failed") && names.contains(&"stuck"),
+        "{names:?}"
+    );
+    let events = capture.events.lock().unwrap();
+    let messages: Vec<_> = events
+        .iter()
+        .map(|event| event.0["message"].as_str())
+        .collect();
+    assert_eq!(messages, ["connection failed", "scope deadline exceeded"]);
+    assert_eq!(events[0].0["in task"], "failed");
+    assert_eq!(events[1].0["running_tasks"], r#"["stuck"]"#);
 }

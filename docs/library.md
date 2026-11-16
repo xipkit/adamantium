@@ -37,12 +37,49 @@ The buffer of Serde reports that it is human-readable, so `Bytes` requests a seq
 `Tasks<E>` manages a scope of tasks.
 
 - `spawn` starts a task. `value` waits for its result.
+- `spawn_handled` starts a task whose error goes to a handler instead of the scope. See [Handled tasks](#handled-tasks).
 - `join` and `Tasks::run` wait for the remaining tasks.
 - `join` returns the task errors that nothing observed.
 - If the body or an unobserved task returns an error, the scope aborts the remaining tasks.
 - In `Tasks::run` and `Tasks::run_until`, a task error that nobody can claim stops the body at its next `await`. An error is unclaimable once the task has failed and its handle has been dropped, in either order. The scope then aborts and drains the other tasks and returns the oldest unclaimed error. A handle that the body keeps can still claim its error, so that error waits until the handle is passed to `value` or dropped.
 - A task panic resumes in the scope.
 - When the error type cannot be inferred, specify it with `Tasks::<E>::run`. This occurs when all errors pass through `?`.
+
+### Handled tasks
+
+`tasks.spawn_handled(future, on_error)` starts a task whose error goes to `on_error` and not to the scope. Use it for work whose failure concerns only that work, such as one connection of a server.
+
+```rust
+use adamantium::Tasks;
+
+Tasks::run_until(shutdown, None, async |tasks| {
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        tasks.spawn_handled(serve(stream), move |error| {
+            eprintln!("connection from {peer} failed: {error}");
+        });
+    }
+})
+.await
+```
+
+- `on_error` runs in the task after the future fails. Log the error, count it, or drop it.
+- The error does not stop the body, does not abort the other tasks, and does not fail `join`.
+- The task has no handle. Its error type can be different from the error type of the scope.
+- A panic in the future or in `on_error` resumes in the scope, as for any task.
+- The scope aborts a handled task like any other task. An aborted task does not call `on_error`.
+- `tasks.spawn_handled_named(name, future, on_error)` gives the task a name for the `tracing` feature. `on_error` runs inside the span of the task. See [Task names and tracing](#task-names-and-tracing).
+
+`cargo run --example server` serves real local TCP connections. One connection fails, its error goes to the handler, and the server continues to serve the next connection.
+
+### Which spawn to use
+
+| Spawn | Use it when | A task error |
+| --- | --- | --- |
+| `spawn` | The body needs the result, or the work cannot fail alone. Most fork and join work is like this. | Fails the scope. |
+| `spawn_handled` | A failure concerns only that task, such as one connection of a server. | Goes to `on_error`. The scope continues. |
+| `spawn_supervised` | A long-lived worker must restart after a failure. | Restarts the task. When no restart is left, fails the scope. |
+| `spawn_blocking` | Blocking work that the scope must wait for. | Fails the scope. |
 
 ### `concurrently`
 
@@ -377,7 +414,7 @@ With the `tokio` feature, use `adamantium::time::sleep(duration)` and `adamantiu
 
 ## Task names and tracing
 
-Use the optional `tracing` feature to find work that does not finish. Start tasks with `tasks.spawn_named("fetch", future)` or `tasks.spawn_blocking_named("parse", closure)`.
+Use the optional `tracing` feature to find work that does not finish. Start tasks with `tasks.spawn_named("fetch", future)`, `tasks.spawn_blocking_named("parse", closure)`, or `tasks.spawn_handled_named("connection", future, on_error)`.
 
 - Each named task runs inside an `adamantium.task` tracing span. The span has a `task.name` field, and its parent is the current span.
 - When the deadline expires, the scope emits a warning with `running_tasks`. This is a snapshot of the unfinished named tasks in spawn order. The scope emits it before it requests cancellation or waits for cleanup.
