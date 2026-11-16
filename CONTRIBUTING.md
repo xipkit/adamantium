@@ -30,6 +30,27 @@ The repository follows its own rules. Where the library needs restricted feature
 ## Releasing
 
 Both crates use the MIT license and share the version in `[workspace.package]`.
+Record user-visible changes for both crates under `Unreleased` in
+[CHANGELOG.md](CHANGELOG.md), grouped by the Keep a Changelog categories
+(`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, and `Security`). Name the
+affected crate when a change applies to only one of them.
+
+Prepare each release in a pull request:
+
+1. Bump `[workspace.package].version` and update the lockfiles to match.
+2. Move the `Unreleased` entries into a section for the new version with its
+   release date (`YYYY-MM-DD`), newest release first. Keep an empty `Unreleased`
+   section for future changes.
+3. Add a comparison link for the new version and update the `Unreleased` link
+   to compare the new tag with `HEAD`.
+4. Inspect both crate archives and run the publish dry runs below. Each
+   archive must contain `CHANGELOG.md`. Edit only the root changelog:
+   `cli/CHANGELOG.md` is a symlink to it, which
+   [Cargo packages as a regular file](https://doc.rust-lang.org/cargo/commands/cargo-package.html#description).
+5. After the release pull request merges, push the matching `v<version>` tag.
+   If you create a GitHub release after publishing succeeds, use that version's
+   changelog entry as its release notes, including any link definitions it uses.
+
 Pull requests run `cargo publish --dry-run` for each crate to verify that its
 archive builds independently of this checkout. To inspect the archives locally:
 
@@ -79,7 +100,6 @@ automatically creates a missing environment without reviewers. See GitHub's
 and [tag rules](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets).
 
 Version 0.1.0 of both crates was published by hand to create them, because
-Trusted Publishing only works for crates that already exist. It has no tag:
-bump the workspace version before pushing the first release tag. Prepare and
-review the release before pushing its tag: published crate versions cannot be
-overwritten or deleted.
+Trusted Publishing only works for crates that already exist. It has no tag;
+0.1.1 was the first tagged release. Prepare and review each release before
+pushing its tag: published crate versions cannot be overwritten or deleted.
