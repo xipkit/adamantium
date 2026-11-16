@@ -470,3 +470,49 @@ async fn deadline_during_join_waits_for_blocking_cleanup_and_keeps_its_reason() 
     release.send(()).unwrap();
     assert_eq!(joined.await, Err(ScopeError::DeadlineExceeded));
 }
+
+on_both_runtimes! {
+    async fn an_orphaned_error_stops_the_body_and_cancels_the_signal() {
+        let cancel = Cancellation::new();
+        let child_dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(child_dropped.clone());
+        let scope = Tasks::<&str>::run_until(cancel.clone(), None, async |t| {
+            t.spawn(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+                Ok(())
+            });
+            t.spawn(async { Err::<(), _>("orphaned") });
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        assert_eq!(
+            timeout(HUNG, scope).await.unwrap(),
+            Err(ScopeError::Failed("orphaned"))
+        );
+        assert!(cancel.is_cancelled());
+        assert!(child_dropped.load(Ordering::SeqCst));
+    }
+}
+
+// One thread at a time, so the error is recorded before the body cancels, and
+// shutdown and the orphan are both ready at the next poll.
+#[tokio::test]
+async fn an_orphaned_error_wins_the_result_over_a_shutdown_ready_at_the_same_poll() {
+    let cancel = Cancellation::new();
+    let (failed, failure) = oneshot::channel();
+    let scope = Tasks::<&str>::run_until(cancel.clone(), None, async |t| {
+        t.spawn(async move {
+            failed.send(()).unwrap();
+            Err::<(), _>("orphaned")
+        });
+        failure.await.unwrap();
+        cancel.cancel();
+        std::future::pending::<()>().await;
+        Ok(())
+    });
+    assert_eq!(
+        timeout(HUNG, scope).await.unwrap(),
+        Err(ScopeError::Failed("orphaned"))
+    );
+}

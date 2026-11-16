@@ -5,10 +5,11 @@ use std::{
 use crate::runtime::{
     Guard, Lock, World,
     task::{JoinError, JoinSet},
+    wait::WaitQueue,
 };
 use tokio::time::Instant;
 
-use crate::{Reply, ReplyReceiver, Watch, time};
+use crate::{Closed, Reply, ReplyReceiver, Watch, time};
 
 mod stream;
 #[cfg(feature = "tracing")]
@@ -227,6 +228,22 @@ struct Errors<E> {
     next: u64,
     recorded: BTreeMap<u64, E>,
     panic: Option<Box<dyn Any + Send>>,
+    /// Whether a recorded error has lost its handle, so that nothing but the
+    /// scope can ever report it.
+    orphaned: bool,
+}
+
+/// What a scope shares with its tasks and their handles.
+struct Ledger<E> {
+    errors: Lock<Errors<E>>,
+    /// Woken when an error is first orphaned.
+    on_orphan: WaitQueue,
+}
+
+impl<E> Ledger<E> {
+    fn lock(&self) -> Guard<'_, Errors<E>> {
+        self.errors.lock()
+    }
 }
 
 /// What a failed task sends its handle: where to claim the error.
@@ -234,7 +251,7 @@ struct Receipt(u64);
 
 type Shared<V> = Arc<Lock<V>>;
 
-type SharedErrors<E> = Shared<Errors<E>>;
+type SharedErrors<E> = Arc<Ledger<E>>;
 
 fn shared<V>(value: V) -> Shared<V> {
     Arc::new(Lock::new(value))
@@ -245,7 +262,7 @@ fn lock<V>(shared: &Shared<V>) -> Guard<'_, V> {
 }
 
 fn record<E>(errors: &SharedErrors<E>, error: E) -> Receipt {
-    let mut errors = lock(errors);
+    let mut errors = errors.lock();
     let place = errors.next;
     errors.next += 1;
     errors.recorded.insert(place, error);
@@ -253,20 +270,63 @@ fn record<E>(errors: &SharedErrors<E>, error: E) -> Receipt {
 }
 
 fn claim<E>(errors: &SharedErrors<E>, receipt: Receipt) -> Option<E> {
-    lock(errors).recorded.remove(&receipt.0)
+    errors.lock().recorded.remove(&receipt.0)
 }
 
 fn any_recorded<E>(errors: &SharedErrors<E>) -> bool {
-    !lock(errors).recorded.is_empty()
+    !errors.lock().recorded.is_empty()
 }
 
 fn take_oldest<E>(errors: &SharedErrors<E>) -> Option<E> {
-    lock(errors).recorded.pop_first().map(|(_, error)| error)
+    errors.lock().recorded.pop_first().map(|(_, error)| error)
+}
+
+/// Marks that a recorded error can no longer reach anyone through its handle,
+/// and wakes a body waiting in [`orphaned`].
+fn orphan<E>(errors: &SharedErrors<E>) {
+    let first = !std::mem::replace(&mut errors.lock().orphaned, true);
+    if first {
+        errors.on_orphan.notify_all();
+    }
+}
+
+/// Waits until some error is orphaned, returning at once if one already is.
+async fn orphaned<E>(errors: &SharedErrors<E>) {
+    loop {
+        if errors.lock().orphaned {
+            return;
+        }
+        // Listen before checking again, so an orphan between the two checks
+        // still wakes this wait.
+        let listener = errors.on_orphan.listen();
+        if errors.lock().orphaned {
+            return;
+        }
+        listener.await;
+    }
+}
+
+/// Sends a task's result to its handle. An error the handle is no longer
+/// there to take stays recorded, now orphaned.
+fn deliver<T, E>(
+    errors: &SharedErrors<E>,
+    tx: Reply<Result<T, Receipt>>,
+    result: Result<T, Receipt>,
+) {
+    if let Err(Closed(Err(_))) = tx.send(result) {
+        orphan(errors);
+    }
 }
 
 fn no_result() -> ! {
     panic::resume_unwind(Box::new(
         "adamantium: a task ended without a result and without a panic",
+    ))
+}
+
+fn no_orphan() -> ! {
+    panic::resume_unwind(Box::new(
+        "adamantium: an orphaned error was gone when the scope ended",
     ))
 }
 
@@ -276,7 +336,9 @@ fn no_result() -> ! {
 /// and an error in any of them ends the scope with that error after the
 /// others are aborted. A task's error reaches the body through
 /// [`value`](Self::value); an error nobody asked for is reported when the
-/// scope joins, so it is never lost. A panic in a task is resumed in the
+/// scope joins, so it is never lost. Under [`run`](Self::run) or
+/// [`run_until`](Self::run_until), an error that nobody can ask for any more
+/// also ends the body at once: see [`Task`]. A panic in a task is resumed in the
 /// scope, as a thread panic is resumed by a scoped thread. Dropping a scope
 /// without joining aborts its async tasks without waiting for them. Started
 /// blocking closures continue running. See [`run_until`](Self::run_until)
@@ -299,6 +361,17 @@ pub struct Tasks<E> {
 /// Pass it to [`Tasks::value`] on the scope that spawned the task to wait for
 /// its result. Dropping it or keeping it is fine: the task still runs, and an
 /// error nobody took with `value` is reported when the scope joins.
+///
+/// Once a task has failed and its handle is gone, whichever came first, the
+/// error is orphaned: nobody can take it any more. In
+/// [`Tasks::run`] and [`Tasks::run_until`] an orphaned error stops the body at
+/// its next `await`, as a failed child stops a Trio nursery: the body is
+/// dropped, the other tasks are aborted and drained, and the scope returns
+/// the oldest unclaimed error. A handle that is kept, even one never awaited,
+/// can still take its error, so that error waits until the handle is dropped
+/// or passed to `value`. A scope used by hand, with [`Tasks::join`] or
+/// [`Tasks::join_until`], has no body to stop and reports the error when it
+/// joins.
 pub struct Task<T, E> {
     world: World,
     rx: ReplyReceiver<Result<T, Receipt>>,
@@ -311,10 +384,14 @@ impl<E: Send + 'static> Tasks<E> {
         Self {
             set: JoinSet::new(),
             world: World::current(),
-            errors: shared(Errors {
-                next: 0,
-                recorded: BTreeMap::new(),
-                panic: None,
+            errors: Arc::new(Ledger {
+                errors: Lock::new(Errors {
+                    next: 0,
+                    recorded: BTreeMap::new(),
+                    panic: None,
+                    orphaned: false,
+                }),
+                on_orphan: WaitQueue::new(),
             }),
             cancellation: None,
             #[cfg(feature = "tracing")]
@@ -323,7 +400,8 @@ impl<E: Send + 'static> Tasks<E> {
     }
 
     /// Runs `body` with a scope, then joins the scope. This is the usual
-    /// way to use `Tasks`:
+    /// way to use `Tasks`. An [orphaned](Task) task error stops the body at its
+    /// next `await` and becomes the scope's error.
     ///
     /// ```
     /// # use adamantium::Tasks;
@@ -350,8 +428,13 @@ impl<E: Send + 'static> Tasks<E> {
     {
         crate::runtime::in_world(World::current(), async move {
             let mut tasks = Self::new();
-            let result = body(&mut tasks).await;
-            tasks.join(result).await
+            let errors = Arc::clone(&tasks.errors);
+            tokio::select! {
+                biased;
+                () = orphaned(&errors) => {},
+                result = body(&mut tasks) => return tasks.join(result).await,
+            }
+            tasks.fail().await
         })
         .await
     }
@@ -372,8 +455,10 @@ impl<E: Send + 'static> Tasks<E> {
     /// Precedence is: child panic (resumed after draining), an already returned
     /// body error, oldest unclaimed child error (even during cleanup), then the
     /// selected shutdown reason. Once cleanup starts its reason is fixed.
-    /// Failures are collected as in [`run`](Self::run): a child failure alone
-    /// does not interrupt a body that is still running.
+    /// As in [`run`](Self::run), an [orphaned](Task) child error stops the body
+    /// at its next `await`, which also cancels the signal, and the scope fails
+    /// with the oldest unclaimed error. A shutdown request present at the same
+    /// poll still wins the poll, but that error then wins the result.
     ///
     /// Dropping this future after it starts, or panicking in its body, signals
     /// cancellation and requests aborts, but cannot wait for cleanup. Started
@@ -414,9 +499,11 @@ impl<E: Send + 'static> Tasks<E> {
         crate::runtime::in_world(World::current(), async move {
             let mut tasks = Self::new();
             tasks.cancellation = Some(cancellation.clone());
+            let errors = Arc::clone(&tasks.errors);
             let reason = tokio::select! {
                 biased;
                 reason = shutdown(&cancellation, deadline) => reason,
+                () = orphaned(&errors) => return tasks.fail().await.map_err(ScopeError::Failed),
                 result = body(&mut tasks) => return tasks.join_until(cancellation, deadline, result).await,
             };
             #[cfg(feature = "tracing")]
@@ -439,9 +526,8 @@ impl<E: Send + 'static> Tasks<E> {
         let errors = Arc::clone(&self.errors);
         self.set.spawn(async move {
             let result = future.await.map_err(|error| record(&errors, error));
-            // Without a handle to take it, a value is dropped and an error
-            // stays recorded for join.
-            drop(tx.send(result));
+            // Without a handle to take it, a value is dropped.
+            deliver(&errors, tx, result);
         });
         Task {
             world: self.world,
@@ -499,8 +585,8 @@ impl<E: Send + 'static> Tasks<E> {
         let errors = Arc::clone(&self.errors);
         self.set.spawn_blocking(move || {
             let result = f().map_err(|error| record(&errors, error));
-            // A dropped handle discards the value; errors stay recorded for join.
-            drop(tx.send(result));
+            // A dropped handle discards the value.
+            deliver(&errors, tx, result);
         });
         Task {
             world: self.world,
@@ -624,6 +710,16 @@ impl<E: Send + 'static> Tasks<E> {
         self.propagate_panic();
     }
 
+    /// Ends a scope whose body an orphaned error stopped.
+    async fn fail<R>(mut self) -> Result<R, E> {
+        self.settle(true).await;
+        match take_oldest(&self.errors) {
+            Some(error) => Err(error),
+            // Only a handle can claim an error, and an orphaned one has none.
+            None => no_orphan(),
+        }
+    }
+
     fn result<R>(&self, body: Result<R, E>) -> Result<R, E> {
         match (body, take_oldest(&self.errors)) {
             (Err(error), _) => Err(error),
@@ -648,7 +744,7 @@ impl<E: Send + 'static> Tasks<E> {
         while let Some(next) = self.set.join_next().await {
             if let Err(join_error) = next {
                 self.remember_panic(join_error);
-                let panicked = lock(&self.errors).panic.is_some();
+                let panicked = self.errors.lock().panic.is_some();
                 if panicked {
                     self.drain().await;
                 }
@@ -662,7 +758,7 @@ impl<E: Send + 'static> Tasks<E> {
     fn remember_panic(&mut self, join_error: JoinError) {
         if let Ok(payload) = join_error.try_into_panic() {
             {
-                let mut errors = lock(&self.errors);
+                let mut errors = self.errors.lock();
                 if errors.panic.is_none() {
                     errors.panic = Some(payload);
                 }
@@ -672,7 +768,7 @@ impl<E: Send + 'static> Tasks<E> {
     }
 
     fn propagate_panic(&mut self) {
-        let payload = lock(&self.errors).panic.take();
+        let payload = self.errors.lock().panic.take();
         if let Some(payload) = payload {
             panic::resume_unwind(payload);
         }
@@ -723,6 +819,21 @@ impl<E> fmt::Debug for Tasks<E> {
         f.debug_struct("Tasks")
             .field("len", &self.set.len())
             .finish()
+    }
+}
+
+impl<T, E> Drop for Task<T, E> {
+    fn drop(&mut self) {
+        if std::thread::panicking() && self.world != World::current() {
+            return;
+        }
+        // Closing first means a task failing from now on finds no handle and
+        // orphans its error itself, while one that already failed left its
+        // receipt here.
+        self.rx.close();
+        if let Ok(Err(_)) = self.rx.try_receive() {
+            orphan(&self.errors);
+        }
     }
 }
 
@@ -969,16 +1080,16 @@ mod schedule_tests {
         async fn scenario() {
             let mut tasks = Tasks::<&str>::new();
             let first = tasks.spawn(async { Err::<(), _>("first") });
-            while lock(&tasks.errors).recorded.len() != 1 {
+            while tasks.errors.lock().recorded.len() != 1 {
                 shuttle::future::yield_now().await;
             }
             let second = tasks.spawn(async { Err::<(), _>("second") });
-            while lock(&tasks.errors).recorded.len() != 2 {
+            while tasks.errors.lock().recorded.len() != 2 {
                 shuttle::future::yield_now().await;
             }
             assert_eq!(tasks.value(first).await, Err("first"));
             let third = tasks.spawn(async { Err::<(), _>("third") });
-            while lock(&tasks.errors).recorded.len() != 2 {
+            while tasks.errors.lock().recorded.len() != 2 {
                 shuttle::future::yield_now().await;
             }
             // Retained result handles cannot hide errors from join.

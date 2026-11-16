@@ -544,6 +544,78 @@ fn foreign_pending_stream_is_rejected_before_yielding_a_buffered_result() {
 }
 
 #[test]
+fn orphaned_errors_stop_the_body_and_claimed_or_kept_ones_do_not() {
+    check(|| {
+        Box::pin(async {
+            let dropped = Actor::new(0);
+            let guard = Dropped(dropped.clone());
+            let result = Tasks::<&str>::run(async move |tasks| {
+                tasks.spawn(async move {
+                    let _guard = guard;
+                    pending::<()>().await;
+                    Ok(())
+                });
+                // The schedule decides whether the task fails before or after
+                // its handle is dropped; either way the error is orphaned.
+                drop(tasks.spawn(async { Err::<(), _>("orphaned") }));
+                pending::<Result<(), &str>>().await
+            })
+            .await;
+            assert_eq!(result, Err("orphaned"));
+            assert_eq!(dropped.snapshot(), 1);
+
+            let result = Tasks::<&str>::run(async |tasks| {
+                tasks.spawn_blocking(|| Err::<(), _>("blocking"));
+                pending::<Result<(), &str>>().await
+            })
+            .await;
+            assert_eq!(result, Err("blocking"));
+
+            let result = Tasks::<&str>::run(async |tasks| {
+                let failed = tasks.spawn(async { Err::<(), _>("handled") });
+                assert_eq!(tasks.value(failed).await, Err("handled"));
+                let retried = tasks.spawn(async { Ok("recovered") });
+                tasks.value(retried).await
+            })
+            .await;
+            assert_eq!(result, Ok("recovered"));
+
+            let finished = Actor::new(false);
+            let result = Tasks::<&str>::run(async |tasks| {
+                let kept = tasks.spawn(async { Err::<(), _>("kept") });
+                for _ in 0..3 {
+                    let other = tasks.spawn(async { Ok(()) });
+                    tasks.value(other).await?;
+                }
+                finished.with(|finished| *finished = true);
+                drop(kept);
+                Ok(())
+            })
+            .await;
+            assert_eq!(result, Err("kept"));
+            assert!(finished.snapshot());
+
+            let signal = Cancellation::new();
+            let dropped = Actor::new(0);
+            let guard = Dropped(dropped.clone());
+            let result = Tasks::<&str>::run_until(signal.clone(), None, async move |tasks| {
+                tasks.spawn(async move {
+                    let _guard = guard;
+                    pending::<()>().await;
+                    Ok(())
+                });
+                drop(tasks.spawn(async { Err::<(), _>("orphaned") }));
+                pending::<Result<(), &str>>().await
+            })
+            .await;
+            assert_eq!(result, Err(ScopeError::Failed("orphaned")));
+            assert_eq!(dropped.snapshot(), 1);
+            assert!(signal.is_cancelled());
+        })
+    });
+}
+
+#[test]
 fn run_until_prioritizes_cancellation_and_destroys_scoped_children() {
     check(|| {
         Box::pin(async {

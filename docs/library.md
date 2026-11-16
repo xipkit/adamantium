@@ -40,6 +40,7 @@ The buffer of Serde reports that it is human-readable, so `Bytes` requests a seq
 - `join` and `Tasks::run` wait for the remaining tasks.
 - `join` returns the task errors that nothing observed.
 - If the body or an unobserved task returns an error, the scope aborts the remaining tasks.
+- In `Tasks::run` and `Tasks::run_until`, a task error that nobody can claim stops the body at its next `await`. An error is unclaimable once the task has failed and its handle has been dropped, in either order. The scope then aborts and drains the other tasks and returns the oldest unclaimed error. A handle that the body keeps can still claim its error, so that error waits until the handle is passed to `value` or dropped.
 - A task panic resumes in the scope.
 - When the error type cannot be inferred, specify it with `Tasks::<E>::run`. This occurs when all errors pass through `?`.
 
@@ -319,7 +320,7 @@ These methods return `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExcee
 - If cancellation and the deadline are both ready, cancellation wins.
 - After shutdown starts, its reason stays the same during cleanup.
 - A scope that is already cancelled or expired does not poll its body.
-- As with `run`, child failures are collected when the body asks for a value or joins. They do not interrupt a body that is otherwise pending.
+- As with `run`, a child error that nobody can claim stops the body and cancels the signal. If a shutdown request is ready at the same poll, shutdown still starts cleanup, but the child error is the result.
 
 ### Cleanup
 

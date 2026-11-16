@@ -562,6 +562,9 @@ fn a_child_error_at_the_deadline_wins_if_recorded_before_abort() {
             let mut tasks = Tasks::<&str>::new();
             drop(tasks.spawn(async move {
                 time::sleep_until(deadline).await;
+                // Without a scheduling point between waking and failing, the
+                // abort comes first in too few schedules to rely on reaching.
+                tokio::task::yield_now().await;
                 Err::<(), _>("timed failure")
             }));
             let result = tasks
