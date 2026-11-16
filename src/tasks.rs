@@ -273,10 +273,6 @@ fn claim<E>(errors: &SharedErrors<E>, receipt: Receipt) -> Option<E> {
     errors.lock().recorded.remove(&receipt.0)
 }
 
-fn any_recorded<E>(errors: &SharedErrors<E>) -> bool {
-    !errors.lock().recorded.is_empty()
-}
-
 fn take_oldest<E>(errors: &SharedErrors<E>) -> Option<E> {
     errors.lock().recorded.pop_first().map(|(_, error)| error)
 }
@@ -357,6 +353,7 @@ fn no_orphan() -> ! {
 /// [`spawn`](Self::spawn) and [`join`](Self::join) by hand.
 pub struct Tasks<E> {
     set: JoinSet,
+    reaped_cancelled: bool,
     world: World,
     errors: SharedErrors<E>,
     cancellation: Option<Cancellation>,
@@ -391,6 +388,7 @@ impl<E: Send + 'static> Tasks<E> {
     pub fn new() -> Self {
         Self {
             set: JoinSet::new(),
+            reaped_cancelled: false,
             world: World::current(),
             errors: Arc::new(Ledger {
                 errors: Lock::new(Errors {
@@ -530,6 +528,7 @@ impl<E: Send + 'static> Tasks<E> {
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
         self.world.check();
+        self.reap();
         let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
         self.set.spawn(async move {
@@ -652,6 +651,7 @@ impl<E: Send + 'static> Tasks<E> {
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
         self.world.check();
+        self.reap();
         let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
         self.set.spawn_blocking(move || {
@@ -768,7 +768,7 @@ impl<E: Send + 'static> Tasks<E> {
         loop {
             // A task records its error just before it ends, so the end of
             // any task is the moment to look for a new one.
-            if !aborted && (body_failed || any_recorded(&self.errors)) {
+            if !aborted && (body_failed || self.failed()) {
                 self.abort();
                 aborted = true;
             }
@@ -799,19 +799,37 @@ impl<E: Send + 'static> Tasks<E> {
         }
     }
 
-    /// The number of tasks that have not been joined.
+    /// The number of unfinished tasks, including work being dropped on abort.
     pub fn len(&self) -> usize {
         self.world.check();
-        self.set.len()
+        self.set.unfinished()
     }
 
-    /// Whether every spawned task has been joined.
+    /// Whether every spawned task has finished.
     pub fn is_empty(&self) -> bool {
-        self.world.check();
-        self.set.is_empty()
+        self.len() == 0
+    }
+
+    fn reap(&mut self) {
+        while let Some(result) = self.set.try_join_next() {
+            match result {
+                Ok(()) => {}
+                Err(JoinError::Cancelled) => self.reaped_cancelled = true,
+                Err(join_error) => self.remember_panic(join_error),
+            }
+        }
+    }
+
+    fn failed(&self) -> bool {
+        let errors = self.errors.lock();
+        self.reaped_cancelled || !errors.recorded.is_empty() || errors.panic.is_some()
     }
 
     async fn resume_first_panic<T>(&mut self) -> T {
+        if self.reaped_cancelled || self.errors.lock().panic.is_some() {
+            self.abort();
+            self.drain().await;
+        }
         while let Some(next) = self.set.join_next().await {
             if let Err(join_error) = next {
                 self.remember_panic(join_error);
@@ -963,8 +981,8 @@ where
         let mut started = 0;
         // Fill the window, then wait for a place to open. A task records its
         // error just before it ends, so this stops before taking another item.
-        while !any_recorded(&tasks.errors) {
-            if tasks.len() < limit
+        while !tasks.failed() {
+            if tasks.set.len() < limit
                 && let Some(item) = items.next()
             {
                 let index = started;
@@ -1063,8 +1081,8 @@ where
         let mut started = 0;
         // A task reports just before it ends, so this stops before taking
         // another item once one has succeeded.
-        while lock(&outcomes).winner.is_none() {
-            if tasks.len() < limit
+        while lock(&outcomes).winner.is_none() && !tasks.failed() {
+            if tasks.set.len() < limit
                 && let Some(item) = items.next()
             {
                 let index = started;
@@ -1141,6 +1159,168 @@ where
     .await
 }
 
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use futures_util::FutureExt;
+    use std::panic::AssertUnwindSafe;
+
+    async fn yield_now() {
+        #[cfg(feature = "deterministic")]
+        if World::current().is_model() {
+            shuttle::future::yield_now().await;
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    struct Dropped(crate::Actor<bool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.with(|dropped| *dropped = true);
+        }
+    }
+
+    enum Reap {
+        Spawn,
+        SpawnBlocking,
+    }
+
+    #[tokio::test]
+    async fn aborted_work_stays_unfinished_until_it_is_dropped() {
+        let mut tasks = Tasks::<()>::new();
+        tasks.spawn(std::future::pending::<Result<(), ()>>());
+        tasks.spawn(std::future::pending::<Result<(), ()>>());
+        assert_eq!(tasks.len(), 2);
+        tasks.abort();
+        assert_eq!(tasks.len(), 2);
+        tasks.drain().await;
+        assert!(tasks.is_empty());
+    }
+
+    async fn panic_scenario() {
+        for blocking in [false, true] {
+            for through_value in [false, true] {
+                for reaper in [Reap::Spawn, Reap::SpawnBlocking] {
+                    let mut tasks = Tasks::<&str>::new();
+                    let failed = if blocking {
+                        tasks.spawn_blocking::<(), _>(|| panic!("reaped panic"))
+                    } else {
+                        tasks.spawn::<(), _>(async { panic!("reaped panic") })
+                    };
+                    while !failed.rx.is_closed() {
+                        yield_now().await;
+                    }
+                    while tasks.errors.lock().panic.is_none() {
+                        match reaper {
+                            Reap::Spawn => drop(tasks.spawn(async { Ok(()) })),
+                            Reap::SpawnBlocking => drop(tasks.spawn_blocking(|| Ok(()))),
+                        }
+                        yield_now().await;
+                    }
+
+                    // Work added after reaping must also be drained before the
+                    // saved panic is resumed.
+                    let dropped = crate::Actor::new(false);
+                    let guard = Dropped(dropped.clone());
+                    tasks.spawn(async move {
+                        let _guard = guard;
+                        std::future::pending::<()>().await;
+                        Ok(())
+                    });
+                    let panic = AssertUnwindSafe(async move {
+                        if through_value {
+                            tasks.value(failed).await
+                        } else {
+                            tasks.join(Err::<(), _>("body error")).await
+                        }
+                    })
+                    .catch_unwind()
+                    .await
+                    .unwrap_err();
+                    assert_eq!(panic.downcast_ref::<&str>(), Some(&"reaped panic"));
+                    assert!(dropped.snapshot());
+                }
+            }
+        }
+    }
+
+    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
+    #[tokio::test]
+    async fn reaped_panics_reach_value_and_join_after_cleanup() {
+        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
+        tokio::time::timeout(std::time::Duration::from_secs(30), panic_scenario())
+            .await
+            .unwrap();
+    }
+
+    #[cfg(feature = "deterministic")]
+    #[test]
+    fn reaped_panics_survive_deterministic_replay() {
+        let config = crate::testing::Config {
+            seed: 187,
+            iterations: 100,
+            max_steps: 30_000,
+        };
+        let replay = crate::testing::check(config, panic_scenario).unwrap();
+        assert_eq!(
+            crate::testing::replay(&replay, panic_scenario).unwrap(),
+            replay
+        );
+    }
+
+    #[tokio::test]
+    async fn spawning_keeps_retained_entries_bounded_across_100_000_tasks() {
+        Tasks::<()>::run(async |tasks| {
+            for _ in 0..1_000 {
+                let handles: Vec<_> = (0..100).map(|_| tasks.spawn(async { Ok(()) })).collect();
+                assert!(tasks.set.len() <= 100, "completed entries accumulated");
+                for handle in handles {
+                    tasks.value(handle).await?;
+                }
+            }
+            assert_eq!(tasks.len(), 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(feature = "deterministic")]
+    #[test]
+    fn finished_tasks_are_reaped_across_many_modeled_batches() {
+        async fn scenario() {
+            Tasks::<()>::run(async |tasks| {
+                for _ in 0..100 {
+                    let retained = tasks.spawn(async { Ok(42) });
+                    let blocking = tasks.spawn_blocking(|| Ok(7));
+                    while !tasks.is_empty() {
+                        yield_now().await;
+                    }
+                    let trigger = tasks.spawn(async { Ok(()) });
+                    assert_eq!(tasks.set.len(), 1);
+                    // Reaping only releases the scope's bookkeeping. Handles
+                    // continue to own their results until value is requested.
+                    assert_eq!(tasks.value(retained).await, Ok(42));
+                    assert_eq!(tasks.value(blocking).await, Ok(7));
+                    assert_eq!(tasks.value(trigger).await, Ok(()));
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+        let config = crate::testing::Config {
+            seed: 187,
+            iterations: 20,
+            max_steps: 100_000,
+        };
+        let replay = crate::testing::check(config, scenario).unwrap();
+        assert_eq!(crate::testing::replay(&replay, scenario).unwrap(), replay);
+    }
+}
+
 #[cfg(all(test, feature = "deterministic"))]
 mod schedule_tests {
     use super::*;
@@ -1169,7 +1349,7 @@ mod schedule_tests {
 
             let mut tasks = Tasks::<&str>::new();
             let child = tasks.spawn(async { Err::<(), _>("child") });
-            while !any_recorded(&tasks.errors) {
+            while !tasks.failed() {
                 shuttle::future::yield_now().await;
             }
             assert_eq!(tasks.join(Err::<(), _>("body")).await, Err("body"));

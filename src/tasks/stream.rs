@@ -6,7 +6,7 @@ use std::{
 
 use futures_core::Stream;
 
-use super::{Cancellation, ScopeError, Tasks, any_recorded, lock, no_result, shared};
+use super::{Cancellation, ScopeError, Tasks, lock, no_result, shared};
 
 /// Maps items concurrently and yields successful results in input order.
 ///
@@ -214,21 +214,21 @@ where
         let mut exhausted = false;
         let mut missing = false;
         let reason = loop {
-            if any_recorded(&tasks.errors) {
+            if tasks.failed() {
                 break None;
             }
             // Join readiness can lag result publication. Bound unjoined handles
             // too, even if their values have already been yielded.
-            let can_start = !exhausted && outstanding < limit && tasks.len() < limit;
+            let can_start = !exhausted && outstanding < limit && tasks.set.len() < limit;
             let can_yield = lock(&results).contains(yielded);
-            if tasks.is_empty() && !can_start && !can_yield {
+            if tasks.set.is_empty() && !can_start && !can_yield {
                 missing = outstanding != 0;
                 break cancellation.is_cancelled().then_some(ScopeError::Cancelled);
             }
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => break Some(ScopeError::Cancelled),
-                joined = tasks.set.join_next(), if !tasks.is_empty() => {
+                joined = tasks.set.join_next(), if !tasks.set.is_empty() => {
                     if let Some(Err(error)) = joined {
                         tasks.remember_panic(error);
                         missing = true;
@@ -238,7 +238,7 @@ where
                 () = future::ready(()), if can_start || can_yield => {
                     // Joining can race with a worker recording an error. Check
                     // again before consuming an input or yielding a success.
-                    if any_recorded(&tasks.errors) || cancellation.is_cancelled() {
+                    if tasks.failed() || cancellation.is_cancelled() {
                         continue;
                     }
                     if can_start {
