@@ -189,7 +189,7 @@ The mailbox:
 Close and failure:
 
 - Call `close()` before the scope completes successfully. `close()` rejects new sends and drains the accepted work. Dropping the mailbox handles does not close the mailbox.
-- A handler error closes the mailbox and discards the queued messages. The error propagates at scope join through `Tasks`. It does not interrupt a pending scope body.
+- A handler error closes the mailbox and discards the queued messages. The error fails the scope through `Tasks`. Nothing holds the worker's handle, so under `Tasks::run` or `Tasks::run_until` the error also stops a pending scope body.
 - A panic or a cancellation also closes the mailbox and discards the queue. This is true before the first poll of the worker, and while mailbox handles remain.
 - Cancellation can interrupt I/O. It cannot roll back external effects or guarantee delivery.
 - To wait for cleanup, await the shutdown of the scope. Dropping a scope requests aborts but does not wait.
