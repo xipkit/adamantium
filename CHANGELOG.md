@@ -8,6 +8,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- `cargo-adamantium`: `fix` links each finding it leaves to the migration
+  guide's section by its rule and disallowed path. A finding the guide has no
+  section on, such as `unwrap_used`, gets the `cargo adamantium explain`
+  command for its rule instead of a link to the Tasks section.
+
 ## [0.2.0] - 2026-11-15
 
 ### Added

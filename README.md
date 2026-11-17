@@ -103,7 +103,7 @@ cargo adamantium deps           # show which dependencies use unsafe code or spa
 ```
 
 - `check` runs Clippy with the Adamantium rules on every workspace member. It prints text, JSON, or SARIF. The exit status is `0` for no findings, `1` for findings, and `2` if the project did not build.
-- `fix` applies the rewrites that are safe to automate. It reports the others with a link to the [migration guide](docs/migrating.md). If the fixed project does not build, `fix` restores every file that it changed.
+- `fix` applies the rewrites that are safe to automate. It reports the others with a link to the section of the [migration guide](docs/migrating.md) that covers them, or, for a rule the guide doesn't cover, the `cargo adamantium explain` command for it. If the fixed project does not build, `fix` restores every file that it changed.
 - `init` adds the rules to the project. After that, `cargo clippy` applies them without the command.
 
 The [command reference](docs/cli.md) describes each subcommand, the report formats, and the CI setup.
