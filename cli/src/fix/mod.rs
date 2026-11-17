@@ -1,7 +1,7 @@
 //! Conservative fixes: compiler suggestions first, then guide-approved syntax.
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -181,12 +181,12 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
     }
     for finding in &remaining.findings {
         eprintln!(
-            "{}:{}: {}: {}\n  Review {GUIDE}#{}",
+            "{}:{}: {}: {}\n  {}",
             finding.file,
             finding.line.unwrap_or(1),
             finding.rule,
             finding.message,
-            section(&finding.message)
+            Hint::new(&finding.rule, &finding.message)
         );
     }
     for warning in &remaining.warnings {
@@ -597,23 +597,132 @@ impl<'ast> Visit<'ast> for Mechanical<'_> {
     }
 }
 
-fn section(message: &str) -> &'static str {
-    if message.contains("spawn_blocking") || message.contains("thread::spawn") {
-        "blocking-work"
-    } else if message.contains("across an await")
-        || message.contains("`tokio::sync::Mutex`")
-        || message.contains("`futures::lock::Mutex`")
-    {
-        "a-lock-held-across-an-await"
-    } else if message.contains("RwLock") {
-        "rwlock"
-    } else if message.contains("Mutex") || message.contains("lock") {
-        "shared-state"
-    } else if message.contains("time::") {
-        "stopping-a-long-lived-task"
-    } else {
-        "tasks"
+/// Where `fix` sends the reader about a finding it left: the migration
+/// guide's section on it, or, for a rule the guide has no section on, the
+/// rule's explanation, which has a before and after for every rule.
+#[derive(Debug, PartialEq, Eq)]
+enum Hint<'a> {
+    Guide(&'static str),
+    Explain(&'a str),
+}
+
+impl<'a> Hint<'a> {
+    fn new(rule: &'a str, message: &str) -> Self {
+        let section = match rule {
+            "clippy::await_holding_lock" => Some("a-lock-held-across-an-await"),
+            "clippy::rc_mutex" => Some("shared-state"),
+            "clippy::disallowed_methods" => disallowed(message, DISALLOWED_METHODS),
+            "clippy::disallowed_types" => disallowed(message, DISALLOWED_TYPES),
+            _ => None,
+        };
+        section.map_or(Self::Explain(rule), Self::Guide)
     }
+}
+
+impl fmt::Display for Hint<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Guide(section) => write!(f, "Review {GUIDE}#{section}"),
+            Self::Explain(rule) => write!(f, "Run cargo adamantium explain {rule}"),
+        }
+    }
+}
+
+/// The guide's section on each disallowed method it covers, by the path as
+/// `clippy.toml` lists it.
+const DISALLOWED_METHODS: &[(&str, &[&str])] = &[
+    (
+        "tasks",
+        &[
+            "tokio::spawn",
+            "tokio::task::spawn",
+            "tokio::task::spawn_local",
+            "tokio::runtime::Handle::spawn",
+            "tokio::runtime::Runtime::spawn",
+            "tokio::runtime::LocalRuntime::spawn_local",
+            "tokio::task::Builder::spawn",
+            "tokio::task::Builder::spawn_on",
+            "tokio::task::Builder::spawn_local",
+            "tokio::task::Builder::spawn_local_on",
+            "async_std::task::spawn",
+            "async_std::task::spawn_local",
+            "async_std::task::Builder::spawn",
+            "async_std::task::Builder::local",
+            "smol::spawn",
+            "smol::Executor::spawn",
+            "smol::Executor::spawn_many",
+            "smol::LocalExecutor::spawn",
+            "smol::LocalExecutor::spawn_many",
+        ],
+    ),
+    (
+        "blocking-work",
+        &[
+            "tokio::task::spawn_blocking",
+            "tokio::task::block_in_place",
+            "tokio::runtime::Handle::spawn_blocking",
+            "tokio::runtime::Runtime::spawn_blocking",
+            "tokio::runtime::LocalRuntime::spawn_blocking",
+            "tokio::task::Builder::spawn_blocking",
+            "tokio::task::Builder::spawn_blocking_on",
+            "async_std::task::spawn_blocking",
+            "smol::unblock",
+            "std::thread::spawn",
+            "std::thread::Builder::spawn",
+            "std::thread::scope",
+        ],
+    ),
+    (
+        "messages-for-every-receiver",
+        &["tokio::sync::broadcast::channel"],
+    ),
+    (
+        "stopping-a-long-lived-task",
+        &[
+            "tokio::time::sleep",
+            "tokio::time::sleep_until",
+            "tokio::time::interval",
+            "tokio::time::interval_at",
+            "tokio::time::Instant::now",
+        ],
+    ),
+];
+
+/// The guide's section on each disallowed type it covers, by the path as
+/// `clippy.toml` lists it.
+const DISALLOWED_TYPES: &[(&str, &[&str])] = &[
+    ("shared-state", &["std::sync::Mutex", "parking_lot::Mutex"]),
+    (
+        "rwlock",
+        &[
+            "std::sync::RwLock",
+            "tokio::sync::RwLock",
+            "parking_lot::RwLock",
+        ],
+    ),
+    (
+        "a-lock-held-across-an-await",
+        &["tokio::sync::Mutex", "futures::lock::Mutex"],
+    ),
+    (
+        "messages-for-every-receiver",
+        &[
+            "tokio::sync::broadcast::Sender",
+            "tokio::sync::broadcast::Receiver",
+        ],
+    ),
+    ("results-as-they-finish", &["tokio::task::JoinSet"]),
+];
+
+/// The section on the path a disallowed-method or -type finding names.
+/// Clippy quotes the path as the configuration lists it, as in "use of a
+/// disallowed method `tokio::spawn`".
+fn disallowed(message: &str, sections: &[(&'static str, &[&str])]) -> Option<&'static str> {
+    let path = message.split('`').nth(1)?;
+    sections
+        .iter()
+        .find(|(_, paths)| paths.contains(&path))
+        .map(|(section, _)| *section)
 }
 
 // One whole-file unified hunk keeps the preview valid without an external diff
@@ -775,22 +884,213 @@ mod tests {
         assert_eq!(fs::read_to_string(&first).unwrap(), "before\n");
     }
 
+    /// The anchors GitHub gives the migration guide's headings: lowercase,
+    /// punctuation such as backticks dropped, spaces as hyphens, and a
+    /// number after a repeated heading. Lines in code blocks aren't headings.
+    fn guide_anchors() -> Result<BTreeSet<String>> {
+        let guide =
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/migrating.md"))?;
+        let mut anchors = BTreeSet::new();
+        let mut fence = None;
+        for line in guide.lines() {
+            let trimmed = line.trim_start();
+            let marker = ["```", "~~~"]
+                .into_iter()
+                .find(|marker| trimmed.starts_with(marker));
+            match (fence, marker) {
+                (None, Some(marker)) => fence = Some(marker),
+                (Some(open), Some(marker)) if open == marker => fence = None,
+                _ => {}
+            }
+            if fence.is_some() || marker.is_some() {
+                continue;
+            }
+            let level = line.chars().take_while(|c| *c == '#').count();
+            let Some(text) = line.get(level..).and_then(|text| text.strip_prefix(' ')) else {
+                continue;
+            };
+            if !(1..=6).contains(&level) {
+                continue;
+            }
+            let base: String = text
+                .trim()
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+                .map(|c| if c == ' ' { '-' } else { c })
+                .collect();
+            let mut anchor = base.clone();
+            let mut repeats = 0;
+            while !anchors.insert(anchor.clone()) {
+                repeats += 1;
+                anchor = format!("{base}-{repeats}");
+            }
+        }
+        Ok(anchors)
+    }
+
+    /// The paths a list in the bundled `clippy.toml` disallows.
+    fn disallowed_paths(list: &str) -> Result<Vec<String>> {
+        let config: toml_edit::DocumentMut = crate::lints::CLIPPY_TOML.parse()?;
+        let entries = config
+            .get(list)
+            .and_then(toml_edit::Item::as_array)
+            .with_context(|| format!("clippy.toml has no {list} array"))?;
+        entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_inline_table()
+                    .and_then(|entry| entry.get("path"))
+                    .and_then(toml_edit::Value::as_str)
+                    .map(str::to_owned)
+                    .with_context(|| format!("an entry in {list} has no path: {entry}"))
+            })
+            .collect()
+    }
+
     #[test]
-    fn locks_held_across_an_await_link_to_their_section() {
-        for message in [
-            "this `MutexGuard` is held across an await point",
-            "use of a disallowed type `tokio::sync::Mutex`",
-            "use of a disallowed type `futures::lock::Mutex`",
+    fn the_guide_anchors_are_its_headings() {
+        let anchors = guide_anchors().unwrap();
+        for anchor in [
+            "shared-state",
+            "rwlock",
+            "a-lock-held-across-an-await",
+            "tasks",
         ] {
-            assert_eq!(section(message), "a-lock-held-across-an-await");
+            assert!(anchors.contains(anchor), "{anchor} in {anchors:?}");
+        }
+        // `#[tokio::main]` starts a line in many of its code blocks.
+        assert!(
+            !anchors.iter().any(|anchor| anchor.contains("tokio")),
+            "{anchors:?}"
+        );
+    }
+
+    #[test]
+    fn every_finding_points_at_a_guide_section_or_its_rule_explanation() {
+        let anchors = guide_anchors().unwrap();
+        let mut findings: Vec<(String, String)> = crate::lints::selected(true)
+            .map(|lint| (lint.qualified(), format!("a finding of {}", lint.name)))
+            .chain([(
+                crate::lints::OVERFLOW_RULE.to_owned(),
+                "overflow checks are off".to_owned(),
+            )])
+            .collect();
+        for (list, rule, kind) in [
+            ("disallowed-methods", "clippy::disallowed_methods", "method"),
+            ("disallowed-types", "clippy::disallowed_types", "type"),
+        ] {
+            for path in disallowed_paths(list).unwrap() {
+                findings.push((
+                    rule.to_owned(),
+                    format!("use of a disallowed {kind} `{path}`"),
+                ));
+            }
+        }
+        for (rule, message) in &findings {
+            match Hint::new(rule, message) {
+                Hint::Guide(section) => {
+                    assert!(anchors.contains(section), "{rule}: {message}: #{section}");
+                }
+                Hint::Explain(explained) => assert_eq!(explained, rule, "{message}"),
+            }
+        }
+        for reason in [
+            state::Reason::AcrossStatements,
+            state::Reason::AcrossAwait,
+            state::Reason::TwoLocks,
+            state::Reason::ControlFlow,
+            state::Reason::InsideActor,
+            state::Reason::Calls,
+            state::Reason::Nested(""),
+            state::Reason::Poll,
+            state::Reason::Unfollowed(""),
+        ] {
+            assert!(anchors.contains(reason.section()), "{}", reason.section());
+        }
+    }
+
+    #[test]
+    fn every_path_with_a_section_is_disallowed_once() {
+        for (list, sections) in [
+            ("disallowed-methods", DISALLOWED_METHODS),
+            ("disallowed-types", DISALLOWED_TYPES),
+        ] {
+            let disallowed = disallowed_paths(list).unwrap();
+            let mut seen = BTreeSet::new();
+            for path in sections.iter().flat_map(|(_, paths)| paths.iter()) {
+                assert!(
+                    disallowed.iter().any(|listed| listed == path),
+                    "{path} in {list}"
+                );
+                assert!(seen.insert(path), "{path} twice");
+            }
+        }
+    }
+
+    #[test]
+    fn findings_link_by_rule_and_disallowed_path() {
+        let method = |path: &str| format!("use of a disallowed method `{path}`");
+        let kind = |path: &str| format!("use of a disallowed type `{path}`");
+        for (rule, message, hint) in [
+            (
+                "clippy::disallowed_methods",
+                method("std::thread::Builder::spawn"),
+                Hint::Guide("blocking-work"),
+            ),
+            (
+                "clippy::disallowed_methods",
+                method("tokio::spawn"),
+                Hint::Guide("tasks"),
+            ),
+            (
+                "clippy::disallowed_types",
+                kind("tokio::sync::Mutex"),
+                Hint::Guide("a-lock-held-across-an-await"),
+            ),
+            (
+                "clippy::disallowed_types",
+                kind("std::sync::Mutex"),
+                Hint::Guide("shared-state"),
+            ),
+            (
+                "clippy::disallowed_types",
+                kind("tokio::sync::RwLock"),
+                Hint::Guide("rwlock"),
+            ),
+            (
+                "clippy::await_holding_lock",
+                "this `MutexGuard` is held across an await point".to_owned(),
+                Hint::Guide("a-lock-held-across-an-await"),
+            ),
+            (
+                "clippy::unwrap_used",
+                "used `unwrap()` on a `Result` value".to_owned(),
+                Hint::Explain("clippy::unwrap_used"),
+            ),
+            (
+                "clippy::disallowed_methods",
+                method("std::mem::forget"),
+                Hint::Explain("clippy::disallowed_methods"),
+            ),
+            // A path a project added to its own clippy.toml.
+            (
+                "clippy::disallowed_methods",
+                method("my_crate::spawn"),
+                Hint::Explain("clippy::disallowed_methods"),
+            ),
+            (
+                "unsafe_code",
+                "usage of an `unsafe` block".to_owned(),
+                Hint::Explain("unsafe_code"),
+            ),
+        ] {
+            assert_eq!(Hint::new(rule, &message), hint, "{message}");
         }
         assert_eq!(
-            section("use of a disallowed type `std::sync::Mutex`"),
-            "shared-state"
-        );
-        assert_eq!(
-            section("use of a disallowed type `tokio::sync::RwLock`"),
-            "rwlock"
+            Hint::Explain("clippy::unwrap_used").to_string(),
+            "Run cargo adamantium explain clippy::unwrap_used"
         );
     }
 
