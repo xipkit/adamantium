@@ -8,6 +8,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-17
+
 ### Fixed
 
 - `cargo-adamantium`: `fix` links each finding it leaves to the migration
@@ -66,7 +68,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and `style` for reviewing code against the Google Rust style guide. Checks
   support text, JSON, SARIF, baselines, and an optional strict lint tier.
 
-[Unreleased]: https://github.com/xipkit/adamantium/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/xipkit/adamantium/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/xipkit/adamantium/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/xipkit/adamantium/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/xipkit/adamantium/compare/286dc4203db35925e980a90d3dbb9c1f34f4e00c...v0.1.1
 [0.1.0]: https://github.com/xipkit/adamantium/tree/286dc4203db35925e980a90d3dbb9c1f34f4e00c
