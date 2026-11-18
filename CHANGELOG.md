@@ -14,6 +14,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   can add siblings to their scope, with the same joining and error rules.
   Spawning after the scope closes returns `SpawnError` without starting work.
 
+### Changed
+
+- `cargo-adamantium`: Default rules report Tokio `oneshot`, Tokio `watch`,
+  and `std::sync::mpsc::sync_channel`. Strict rules also report bounded Tokio
+  `mpsc`, `Notify`, and `Semaphore`. Broadcast diagnostics recommend
+  Adamantium's `Watch` when only the latest value matters.
+
 ## [0.3.0] - 2026-11-17
 
 ### Fixed

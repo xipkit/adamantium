@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ReportFormat,
     config::Config,
-    lints::{self, CLIPPY_TOML, EXPERIMENTAL_LINTS, OVERFLOW_RULE},
+    lints::{self, EXPERIMENTAL_LINTS, OVERFLOW_RULE},
     manifest, sarif,
 };
 
@@ -366,12 +366,13 @@ fn print_json(value: &impl Serialize) -> Result<()> {
 /// by. Clippy canonicalizes `CLIPPY_CONF_DIR` before reading it, so when `dir`
 /// is reached through a symlink, as macOS's temporary directory is through
 /// `/var`, the two spellings differ.
-fn write_clippy_config(dir: &Path) -> Result<PathBuf> {
+fn write_clippy_config(dir: &Path, strict: bool) -> Result<PathBuf> {
     let dir = dir
         .canonicalize()
         .with_context(|| format!("resolving {}", dir.display()))?;
     let path = dir.join("clippy.toml");
-    fs::write(&path, CLIPPY_TOML).with_context(|| format!("writing {}", path.display()))?;
+    fs::write(&path, lints::clippy_toml(strict)?.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
 }
 
@@ -407,7 +408,7 @@ fn check_selected(
 ) -> Result<Report> {
     let config = Config::load(root)?;
     let conf = tempfile::tempdir().context("creating a directory for clippy.toml")?;
-    let clippy_config = write_clippy_config(conf.path())?;
+    let clippy_config = write_clippy_config(conf.path(), strict)?;
 
     let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -1216,12 +1217,12 @@ mod tests {
         let links = tempfile::tempdir().unwrap();
         let link = links.path().join("conf");
         std::os::unix::fs::symlink(real.path(), &link).unwrap();
-        let path = write_clippy_config(&link).unwrap();
+        let path = write_clippy_config(&link, false).unwrap();
         assert_eq!(
             path,
             real.path().canonicalize().unwrap().join("clippy.toml")
         );
-        assert_eq!(fs::read_to_string(&path).unwrap(), CLIPPY_TOML);
+        assert_eq!(fs::read_to_string(&path).unwrap(), lints::CLIPPY_TOML);
     }
 
     #[test]
