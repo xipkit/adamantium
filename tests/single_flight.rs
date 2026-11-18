@@ -430,6 +430,60 @@ fn a_wake_the_polling_caller_leaves_behind_reaches_the_others() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI has one thread")]
+#[allow(
+    clippy::disallowed_types,
+    clippy::disallowed_methods,
+    reason = "a second caller joins from another thread during the first poll"
+)]
+fn a_wake_during_the_first_poll_reaches_the_others_when_the_creator_leaves() {
+    let flights = SingleFlight::new();
+    let wakes = Arc::new(Wakes::default());
+    let second_slot: Arc<std::sync::Mutex<Option<Call>>> = Arc::default();
+    let (slot, joined, second_wakes) = (
+        Arc::clone(&second_slot),
+        flights.clone(),
+        Arc::clone(&wakes),
+    );
+    let mut polls = 0;
+    let operation = move || {
+        std::future::poll_fn(move |cx| {
+            polls += 1;
+            if polls > 1 {
+                return Poll::Ready(5);
+            }
+            // The operation wakes itself on its first poll, and another
+            // thread's caller joins while it is still being polled.
+            cx.waker().wake_by_ref();
+            let (joined, second_wakes) = (joined.clone(), Arc::clone(&second_wakes));
+            let second = std::thread::spawn(move || {
+                let mut second: Call = Box::pin(async move { joined.run(1, || ready(0)).await });
+                let waker = Waker::from(second_wakes);
+                let polled = second.as_mut().poll(&mut Context::from_waker(&waker));
+                assert!(polled.is_pending(), "the operation is being polled");
+                second
+            })
+            .join()
+            .unwrap();
+            *slot.lock().unwrap() = Some(second);
+            Poll::Pending
+        })
+    };
+    let mut first = Box::pin(flights.run(1, operation));
+    assert!(poll_once(first.as_mut()).is_pending());
+    let looked = wakes.0.load(Ordering::SeqCst);
+    // The creator leaves before it is polled again.
+    drop(first);
+    assert!(
+        wakes.0.load(Ordering::SeqCst) > looked,
+        "the second caller was woken to take the operation"
+    );
+    let mut second = second_slot.lock().unwrap().take().unwrap();
+    assert_eq!(poll_once(second.as_mut()), Poll::Ready(5));
+    assert!(flights.is_empty());
+}
+
+#[test]
 fn a_call_polled_between_the_polls_of_the_operation_is_not_nested() {
     let flights = SingleFlight::new();
     let answers = Channel::<u32>::bounded(1);
