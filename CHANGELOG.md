@@ -26,6 +26,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `adamantium`: `Backoff::jitter` spreads each retry or restart wait between
   half of its delay and the whole of it, drawn from `random`. A backoff without
   it waits and schedules exactly as before.
+- `adamantium`: `SingleFlight` lets concurrent calls for the same key share
+  one operation and its output. Dropping the call that started the operation
+  leaves it to the others, and dropping the last call drops it. It works
+  without Tokio.
 
 ### Changed
 
