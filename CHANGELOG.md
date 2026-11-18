@@ -15,10 +15,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Spawning after the scope closes returns `SpawnError` without starting work.
 - `adamantium`: `KeyedLimit` serializes calls for the same key, including
   inside a connection `Limit`, and evicts keys after their last call ends.
+- `adamantium`: deterministic tests can select probabilistic concurrency testing
+  or bounded depth-first search and replay saved failure schedules as a corpus.
 - `adamantium`: `SingleFlight` lets concurrent calls for the same key share
   one operation and its output. Dropping the call that started the operation
   leaves it to the others, and dropping the last call drops it. It works
   without Tokio.
+
+### Changed
+
+- `adamantium`: replay records use format 3 to capture the scheduler and its
+  bounds. Regenerate saved records from previous formats.
+
+### Changed
+
+- `cargo-adamantium`: Default rules report Tokio `oneshot`, Tokio `watch`,
+  and `std::sync::mpsc::sync_channel`. Strict rules also report bounded Tokio
+  `mpsc`, `Notify`, and `Semaphore`. Broadcast diagnostics recommend
+  Adamantium's `Watch` when only the latest value matters.
+
+### Fixed
+
+- `adamantium`: `time::sleep` caps waits longer than 30 years at 30 years on
+  every supported Tokio version. Tokio before 1.54 kept them, so production
+  could wait longer than the deterministic clock.
 
 ## [0.3.0] - 2026-11-17
 

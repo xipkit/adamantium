@@ -66,7 +66,7 @@ async fn scope_completion_finishes_listener() {
 #[cfg(unix)]
 mod unix {
     use super::*;
-    use adamantium::ScopeError;
+    use adamantium::{Reply, ScopeError};
     use std::{
         io::{BufRead, BufReader, Write},
         process::{Child, Command, Stdio},
@@ -113,13 +113,13 @@ mod unix {
             begin(listener.as_mut()).await;
             let scope = Tasks::<std::io::Error>::run_until(observer.clone(), None, async |tasks| {
                 let guard = Dropped(dropped.clone());
-                let (started, running) = tokio::sync::oneshot::channel();
+                let (started, running) = Reply::pair();
                 tasks.spawn(async move {
                     let _guard = guard;
                     started.send(()).unwrap();
                     std::future::pending::<Result<(), std::io::Error>>().await
                 });
-                running.await.unwrap();
+                running.receive().await.unwrap();
                 println!("SIGNAL_LISTENER_READY");
                 std::io::stdout().flush().unwrap();
                 std::future::pending::<Result<(), std::io::Error>>().await

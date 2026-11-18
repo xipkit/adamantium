@@ -3,9 +3,9 @@
 ## Where the rules are
 
 - The default lint levels are in the `[workspace.lints]` table of this repository.
-- The Clippy configuration is in [`cli/clippy.toml`](../cli/clippy.toml). The Cargo configuration of the repository points Clippy at that same bundled file.
+- The default Clippy configuration is in [`cli/clippy.toml`](../cli/clippy.toml). The Cargo configuration of the repository points Clippy at that same bundled file.
 - `cargo adamantium rules` prints both.
-- The optional strict rules are in `[workspace.metadata.adamantium-strict.lints]`. `cargo adamantium rules --strict` prints them. They do not apply to this repository.
+- The optional strict tier adds lint levels from `[workspace.metadata.adamantium-strict.lints]` and Clippy paths from [`cli/clippy-strict.toml`](../cli/clippy-strict.toml). `cargo adamantium rules --strict` prints the combined rules.
 
 ## Properties
 
@@ -26,11 +26,24 @@ The rules and the library give these properties to code that follows them:
 | Explicit leak APIs and weak references restricted | `mem_forget`, `Box::leak`, `ManuallyDrop`, `Arc::downgrade`, and `Weak` are not allowed. |
 | No skipped cleanup | `exit`. `std::process::abort` is not allowed. |
 
+## Synchronization
+
+Adamantium's synchronization primitives use the deterministic runtime's scheduler when a test runs under it. Use `Topic` to deliver every broadcast message to each subscriber with backpressure. Use `Watch` when subscribers only need the latest value.
+
+| Primitive | Tier | Modeled replacement and behavior |
+| --- | --- | --- |
+| Bounded Tokio `mpsc` | Strict | Use `Channel::bounded(n).split()` for an async queue with backpressure. Adamantium receivers can be cloned to compete for work. Tokio has one receiver and serves sends and reservations in queue order. Adamantium has no reservation permits or admission-order guarantee. |
+| Tokio `oneshot` | Default | Use `Reply::pair()`. Sending consumes the reply and returns the payload in `Closed<T>` if the receiver closed. Use `receive().await` for an `Option<T>` in place of awaiting the Tokio receiver for a `Result`. |
+| Tokio `watch` | Default | Use `Watch` and `Watcher` for latest-value state. A watcher reads cloned snapshots. Adamantium replaces the whole value and retains updates even with zero watchers. Check any use of borrowed reads, in-place mutations, or Tokio's failed `send` when its last receiver goes away. |
+| Tokio `Notify` | Strict | Use `Cancellation` for sticky shutdown, `Watch` for a change in state, or `Channel::bounded(1)` with `try_send(())` for a coalescing single-consumer signal. Handle a full channel as an already pending signal. Tokio's stored single permit and its wake-all operation for existing waiters have different delivery semantics, so choose by intent. |
+| Tokio `Semaphore` | Strict | Use `Limit::run` for a shared concurrency limit and `concurrently` for one batch. `Limit` scopes each place to one call and serves waiting calls without FIFO ordering. Code that needs weighted, transferable, or dynamically adjustable permits needs a scoped exception. |
+| `std::sync::mpsc::sync_channel` | Default | Use `Channel::bounded(n).split()` for positive-capacity queues with async send and receive. Std can block the caller and supports a zero-capacity rendezvous. Adamantium treats zero as one. Keep a genuine blocking rendezvous at a blocking boundary with a scoped exception. |
+
 ## Allowed, and why
 
 ### Semaphores
 
-Tokio's `Semaphore` is allowed. A task can hold a permit across an `await`, because a permit guards no data.
+The default tier allows Tokio's `Semaphore`. A task can hold a permit across an `await`, because a permit guards no data.
 
 - To limit how many items run at one time, use `concurrently` or the streaming variants.
 - To share one limit between tasks, use `Limit`. Its work may enter one `KeyedLimit` for per-key exclusion. All other direct nesting of these limits panics before waiting.

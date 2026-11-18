@@ -69,8 +69,7 @@ pub(crate) fn now() -> Instant {
 
 pub(crate) fn deadline_after(duration: Duration) -> Instant {
     let now = now();
-    // Match Tokio's safe_delay cap, using virtual time rather than its clock.
-    let mut delay = duration.min(Duration::from_secs(86400 * 365 * 30));
+    let mut delay = duration;
     loop {
         if let Some(deadline) = now.checked_add(delay) {
             return deadline;

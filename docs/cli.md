@@ -306,15 +306,15 @@ cargo adamantium init --strict
 cargo adamantium rules --strict              # also supports --format json or toml
 ```
 
-The strict tier starts with [`arithmetic_side_effects`](https://clippy.rust-lang.org/master/index.html#arithmetic_side_effects). This lint reports arithmetic operators that can overflow or panic, including integer division and negation.
+The strict tier includes [`arithmetic_side_effects`](https://clippy.rust-lang.org/master/index.html#arithmetic_side_effects). This lint reports arithmetic operators that can overflow or panic, including integer division and negation. Strict mode also reports [bounded Tokio `mpsc`, `Notify`, and `Semaphore`](rules.md#synchronization).
 
 To state the behavior that you intend, use methods such as `checked_add`, `checked_div`, `saturating_add`, or `wrapping_add`.
 
 Clippy recognizes some safe operations. It cannot prove the arithmetic bounds of every application, so this tier is optional.
 
-- `init --strict` adds the strict lint levels to the tables of the project. `cargo clippy` then applies them.
+- `init --strict` adds the strict lint levels to `Cargo.toml` and strict paths to `clippy.toml`. It can upgrade the bundled default configuration directly. Use `--force` to replace a custom Clippy configuration.
 - Continue to pass `--strict` to `check` in CI. The Adamantium reports then include the strict rules.
-- A second `init --strict` makes no changes. A later `init` keeps the strict lint levels.
+- A second `init --strict` makes no changes. A later `init` keeps the installed strict configuration and lint levels.
 - The same skip list applies to both tiers.
 
 ## Dependencies

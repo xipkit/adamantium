@@ -1,7 +1,5 @@
-# Tokio's broadcast channel beside the synchronization the rules allow:
-# Semaphore permits held across an await or forgotten, watch, and one Channel
-# per receiver. Each line that must be reported ends in a comment naming its
-# rule. Its own workspace, so Cargo does not look for a parent.
+# Each failing line in src/lib.rs names its rule and whether it is strict-only.
+# The modeled replacements in src/modeled.rs pass in both tiers.
 [workspace]
 
 [package]
@@ -11,7 +9,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-adamantium = { path = "../../../..", default-features = false }
+adamantium = { path = "../../../.." }
 tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [profile.release]
