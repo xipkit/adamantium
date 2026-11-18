@@ -302,6 +302,11 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
                     Taken::Operation(operation) => operation,
                     Taken::Output(output) => return Poll::Ready(output),
                     Taken::Yield => {
+                        // The wake that is still pending also notified this
+                        // call's listener, which was registered before the
+                        // operation was taken. If this call is dropped before
+                        // it is polled again, the listener passes that
+                        // notification on to another caller.
                         cx.waker().wake_by_ref();
                         return Poll::Pending;
                     }

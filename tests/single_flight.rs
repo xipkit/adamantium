@@ -12,7 +12,7 @@ use std::{
     task::{Context, Poll, Wake, Waker},
 };
 
-fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
+fn poll_once<F: Future + ?Sized>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
 }
 
@@ -364,6 +364,69 @@ fn a_yielding_operation_lets_another_caller_take_its_turn() {
     // The operation is still woken, so the second caller polls it next.
     assert_eq!(poll_once(second.as_mut()), Poll::Ready(12));
     assert_eq!(poll_once(first.as_mut()), Poll::Ready(12));
+}
+
+type Call = Pin<Box<dyn Future<Output = u32> + Send>>;
+
+#[test]
+#[allow(
+    clippy::disallowed_types,
+    reason = "the test hands a call to the operation"
+)]
+fn a_wake_the_polling_caller_leaves_behind_reaches_the_others() {
+    let flights = SingleFlight::new();
+    let wakes = Arc::new(Wakes::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let second_slot: Arc<std::sync::Mutex<Option<Call>>> = Arc::default();
+    let operation_waker: Arc<std::sync::Mutex<Option<Waker>>> = Arc::default();
+    let (slot, saved, inner_waker) = (
+        Arc::clone(&second_slot),
+        Arc::clone(&operation_waker),
+        waker.clone(),
+    );
+    let mut polls = 0;
+    let operation = move || {
+        std::future::poll_fn(move |cx| {
+            polls += 1;
+            match polls {
+                1 => {
+                    *saved.lock().unwrap() = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+                2 => {
+                    // The operation wakes itself, then the second caller
+                    // looks while it is still being polled, as it could
+                    // from another thread.
+                    cx.waker().wake_by_ref();
+                    let mut second = slot.lock().unwrap();
+                    let second = second.as_mut().unwrap();
+                    let polled = second.as_mut().poll(&mut Context::from_waker(&inner_waker));
+                    assert!(polled.is_pending(), "the operation is being polled");
+                    Poll::Pending
+                }
+                _ => Poll::Ready(5),
+            }
+        })
+    };
+    let mut first = Box::pin(flights.run(1, operation));
+    assert!(poll_once(first.as_mut()).is_pending());
+    let joined = flights.clone();
+    let mut second: Call = Box::pin(async move { joined.run(1, || ready(0)).await });
+    assert!(poll_once(second.as_mut()).is_pending());
+    *second_slot.lock().unwrap() = Some(second);
+
+    operation_waker.lock().unwrap().take().unwrap().wake();
+    assert!(poll_once(first.as_mut()).is_pending());
+    let looked = wakes.0.load(Ordering::SeqCst);
+    // The first caller leaves before it is polled again.
+    drop(first);
+    assert!(
+        wakes.0.load(Ordering::SeqCst) > looked,
+        "the second caller was woken to take the operation"
+    );
+    let mut second = second_slot.lock().unwrap().take().unwrap();
+    assert_eq!(poll_once(second.as_mut()), Poll::Ready(5));
+    assert!(flights.is_empty());
 }
 
 #[test]
