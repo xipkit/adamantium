@@ -63,6 +63,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `AsyncActor` | One worker that owns its state and handles one message at a time. Use it when the state must `await`. |
 | `Channel`, `Reply`, `Watch` | A bounded queue, a one-shot reply, and the latest value of some state. |
 | `Topic` | Sends each message to every subscriber. It waits for a slow subscriber and drops no message. |
+| `Fanout` | Sends each event to every subscriber without waiting. It disconnects a subscriber that falls behind, which can then resubscribe. |
 | `race` | Waits for the first of several futures and drops the others. Use it in place of `select!`. |
 | `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. |
 | `retry`, `RateLimit`, `Limit` | Retries with backoff, a limit on calls in a time window, and a limit on calls that run at the same time. |
@@ -80,7 +81,7 @@ The [library guide](docs/library.md) describes each type, and [`examples/server.
 | `tracing` | No | Named task spans, and a warning that lists unfinished tasks when a deadline expires |
 | `deterministic` | No | A test harness that explores task interleavings from a seed. See [Deterministic tests](docs/testing.md). |
 
-With `default-features = false`, the values, `Actor`, `Channel`, `Topic`, `Reply`, `Watch`, `Limit`, and `race` work without Tokio.
+With `default-features = false`, the values, `Actor`, `Channel`, `Topic`, `Fanout`, `Reply`, `Watch`, `Limit`, and `race` work without Tokio.
 
 ### WASI
 

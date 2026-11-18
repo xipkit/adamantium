@@ -13,6 +13,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `adamantium`: `Tasks::spawner()` returns a cloneable `Spawner` so children
   can add siblings to their scope, with the same joining and error rules.
   Spawning after the scope closes returns `SpawnError` without starting work.
+- `adamantium`: `Fanout` sends each event to every subscribing `Feed`
+  without waiting. A feed whose bounded queue is full is disconnected: it
+  receives what it had queued, then `Ended::Overflowed`, and never a later
+  event, so what a feed receives has no gaps. `Feed::resubscribe` starts a
+  new feed to recover. Clones of a `Fanout` can all send, and every feed
+  receives their sends in one order.
 
 ## [0.3.0] - 2026-11-17
 

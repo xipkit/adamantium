@@ -5,12 +5,13 @@
 //! copy-on-write values ([`Str`], [`Bytes`], [`Array`], [`Deque`], [`Map`], [`Set`]), a
 //! structured task scope (`Tasks`), shared state whose methods run one at
 //! a time ([`Actor`]), a bounded channel ([`Channel`]), a channel that sends
-//! each message to every subscriber ([`Topic`]), a one-shot reply
-//! ([`Reply`]), the latest value of shared state ([`Watch`]), [`race`] to wait
-//! for the first of several events, a limit on how many calls run at once
-//! ([`Limit`]), and `blocking` for code that must block a thread. The
-//! `cargo adamantium` subcommand applies the Clippy rules that keep a crate
-//! inside the fragment.
+//! each message to every subscriber ([`Topic`]), a publisher that never
+//! waits and disconnects a subscriber that falls behind ([`Fanout`]), a
+//! one-shot reply ([`Reply`]), the latest value of shared state
+//! ([`Watch`]), [`race`] to wait for the first of several events, a limit
+//! on how many calls run at once ([`Limit`]), and `blocking` for code that
+//! must block a thread. The `cargo adamantium` subcommand applies the Clippy
+//! rules that keep a crate inside the fragment.
 //!
 //! Everything here is `Send + Sync + 'static` when its element types are, so
 //! a value of any of these types can be handed to a task without ceremony.
@@ -20,8 +21,8 @@
 //! `time` module, and `retry` and `RateLimit`, whose waits all end when a
 //! `Cancellation` is requested. `Tasks::spawn_supervised` restarts a task
 //! that fails, as often as a [`Restarts`] allows.
-//! Disable default features to use the values, synchronous actors, channels, replies,
-//! and watches without a Tokio dependency.
+//! Disable default features to use the values, synchronous actors, channels, topics,
+//! fanouts, replies, and watches without a Tokio dependency.
 //!
 //! Both configurations build and are tested on `wasm32-wasip1`. WASI has one
 //! thread and aborts on a panic, so `blocking` and `Tasks::spawn_blocking` run
@@ -41,6 +42,7 @@ mod async_actor;
 mod bytes;
 mod channel;
 mod deque;
+mod fanout;
 mod limit;
 mod map;
 mod race;
@@ -72,6 +74,9 @@ pub use channel::{Channel, Closed, Receiver, Sender, TryReceiveError, TrySendErr
 #[cfg(feature = "tokio")]
 pub use channel::{ReceiveError, SendError};
 pub use deque::Deque;
+#[cfg(feature = "tokio")]
+pub use fanout::FeedError;
+pub use fanout::{Ended, Fanout, Feed, Sent};
 pub use limit::Limit;
 pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
 pub use race::{Race, race};

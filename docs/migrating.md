@@ -31,6 +31,7 @@ changes behavior in a way to check.
 | `select!` racing futures for the first success | `first_ok` | Mostly |
 | `select!` waiting for the first of several events | `race` | Mostly |
 | `tokio::sync::broadcast` | `Topic` | Mostly |
+| `tokio::sync::broadcast` whose sender must not wait for a slow receiver | `Fanout` | Mostly |
 | A detached worker fed by a channel | A worker task in the scope that sends to it | No |
 | `JoinHandle::abort` on a long-lived task | `Tasks::run_until` with a `Cancellation` | No |
 | `tokio::spawn` inside a task | A scope inside the task | No |
@@ -786,6 +787,59 @@ async fn main() {
 
 A topic has one sender, where a `broadcast::Sender` can be cloned. To publish
 from several tasks, send to one task that owns the topic through a `Channel`.
+
+When the sender must not wait for a slow receiver, use `Fanout`. Like a
+`broadcast::Sender`, it can be cloned and its `send` never waits. A receiver
+that falls behind is disconnected instead of skipping ahead: it receives the
+messages already in its queue, then `Ended::Overflowed`, and nothing after
+that. Where code handled `Lagged` by reloading its state, call `resubscribe`
+and then reload, so no message falls between the two.
+
+Before:
+
+```rust
+use tokio::sync::broadcast::error::RecvError;
+
+#[tokio::main]
+async fn main() {
+    let (prices, mut display) = tokio::sync::broadcast::channel(1);
+    prices.send(1).ok();
+    prices.send(2).ok();
+    drop(prices);
+    loop {
+        match display.recv().await {
+            Ok(price) => println!("{price}"),
+            Err(RecvError::Lagged(_)) => println!("reload the prices"),
+            Err(RecvError::Closed) => break,
+        }
+    }
+}
+```
+
+After:
+
+```rust
+use adamantium::{Ended, Fanout};
+
+#[tokio::main]
+async fn main() {
+    let prices = Fanout::new(1);
+    let mut display = prices.subscribe();
+    prices.send(1).ok();
+    prices.send(2).ok();
+    drop(prices);
+    loop {
+        match display.receive().await {
+            Ok(price) => println!("{price}"),
+            Err(Ended::Overflowed) => {
+                display = display.resubscribe();
+                println!("reload the prices");
+            }
+            Err(Ended::Closed) => break,
+        }
+    }
+}
+```
 
 ### Blocking work
 
