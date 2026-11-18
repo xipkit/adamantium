@@ -15,6 +15,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Spawning after the scope closes returns `SpawnError` without starting work.
 - `adamantium`: `KeyedLimit` serializes calls for the same key, including
   inside a connection `Limit`, and evicts keys after their last call ends.
+- `adamantium`: deterministic tests can select probabilistic concurrency testing
+  or bounded depth-first search and replay saved failure schedules as a corpus.
+
+### Changed
+
+- `adamantium`: replay records use format 3 to capture the scheduler and its
+  bounds. Regenerate saved records from previous formats.
 
 ### Changed
 
