@@ -26,7 +26,7 @@ use std::{
 };
 
 use proc_macro2::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use syn::{
     Arm, AttrStyle, Attribute, Block, Expr, ExprCall, ExprClosure, ExprForLoop, ExprIf, ExprLit,
     ExprMethodCall, ExprPath, ExprUnsafe, ExprWhile, Field, FieldValue, File, FnArg, GenericParam,
@@ -69,7 +69,7 @@ pub struct Crate<'a> {
 }
 
 /// The kinds of `unsafe` code, counted where they are written.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct UnsafeCounts {
     /// `unsafe fn`, free or in a trait or impl.
     pub functions: usize,
@@ -100,19 +100,26 @@ pub struct UnsafeCounts {
 
 impl UnsafeCounts {
     pub fn total(&self) -> usize {
-        self.functions
-            + self.blocks
-            + self.impls
-            + self.traits
-            + self.extern_blocks
-            + self.attributes
-            + self.global_asm
-            + self.in_macros
+        self.by_category().into_iter().map(|(_, count)| count).sum()
+    }
+
+    /// The names used in the dependency report and each category's count.
+    pub fn by_category(&self) -> [(&'static str, usize); 8] {
+        [
+            ("functions", self.functions),
+            ("blocks", self.blocks),
+            ("impls", self.impls),
+            ("traits", self.traits),
+            ("extern_blocks", self.extern_blocks),
+            ("attributes", self.attributes),
+            ("global_asm", self.global_asm),
+            ("in_macros", self.in_macros),
+        ]
     }
 }
 
 /// A place in a dependency's source.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 pub struct Site {
     pub file: String,
     pub line: usize,
@@ -120,7 +127,7 @@ pub struct Site {
 }
 
 /// Source the scan couldn't read, so its counts leave it out.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Unscanned {
     pub file: String,
     pub line: Option<usize>,

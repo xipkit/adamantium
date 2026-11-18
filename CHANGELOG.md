@@ -36,6 +36,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   one operation and its output. Dropping the call that started the operation
   leaves it to the others, and dropping the last call drops it. It works
   without Tokio.
+- `cargo-adamantium`: `deps --deny-new` lets CI reject increases in unsafe
+  code or unscoped task starts across dependency updates using a JSON baseline.
 
 ### Changed
 
