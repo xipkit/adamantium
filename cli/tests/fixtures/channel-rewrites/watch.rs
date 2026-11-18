@@ -47,11 +47,10 @@ fn latest() -> u32 {
     *rx.borrow()
 }
 
-/// A receiver moved into a task.
+/// A receiver waited on in a future that borrows it.
 async fn worker() -> u32 {
-    let (tx, rx) = watch::channel(0u32);
-    let task = async move {
-        let mut rx = rx;
+    let (tx, mut rx) = watch::channel(0u32);
+    let task = async {
         let mut total = 0;
         while rx.changed().await.is_ok() {
             total += *rx.borrow_and_update();

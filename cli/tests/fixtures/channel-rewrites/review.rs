@@ -58,16 +58,29 @@ async fn borrowed() -> (u32, bool) {
     (first, borrowed_rx.changed().await.is_ok())
 }
 
+/// A send after the receiver is gone. Tokio drops the value, which ends
+/// the wait on `done`; a `Watch` would keep it, and the wait would hang.
+async fn unwatched() -> bool {
+    let (done_tx, done_rx) = oneshot::channel::<()>();
+    let (unwatched_tx, unwatched_rx) = watch::channel(None);
+    drop(unwatched_rx);
+    unwatched_tx.send(Some(done_tx)).ok();
+    let ended = done_rx.await.is_err();
+    drop(unwatched_tx);
+    ended
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     printed();
     println!(
-        "{:?} {:?} {} {} {} {:?}",
+        "{:?} {:?} {} {} {} {:?} {}",
         passed().await,
         propagated().await,
         unbound(),
         checked(),
         subscribed(),
-        borrowed().await
+        borrowed().await,
+        unwatched().await
     );
 }

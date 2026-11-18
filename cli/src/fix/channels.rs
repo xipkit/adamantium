@@ -25,9 +25,12 @@
 //! `receive().await`, which also marks the value seen and returns a copy of
 //! it, so `unwrap` and `expect` on a wait are refused, as they would panic
 //! with another message. Two differences need care. Tokio's `send` fails and drops the value
-//! when no receiver is alive, where `Watch::send` keeps it; that is unseen
-//! unless the sender is read or subscribed to, or the send's result is
-//! tested, so those are refused. And `borrow` reads without marking the
+//! when no receiver is alive, where `Watch::send` keeps it, which the
+//! value's destructor can show. So a watch that sends is rewritten only
+//! when every send runs in the channel's own block, outside any closure or
+//! async block, and the receiver the constructor made stays in that block
+//! until it ends, so a receiver is alive at every send. Reading or
+//! subscribing to the sender, and testing a send's result, are refused too. And `borrow` reads without marking the
 //! value seen, where `Watcher::get` marks it; that is unseen unless the
 //! receiver also waits for changes, which is refused.
 
@@ -111,6 +114,8 @@ const RESULT: &str = "the result of a send or receive is used in a way whose mea
 const UNLOCATED: &str = "fix couldn't find its source text";
 const OVERLAP: &str = "rewriting it would overlap the rewrite of another channel";
 const WATCH_SEND: &str = "a send's result is used, but Tokio's `send` fails once every receiver is gone and `Watch::send` keeps the value";
+const WATCH_UNWATCHED: &str =
+    "a send might run once no receiver is alive, when Tokio drops the value and `Watch` keeps it";
 const WATCH_SENDER: &str = "its sender is read, subscribed to or asked about receivers, which would show a value Tokio dropped because no receiver was alive";
 const HAS_CHANGED: &str = "Tokio's `has_changed` fails once the sender is gone, even with an unseen value, where `Watcher::has_changed` doesn't";
 const BORROW_SEEN: &str = "`borrow` leaves the value unseen, but `Watcher::get` marks it seen, and the receiver also waits for changes";
@@ -423,6 +428,10 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
         edits: Vec::new(),
         refusal: None,
         captured: 0,
+        nested: 0,
+        sends: false,
+        sends_nested: false,
+        receiver_moved: false,
         waits: false,
         borrows: false,
     };
@@ -437,6 +446,16 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
     }
     if analysis.borrows && analysis.waits {
         analysis.refuse(BORROW_SEEN);
+    }
+    // Tokio drops a value sent while no receiver is alive, and `Watch`
+    // keeps it, which its destructor can show. A send is proved to run while
+    // the constructor's receiver is alive when it runs in the block itself
+    // and that receiver stays there until the block ends.
+    if found.kind == Kind::Watch
+        && analysis.sends
+        && (analysis.sends_nested || analysis.receiver_moved)
+    {
+        analysis.refuse(WATCH_UNWATCHED);
     }
     if let Some(reason) = analysis.refusal {
         group.refusal = Some(reason);
@@ -619,6 +638,16 @@ struct Analysis<'t> {
     refusal: Option<&'static str>,
     /// Closures and borrowing async blocks around the current expression.
     captured: usize,
+    /// Closures and async blocks of any kind around the current expression.
+    nested: usize,
+    /// Whether a watch sends.
+    sends: bool,
+    /// Whether a watch sends inside a closure or async block, which might
+    /// run after the receiver is gone.
+    sends_nested: bool,
+    /// Whether the constructor's receiver is moved, dropped or captured, so
+    /// it might be gone before the end of its block.
+    receiver_moved: bool,
     /// Whether a receiver waits for changes.
     waits: bool,
     /// Whether a receiver reads with `borrow`.
@@ -779,7 +808,13 @@ impl<'t> Analysis<'t> {
     /// checked, and follows its arguments.
     fn take(&mut self, op: &Op<'t>) {
         match op.kind {
-            OpKind::Send(value) => self.visit_expr(value),
+            OpKind::Send(value) => {
+                if self.kind == Kind::Watch {
+                    self.sends = true;
+                    self.sends_nested |= self.nested > 0;
+                }
+                self.visit_expr(value);
+            }
             // Awaiting Tokio's receiver moves it into a block that captures
             // it, and `receive` borrows it, which a block that outlives the
             // function can't.
@@ -1041,6 +1076,9 @@ impl<'t> Analysis<'t> {
                     .and_then(|var| self.role(var)),
                 _ => None,
             };
+            if self.tracked(&init.expr) == Some(RECEIVER) {
+                self.receiver_moved = true;
+            }
             if let Some(role) = moved.or(cloned) {
                 let var = self.var(role, binding);
                 if let Some(scope) = self.scopes.last_mut() {
@@ -1244,7 +1282,8 @@ impl<'t> Visit<'t> for Analysis<'t> {
                 let Some(arg) = call.args.first() else {
                     return;
                 };
-                if self.tracked(arg).is_some() {
+                if let Some(var) = self.tracked(arg) {
+                    self.receiver_moved |= var == RECEIVER;
                     return;
                 }
                 match self.op(arg) {
@@ -1297,7 +1336,11 @@ impl<'t> Visit<'t> for Analysis<'t> {
                 });
             }
             Expr::Closure(closure) => {
+                if closure.capture.is_some() {
+                    self.capture(quote::ToTokens::to_token_stream(&closure.body));
+                }
                 self.captured += 1;
+                self.nested += 1;
                 self.scoped(|this| {
                     for input in &closure.inputs {
                         this.declare(input);
@@ -1305,19 +1348,43 @@ impl<'t> Visit<'t> for Analysis<'t> {
                     this.visit_expr(&closure.body);
                 });
                 self.captured -= 1;
+                self.nested -= 1;
             }
             Expr::Async(block) => {
+                if block.capture.is_some() {
+                    self.capture(quote::ToTokens::to_token_stream(&block.block));
+                }
                 let borrowing = block.capture.is_none();
                 self.captured += usize::from(borrowing);
+                self.nested += 1;
                 self.visit_block(&block.block);
                 self.captured -= usize::from(borrowing);
+                self.nested -= 1;
             }
             _ => syn::visit::visit_expr(self, expr),
         }
     }
 }
 
+/// The constructor's receiver, the second local `Analysis` tracks.
+const RECEIVER: usize = 1;
+
 impl<'t> Analysis<'t> {
+    /// Notes a `move` closure or async block that names the constructor's
+    /// receiver, which moves it there, where it might be dropped before the
+    /// end of its block. One without `move` borrows it, and a use that moves
+    /// it out of the block is followed on its own.
+    fn capture(&mut self, tokens: TokenStream) {
+        fn names(analysis: &Analysis<'_>, tokens: TokenStream) -> bool {
+            tokens.into_iter().any(|token| match token {
+                TokenTree::Group(group) => names(analysis, group.stream()),
+                TokenTree::Ident(ident) => analysis.lookup(&bare(&ident)) == Some(RECEIVER),
+                _ => false,
+            })
+        }
+        self.receiver_moved |= names(self, tokens);
+    }
+
     /// Follows a method on a half other than a send or receive, returning
     /// whether it was one.
     fn half_method(&mut self, call: &'t ExprMethodCall) -> bool {
@@ -1590,6 +1657,24 @@ mod tests {
     #[test]
     fn uses_whose_meaning_would_change_are_refused() {
         for (body, reason) in [
+            // Sends that might run once no receiver is alive, when Tokio
+            // drops the value and `Watch` keeps it.
+            (
+                "let (tx, rx) = watch::channel(None); drop(rx); tx.send(Some(String::new())).ok(); drop(tx);",
+                WATCH_UNWATCHED,
+            ),
+            (
+                "let (tx, rx) = watch::channel(0u8); let watcher = rx; drop(watcher); tx.send(1).ok();",
+                WATCH_UNWATCHED,
+            ),
+            (
+                "let (tx, rx) = watch::channel(0u8); let task = async move { let _ = *rx.borrow(); }; task.await; tx.send(1).ok();",
+                WATCH_UNWATCHED,
+            ),
+            (
+                "let (tx, rx) = watch::channel(0u8); let task = async move { tx.send(1).ok(); }; task.await; let _ = *rx.borrow();",
+                WATCH_UNWATCHED,
+            ),
             // A panic would print another error.
             (
                 "let (tx, mut rx) = watch::channel(0u8); rx.changed().await.unwrap(); drop(tx);",

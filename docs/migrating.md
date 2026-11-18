@@ -1158,9 +1158,13 @@ and returns a copy of it, so the value must be `Clone`, and
 Three differences make `fix` leave a channel for review:
 
 - Tokio's `send` fails, and drops the value, when no receiver is alive.
-  `Watch::send` keeps it for watchers subscribed later. `fix` rewrites a send
-  only when its result is discarded, and leaves a channel whose sender is
-  read, subscribed to or asked whether receivers remain.
+  `Watch::send` keeps it for watchers subscribed later, so a value with a
+  destructor, such as a reply, lives on. `fix` rewrites a channel that sends
+  only when a receiver is alive at every send: each send runs in the block
+  that made the channel, outside closures and async blocks, and the receiver
+  the channel was made with stays in that block, not moved, dropped or
+  captured by a `move` block. A send's result must be discarded, and the
+  sender must not be read, subscribed to or asked whether receivers remain.
 - `borrow` reads without marking the value seen, and `get` marks it. `fix`
   rewrites `borrow` to `get` only when no receiver of the channel waits for
   changes.

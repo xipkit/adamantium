@@ -1013,6 +1013,7 @@ fn channels_fix_cannot_follow_are_reported_and_left_unchanged() {
             "watch",
             "the-latest-value",
         ),
+        ("(unwatched_tx, unwatched_rx)", "watch", "the-latest-value"),
     ] {
         let constructor = name.strip_suffix("(..)").map_or_else(
             || format!("let {name} = "),

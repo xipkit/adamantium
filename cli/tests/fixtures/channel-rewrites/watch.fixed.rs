@@ -50,12 +50,11 @@ fn latest() -> u32 {
     rx.get()
 }
 
-/// A receiver moved into a task.
+/// A receiver waited on in a future that borrows it.
 async fn worker() -> u32 {
     let tx = ::adamantium::Watch::new(0u32);
-    let rx = tx.subscribe();
-    let task = async move {
-        let mut rx = rx;
+    let mut rx = tx.subscribe();
+    let task = async {
         let mut total = 0;
         while rx.receive().await.is_some() {
             total += rx.get();

@@ -233,7 +233,8 @@ The parameter, the return value, and every value passed or taken are rewritten t
 - A half passed to a function, stored in a field, returned, borrowed, or named in a macro or a type.
 - `unwrap` or `expect` on a send or a wait, which would panic with another message.
 - A oneshot receiver awaited inside a closure or an async block without `move`, which would borrow it instead of moving it.
-- A watch send whose result is used, and a watch sender that is read, subscribed to, or asked about its receivers. Tokio drops a value sent while no receiver is alive, and a `Watch` keeps it.
+- A watch send that might run once no receiver is alive: one inside a closure or an async block, or after the original receiver is moved, dropped, or captured by a `move` block. Tokio drops a value sent while no receiver is alive, and a `Watch` keeps it.
+- A watch send whose result is used, and a watch sender that is read, subscribed to, or asked about its receivers, for the same reason.
 - A watch receiver read with `borrow` that also waits for changes. `borrow` doesn't mark the value seen, and `get` does.
 - A watch receiver's `has_changed`, which in Tokio fails once the sender is gone.
 
