@@ -40,6 +40,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   code or unscoped task starts across dependency updates using a JSON baseline.
 - In `adamantium`, `Bytes::slice` checks byte ranges and shares storage.
   Editing a window through `make_mut` copies only the selected bytes.
+- `cargo-adamantium`: `check --format json` and `check --format sarif` include
+  an optional `remediation` for each finding, combining the replacement for its
+  rule or disallowed path with the migration guide section or `cargo adamantium
+  explain` command.
 
 ### Changed
 

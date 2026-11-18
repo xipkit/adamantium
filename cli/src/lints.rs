@@ -58,6 +58,275 @@ pub const OVERFLOW_EXAMPLE: Example = example(
     "[profile.release]\noverflow-checks = false",
     "[profile.release]\noverflow-checks = true",
 );
+pub const GUIDE: &str = "https://github.com/xipkit/adamantium/blob/main/docs/migrating.md";
+
+/// Where `fix` and `check` send the reader about a finding: the migration
+/// guide's section on it, or, for a rule the guide has no section on, the
+/// rule's explanation, which has a before and after for every rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hint<'a> {
+    Guide(&'static str),
+    Explain(&'a str),
+}
+
+impl<'a> Hint<'a> {
+    pub fn new(rule: &'a str, message: &str) -> Self {
+        let section = match rule {
+            "clippy::await_holding_lock" => Some("a-lock-held-across-an-await"),
+            "clippy::rc_mutex" => Some("shared-state"),
+            "clippy::disallowed_macros" => disallowed(message, DISALLOWED_MACROS),
+            "clippy::disallowed_methods" => disallowed(message, DISALLOWED_METHODS),
+            "clippy::disallowed_types" => disallowed(message, DISALLOWED_TYPES),
+            "adamantium_blocking_in_async" => Some("blocking-work"),
+            "adamantium_nested_actor_access" => Some("two-locks-at-once"),
+            "adamantium_race_with_timer" => Some("the-first-event"),
+            _ => None,
+        };
+        section.map_or(Self::Explain(rule), Self::Guide)
+    }
+}
+
+impl fmt::Display for Hint<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Guide(section) => write!(f, "Review {GUIDE}#{section}"),
+            Self::Explain(rule) => write!(f, "Run cargo adamantium explain {rule}"),
+        }
+    }
+}
+
+/// The guide's section on each disallowed macro it covers, by the path as
+/// `clippy.toml` lists it.
+pub const DISALLOWED_MACROS: &[(&str, &[&str])] = &[("the-first-to-succeed", &["futures::select"])];
+
+/// The guide's section on each disallowed method it covers, by the path as
+/// `clippy.toml` lists it.
+pub const DISALLOWED_METHODS: &[(&str, &[&str])] = &[
+    (
+        "tasks",
+        &[
+            "tokio::spawn",
+            "tokio::task::spawn",
+            "tokio::task::spawn_local",
+            "tokio::runtime::Handle::spawn",
+            "tokio::runtime::Runtime::spawn",
+            "tokio::runtime::LocalRuntime::spawn_local",
+            "tokio::task::Builder::spawn",
+            "tokio::task::Builder::spawn_on",
+            "tokio::task::Builder::spawn_local",
+            "tokio::task::Builder::spawn_local_on",
+            "async_std::task::spawn",
+            "async_std::task::spawn_local",
+            "async_std::task::Builder::spawn",
+            "async_std::task::Builder::local",
+            "smol::spawn",
+            "smol::Executor::spawn",
+            "smol::Executor::spawn_many",
+            "smol::LocalExecutor::spawn",
+            "smol::LocalExecutor::spawn_many",
+        ],
+    ),
+    (
+        "blocking-work",
+        &[
+            "tokio::task::spawn_blocking",
+            "tokio::task::block_in_place",
+            "tokio::runtime::Handle::spawn_blocking",
+            "tokio::runtime::Runtime::spawn_blocking",
+            "tokio::runtime::LocalRuntime::spawn_blocking",
+            "tokio::task::Builder::spawn_blocking",
+            "tokio::task::Builder::spawn_blocking_on",
+            "async_std::task::spawn_blocking",
+            "smol::unblock",
+            "std::thread::spawn",
+            "std::thread::Builder::spawn",
+            "std::thread::scope",
+        ],
+    ),
+    (
+        "messages-for-every-receiver",
+        &["tokio::sync::broadcast::channel"],
+    ),
+    (
+        "stopping-a-long-lived-task",
+        &[
+            "tokio::time::sleep",
+            "tokio::time::sleep_until",
+            "tokio::time::interval",
+            "tokio::time::interval_at",
+            "tokio::time::Instant::now",
+        ],
+    ),
+    (
+        "the-first-to-succeed",
+        &["tokio::macros::support::poll_budget_available"],
+    ),
+    (
+        "randomness",
+        &[
+            "rand::random",
+            "rand::thread_rng",
+            "rand::rng",
+            "rand::random_iter",
+            "rand::random_range",
+            "rand::random_bool",
+            "rand::random_ratio",
+            "rand::fill",
+            "rand::make_rng",
+            "rand::rngs::ThreadRng::reseed",
+            "rand::SeedableRng::from_entropy",
+            "rand::SeedableRng::from_os_rng",
+            "rand::SeedableRng::try_from_os_rng",
+            "fastrand::Rng::new",
+            "fastrand::seed",
+            "fastrand::get_seed",
+            "fastrand::bool",
+            "fastrand::alphabetic",
+            "fastrand::alphanumeric",
+            "fastrand::lowercase",
+            "fastrand::uppercase",
+            "fastrand::char",
+            "fastrand::digit",
+            "fastrand::choice",
+            "fastrand::choose_multiple",
+            "fastrand::shuffle",
+            "fastrand::fill",
+            "fastrand::u8",
+            "fastrand::i8",
+            "fastrand::u16",
+            "fastrand::i16",
+            "fastrand::u32",
+            "fastrand::i32",
+            "fastrand::u64",
+            "fastrand::i64",
+            "fastrand::u128",
+            "fastrand::i128",
+            "fastrand::usize",
+            "fastrand::isize",
+            "fastrand::f32",
+            "fastrand::f32_inclusive",
+            "fastrand::f64",
+            "fastrand::f64_inclusive",
+        ],
+    ),
+    ("a-detached-worker", &["tokio::sync::mpsc::channel"]),
+];
+
+/// The guide's section on each disallowed type it covers, by the path as
+/// `clippy.toml` lists it.
+pub const DISALLOWED_TYPES: &[(&str, &[&str])] = &[
+    ("shared-state", &["std::sync::Mutex", "parking_lot::Mutex"]),
+    (
+        "rwlock",
+        &[
+            "std::sync::RwLock",
+            "tokio::sync::RwLock",
+            "parking_lot::RwLock",
+        ],
+    ),
+    (
+        "a-lock-held-across-an-await",
+        &["tokio::sync::Mutex", "futures::lock::Mutex"],
+    ),
+    (
+        "messages-for-every-receiver",
+        &[
+            "tokio::sync::broadcast::Sender",
+            "tokio::sync::broadcast::Receiver",
+        ],
+    ),
+    ("results-as-they-finish", &["tokio::task::JoinSet"]),
+    (
+        "a-detached-worker",
+        &["tokio::sync::mpsc::Sender", "tokio::sync::mpsc::Receiver"],
+    ),
+];
+
+/// The path a disallowed-macro, -method or -type finding names. Clippy quotes
+/// the path as the configuration lists it, as in "use of a disallowed method
+/// `tokio::spawn`".
+fn quoted_path(message: &str) -> Option<&str> {
+    message.split('`').nth(1)
+}
+
+/// The section on the path a disallowed-method or -type finding names.
+fn disallowed(message: &str, sections: &[(&'static str, &[&str])]) -> Option<&'static str> {
+    let path = quoted_path(message)?;
+    sections
+        .iter()
+        .find(|(_, paths)| paths.contains(&path))
+        .map(|(section, _)| *section)
+}
+
+/// The replacement and migration hint for a finding of `rule` with `message`.
+/// A disallowed macro, method or type gets the specific reason configured for
+/// its path in `clippy_config`, falling back to the rule's general replacement
+/// when a project's own configuration supplies no reason; other rules get the
+/// replacement from `explain`. The hint points at the migration guide's
+/// section when the guide covers the finding, or at `cargo adamantium explain`.
+pub fn remediation(rule: &str, message: &str, clippy_config: &str) -> Option<String> {
+    let replacement = match rule {
+        "clippy::disallowed_macros" => {
+            disallowed_reason(clippy_config, "disallowed-macros", message)
+        }
+        "clippy::disallowed_methods" => {
+            disallowed_reason(clippy_config, "disallowed-methods", message)
+        }
+        "clippy::disallowed_types" => disallowed_reason(clippy_config, "disallowed-types", message),
+        _ => None,
+    }
+    .or_else(|| rule_replacement(rule).map(str::to_owned))?;
+    let replacement = capitalize(&replacement);
+    let punctuation = if replacement.ends_with(['.', '!', '?']) {
+        ""
+    } else {
+        "."
+    };
+    Some(format!(
+        "{replacement}{punctuation} {}.",
+        Hint::new(rule, message)
+    ))
+}
+
+fn rule_replacement(rule: &str) -> Option<&'static str> {
+    match rule {
+        OVERFLOW_RULE => Some(OVERFLOW_EXAMPLE.replacement),
+        "adamantium_blocking_in_async" => {
+            Some("Use adamantium::blocking or Tasks::spawn_blocking for blocking work.")
+        }
+        "adamantium_nested_actor_access" => {
+            Some("Access the second actor after the outer callback returns.")
+        }
+        "adamantium_race_with_timer" => Some(
+            "Use adamantium::until or a *_until method, or race only documented drop-safe operations.",
+        ),
+        _ => selected(true)
+            .find(|lint| lint.name == rule || lint.qualified() == rule)
+            .map(|lint| lint.example.replacement),
+    }
+}
+
+fn disallowed_reason(clippy_config: &str, list: &str, message: &str) -> Option<String> {
+    let path = quoted_path(message)?;
+    let doc: DocumentMut = clippy_config.parse().ok()?;
+    let entries = doc.get(list)?.as_array()?;
+    entries.iter().find_map(|entry| {
+        let table = entry.as_inline_table()?;
+        if table.get("path")?.as_str()? != path {
+            return None;
+        }
+        let reason = table.get("reason")?.as_str()?.trim();
+        (!reason.is_empty()).then(|| reason.to_owned())
+    })
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    first.to_uppercase().chain(chars).collect()
+}
 
 /// The Clippy configuration bundled with the CLI and used by this repository.
 pub const CLIPPY_TOML: &str = include_str!("../clippy.toml");

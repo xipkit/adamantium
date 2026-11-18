@@ -311,9 +311,37 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
             "no finding for {expected} in {rules:?}"
         );
     }
-    for (rule, path) in [
-        ("clippy::disallowed_methods", "std::process::abort"),
-        ("clippy::disallowed_types", "std::mem::ManuallyDrop"),
+    for (rule, path, expected_remediation) in [
+        (
+            "clippy::disallowed_methods",
+            "std::process::abort",
+            "Skips every scope's cleanup; return an exit code from main. Run cargo adamantium explain clippy::disallowed_methods.",
+        ),
+        (
+            "clippy::disallowed_methods",
+            "tokio::task::spawn",
+            "An unstructured task; spawn inside adamantium::Tasks. Review https://github.com/xipkit/adamantium/blob/main/docs/migrating.md#tasks.",
+        ),
+        (
+            "clippy::disallowed_methods",
+            "std::thread::spawn",
+            "An unstructured thread; use adamantium::Tasks or adamantium::blocking. Review https://github.com/xipkit/adamantium/blob/main/docs/migrating.md#blocking-work.",
+        ),
+        (
+            "clippy::disallowed_types",
+            "std::mem::ManuallyDrop",
+            "Suppresses automatic cleanup and can leak; let values drop normally. Run cargo adamantium explain clippy::disallowed_types.",
+        ),
+        (
+            "clippy::disallowed_types",
+            "std::sync::Mutex",
+            "Use adamantium::Actor, which never holds its lock across an await or inside another actor. Review https://github.com/xipkit/adamantium/blob/main/docs/migrating.md#shared-state.",
+        ),
+        (
+            "clippy::disallowed_types",
+            "tokio::task::JoinSet",
+            "Use adamantium::Tasks so every task has a scope that joins it. Review https://github.com/xipkit/adamantium/blob/main/docs/migrating.md#results-as-they-finish.",
+        ),
     ] {
         assert!(
             report["findings"]
@@ -321,17 +349,27 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
                 .unwrap()
                 .iter()
                 .any(|finding| {
-                    finding["rule"] == rule && finding["message"].as_str().unwrap().contains(path)
+                    finding["rule"] == rule
+                        && finding["message"].as_str().unwrap().contains(path)
+                        && finding["remediation"] == expected_remediation
                 }),
-            "no {rule} finding for {path}: {report}"
+            "no {rule} finding for {path} with expected remediation: {report}"
         );
     }
     let first = &report["findings"][0];
     assert!(first["file"].as_str().unwrap().ends_with(".rs"));
     assert!(first["line"].as_u64().is_some());
     // Each finding carries the trimmed text of the line it starts on, so a
-    // baseline can match it after the line moves.
+    // baseline can match it after the line moves, and an actionable remediation.
     for finding in report["findings"].as_array().unwrap() {
+        assert!(
+            !finding["remediation"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .is_empty(),
+            "{finding} has no remediation"
+        );
         let Some(line) = finding["line"].as_u64() else {
             assert_eq!(finding["source"], serde_json::Value::Null, "{finding}");
             continue;
@@ -1132,7 +1170,7 @@ fn check_reports_the_violations_fixture_as_sarif() {
         .unwrap();
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let root = PathBuf::from(report["root"].as_str().unwrap());
-    let mut expected: Vec<(String, PathBuf, u64, Option<u64>)> = report["findings"]
+    let mut expected: Vec<(String, PathBuf, u64, Option<u64>, String)> = report["findings"]
         .as_array()
         .unwrap()
         .iter()
@@ -1142,6 +1180,7 @@ fn check_reports_the_violations_fixture_as_sarif() {
                 root.join(finding["file"].as_str().unwrap()),
                 finding["line"].as_u64().unwrap_or(1),
                 finding["column"].as_u64(),
+                finding["remediation"].as_str().unwrap().to_owned(),
             )
         })
         .collect();
@@ -1159,7 +1198,7 @@ fn check_reports_the_violations_fixture_as_sarif() {
     );
     let rules = run["tool"]["driver"]["rules"].as_array().unwrap();
     let results = run["results"].as_array().unwrap();
-    let mut found: Vec<(String, PathBuf, u64, Option<u64>)> = results
+    let mut found: Vec<(String, PathBuf, u64, Option<u64>, String)> = results
         .iter()
         .map(|result| {
             let rule = result["ruleId"].as_str().unwrap().to_owned();
@@ -1172,12 +1211,16 @@ fn check_reports_the_violations_fixture_as_sarif() {
                 sarif_path(run, result).unwrap(),
                 region["startLine"].as_u64().unwrap(),
                 region["startColumn"].as_u64(),
+                result["properties"]["remediation"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
             )
         })
         .collect();
     found.sort();
     assert_eq!(found, expected);
-    for (_, path, _, _) in &found {
+    for (_, path, _, _, _) in &found {
         assert!(path.is_file(), "{}", path.display());
     }
     let mut ids: Vec<&str> = rules
