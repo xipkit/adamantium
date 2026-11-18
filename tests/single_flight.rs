@@ -302,6 +302,26 @@ fn the_operation_cannot_call_for_its_own_key() {
 }
 
 #[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
+fn creating_the_operation_cannot_call_for_its_own_key() {
+    let flights = SingleFlight::<u8, u32>::new();
+    let inner = flights.clone();
+    let mut first = pin!(flights.run(1, || {
+        // Waiting for the same key while creating the operation would wait
+        // for an operation that doesn't exist yet.
+        let mut nested = pin!(inner.run(1, || ready(1)));
+        ready(u32::from(poll_once(nested.as_mut()).is_ready()))
+    }));
+    let payload = catch_unwind(AssertUnwindSafe(|| poll_once(first.as_mut()))).unwrap_err();
+    let message = payload.downcast_ref::<&str>().unwrap();
+    assert!(
+        message.contains("called by the operation for the same key"),
+        "{message}"
+    );
+    assert!(flights.is_empty());
+}
+
+#[test]
 fn a_call_polled_between_the_polls_of_the_operation_is_not_nested() {
     let flights = SingleFlight::new();
     let answers = Channel::<u32>::bounded(1);

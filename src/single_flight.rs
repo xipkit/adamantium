@@ -189,7 +189,11 @@ where
         let mut held = None;
         if caller.polling {
             let mut creating = Unwinding::arm(&mut caller);
+            // Creating the operation is part of it, so a call it makes for
+            // its own key is refused here too.
+            let polling = Polling::enter(&creating.caller.flight);
             held = Some(Box::pin(operation()) as Operation<T>);
+            drop(polling);
             creating.disarm();
         } else {
             drop(operation);
