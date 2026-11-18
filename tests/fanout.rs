@@ -427,6 +427,55 @@ fn feeds_are_woken_outside_the_lock() {
     );
 }
 
+/// An event whose second clone panics, and whose destructor reads the
+/// fanout. It reaches the fanout through an `Arc`, since cloning a `Fanout`
+/// handle inside `clone` would take the lock a send holds.
+struct ExplodesOnSecondClone {
+    fanout: Arc<Fanout<ExplodesOnSecondClone>>,
+    clones: Arc<AtomicUsize>,
+}
+
+impl Clone for ExplodesOnSecondClone {
+    fn clone(&self) -> Self {
+        if self.clones.fetch_add(1, Ordering::SeqCst) == 1 {
+            std::panic::panic_any("second clone failed");
+        }
+        Self {
+            fanout: Arc::clone(&self.fanout),
+            clones: Arc::clone(&self.clones),
+        }
+    }
+}
+
+impl Drop for ExplodesOnSecondClone {
+    fn drop(&mut self) {
+        // Takes the fanout's lock, so it would deadlock if the clone made
+        // before the panic were dropped while the send held it.
+        let _ = self.fanout.subscriber_count();
+    }
+}
+
+#[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
+#[test]
+fn clones_made_before_a_panicking_clone_drop_outside_the_lock() {
+    let fanout = Arc::new(Fanout::new(1));
+    let mut feeds = [fanout.subscribe(), fanout.subscribe(), fanout.subscribe()];
+    let clones = Arc::new(AtomicUsize::new(0));
+    let event = ExplodesOnSecondClone {
+        fanout: Arc::clone(&fanout),
+        clones: Arc::clone(&clones),
+    };
+    let sent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(fanout.send(event));
+    }));
+    assert!(sent.is_err());
+    assert_eq!(clones.load(Ordering::SeqCst), 2);
+    for feed in &mut feeds {
+        assert_eq!(feed.try_receive().map(|event| event.is_some()), Ok(false));
+    }
+    assert_eq!(fanout.subscriber_count(), 3);
+}
+
 #[test]
 fn handles_cross_tasks_and_describe_themselves() {
     fn crosses_tasks<T: Send + Sync + 'static>() {}

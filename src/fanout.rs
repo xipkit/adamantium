@@ -322,9 +322,13 @@ impl<T: Clone> Fanout<T> {
     /// receives the event, so a `T::clone` that panics delivers it to none.
     /// Because the lock is held, `T::clone` must not use this fanout:
     /// cloning a `Fanout` handle there, for one, waits for the lock forever.
-    /// The wakers of waiting feeds run after the lock is released, and can
-    /// use it.
+    /// Destructors of `T` and the wakers of waiting feeds run after the lock
+    /// is released, and can use it.
     pub fn send(&self, value: T) -> Result<Sent, Closed<T>> {
+        // Declared before the guard, so that if a `T::clone` panics, the
+        // clones already made drop after unwinding has released the lock:
+        // their destructors are the caller's code.
+        let mut events: Vec<T> = Vec::new();
         let mut state = self.shared.lock();
         if state.closed {
             drop(state);
@@ -333,7 +337,7 @@ impl<T: Clone> Fanout<T> {
         let cut_off = state.cut_off_full(self.shared.capacity);
         // One clone for each feed but the last, which takes `value`. With no
         // feeds `value` stays here, to drop once the lock is released.
-        let mut events: Vec<T> = state.feeds.iter().skip(1).map(|_| value.clone()).collect();
+        events.extend(state.feeds.iter().skip(1).map(|_| value.clone()));
         events.push(value);
         for inbox in &state.feeds {
             if let Some(event) = events.pop() {
