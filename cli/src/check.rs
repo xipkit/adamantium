@@ -63,6 +63,10 @@ pub struct Finding {
     /// The source line the finding starts on, without its indentation or
     /// trailing whitespace, or `None` when the finding has no line.
     pub source: Option<String>,
+    /// The applicable replacement and migration guide section or `explain`
+    /// command, when the CLI has guidance for this finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
 }
 
 /// A compiler error or configuration warning unrelated to the rules.
@@ -363,17 +367,20 @@ fn print_json(value: &impl Serialize) -> Result<()> {
 
 /// Writes Adamantium's `clippy.toml` into `dir`, which becomes
 /// `CLIPPY_CONF_DIR`, and returns the path Clippy's diagnostics will name it
-/// by. Clippy canonicalizes `CLIPPY_CONF_DIR` before reading it, so when `dir`
-/// is reached through a symlink, as macOS's temporary directory is through
-/// `/var`, the two spellings differ.
-fn write_clippy_config(dir: &Path, strict: bool) -> Result<PathBuf> {
+/// by and its contents. Clippy canonicalizes `CLIPPY_CONF_DIR` before reading
+/// it, so when `dir` is reached through a symlink, as macOS's temporary
+/// directory is through `/var`, the two spellings differ.
+fn write_clippy_config(
+    dir: &Path,
+    strict: bool,
+) -> Result<(PathBuf, std::borrow::Cow<'static, str>)> {
     let dir = dir
         .canonicalize()
         .with_context(|| format!("resolving {}", dir.display()))?;
     let path = dir.join("clippy.toml");
-    fs::write(&path, lints::clippy_toml(strict)?.as_bytes())
-        .with_context(|| format!("writing {}", path.display()))?;
-    Ok(path)
+    let toml = lints::clippy_toml(strict)?;
+    fs::write(&path, toml.as_bytes()).with_context(|| format!("writing {}", path.display()))?;
+    Ok((path, toml))
 }
 
 pub(crate) fn check(
@@ -408,7 +415,7 @@ fn check_selected(
 ) -> Result<Report> {
     let config = Config::load(root)?;
     let conf = tempfile::tempdir().context("creating a directory for clippy.toml")?;
-    let clippy_config = write_clippy_config(conf.path(), strict)?;
+    let (clippy_config, clippy_toml) = write_clippy_config(conf.path(), strict)?;
 
     let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -458,6 +465,7 @@ fn check_selected(
     let setting = Setting {
         root,
         clippy_config: &clippy_config,
+        clippy_toml: &clippy_toml,
         config: &config,
         rules: &rules,
         echo,
@@ -524,13 +532,16 @@ fn check_selected(
     if overflow_unchecked && config.skips(OVERFLOW_RULE, "Cargo.toml") {
         *sorted.skipped.entry(OVERFLOW_RULE.to_owned()).or_insert(0) += 1;
     } else if overflow_unchecked && !sorted.in_baseline(OVERFLOW_RULE, "Cargo.toml", None) {
+        let message = "[profile.release] does not set overflow-checks = true, so integer overflow wraps silently in release builds; `cargo adamantium init` adds it".to_owned();
+        let remediation = lints::remediation(OVERFLOW_RULE, &message, &clippy_toml);
         let finding = Finding {
             rule: OVERFLOW_RULE.to_owned(),
-            message: "[profile.release] does not set overflow-checks = true, so integer overflow wraps silently in release builds; `cargo adamantium init` adds it".to_owned(),
+            message,
             file: "Cargo.toml".to_owned(),
             line: None,
             column: None,
             source: None,
+            remediation,
         };
         if echo {
             eprintln!(
@@ -634,6 +645,7 @@ fn dylint_command(root: &Path, cargo_args: &[String], library: &Path) -> Result<
 struct Setting<'a> {
     root: &'a Path,
     clippy_config: &'a Path,
+    clippy_toml: &'a str,
     config: &'a Config,
     rules: &'a HashSet<String>,
     echo: bool,
@@ -774,14 +786,18 @@ fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted) 
         file
     };
     match code {
-        Some(rule) if setting.rules.contains(&rule) => sorted.findings.push(Finding {
-            rule,
-            message: diagnostic.message,
-            file,
-            line: Some(span.line_start),
-            column: Some(span.column_start),
-            source,
-        }),
+        Some(rule) if setting.rules.contains(&rule) => {
+            let remediation = lints::remediation(&rule, &diagnostic.message, setting.clippy_toml);
+            sorted.findings.push(Finding {
+                rule,
+                message: diagnostic.message,
+                file,
+                line: Some(span.line_start),
+                column: Some(span.column_start),
+                source,
+                remediation,
+            });
+        }
         _ if diagnostic.level == "error" => sorted.errors.push(Problem {
             message: diagnostic.message,
             file: Some(file),
@@ -884,6 +900,7 @@ mod tests {
         let setting = Setting {
             root,
             clippy_config: Path::new("generated/clippy.toml"),
+            clippy_toml: lints::CLIPPY_TOML,
             config,
             rules: &rules,
             echo: false,
@@ -1093,6 +1110,7 @@ mod tests {
         let setting = Setting {
             root: Path::new("project"),
             clippy_config: Path::new("generated/clippy.toml"),
+            clippy_toml: lints::CLIPPY_TOML,
             config: &config,
             rules: &rules,
             echo: false,
@@ -1217,11 +1235,12 @@ mod tests {
         let links = tempfile::tempdir().unwrap();
         let link = links.path().join("conf");
         std::os::unix::fs::symlink(real.path(), &link).unwrap();
-        let path = write_clippy_config(&link, false).unwrap();
+        let (path, toml) = write_clippy_config(&link, false).unwrap();
         assert_eq!(
             path,
             real.path().canonicalize().unwrap().join("clippy.toml")
         );
+        assert_eq!(toml, lints::CLIPPY_TOML);
         assert_eq!(fs::read_to_string(&path).unwrap(), lints::CLIPPY_TOML);
     }
 
@@ -1494,5 +1513,78 @@ mod tests {
         );
         assert!(report.findings.is_empty(), "{:?}", report.findings);
         assert_eq!(report.baseline_unmatched, Some(0));
+    }
+
+    #[test]
+    fn findings_carry_rule_and_path_specific_remediation() {
+        let report = classify_diagnostics(vec![
+            diagnostic(
+                "src/lib.rs",
+                "warning",
+                Some("clippy::disallowed_methods"),
+                "use of a disallowed method `tokio::spawn`",
+            ),
+            diagnostic(
+                "src/lib.rs",
+                "warning",
+                Some("clippy::disallowed_methods"),
+                "use of a disallowed method `std::thread::Builder::spawn`",
+            ),
+            diagnostic(
+                "src/lib.rs",
+                "warning",
+                Some("clippy::disallowed_methods"),
+                "use of a disallowed method `std::mem::forget`",
+            ),
+            diagnostic(
+                "src/lib.rs",
+                "warning",
+                Some("clippy::disallowed_types"),
+                "use of a disallowed type `std::sync::Mutex`",
+            ),
+            diagnostic(
+                "src/lib.rs",
+                "warning",
+                Some("clippy::disallowed_types"),
+                "use of a disallowed type `tokio::sync::RwLock`",
+            ),
+            diagnostic(
+                "src/lib.rs",
+                "warning",
+                Some("clippy::unwrap_used"),
+                "used `unwrap()` on an `Option` value",
+            ),
+        ]);
+        let remediations: Vec<Option<&str>> = report
+            .findings
+            .iter()
+            .map(|finding| finding.remediation.as_deref())
+            .collect();
+        assert_eq!(
+            remediations,
+            [
+                Some(
+                    "An unstructured task; spawn inside adamantium::Tasks. Review https://github.com/xipkit/adamantium/blob/main/docs/migrating.md#tasks."
+                ),
+                Some(
+                    "An unstructured thread; use adamantium::Tasks or adamantium::blocking. Review https://github.com/xipkit/adamantium/blob/main/docs/migrating.md#blocking-work."
+                ),
+                Some("Leaks. Run cargo adamantium explain clippy::disallowed_methods."),
+                Some(
+                    "Use adamantium::Actor, which never holds its lock across an await or inside another actor. Review https://github.com/xipkit/adamantium/blob/main/docs/migrating.md#shared-state."
+                ),
+                Some(
+                    "An async lock can be held across an await; use adamantium::Actor. Review https://github.com/xipkit/adamantium/blob/main/docs/migrating.md#rwlock."
+                ),
+                Some(
+                    "Return or handle None/Err. Propagate Result with ? so an enclosing adamantium::Tasks scope can observe failure. Run cargo adamantium explain clippy::unwrap_used."
+                ),
+            ]
+        );
+
+        let mut without_guidance = report.findings.first().unwrap().clone();
+        without_guidance.remediation = None;
+        let encoded = serde_json::to_value(&without_guidance).unwrap();
+        assert!(encoded.get("remediation").is_none(), "{encoded}");
     }
 }

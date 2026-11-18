@@ -114,13 +114,22 @@ pub fn log(report: &Report, roots: &Roots) -> Value {
                     rules.push(&finding.rule);
                     rules.len() - 1
                 });
-            json!({
+            let mut result = json!({
                 "ruleId": finding.rule,
                 "ruleIndex": index,
                 "level": "error",
                 "message": { "text": finding.message },
                 "locations": [location(&finding_path(finding, report, roots), finding.line, finding.column, &roots.source)],
-            })
+            });
+            if let (Some(remediation), Some(fields)) =
+                (&finding.remediation, result.as_object_mut())
+            {
+                fields.insert(
+                    "properties".to_owned(),
+                    json!({ "remediation": remediation }),
+                );
+            }
+            result
         })
         .collect();
     let notifications: Vec<Value> = report
@@ -302,13 +311,16 @@ mod tests {
     use super::*;
 
     fn finding(rule: &str, file: &str, line: Option<u64>) -> Finding {
+        let message = format!("{rule} broken");
+        let remediation = lints::remediation(rule, &message, lints::CLIPPY_TOML);
         Finding {
             rule: rule.to_owned(),
-            message: format!("{rule} broken"),
+            message,
             file: file.to_owned(),
             line,
             column: line.map(|_| 5),
             source: line.map(|_| format!("{rule}();")),
+            remediation,
         }
     }
 
@@ -427,6 +439,10 @@ mod tests {
             .map(|result| result["ruleIndex"].as_u64().unwrap())
             .collect();
         assert_eq!(indexes, [0, 1, 0]);
+        assert_eq!(
+            run["results"][0]["properties"]["remediation"],
+            "Return or handle None/Err. Propagate Result with ? so an enclosing adamantium::Tasks scope can observe failure. Run cargo adamantium explain clippy::unwrap_used."
+        );
     }
 
     #[test]

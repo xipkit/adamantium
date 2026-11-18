@@ -1,6 +1,8 @@
 use std::{
     borrow::Borrow,
+    collections::HashMap,
     hash::{Hash, Hasher},
+    ops::Bound,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -271,6 +273,126 @@ fn bytes_unique_clear_retains_allocation() {
     assert_eq!(value.as_ptr(), pointer);
     value.push(7);
     assert_eq!(value.as_ptr(), pointer);
+}
+
+#[test]
+fn bytes_nested_windows_share_storage() {
+    let original = Bytes::from("prefixframefooter");
+    let window = original.slice(6..11).unwrap();
+    let nested = window.slice(1..=3).unwrap();
+
+    assert!(original.is_shared());
+    assert!(window.is_shared());
+    assert!(nested.is_shared());
+    assert_eq!(window.as_ptr(), original.as_ptr().wrapping_add(6));
+    assert_eq!(nested.as_ptr(), window.as_ptr().wrapping_add(1));
+    assert_eq!(window.as_slice(), b"frame");
+    assert_eq!(nested.as_slice(), b"ram");
+    assert_eq!(window.slice(..2).unwrap().as_slice(), b"fr");
+    assert_eq!(window.slice(2..).unwrap().as_slice(), b"ame");
+
+    assert!(window.slice(4..6).is_none());
+    assert!(window.slice(6..).is_none());
+    assert!(window.slice(..=5).is_none());
+    let (start, end) = (3, 2);
+    assert!(window.slice(start..end).is_none());
+    assert!(window.slice(..=usize::MAX).is_none());
+    assert!(
+        window
+            .slice((Bound::Excluded(usize::MAX), Bound::Unbounded))
+            .is_none()
+    );
+}
+
+#[test]
+fn bytes_empty_windows_are_valid_at_any_in_bounds_offset() {
+    let original = Bytes::from("frame");
+    for offset in [0, 2, original.len()] {
+        let mut empty = original.slice(offset..offset).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.as_ptr(), original.as_ptr().wrapping_add(offset));
+        assert!(empty.slice(..).unwrap().is_empty());
+        assert!(empty.slice(..1).is_none());
+        assert!(empty.clone().into_vec().is_empty());
+        empty.push(b'x');
+        assert_eq!(empty.as_slice(), b"x");
+        assert_eq!(original.as_slice(), b"frame");
+    }
+    assert!(Bytes::new().slice(..).unwrap().is_empty());
+}
+
+#[test]
+fn bytes_windows_are_values_of_the_selected_bytes() {
+    let original = Bytes::from("zabbac");
+    let first = original.slice(1..3).unwrap();
+    let second = original.slice(3..5).unwrap();
+
+    assert_eq!(first, Bytes::from("ab"));
+    assert!(first < second);
+    assert!(first.iter().copied().eq(*b"ab"));
+    assert_eq!(first.as_ref(), b"ab");
+    assert_eq!(format!("{first:?}"), "b\"ab\"");
+    let values = HashMap::from([(first.clone(), 1)]);
+    assert_eq!(values.get(b"ab".as_slice()), Some(&1));
+    assert_eq!(first.into_vec(), b"ab");
+    drop(values);
+    drop(original);
+    assert_eq!(second.into_vec(), b"ba");
+}
+
+#[test]
+fn bytes_window_make_mut_isolates_overlapping_windows_and_parent() {
+    let mut parent = Bytes::from("prefixframefooter");
+    let mut frame = parent.slice(6..11).unwrap();
+    let mut overlap = parent.slice(8..13).unwrap();
+
+    let buffer: &mut Vec<u8> = frame.make_mut();
+    assert_eq!(buffer.as_slice(), b"frame");
+    buffer.reverse();
+    buffer.push(b'!');
+    assert_eq!(frame.as_slice(), b"emarf!");
+    assert!(!frame.is_shared());
+    assert_eq!(parent.as_slice(), b"prefixframefooter");
+    assert_eq!(overlap.as_slice(), b"amefo");
+
+    parent.make_mut().truncate(2);
+    assert_eq!(parent.as_slice(), b"pr");
+    assert_eq!(overlap.as_slice(), b"amefo");
+    assert!(!overlap.is_shared());
+    overlap.extend_from_slice(b"!");
+    assert_eq!(overlap.as_slice(), b"amefo!");
+}
+
+#[test]
+fn bytes_clear_detaches_shared_windows_and_resets_unique_windows() {
+    let parent = Bytes::from("prefixframefooter");
+    let pointer = parent.as_ptr();
+    let mut window = parent.slice(6..11).unwrap();
+    let mut shared = window.clone();
+    shared.clear();
+    assert!(shared.is_empty());
+    assert!(!shared.is_shared());
+    assert_eq!(window.as_slice(), b"frame");
+
+    drop(parent);
+    window.clear();
+    assert!(window.is_empty());
+    assert_eq!(window.as_ptr(), pointer);
+    window.push(b'!');
+    assert_eq!(window.as_slice(), b"!");
+}
+
+#[test]
+fn bytes_full_window_reuses_unique_buffer() {
+    let parent = Bytes::from("frame");
+    let pointer = parent.as_ptr();
+    let mut full = parent.slice(..).unwrap();
+    drop(parent);
+
+    full.make_mut().reverse();
+    let owned = full.into_vec();
+    assert_eq!(owned.as_ptr(), pointer);
+    assert_eq!(owned, b"emarf");
 }
 
 #[test]
