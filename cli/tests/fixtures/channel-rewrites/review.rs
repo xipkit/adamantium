@@ -70,6 +70,15 @@ async fn unwatched() -> bool {
     ended
 }
 
+/// A read in place, which copies nothing, where `Watcher::get` would clone
+/// the string.
+fn compared() -> bool {
+    let (compared_tx, compared_rx) = watch::channel(String::from("a"));
+    let same = *compared_rx.borrow() == "a";
+    drop(compared_tx);
+    same
+}
+
 /// A capacity that isn't a literal, which might be zero.
 async fn sized(size: usize) -> Option<u32> {
     let (sized_tx, mut sized_rx) = mpsc::channel(size);
@@ -102,7 +111,7 @@ async fn unwrapped() -> Option<u32> {
 async fn main() {
     printed();
     println!(
-        "{:?} {:?} {} {} {} {:?} {} {:?} {:?} {:?}",
+        "{:?} {:?} {} {} {} {:?} {} {} {:?} {:?} {:?}",
         passed().await,
         propagated().await,
         unbound(),
@@ -110,6 +119,7 @@ async fn main() {
         subscribed(),
         borrowed().await,
         unwatched().await,
+        compared(),
         sized(1).await,
         cloned().await,
         unwrapped().await

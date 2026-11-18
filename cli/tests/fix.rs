@@ -1023,6 +1023,7 @@ fn channels_fix_cannot_follow_are_reported_and_left_unchanged() {
             "the-latest-value",
         ),
         ("(unwatched_tx, unwatched_rx)", "watch", "the-latest-value"),
+        ("(compared_tx, compared_rx)", "watch", "the-latest-value"),
         ("(sized_tx, mut sized_rx)", "mpsc", "a-bounded-queue"),
         ("(cloned_tx, mut cloned_rx)", "mpsc", "a-bounded-queue"),
         (

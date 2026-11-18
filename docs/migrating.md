@@ -1217,8 +1217,12 @@ gets a value it hasn't seen before it learns the channel is closed.
 it, as Tokio's does, but gives an `Option<()>` where Tokio's gave a
 `Result`, so `fix` rewrites what reads it as it does for a reply. To wait and
 read the value in one call, use `receive`, which returns a copy.
-`*rx.borrow_and_update()` becomes `rx.get()`. As with a reply, `unwrap` and
-`expect` on a wait would panic with another message, so `fix` leaves them.
+`*rx.borrow_and_update()` becomes `rx.get()` where its value is copied out,
+as into a variable, an argument or arithmetic. `get` copies with `Clone`,
+which for a `Copy` value is the same copy. A dereference that reads in
+place, as in a comparison, copies nothing, so `fix` leaves it for review. As
+with a reply, `unwrap` and `expect` on a wait would panic with another
+message, so `fix` leaves them.
 
 Three differences make `fix` leave a channel for review:
 
