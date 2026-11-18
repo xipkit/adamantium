@@ -9,10 +9,11 @@
 //! waits and disconnects a subscriber that falls behind ([`Fanout`]), a
 //! one-shot reply ([`Reply`]), the latest value of shared state
 //! ([`Watch`]), [`race`] to wait for the first of several events, a limit
-//! on how many calls run at once ([`Limit`]), random draws that tests can
-//! replay ([`random`]), and `blocking` for code that must block a thread.
-//! The `cargo adamantium` subcommand applies the Clippy rules that keep a
-//! crate inside the fragment.
+//! on how many calls run at once ([`Limit`]), calls that share one
+//! operation per key ([`SingleFlight`]), random draws that tests can replay
+//! ([`random`]), and `blocking` for code that must block a thread. The
+//! `cargo adamantium` subcommand applies the Clippy rules that keep a crate
+//! inside the fragment.
 //!
 //! Everything here is `Send + Sync + 'static` when its element types are, so
 //! a value of any of these types can be handed to a task without ceremony.
@@ -23,7 +24,8 @@
 //! `Cancellation` is requested. `Tasks::spawn_supervised` restarts a task
 //! that fails, as often as a [`Restarts`] allows.
 //! Disable default features to use the values, synchronous actors, channels, topics,
-//! fanouts, replies, and watches without a Tokio dependency.
+//! fanouts, replies, watches, `Limit`, `KeyedLimit` and `SingleFlight` without a
+//! Tokio dependency.
 //!
 //! Both configurations build and are tested on `wasm32-wasip1`. WASI has one
 //! thread and aborts on a panic, so `blocking` and `Tasks::spawn_blocking` run
@@ -57,6 +59,7 @@ mod restarts;
 mod retry;
 mod runtime;
 mod set;
+mod single_flight;
 mod string;
 #[cfg(feature = "tokio")]
 mod tasks;
@@ -92,6 +95,7 @@ pub use restarts::Restarts;
 #[cfg(feature = "tokio")]
 pub use retry::{Backoff, retry, retry_if};
 pub use set::Set;
+pub use single_flight::SingleFlight;
 pub use string::Str;
 #[cfg(feature = "tokio")]
 pub use tasks::{

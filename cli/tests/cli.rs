@@ -491,6 +491,22 @@ fn check_applies_the_selected_sync_rules() {
     }
 }
 
+#[test]
+fn check_reports_uncontrolled_randomness_and_allows_owned_seeds() {
+    for strict in [false, true] {
+        check_marked_rules("random", strict).unwrap();
+    }
+
+    let output = adamantium()
+        .args(["check"])
+        .arg(fixture("random"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("use adamantium::random"), "{stderr}");
+}
+
 /// Direct calls and imported aliases are reported, while structured deadlines
 /// and reasoned local exceptions remain allowed.
 #[test]

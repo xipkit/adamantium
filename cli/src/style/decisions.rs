@@ -148,13 +148,19 @@ impl Decisions {
         })
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "the CLI is synchronous and has no runtime to yield to; sleeping is the backoff"
-    )]
     fn evaluate(&self, request: &Value) -> Result<Value> {
-        self.evaluate_with(request, RETRY_BUDGET, thread::sleep, || {
-            Duration::from_millis(fastrand::u64(0..=250))
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "the CLI is synchronous and has no runtime to yield to; sleeping is the backoff"
+        )]
+        let sleep = thread::sleep;
+        self.evaluate_with(request, RETRY_BUDGET, sleep, || {
+            #[allow(
+                clippy::disallowed_methods,
+                reason = "HTTP retry jitter for the standalone CLI runs outside the deterministic harness"
+            )]
+            let jitter = fastrand::u64(0..=250);
+            Duration::from_millis(jitter)
         })
     }
 }

@@ -2,9 +2,9 @@
 
 Most of what `cargo adamantium check` reports in an existing async crate is
 shared state behind `Arc<Mutex<T>>` and tasks started with `tokio::spawn`.
-This guide shows the rewrite for each common form of the two. Each section has
-the code as it was and the code as the rules want it. Every block runs as a
-doctest of the library, so the rewrites track the current API.
+This guide covers the common rewrites for those patterns, timers, and random
+draws. Every code block runs as a doctest of the library, so the rewrites
+track the current API.
 
 To adopt the rules one module at a time, skip the paths you haven't migrated
 yet with the [skip list](cli.md#skip-list).
@@ -37,6 +37,8 @@ changes behavior in a way to check.
 | `tokio::spawn` inside a task | A scope inside the task | No |
 | `tokio::time::sleep` | `time::sleep` | Yes |
 | `tokio::time::interval` | A loop over `time::sleep_until` | Mostly |
+| `rand::random::<u64>()`, `fastrand::u64(..)` | `random::u64()` | Yes |
+| `fastrand::u64(0..=max)`, `rand::random_range(0..=max)` for a `u64` range | `random::up_to(max)` | Yes |
 
 ## Shared state
 
@@ -1080,3 +1082,35 @@ async fn main() {
     assert_eq!(total, 6);
 }
 ```
+
+## Randomness
+
+The default rules report calls to `rand`'s thread-local and entropy-seeded
+entry points, such as `rand::thread_rng()` and `rand::rng()`, and
+`fastrand`'s free functions and `Rng::new()`. These APIs draw or seed
+outside Adamantium's deterministic scheduler, so rerunning a test with the
+same harness seed or replaying a failure can produce different values.
+
+Replace `rand::random::<u64>()` with `adamantium::random::u64()`. For retry
+jitter such as `fastrand::u64(0..=250)`, use `random::up_to(250)`. The upper
+bound is inclusive.
+
+```rust
+use std::time::Duration;
+
+use adamantium::random;
+
+let jitter = Duration::from_millis(random::up_to(250));
+assert!(jitter <= Duration::from_millis(250));
+```
+
+Inside a deterministic test the scheduler supplies these draws from the
+test's seed, and a `Replay` repeats them in order. An owned RNG with an
+explicit seed, such as `StdRng::seed_from_u64(seed)` or
+`fastrand::Rng::with_seed(seed)`, is also allowed. For a distribution or a
+shuffle that needs an RNG, seed the owned generator with `random::u64()` to
+derive its sequence from the harness.
+
+Keep cryptographic randomness for keys and tokens at an input boundary.
+Supply fixed test inputs at that boundary when running under the
+deterministic harness.

@@ -32,6 +32,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `adamantium`: `Backoff::jitter` spreads each retry or restart wait between
   half of its delay and the whole of it, drawn from `random`. A backoff without
   it waits and schedules exactly as before.
+- `adamantium`: `SingleFlight` lets concurrent calls for the same key share
+  one operation and its output. Dropping the call that started the operation
+  leaves it to the others, and dropping the last call drops it. It works
+  without Tokio.
 
 ### Changed
 
@@ -41,6 +45,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and `std::sync::mpsc::sync_channel`. Strict rules also report bounded Tokio
   `mpsc`, `Notify`, and `Semaphore`. Broadcast diagnostics recommend
   Adamantium's `Watch` when only the latest value matters.
+- `cargo-adamantium`: Default rules report thread-local and implicitly
+  seeded randomness from `rand` and `fastrand` and recommend
+  `adamantium::random` for replayable draws.
 - `cargo-adamantium`: The messages for Tokio's `broadcast` channel suggest
   `Fanout` alongside `Topic`.
 
