@@ -79,6 +79,54 @@ fn a_watcher_receives_the_latest_value_once() {
 }
 
 #[test]
+fn changed_marks_the_newest_value_seen_without_copying_it() {
+    /// Neither `Clone` nor silent: each drop counts.
+    struct Counted(Arc<AtomicUsize>);
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    let watch = Watch::new(Counted(Arc::clone(&drops)));
+    let mut watcher = watch.subscribe();
+    assert_eq!(now(watcher.changed()), Poll::Pending);
+    watch.send(Counted(Arc::clone(&drops))).ok();
+    watch.send(Counted(Arc::clone(&drops))).ok();
+    // The two replaced values, and nothing the wait made.
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
+    assert_eq!(now(watcher.changed()), Poll::Ready(Some(())));
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
+    assert!(!watcher.has_changed());
+    assert_eq!(now(watcher.changed()), Poll::Pending);
+    watch.send(Counted(Arc::clone(&drops))).ok();
+    drop(watch);
+    // An unseen last value comes before the end.
+    assert_eq!(now(watcher.changed()), Poll::Ready(Some(())));
+    assert_eq!(now(watcher.changed()), Poll::Ready(None));
+    assert_eq!(drops.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn a_waiting_changed_wakes_on_send_and_on_close() {
+    let counter = Arc::new(WakeCounter::default());
+    let watch = Watch::new(0);
+    let mut watcher = watch.subscribe();
+    {
+        let mut wait = pin!(watcher.changed());
+        assert_eq!(poll_once(wait.as_mut(), &counter), Poll::Pending);
+        watch.send(1).unwrap();
+        assert_eq!(counter.wakes(), 1);
+        assert_eq!(poll_once(wait.as_mut(), &counter), Poll::Ready(Some(())));
+    }
+    let mut wait = pin!(watcher.changed());
+    assert_eq!(poll_once(wait.as_mut(), &counter), Poll::Pending);
+    assert!(watch.close());
+    assert_eq!(counter.wakes(), 2);
+    assert_eq!(poll_once(wait.as_mut(), &counter), Poll::Ready(None));
+}
+
+#[test]
 fn get_marks_the_value_seen() {
     let watch = Watch::new(0);
     let mut watcher = watch.subscribe();

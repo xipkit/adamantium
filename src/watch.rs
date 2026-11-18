@@ -189,6 +189,44 @@ impl<T> Watcher<T> {
     pub fn is_closed(&self) -> bool {
         self.shared.lock().closed
     }
+
+    /// Waits for a value this watcher hasn't seen and marks it seen, as
+    /// [`receive`](Self::receive) does, without copying it. Returns `None`
+    /// once the watch is closed and its last value has been seen. Read the
+    /// value with [`get`](Self::get) where it is needed.
+    ///
+    /// Dropping the returned future loses nothing: the value stays unseen.
+    pub async fn changed(&mut self) -> Option<()> {
+        crate::runtime::in_world(self.shared.world, async move {
+            loop {
+                if let Some(changed) = self.mark() {
+                    return changed;
+                }
+                // Listen before checking again, so a send between the two
+                // checks still wakes this wait.
+                let listener = self.shared.changed.listen();
+                if let Some(changed) = self.mark() {
+                    return changed;
+                }
+                listener.await;
+            }
+        })
+        .await
+    }
+
+    /// `Some(Some(()))` for an unseen value, which it marks seen,
+    /// `Some(None)` once closed with nothing unseen, and `None` to wait.
+    fn mark(&mut self) -> Option<Option<()>> {
+        let state = self.shared.lock();
+        if state.version != self.seen {
+            self.seen = state.version;
+            Some(Some(()))
+        } else if state.closed {
+            Some(None)
+        } else {
+            None
+        }
+    }
 }
 
 impl<T: Clone> Watcher<T> {
