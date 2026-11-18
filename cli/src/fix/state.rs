@@ -28,7 +28,7 @@ use quote::ToTokens;
 use super::{
     Edit,
     scan::{Crate, Hazard, macro_attribute},
-    source::{Imports, Text, bare, coalesce, format_captures, has_out_of_line_module, names_in},
+    source::{Text, bare, coalesce, format_captures, names_in},
 };
 
 mod calls;
@@ -107,7 +107,6 @@ pub(super) struct Outcome {
 /// One file's rewrites before the checks that need the whole package.
 pub(super) struct Draft {
     file: PathBuf,
-    source: String,
     groups: Vec<Group>,
     /// Groups that hold one state, such as a field and a local it is
     /// cloned into, which stand or fall together.
@@ -121,7 +120,7 @@ const ACTOR: &str = "::adamantium::Actor";
 
 /// The imports the rewrite can leave unused: the module and the two types it
 /// replaces.
-const IMPORTS: &[&[&str]] = &[
+pub(super) const IMPORTS: &[&[&str]] = &[
     &["std", "sync"],
     &["alloc", "sync"],
     &["std", "sync", "Arc"],
@@ -165,7 +164,6 @@ pub(super) fn plan(
 ) -> Draft {
     let mut draft = Draft {
         file: file.to_path_buf(),
-        source: source.to_owned(),
         groups: Vec::new(),
         links: Vec::new(),
         callees: Vec::new(),
@@ -450,16 +448,6 @@ impl Draft {
                 }),
                 None => outcome.edits.extend(group.edits),
             }
-        }
-        // A module in another file can name its ancestors' private imports, so
-        // fix can't see every use of them.
-        if !outcome.edits.is_empty()
-            && let Ok(tree) = syn::parse_file(&self.source)
-            && !has_out_of_line_module(&tree)
-        {
-            let text = Text::new(&self.source, &tree);
-            let imports = Imports::prune(&text, &self.file, &tree, &outcome.edits, IMPORTS);
-            outcome.edits.extend(imports);
         }
         outcome.edits = coalesce(outcome.edits);
         (self.file, outcome)
@@ -2798,6 +2786,7 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fix::source::prune_imports;
 
     /// Plans `source` as the only file of its package, as Clippy would see
     /// it with every occurrence of each of `mutexes` resolved to
@@ -2816,10 +2805,13 @@ mod tests {
         settled.pop().map(|(_, outcome)| outcome).unwrap()
     }
 
-    /// Plans `source` and applies the edits.
+    /// Plans `source` and applies the edits, with the imports they leave
+    /// unused removed, as `fix` does.
     pub(super) fn fix(source: &str, mutexes: &[&str]) -> (String, Vec<(String, Reason)>) {
         let outcome = outcome(source, mutexes);
         let mut edits = outcome.edits;
+        let imports = prune_imports(Path::new("lib.rs"), source, &edits, IMPORTS);
+        edits.extend(imports);
         edits.sort();
         let mut fixed = source.to_owned();
         for edit in edits.iter().rev() {
@@ -2961,7 +2953,11 @@ mod tests {
     #[test]
     fn adjacent_imports_are_removed_in_one_edit() {
         let source = "use std::sync::Mutex;\nuse std::sync::Arc;\n\nfn f() {\n    let m = Arc::new(Mutex::new(1));\n    drop(m);\n}\n";
-        assert_eq!(outcome(source, &["Mutex"]).edits.len(), 2);
+        let edits = outcome(source, &["Mutex"]).edits;
+        assert_eq!(
+            prune_imports(Path::new("lib.rs"), source, &edits, IMPORTS).len(),
+            1
+        );
         let (fixed, _) = fix(source, &["Mutex"]);
         assert_eq!(
             fixed,

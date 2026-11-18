@@ -63,6 +63,8 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
             accept(&mut edits, suggestion);
         }
     }
+    // The imports that each file's accepted rewrites can leave unused.
+    let mut imports: BTreeMap<PathBuf, Vec<&[&str]>> = BTreeMap::new();
     // A shared-state rewrite changes every use of a binding at once, so it
     // plans a whole file and its edits stand or fall together. A field's
     // rewrite also depends on the rest of its package.
@@ -101,12 +103,39 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
                     refusal.reason.section()
                 );
             }
-            if !accept(&mut edits, outcome.edits) {
+            if outcome.edits.is_empty() {
+                continue;
+            }
+            if accept(&mut edits, outcome.edits) {
+                imports
+                    .entry(file)
+                    .or_default()
+                    .extend_from_slice(state::IMPORTS);
+            } else {
                 eprintln!(
                     "adamantium: {}: shared-state rewrites overlap another fix; run fix again once it applies",
                     file.display()
                 );
             }
+        }
+    }
+    // One pass per file sees every rewrite at once, so the imports they leave
+    // unused go together, whichever rewrite left each one.
+    for (file, paths) in imports {
+        let rewrites: Vec<Edit> = edits
+            .iter()
+            .filter(|edit| edit.file == file)
+            .cloned()
+            .collect();
+        let source = fs::read_to_string(&file)?;
+        if !accept(
+            &mut edits,
+            source::prune_imports(&file, &source, &rewrites, &paths),
+        ) {
+            eprintln!(
+                "adamantium: {}: removing unused imports overlaps another fix; run fix again once it applies",
+                file.display()
+            );
         }
     }
     edits.sort();

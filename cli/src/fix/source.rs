@@ -14,7 +14,7 @@ use syn::{ItemUse, Lit, UseTree, ext::IdentExt, spanned::Spanned, visit::Visit};
 use super::Edit;
 
 /// Whether any module in the file is declared as `mod name;`.
-pub(super) fn has_out_of_line_module(tree: &syn::File) -> bool {
+fn has_out_of_line_module(tree: &syn::File) -> bool {
     struct Modules(bool);
     impl<'ast> Visit<'ast> for Modules {
         fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
@@ -160,8 +160,28 @@ pub(super) fn names_in(text: &str, name: &str) -> Option<usize> {
         .map(|tokens| count(tokens, name))
 }
 
+/// The edits that remove each import of one of `paths` that `edits` leave
+/// unused in `file`, whose text is `source`.
+pub(super) fn prune_imports(
+    file: &Path,
+    source: &str,
+    edits: &[Edit],
+    paths: &[&[&str]],
+) -> Vec<Edit> {
+    let Ok(tree) = syn::parse_file(source) else {
+        return Vec::new();
+    };
+    // A module in another file can name its ancestors' private imports, so
+    // fix can't see every use of them.
+    if has_out_of_line_module(&tree) {
+        return Vec::new();
+    }
+    let text = Text::new(source, &tree);
+    coalesce(Imports::prune(&text, file, &tree, edits, paths))
+}
+
 /// Removes the imports that a rewrite leaves unused.
-pub(super) struct Imports<'t> {
+struct Imports<'t> {
     text: &'t Text<'t>,
     /// The import paths the rewrite can leave unused, such as
     /// `["std", "sync", "Mutex"]`. Fix leaves every other import alone.
@@ -173,7 +193,7 @@ pub(super) struct Imports<'t> {
 impl<'t> Imports<'t> {
     /// The edits that remove each import in `paths` whose name `edits`
     /// leave unused.
-    pub(super) fn prune(
+    fn prune(
         text: &'t Text<'t>,
         file: &Path,
         tree: &syn::File,
