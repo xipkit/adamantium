@@ -7,6 +7,7 @@ use std::{
     pin::pin,
     sync::Arc,
     task::Poll,
+    time::Duration,
 };
 
 use crate::runtime::{
@@ -168,9 +169,11 @@ impl Default for Cancellation {
 pub enum ScopeError<E> {
     /// The body or a child returned an error.
     Failed(E),
-    /// The caller requested shutdown.
+    /// The caller requested shutdown. From [`Tasks::run_with_grace`], every
+    /// task finished within the grace period.
     Cancelled,
-    /// The scope's deadline elapsed.
+    /// The scope's deadline elapsed. From [`Tasks::run_with_grace`], the
+    /// grace period ran out and the remaining tasks were aborted.
     DeadlineExceeded,
 }
 
@@ -214,24 +217,33 @@ impl Shutdown {
 /// over an equally ready deadline.
 pub(crate) async fn shutdown(cancellation: &Cancellation, deadline: Option<Instant>) -> Shutdown {
     let mut cancelled = pin!(cancellation.cancelled());
-    let mut elapsed = pin!(async {
-        match deadline {
-            Some(deadline) => time::sleep_until(deadline).await,
-            None => std::future::pending().await,
-        }
-    });
+    let mut elapsed = pin!(elapsed(deadline));
     std::future::poll_fn(|cx| {
         if cancelled.as_mut().poll(cx).is_ready() {
             return Poll::Ready(Shutdown::Cancelled);
         }
-        // Tokio timers round up to milliseconds. Check the clock as well so an
-        // expired deadline wins before polling the waiter's work on every poll.
-        if deadline.is_some_and(|deadline| deadline <= time::now())
-            || elapsed.as_mut().poll(cx).is_ready()
-        {
+        if elapsed.as_mut().poll(cx).is_ready() {
             return Poll::Ready(Shutdown::DeadlineExceeded);
         }
         Poll::Pending
+    })
+    .await
+}
+
+/// Waits until `deadline`, or forever for `None`.
+async fn elapsed(deadline: Option<Instant>) {
+    let Some(deadline) = deadline else {
+        return std::future::pending().await;
+    };
+    let mut sleep = pin!(time::sleep_until(deadline));
+    // Tokio timers round up to milliseconds. Check the clock as well so an
+    // expired deadline wins before polling the waiter's work on every poll.
+    poll_fn(|cx| {
+        if deadline <= time::now() || sleep.as_mut().poll(cx).is_ready() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
     })
     .await
 }
@@ -498,7 +510,9 @@ fn no_orphan() -> ! {
 /// `run_until` the panic also stops the body at its next `await`. Dropping a scope
 /// without joining aborts its async tasks without waiting for them. Started
 /// blocking closures continue running. See [`run_until`](Self::run_until)
-/// for cancellation, deadlines, and the cleanup contract.
+/// for cancellation, deadlines, and the cleanup contract, and
+/// [`run_with_grace`](Self::run_with_grace) for a shutdown that lets admitted
+/// tasks finish first.
 ///
 /// Spawning needs a Tokio runtime, as every spawn does. Use
 /// [`run`](Self::run) for the common shape, or [`new`](Self::new),
@@ -827,6 +841,138 @@ impl<E: Send + 'static> Tasks<E> {
         .await
     }
 
+    /// Runs a scope that shuts down gracefully: a cancellation request stops
+    /// the body, as in [`run_until`](Self::run_until), but lets the tasks
+    /// already admitted finish for up to `grace` before aborting the rest.
+    /// This is the shape of a server: the body accepts requests and spawns a
+    /// task for each, and on shutdown it stops accepting while the requests
+    /// in flight complete.
+    ///
+    /// The scope goes through up to three phases.
+    ///
+    /// 1. **Running.** The body runs as in [`run_until`](Self::run_until)
+    ///    with no deadline: an [orphaned](Task) child error or a child panic
+    ///    stops it at its next `await`, aborts the other tasks and fails the
+    ///    scope, and a request already present at a poll wins over polling
+    ///    the body, including before its first poll. A body that returns
+    ///    joins the tasks as [`join`](Self::join) does, waiting as long as
+    ///    they take until shutdown is requested.
+    /// 2. **Draining.** A request drops the body if it is still running, so
+    ///    nothing it was doing, such as accepting, continues. The tasks keep
+    ///    running and the grace period starts. Admission stays open as while
+    ///    joining: a task can still add siblings through a
+    ///    [`Spawner`] until the last task ends or the grace period runs out,
+    ///    so a request can start the work it needs to finish. A task that
+    ///    admits new work itself, such as a second accept loop, must stop on
+    ///    the signal; tasks that should simply finish can ignore it. Queued
+    ///    [`spawn_blocking`](Self::spawn_blocking) closures may still start.
+    ///    Draining ends when the last task ends. A task error or panic, or a
+    ///    failed body, ends it at once, aborting the rest as `join` does.
+    /// 3. **Aborting.** If the grace period runs out first, the remaining
+    ///    tasks are aborted and drained as in `run_until`: their synchronous
+    ///    destructors finish, queued blocking closures do not start, and
+    ///    started blocking closures are waited for, so `grace` bounds the
+    ///    work, not the cleanup. A grace period of zero aborts at once, as
+    ///    `run_until` does on cancellation. A grace period too long to
+    ///    represent as an instant never runs out.
+    ///
+    /// The shutdown reason is fixed when the phase ends: [`ScopeError::Cancelled`]
+    /// if draining ended with every task finished, or
+    /// [`ScopeError::DeadlineExceeded`] once the grace period has run out,
+    /// which a later end of the tasks cannot undo. The grace deadline wins
+    /// over a drain that becomes complete at the same poll. Once shutdown is
+    /// requested, the scope never returns the body's value, even if the body
+    /// had returned and every task then finished in time.
+    ///
+    /// Precedence is that of `run_until`: a child panic (resumed after
+    /// draining), then a returned body error, then the oldest unclaimed child
+    /// error, including one recorded during the drain or the aborts, then the
+    /// shutdown reason. Errors of [`spawn_handled`](Self::spawn_handled)
+    /// tasks go to their handlers and never end the drain.
+    ///
+    /// The scope cancels the signal itself on failure, as `run_until` does,
+    /// and dropping this future after it starts signals cancellation and
+    /// requests aborts without waiting for cleanup, so it also cuts the
+    /// grace period short.
+    ///
+    /// ```
+    /// use adamantium::{Cancellation, ScopeError, Tasks, time};
+    /// use std::time::Duration;
+    /// # #[tokio::main] async fn main() {
+    /// let shutdown = Cancellation::new();
+    /// let request = shutdown.clone();
+    /// let result = Tasks::<std::io::Error>::run_with_grace(
+    ///     shutdown,
+    ///     Duration::from_secs(10),
+    ///     async |tasks| {
+    ///         // An admitted request that takes a while to answer.
+    ///         tasks.spawn(async {
+    ///             time::sleep(Duration::from_millis(10)).await;
+    ///             Ok(())
+    ///         });
+    ///         request.cancel();
+    ///         // The body stops accepting here; the request above finishes.
+    ///         std::future::pending().await
+    ///     },
+    /// ).await;
+    /// assert!(matches!(result, Err::<(), _>(ScopeError::Cancelled)));
+    /// # }
+    /// ```
+    #[allow(clippy::future_not_send, reason = "see run")]
+    pub async fn run_with_grace<R, F>(
+        cancellation: Cancellation,
+        grace: Duration,
+        body: F,
+    ) -> Result<R, ScopeError<E>>
+    where
+        R: Send,
+        F: AsyncFnOnce(&mut Tasks<E>) -> Result<R, E>,
+    {
+        crate::runtime::in_world(World::current(), async move {
+            let mut tasks = Self::new();
+            tasks.cancellation = Some(cancellation.clone());
+            let set = Arc::clone(&tasks.set);
+            let errors = Arc::clone(&tasks.errors);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "run_with_grace observes shutdown and child failure while its body is pending"
+            )]
+            let body = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => None,
+                () = stopped(&set, &errors) => return tasks.fail().await.map_err(ScopeError::Failed),
+                result = body(&mut tasks) => Some(result),
+            };
+            let Some(body) = body else {
+                let reason = tasks.drain_with_grace(grace, false).await;
+                return match take_oldest(&tasks.errors) {
+                    Some(error) => Err(ScopeError::Failed(error)),
+                    None => Err(reason.scope_error()),
+                };
+            };
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "shutdown turns normal settling into a bounded drain"
+            )]
+            let requested = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => true,
+                () = tasks.settle(body.is_err()) => false,
+            };
+            let reason = if requested {
+                Some(tasks.drain_with_grace(grace, body.is_err()).await)
+            } else {
+                None
+            };
+            let value = tasks.result(body).map_err(ScopeError::Failed)?;
+            match reason {
+                Some(reason) => Err(reason.scope_error()),
+                None => Ok(value),
+            }
+        })
+        .await
+    }
+
     /// Starts `future` as a task of this scope and returns its handle.
     pub fn spawn<T, F>(&mut self, future: F) -> Task<T, E>
     where
@@ -1105,6 +1251,31 @@ impl<E: Send + 'static> Tasks<E> {
             }
         }
         self.propagate_panic();
+    }
+
+    /// Lets the tasks finish for up to `grace`, then aborts and drains the
+    /// rest, and returns the shutdown reason: cancelled if every task
+    /// finished in time, or the deadline if the grace period ran out first.
+    async fn drain_with_grace(&mut self, grace: Duration, body_failed: bool) -> Shutdown {
+        let deadline = time::now().checked_add(grace);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the grace deadline interrupts normal settling so the scope can abort and drain"
+        )]
+        let expired = tokio::select! {
+            biased;
+            () = elapsed(deadline) => true,
+            () = self.settle(body_failed) => false,
+        };
+        if !expired {
+            return Shutdown::Cancelled;
+        }
+        let reason = Shutdown::DeadlineExceeded;
+        #[cfg(feature = "tracing")]
+        self.report_deadline(&reason);
+        self.abort();
+        self.drain().await;
+        reason
     }
 
     /// Ends a scope whose body an orphaned error or a task panic stopped.

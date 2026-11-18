@@ -13,6 +13,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `adamantium`: `Tasks::spawner()` returns a cloneable `Spawner` so children
   can add siblings to their scope, with the same joining and error rules.
   Spawning after the scope closes returns `SpawnError` without starting work.
+- `adamantium`: `Tasks::run_with_grace` shuts a scope down gracefully. A
+  cancellation stops the body but lets admitted tasks finish for a grace
+  period before the rest are aborted.
 - `adamantium`: `KeyedLimit` serializes calls for the same key, including
   inside a connection `Limit`, and evicts keys after their last call ends.
 - `adamantium`: deterministic tests can select probabilistic concurrency testing
