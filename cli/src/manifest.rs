@@ -106,6 +106,33 @@ pub fn init(root: &Path, force: bool, config: &Config, strict: bool) -> Result<C
             manifest_path.display()
         );
     }
+
+    let clippy_path = root.join("clippy.toml");
+    let existing_clippy = match fs::read(&clippy_path) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", clippy_path.display()));
+        }
+    };
+    let strict_clippy = lints::clippy_toml(true)?;
+    // A plain init keeps an installed strict tier, just as it keeps strict
+    // lint levels. The bundled default file can be upgraded without --force.
+    let strict = strict || existing_clippy.as_deref() == Some(strict_clippy.as_bytes());
+    let clippy_toml = if strict { &strict_clippy } else { CLIPPY_TOML };
+    let write_clippy = existing_clippy.as_deref() != Some(clippy_toml.as_bytes());
+    if write_clippy
+        && !force
+        && existing_clippy
+            .as_deref()
+            .is_some_and(|contents| contents != CLIPPY_TOML.as_bytes())
+    {
+        bail!(
+            "{} exists and differs from adamantium's; pass --force to replace it",
+            clippy_path.display()
+        );
+    }
+
     for tool in [Tool::Rust, Tool::Clippy] {
         let name = tool.to_string();
         let table = table_in(lints, &name, false)?;
@@ -145,9 +172,6 @@ pub fn init(root: &Path, force: bool, config: &Config, strict: bool) -> Result<C
         release.insert("overflow-checks", value(true));
     }
 
-    let clippy_path = root.join("clippy.toml");
-    let write_clippy = clippy_toml_needs_writing(&clippy_path, force)?;
-
     let after = doc.to_string();
     if after != before {
         fs::write(&manifest_path, after)
@@ -165,30 +189,13 @@ pub fn init(root: &Path, force: bool, config: &Config, strict: bool) -> Result<C
     }
 
     if write_clippy {
-        fs::write(&clippy_path, CLIPPY_TOML)
+        fs::write(&clippy_path, clippy_toml)
             .with_context(|| format!("writing {}", clippy_path.display()))?;
         changes
             .notes
             .push(format!("wrote {}", clippy_path.display()));
     }
     Ok(changes)
-}
-
-/// Whether `init` must write adamantium's `clippy.toml` at `path`: when the
-/// file is missing, or when it differs and `force` allows replacing it. It
-/// runs before `init` writes anything, so a refusal leaves the project as it
-/// was. A file that cannot be read is an error rather than a missing file.
-fn clippy_toml_needs_writing(path: &Path, force: bool) -> Result<bool> {
-    match fs::read(path) {
-        Ok(existing) if existing == CLIPPY_TOML.as_bytes() => Ok(false),
-        Ok(_) if force => Ok(true),
-        Ok(_) => bail!(
-            "{} exists and differs from adamantium's; pass --force to replace it",
-            path.display()
-        ),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
-        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
-    }
 }
 
 /// The table at `key` in `parent`, created if missing. An implicit table

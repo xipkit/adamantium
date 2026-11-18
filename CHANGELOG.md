@@ -16,6 +16,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `adamantium`: `KeyedLimit` serializes calls for the same key, including
   inside a connection `Limit`, and evicts keys after their last call ends.
 
+### Changed
+
+- `cargo-adamantium`: Default rules report Tokio `oneshot`, Tokio `watch`,
+  and `std::sync::mpsc::sync_channel`. Strict rules also report bounded Tokio
+  `mpsc`, `Notify`, and `Semaphore`. Broadcast diagnostics recommend
+  Adamantium's `Watch` when only the latest value matters.
+
 ## [0.3.0] - 2026-11-17
 
 ### Fixed

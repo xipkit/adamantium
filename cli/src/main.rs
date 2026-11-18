@@ -12,7 +12,7 @@ use std::{io::Write, path::PathBuf, process::ExitCode};
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::lints::{CLIPPY_TOML, OVERFLOW_EXAMPLE, OVERFLOW_RULE, OVERFLOW_WHY, lints_toml};
+use crate::lints::{OVERFLOW_EXAMPLE, OVERFLOW_RULE, OVERFLOW_WHY, lints_toml};
 
 #[derive(Parser)]
 #[command(
@@ -38,7 +38,7 @@ enum Command {
         /// Also run the experimental lints from this explicitly built Dylint library.
         #[arg(long)]
         dylint_library: Option<PathBuf>,
-        /// Include the strict rules, starting with arithmetic_side_effects.
+        /// Include the strict rules for arithmetic and synchronization.
         #[arg(long)]
         strict: bool,
         /// Leave out the findings in an earlier `--format json` report, so only
@@ -69,7 +69,7 @@ enum Command {
         /// Replace a clippy.toml that differs from adamantium's.
         #[arg(long)]
         force: bool,
-        /// Include the strict rules, starting with arithmetic_side_effects.
+        /// Include the strict rules for arithmetic and synchronization.
         #[arg(long)]
         strict: bool,
     },
@@ -90,7 +90,7 @@ enum Command {
     Rules {
         #[arg(long, value_enum, default_value_t = RulesFormat::Text)]
         format: RulesFormat,
-        /// Include the strict rules, starting with arithmetic_side_effects.
+        /// Include the strict rules for arithmetic and synchronization.
         #[arg(long)]
         strict: bool,
     },
@@ -166,10 +166,10 @@ impl Explanation {
 }
 
 #[derive(serde::Serialize)]
-struct Rules {
+struct Rules<'a> {
     schema_version: u32,
     lints: Vec<&'static lints::Lint>,
-    clippy_toml: &'static str,
+    clippy_toml: &'a str,
 }
 
 fn main() -> ExitCode {
@@ -268,7 +268,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                             lint.why
                         )?;
                     }
-                    writeln!(stdout, "\n# clippy.toml\n\n{CLIPPY_TOML}")?;
+                    writeln!(stdout, "\n# clippy.toml\n\n{}", lints::clippy_toml(strict)?)?;
                 }
                 RulesFormat::Json => {
                     serde_json::to_writer_pretty(
@@ -276,7 +276,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         &Rules {
                             schema_version: 1,
                             lints: lints::selected(strict).collect(),
-                            clippy_toml: CLIPPY_TOML,
+                            clippy_toml: &lints::clippy_toml(strict)?,
                         },
                     )?;
                     writeln!(stdout)?;

@@ -20,7 +20,6 @@ fn unbounded() {
 }
 
 fn bounded() {
-    drop(std::sync::mpsc::sync_channel::<u8>(1));
     drop(tokio::sync::mpsc::channel::<u8>(1));
     drop(async_channel::bounded::<u8>(1));
     drop(flume::bounded::<u8>(1));
