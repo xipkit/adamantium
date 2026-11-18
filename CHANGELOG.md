@@ -8,6 +8,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- `adamantium`: `KeyedLimit` serializes calls for the same key, including
+  inside a connection `Limit`, and evicts keys after their last call ends.
+
 ## [0.3.0] - 2026-11-17
 
 ### Fixed

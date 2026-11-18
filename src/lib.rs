@@ -72,7 +72,7 @@ pub use channel::{Channel, Closed, Receiver, Sender, TryReceiveError, TrySendErr
 #[cfg(feature = "tokio")]
 pub use channel::{ReceiveError, SendError};
 pub use deque::Deque;
-pub use limit::Limit;
+pub use limit::{KeyedLimit, Limit};
 pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
 pub use race::{Race, race};
 #[cfg(feature = "tokio")]
