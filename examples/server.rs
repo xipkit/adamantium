@@ -1,7 +1,9 @@
 //! Serve TCP connections in a scope, with a concurrency limit, per-connection
-//! error handling, and clean shutdown on a signal or a deadline.
+//! error handling, and graceful shutdown on a signal: the server stops
+//! accepting, lets the connections in flight finish for a grace period, then
+//! aborts the rest.
 
-use adamantium::{Actor, Cancellation, Limit, ScopeError, Tasks, concurrently, time};
+use adamantium::{Actor, Cancellation, Limit, ScopeError, Tasks, concurrently};
 use std::{io, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -9,6 +11,7 @@ use tokio::{
 };
 
 const MAX_CONNECTIONS: usize = 4;
+const GRACE: Duration = Duration::from_secs(10);
 
 /// Answers one line with the same line in upper case. A request of `fail`
 /// is a protocol error, which ends this connection only.
@@ -46,65 +49,71 @@ async fn main() -> io::Result<()> {
     let failed = Actor::new(0usize);
     let shutdown = Cancellation::new();
     let clients = shutdown.clone();
-    let deadline = Some(time::now() + Duration::from_secs(30));
 
     let ((), served) = tokio::try_join!(shutdown.cancel_on_signal(), async {
-        Ok(Tasks::run_until(shutdown.clone(), deadline, async |tasks| {
-            tasks.spawn(async move {
-                concurrently(0..100, 16, |_| async move {
-                    let response = ask(address, "hello").await?;
-                    if response != "HELLO\n" {
+        Ok(
+            Tasks::run_with_grace(shutdown.clone(), GRACE, async |tasks| {
+                tasks.spawn(async move {
+                    concurrently(0..100, 16, |_| async move {
+                        let response = ask(address, "hello").await?;
+                        if response != "HELLO\n" {
+                            return Err(io::Error::other(format!(
+                                "\"hello\" got {response:?}, expected \"HELLO\\n\""
+                            )));
+                        }
+                        Ok(())
+                    })
+                    .await?;
+                    let response = ask(address, "fail").await?;
+                    if !response.is_empty() {
                         return Err(io::Error::other(format!(
-                            "\"hello\" got {response:?}, expected \"HELLO\\n\""
+                            "\"fail\" got {response:?}, expected an empty response"
                         )));
                     }
+                    concurrently(0..100, 16, |_| async move {
+                        let response = ask(address, "again").await?;
+                        if response != "AGAIN\n" {
+                            return Err(io::Error::other(format!(
+                                "\"again\" got {response:?}, expected \"AGAIN\\n\""
+                            )));
+                        }
+                        Ok(())
+                    })
+                    .await?;
+                    clients.cancel();
                     Ok(())
-                })
-                .await?;
-                let response = ask(address, "fail").await?;
-                if !response.is_empty() {
-                    return Err(io::Error::other(format!(
-                        "\"fail\" got {response:?}, expected an empty response"
-                    )));
-                }
-                concurrently(0..100, 16, |_| async move {
-                    let response = ask(address, "again").await?;
-                    if response != "AGAIN\n" {
-                        return Err(io::Error::other(format!(
-                            "\"again\" got {response:?}, expected \"AGAIN\\n\""
-                        )));
+                });
+                loop {
+                    let (stream, peer) = listener.accept().await?;
+                    let connections = connections.clone();
+                    let failed = failed.clone();
+                    tasks.spawn_handled(
+                        async move { connections.run(|| serve(stream)).await },
+                        move |error| {
+                            eprintln!("connection from {peer} failed: {error}");
+                            failed.with(|failed| *failed += 1);
+                        },
+                    );
+                    if tasks.len() > 64 {
+                        return Err(io::Error::other(
+                            "finished connection tasks were not reaped",
+                        ));
                     }
-                    Ok(())
-                })
-                .await?;
-                clients.cancel();
-                Ok(())
-            });
-            loop {
-                let (stream, peer) = listener.accept().await?;
-                let connections = connections.clone();
-                let failed = failed.clone();
-                tasks.spawn_handled(
-                    async move { connections.run(|| serve(stream)).await },
-                    move |error| {
-                        eprintln!("connection from {peer} failed: {error}");
-                        failed.with(|failed| *failed += 1);
-                    },
-                );
-                if tasks.len() > 64 {
-                    return Err(io::Error::other(
-                        "finished connection tasks were not reaped",
-                    ));
                 }
-            }
-        })
-        .await)
+            })
+            .await,
+        )
     })?;
 
     match served {
         Err(ScopeError::Cancelled) => {}
         Err(ScopeError::Failed(error)) => return Err(error),
-        Ok(()) | Err(ScopeError::DeadlineExceeded) => {
+        Err(ScopeError::DeadlineExceeded) => {
+            return Err(io::Error::other(
+                "connections were still open when the grace period ran out",
+            ));
+        }
+        Ok(()) => {
             return Err(io::Error::other("the server ended without being cancelled"));
         }
     }

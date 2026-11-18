@@ -96,7 +96,7 @@ Tasks::run_until(shutdown, None, async |tasks| {
 - The scope aborts a handled task like any other task. An aborted task does not call `on_error`.
 - `tasks.spawn_handled_named(name, future, on_error)` gives the task a name for the `tracing` feature. `on_error` runs inside the span of the task. See [Task names and tracing](#task-names-and-tracing).
 
-`cargo run --example server --features signal` serves local TCP connections under a concurrency limit and shuts down on a signal with a deadline. One connection fails, its error goes to the handler, and the server continues to serve the rest.
+`cargo run --example server --features signal` serves local TCP connections under a concurrency limit and shuts down gracefully on a signal. One connection fails, its error goes to the handler, and the server continues to serve the rest.
 
 ### Which spawn to use
 
