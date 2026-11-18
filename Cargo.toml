@@ -141,6 +141,10 @@ name = "streaming"
 required-features = ["tokio"]
 
 [[example]]
+name = "discovery"
+required-features = ["tokio"]
+
+[[example]]
 name = "task_diagnostics"
 required-features = ["tokio", "tracing"]
 
