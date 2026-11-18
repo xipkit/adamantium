@@ -64,7 +64,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `Channel`, `Reply`, `Watch` | A bounded queue, a one-shot reply, and the latest value of some state. |
 | `Topic` | Sends each message to every subscriber. It waits for a slow subscriber and drops no message. |
 | `race` | Waits for the first of several futures and drops the others. Use it in place of `select!`. |
-| `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. |
+| `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. `Tasks::run_with_grace` lets admitted work finish first. |
 | `retry`, `RateLimit`, `Limit`, `KeyedLimit` | Retry with backoff, cap the call rate or concurrency, or serialize calls for the same key. |
 | `blocking` | Runs blocking code on the blocking pool. |
 

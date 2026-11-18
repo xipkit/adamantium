@@ -369,7 +369,7 @@ A topic has one sender. `send` takes `&mut self`, so two sends cannot overlap. T
 
 ## Shutdown and cancellation
 
-For explicit shutdown, use `Tasks::run_until(cancellation, deadline, body)` or `tasks.join_until(cancellation, deadline, body_result)`.
+For explicit shutdown, use `Tasks::run_until(cancellation, deadline, body)` or `tasks.join_until(cancellation, deadline, body_result)`. For a server that lets the requests it has admitted finish, use `Tasks::run_with_grace(cancellation, grace, body)`. See [Graceful shutdown](#graceful-shutdown).
 
 ### The signal and the deadline
 
@@ -401,6 +401,42 @@ These methods return `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExcee
 - Blocking work that has started cannot be stopped by force. Cleanup can thus continue after the deadline.
 - The free `blocking` function detaches its started closure if its future is dropped. This includes the case where an enclosing async task is aborted.
 - Dropping a scope future, or a panic in its body, signals shutdown and requests aborts. It cannot wait for cleanup. To wait for cleanup, request cancellation and continue to await the scope.
+
+### Graceful shutdown
+
+`Tasks::run_with_grace(cancellation, grace, body)` stops a server in three phases.
+
+```rust
+use adamantium::Tasks;
+use std::time::Duration;
+
+Tasks::run_with_grace(shutdown, Duration::from_secs(10), async |tasks| {
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        tasks.spawn_handled(serve(stream), move |error| {
+            eprintln!("connection from {peer} failed: {error}");
+        });
+    }
+})
+.await
+```
+
+1. **Running.** The body runs as in `run_until` without a deadline. A child error that nobody can claim, or a child panic, stops it and fails the scope. A body that returns waits for its tasks until shutdown is requested.
+2. **Draining.** Cancellation drops the body, so it stops accepting. The tasks continue and the grace period starts.
+   - Spawners still admit siblings, as while joining, until the last task ends or the grace period runs out. A request can thus start the work it needs to finish.
+   - A task that admits new work itself, such as a second accept loop, must stop on the signal. Other tasks can ignore the signal and finish.
+   - Queued `spawn_blocking` closures can still start.
+   - A task error, a task panic, or a failed body ends the drain at once and aborts the rest, as in `join`. Errors of handled tasks go to their handlers and do not end the drain.
+3. **Aborting.** When the grace period runs out, the remaining tasks are aborted and drained as in `run_until`. Queued blocking closures do not start. Started blocking closures are waited for, so cleanup can continue after the grace period. A grace period of zero aborts at once. A grace period too long to represent never runs out.
+
+The result:
+
+- `Err(ScopeError::Cancelled)` if every task finished within the grace period.
+- `Err(ScopeError::DeadlineExceeded)` if the grace period ran out. Tasks that end later do not change this reason. If the grace period runs out at the same poll as the last task ends, the deadline wins.
+- `Ok(value)` only if the body returned and its tasks finished before any shutdown request. After a request, the body's value is not returned.
+- Failures win over the reason, in the order of `run_until`: a child panic, a returned body error, then the oldest unclaimed child error, including one recorded during the drain or the aborts.
+
+As with `run_until`, a failure cancels the signal, and dropping the future signals cancellation and aborts the tasks without waiting. This also ends the grace period.
 
 ### OS signals
 
