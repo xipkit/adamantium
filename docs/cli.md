@@ -427,9 +427,10 @@ The report lists source that the scan cannot read as unscanned, with the reason.
 
 The text report prints a table on stdout, then the calls of each dependency.
 
-`--format json` prints an object with `schema_version: 1`, `root`, `target`, and a `dependencies` array. Each dependency has these fields:
+`--format json` prints an object with `schema_version: 2`, `root`, `target`, and a `dependencies` array. Each dependency has these fields:
 
 - `name`, `version`, and `source`.
+- `path` for path dependencies, relative to the audit root when inside it and absolute otherwise. Their `source` is `null`.
 - `kind`: `runtime` or `build`.
 - `forbids_unsafe`.
 - The `unsafe` counts.
@@ -437,7 +438,32 @@ The text report prints a table on stdout, then the calls of each dependency.
 - `unresolved`: counts by name.
 - `unscanned`.
 
-The exit status is `0` when the report is printed, and `2` on an error.
+Without a policy, the exit status is `0` when the report is printed, and `2` on an error.
+
+### Rejecting new findings in CI
+
+Save a complete schema-version-2 JSON report from a reviewed lockfile and commit it with the project. In CI, compare the current dependencies against that report using the same host target and feature flags.
+
+```sh
+cargo adamantium deps --format json -- --locked > deps-baseline.json
+cargo adamantium deps --deny-new --baseline deps-baseline.json -- --locked
+```
+
+`--deny-new` checks the report's unsafe counts and disallowed paths that start unscoped tasks or threads, such as `tokio::spawn`, `smol::Executor::spawn`, and `std::thread::spawn`. Other disallowed calls remain visible in the audit. Run `--deny-new` without a baseline to check against zero findings. `--baseline` requires `--deny-new`.
+
+A dependency is identified by its Cargo package name and source. Registry dependencies use the registry source. Git dependencies use the Git source and requested ref, ignoring the resolved commit. Path dependencies use the reported `path`. Versions of the same name and source share counts, including when several versions are present at once.
+
+The policy compares occurrence counts by unsafe category, or by disallowed task path and source file. Moving a call within a file preserves its match. Replacing occurrences within a matching group can leave the count unchanged. An increase is a new finding, and a decrease is reported for information. Refresh the baseline after reviewing removals if you want CI to catch their return.
+
+An unscanned entry or an unresolved call whose name matches a task-starting path makes a report incomplete for the policy. Other unresolved calls are informational. Coverage is limited to what the source audit can observe, as described above.
+
+| Status | Meaning with `--deny-new` |
+| --- | --- |
+| `0` | The scan completed and found no increases. |
+| `1` | The scan completed and found at least one increase. |
+| `2` | The scan failed or had gaps, or the supplied baseline was unreadable, invalid, incomplete, or for a different host target. |
+
+With `--format json`, the `policy` object gives the `status` (`clean`, `findings`, or `error`) and, after a complete comparison, `changes` with `added` and `removed` counts by finding. The dependency results still contain the full audit, including any scan gaps.
 
 ## Experimental execution-context checks
 

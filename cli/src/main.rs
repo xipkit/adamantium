@@ -81,6 +81,12 @@ enum Command {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = deps::Format::Text)]
         format: deps::Format,
+        /// Fail on new unsafe code or unscoped task starts, or on scan gaps.
+        #[arg(long)]
+        deny_new: bool,
+        /// Compare against an earlier `deps --format json` report.
+        #[arg(long, value_name = "REPORT", requires = "deny_new")]
+        baseline: Option<PathBuf>,
         /// Arguments passed on to `cargo metadata` and `cargo tree`, such as `--features` or
         /// `--all-features`.
         #[arg(last = true)]
@@ -235,8 +241,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Deps {
             path,
             format,
+            deny_new,
+            baseline,
             cargo_args,
-        } => deps::run(&path, format, &cargo_args),
+        } => deps::run(&path, format, &cargo_args, deny_new, baseline.as_deref()),
         Command::Style(command) => style::run(command),
         Command::Explain { rule, format } => {
             let explanation = Explanation::for_rule(&rule)?;

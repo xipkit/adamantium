@@ -36,6 +36,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   one operation and its output. Dropping the call that started the operation
   leaves it to the others, and dropping the last call drops it. It works
   without Tokio.
+- `cargo-adamantium`: `deps --deny-new` lets CI reject increases in unsafe
+  code or unscoped task starts across dependency updates using a JSON baseline.
+- In `adamantium`, `Bytes::slice` checks byte ranges and shares storage.
+  Editing a window through `make_mut` copies only the selected bytes.
 - `cargo-adamantium`: `check --format json` and `check --format sarif` include
   an optional `remediation` for each finding, combining the replacement for its
   rule or disallowed path with the migration guide section or `cargo adamantium

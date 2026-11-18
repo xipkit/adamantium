@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::cfg::{self, Features, Truth};
 
 /// When a dependency's code runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// Linked into the workspace's programs.
