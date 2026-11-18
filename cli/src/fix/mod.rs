@@ -1,7 +1,7 @@
 //! Conservative fixes: compiler suggestions first, then guide-approved syntax.
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt, fs,
+    fs,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -11,14 +11,16 @@ use proc_macro2::Span;
 use serde_json::Value;
 use syn::{spanned::Spanned, visit::Visit};
 
-use crate::{check, manifest};
+use crate::{
+    check,
+    lints::{GUIDE, Hint},
+    manifest,
+};
 
 mod channels;
 mod scan;
 mod source;
 mod state;
-
-const GUIDE: &str = "https://github.com/xipkit/adamantium/blob/main/docs/migrating.md";
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Edit {
@@ -709,147 +711,6 @@ impl<'ast> Visit<'ast> for Mechanical<'_> {
     }
 }
 
-/// Where `fix` sends the reader about a finding it left: the migration
-/// guide's section on it, or, for a rule the guide has no section on, the
-/// rule's explanation, which has a before and after for every rule.
-#[derive(Debug, PartialEq, Eq)]
-enum Hint<'a> {
-    Guide(&'static str),
-    Explain(&'a str),
-}
-
-impl<'a> Hint<'a> {
-    fn new(rule: &'a str, message: &str) -> Self {
-        let section = match rule {
-            "clippy::await_holding_lock" => Some("a-lock-held-across-an-await"),
-            "clippy::rc_mutex" => Some("shared-state"),
-            "clippy::disallowed_methods" => disallowed(message, DISALLOWED_METHODS),
-            "clippy::disallowed_types" => disallowed(message, DISALLOWED_TYPES),
-            _ => None,
-        };
-        section.map_or(Self::Explain(rule), Self::Guide)
-    }
-}
-
-impl fmt::Display for Hint<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Guide(section) => write!(f, "Review {GUIDE}#{section}"),
-            Self::Explain(rule) => write!(f, "Run cargo adamantium explain {rule}"),
-        }
-    }
-}
-
-/// The guide's section on each disallowed method it covers, by the path as
-/// `clippy.toml` lists it.
-const DISALLOWED_METHODS: &[(&str, &[&str])] = &[
-    (
-        "tasks",
-        &[
-            "tokio::spawn",
-            "tokio::task::spawn",
-            "tokio::task::spawn_local",
-            "tokio::runtime::Handle::spawn",
-            "tokio::runtime::Runtime::spawn",
-            "tokio::runtime::LocalRuntime::spawn_local",
-            "tokio::task::Builder::spawn",
-            "tokio::task::Builder::spawn_on",
-            "tokio::task::Builder::spawn_local",
-            "tokio::task::Builder::spawn_local_on",
-            "async_std::task::spawn",
-            "async_std::task::spawn_local",
-            "async_std::task::Builder::spawn",
-            "async_std::task::Builder::local",
-            "smol::spawn",
-            "smol::Executor::spawn",
-            "smol::Executor::spawn_many",
-            "smol::LocalExecutor::spawn",
-            "smol::LocalExecutor::spawn_many",
-        ],
-    ),
-    (
-        "blocking-work",
-        &[
-            "tokio::task::spawn_blocking",
-            "tokio::task::block_in_place",
-            "tokio::runtime::Handle::spawn_blocking",
-            "tokio::runtime::Runtime::spawn_blocking",
-            "tokio::runtime::LocalRuntime::spawn_blocking",
-            "tokio::task::Builder::spawn_blocking",
-            "tokio::task::Builder::spawn_blocking_on",
-            "async_std::task::spawn_blocking",
-            "smol::unblock",
-            "std::thread::spawn",
-            "std::thread::Builder::spawn",
-            "std::thread::scope",
-        ],
-    ),
-    (
-        "messages-for-every-receiver",
-        &["tokio::sync::broadcast::channel"],
-    ),
-    ("a-single-reply", &["tokio::sync::oneshot::channel"]),
-    ("the-latest-value", &["tokio::sync::watch::channel"]),
-    (
-        "stopping-a-long-lived-task",
-        &[
-            "tokio::time::sleep",
-            "tokio::time::sleep_until",
-            "tokio::time::interval",
-            "tokio::time::interval_at",
-            "tokio::time::Instant::now",
-        ],
-    ),
-];
-
-/// The guide's section on each disallowed type it covers, by the path as
-/// `clippy.toml` lists it.
-const DISALLOWED_TYPES: &[(&str, &[&str])] = &[
-    ("shared-state", &["std::sync::Mutex", "parking_lot::Mutex"]),
-    (
-        "rwlock",
-        &[
-            "std::sync::RwLock",
-            "tokio::sync::RwLock",
-            "parking_lot::RwLock",
-        ],
-    ),
-    (
-        "a-lock-held-across-an-await",
-        &["tokio::sync::Mutex", "futures::lock::Mutex"],
-    ),
-    (
-        "messages-for-every-receiver",
-        &[
-            "tokio::sync::broadcast::Sender",
-            "tokio::sync::broadcast::Receiver",
-        ],
-    ),
-    (
-        "a-single-reply",
-        &[
-            "tokio::sync::oneshot::Sender",
-            "tokio::sync::oneshot::Receiver",
-        ],
-    ),
-    (
-        "the-latest-value",
-        &["tokio::sync::watch::Sender", "tokio::sync::watch::Receiver"],
-    ),
-    ("results-as-they-finish", &["tokio::task::JoinSet"]),
-];
-
-/// The section on the path a disallowed-method or -type finding names.
-/// Clippy quotes the path as the configuration lists it, as in "use of a
-/// disallowed method `tokio::spawn`".
-fn disallowed(message: &str, sections: &[(&'static str, &[&str])]) -> Option<&'static str> {
-    let path = message.split('`').nth(1)?;
-    sections
-        .iter()
-        .find(|(_, paths)| paths.contains(&path))
-        .map(|(section, _)| *section)
-}
-
 // One whole-file unified hunk keeps the preview valid without an external diff
 // executable, including files with no trailing newline.
 fn diff(file: &Path, before: &str, after: &str) {
@@ -872,6 +733,7 @@ fn diff(file: &Path, before: &str, after: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lints::{DISALLOWED_MACROS, DISALLOWED_METHODS, DISALLOWED_TYPES};
     use serde_json::json;
 
     #[test]
@@ -1054,9 +916,10 @@ mod tests {
         Ok(anchors)
     }
 
-    /// The paths a list in the bundled `clippy.toml` disallows.
+    /// The paths a list in the bundled default and strict Clippy configurations
+    /// disallows.
     fn disallowed_paths(list: &str) -> Result<Vec<String>> {
-        let config: toml_edit::DocumentMut = crate::lints::CLIPPY_TOML.parse()?;
+        let config: toml_edit::DocumentMut = crate::lints::clippy_toml(true)?.parse()?;
         let entries = config
             .get(list)
             .and_then(toml_edit::Item::as_array)
@@ -1094,6 +957,7 @@ mod tests {
 
     #[test]
     fn every_finding_points_at_a_guide_section_or_its_rule_explanation() {
+        let strict_config = crate::lints::clippy_toml(true).unwrap();
         let anchors = guide_anchors().unwrap();
         let mut findings: Vec<(String, String)> = crate::lints::selected(true)
             .map(|lint| (lint.qualified(), format!("a finding of {}", lint.name)))
@@ -1101,8 +965,14 @@ mod tests {
                 crate::lints::OVERFLOW_RULE.to_owned(),
                 "overflow checks are off".to_owned(),
             )])
+            .chain(
+                crate::lints::EXPERIMENTAL_LINTS
+                    .iter()
+                    .map(|lint| ((*lint).to_owned(), format!("a finding of {lint}"))),
+            )
             .collect();
         for (list, rule, kind) in [
+            ("disallowed-macros", "clippy::disallowed_macros", "macro"),
             ("disallowed-methods", "clippy::disallowed_methods", "method"),
             ("disallowed-types", "clippy::disallowed_types", "type"),
         ] {
@@ -1114,12 +984,19 @@ mod tests {
             }
         }
         for (rule, message) in &findings {
-            match Hint::new(rule, message) {
+            let hint = Hint::new(rule, message);
+            match hint {
                 Hint::Guide(section) => {
                     assert!(anchors.contains(section), "{rule}: {message}: #{section}");
                 }
                 Hint::Explain(explained) => assert_eq!(explained, rule, "{message}"),
             }
+            let remediation = crate::lints::remediation(rule, message, &strict_config)
+                .unwrap_or_else(|| panic!("{rule}: {message} has no remediation"));
+            assert!(
+                remediation.ends_with(&format!(" {hint}.")),
+                "{rule}: {message}: {remediation}"
+            );
         }
         for reason in [
             state::Reason::AcrossStatements,
@@ -1142,6 +1019,7 @@ mod tests {
     #[test]
     fn every_path_with_a_section_is_disallowed_once() {
         for (list, sections) in [
+            ("disallowed-macros", DISALLOWED_MACROS),
             ("disallowed-methods", DISALLOWED_METHODS),
             ("disallowed-types", DISALLOWED_TYPES),
         ] {

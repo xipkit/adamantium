@@ -139,13 +139,32 @@ fn cow(c: &mut Criterion) {
     }
 }
 
+fn byte_frames(c: &mut Criterion) {
+    let packet = Bytes::from(vec![42; 65_536]);
+    let mut group = c.benchmark_group("bytes/frame");
+    for len in [64, 1_500, 16_384] {
+        let frame = 32..32 + len;
+        group.bench_with_input(BenchmarkId::new("slice", len), &frame, |b, frame| {
+            b.iter(|| black_box(&packet).slice(black_box(frame.clone())));
+        });
+        group.bench_with_input(BenchmarkId::new("copy", len), &frame, |b, frame| {
+            b.iter(|| {
+                black_box(&packet)
+                    .get(black_box(frame.clone()))
+                    .map(Bytes::from)
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .warm_up_time(Duration::from_millis(300))
         .measurement_time(Duration::from_secs(1))
         .sample_size(30);
-    targets = cow, persistent_collections
+    targets = cow, byte_frames, persistent_collections
 }
 #[allow(
     clippy::exit,

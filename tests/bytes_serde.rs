@@ -152,3 +152,15 @@ fn bytes_round_trip_through_cbor_byte_strings() {
         assert_eq!(decoded, bytes);
     }
 }
+
+#[test]
+fn bytes_windows_serialize_only_selected_bytes() {
+    let original = Bytes::from([1, 0, 255, 2]);
+    let window = original.slice(1..3).unwrap();
+
+    assert_eq!(serde_json::to_string(&window).unwrap(), "[0,255]");
+    assert_eq!(
+        cbor4ii::serde::to_vec(Vec::new(), &window).unwrap(),
+        [0x42, 0, 255]
+    );
+}
