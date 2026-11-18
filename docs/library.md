@@ -438,6 +438,14 @@ With the `tokio` feature, use `adamantium::time::sleep(duration)` and `adamantiu
 - For periodic waits, use a loop over `time::sleep_until`.
 - To measure elapsed wall-clock time, `std::time::Instant::now()` is still allowed.
 
+## Randomness
+
+Use `adamantium::random::u64()` for a random number, and `random::up_to(max)` for one from zero to `max`, both included.
+
+- Outside the deterministic harness, each draw comes from the standard library's random hashing keys. The draws are not for keys, tokens, or other secrets.
+- Inside a deterministic execution, each draw comes from the scheduler. The same seed gives the same draws, and a replay repeats them. A replay whose code draws a different number of times fails as a mismatch.
+- It works without the `tokio` feature.
+
 ## Task names and tracing
 
 Use the optional `tracing` feature to find work that does not finish. Start tasks with `tasks.spawn_named("fetch", future)`, `tasks.spawn_blocking_named("parse", closure)`, or `tasks.spawn_handled_named("connection", future, on_error)`.

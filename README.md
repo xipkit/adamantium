@@ -67,6 +67,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. |
 | `retry`, `RateLimit`, `Limit`, `KeyedLimit` | Retry with backoff, cap the call rate or concurrency, or serialize calls for the same key. |
 | `blocking` | Runs blocking code on the blocking pool. |
+| `random` | Random draws that the deterministic harness records and replays. |
 
 The [library guide](docs/library.md) describes each type, and [`examples/server.rs`](examples/server.rs) puts them together in a TCP server.
 

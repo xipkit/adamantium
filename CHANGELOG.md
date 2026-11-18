@@ -15,6 +15,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Spawning after the scope closes returns `SpawnError` without starting work.
 - `adamantium`: `KeyedLimit` serializes calls for the same key, including
   inside a connection `Limit`, and evicts keys after their last call ends.
+- `adamantium`: `random::u64` and `random::up_to` give application code random
+  draws that the deterministic harness takes from its seed and a `Replay`
+  repeats.
 
 ## [0.3.0] - 2026-11-17
 

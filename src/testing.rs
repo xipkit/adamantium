@@ -37,8 +37,10 @@
 //! requires the same code, dependency versions and fixture inputs. Passing
 //! seeded exploration does not prove that every possible execution is correct.
 //!
-//! Real I/O, native threads, wall-clock time, uncontrolled randomness and foreign
-//! executors are outside the model: replace them with deterministic fixtures.
+//! [`crate::random`] draws from the scheduler, so a seed decides the draws and a
+//! replay repeats them. Real I/O, native threads, wall-clock time, other
+//! randomness and foreign executors are outside the model: replace them with
+//! deterministic fixtures.
 //! Arbitrary foreign futures cannot all be detected. A step limit counts
 //! scheduling operations, not CPU instructions; it cannot stop a CPU-only loop.
 
