@@ -565,7 +565,7 @@ fn report<'tcx>(
         Effect::Limit | Effect::KeyedLimit => (
             ADAMANTIUM_NESTED_LIMIT,
             "limit entered inside limit work panics at runtime",
-            "only a KeyedLimit may be entered inside Limit work; enter other limits after the work finishes",
+            "enter only a KeyedLimit inside Limit work, and other limits after the work finishes",
         ),
     };
     let last = notes.len().saturating_sub(1);

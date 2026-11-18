@@ -23,6 +23,7 @@ changes behavior in a way to check.
 | `RwLock<T>` | `Actor<T>`, often holding a copy-on-write value | No |
 | A lock held across an await | Read, await, then record | No |
 | Two locks held at once | One actor, or one after the other | No |
+| Two semaphore permits held at once | A `KeyedLimit` inside a `Limit`, or one after the other | No |
 | `tokio::task::spawn_blocking(f).await.unwrap()` | `blocking(f).await` | Yes |
 | `std::thread::spawn` | `blocking` | Mostly |
 | `tokio::spawn` with the handle awaited in the same function | `Tasks::run` | Mostly |
@@ -366,6 +367,67 @@ checking.with(|from| {
     *from -= 30;
     savings.with(|to| *to += 30); // panics: an actor method can't call an actor
 });
+```
+
+### Two limits at once
+
+Holding one semaphore permit while waiting for another deadlocks when two
+tasks take them in opposite orders, and a semaphore of one deadlocks with
+itself. Limit work may enter one `KeyedLimit`, for exclusion per key inside
+a shared limit. Entering any other limit inside limit work panics instead.
+Otherwise, finish the first work before entering the second limit.
+
+Before:
+
+```rust
+use tokio::sync::Semaphore;
+
+async fn refresh(session: &str) -> String {
+    format!("{session} refreshed")
+}
+
+#[tokio::main]
+async fn main() {
+    let connections = Semaphore::new(4);
+    let session = Semaphore::new(1);
+    let _connection = connections.acquire().await.unwrap();
+    let _session = session.acquire().await.unwrap();
+    assert_eq!(refresh("a").await, "a refreshed");
+}
+```
+
+After:
+
+```rust
+use adamantium::{KeyedLimit, Limit};
+
+async fn refresh(session: &str) -> String {
+    format!("{session} refreshed")
+}
+
+#[tokio::main]
+async fn main() {
+    let connections = Limit::new(4);
+    let sessions = KeyedLimit::new();
+    let refreshed = connections
+        .run(|| sessions.run("a", || refresh("a")))
+        .await;
+    assert_eq!(refreshed, "a refreshed");
+}
+```
+
+A second `Limit` inside limit work panics, whichever limit it is:
+
+```rust,should_panic
+use adamantium::Limit;
+
+#[tokio::main]
+async fn main() {
+    let connections = Limit::new(4);
+    let exports = Limit::new(1);
+    // panics: limit work can't enter another Limit
+    connections.run(|| exports.run(|| async {})).await;
+}
 ```
 
 ## Tasks
