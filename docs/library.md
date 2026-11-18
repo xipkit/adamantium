@@ -201,7 +201,7 @@ With the `tokio` feature, `until(&cancellation, deadline, future)` waits for one
 
 - It returns `Ok(output)` if `future` finishes first, or `Err(UntilError::Cancelled)` / `Err(UntilError::DeadlineExceeded)` if shutdown wins.
 - As with `receive_until` and `Tasks::run_until`, a request already present wins over a ready future, and cancellation wins over an equally ready deadline.
-- When it stops early, `until` drops `future` at its current `await`. Pass only futures that lose nothing when dropped, such as `Channel::receive`, `Receiver::receive`, `ReplyReceiver::receive`, `Reply::closed`, `Watcher::receive`, `Watcher::wait_for`, `time::sleep`, `time::sleep_until`, or `Cancellation::cancelled`. Do not pass `send` futures (use `send_until`).
+- When it stops early, `until` drops `future` at its current `await`. Pass only futures that lose nothing when dropped, such as `Channel::receive`, `Receiver::receive`, `ReplyReceiver::receive`, `Reply::closed`, `Feed::receive`, `Watcher::receive`, `Watcher::wait_for`, `time::sleep`, `time::sleep_until`, or `Cancellation::cancelled`. Do not pass `send` futures (use `send_until`).
 
 ## Actors
 
@@ -344,6 +344,43 @@ A topic has one sender. `send` takes `&mut self`, so two sends cannot overlap. T
 `topic.subscriptions()` returns a `Subscriptions<T>` handle. Clone it and call `subscribe()` to add subscribers from other tasks.
 
 `Topic` works with `default-features = false`. `send_until` needs the `tokio` feature.
+
+## Fanout
+
+`Fanout<T>` sends each event to every subscriber without waiting. A subscriber that falls a whole queue behind is disconnected, so it never holds up the others.
+
+```rust
+use adamantium::{Ended, Fanout, Sent};
+
+let prices = Fanout::new(2);
+let mut display = prices.subscribe();
+let mut stalled = prices.subscribe();
+
+for price in [1, 2] {
+    prices.send(price)?;
+    assert_eq!(display.try_receive(), Ok(Some(price)));
+}
+assert_eq!(prices.send(3)?, Sent { delivered: 1, disconnected: 1 });
+assert_eq!(display.try_receive(), Ok(Some(3)));
+
+assert_eq!(stalled.try_receive(), Ok(Some(1)));
+assert_eq!(stalled.try_receive(), Ok(Some(2)));
+assert_eq!(stalled.try_receive(), Err(Ended::Overflowed));
+```
+
+- Each subscriber is a `Feed<T>` with its own queue of `capacity` events.
+- `send(value)` never waits. It gives a clone of the value to every feed with room. It disconnects every feed whose queue is full. It returns a `Sent` that counts both.
+- A disconnected feed receives the events already in its queue, then `Err(Ended::Overflowed)`. It never receives a later event, so what a feed receives has no gaps.
+- `Fanout` is `Clone`. Every clone can send and subscribe, and every feed receives the sends of all clones in the same order.
+- A feed receives the events sent after it subscribed. Dropping a `Feed` unsubscribes it.
+- `close()`, or dropping the last `Fanout`, closes the fanout. Each feed receives its queued events, then `Err(Ended::Closed)`, and later sends return the value in `Closed`. Feeds don't hold a fanout open.
+- `receive_until` stops waiting on a `Cancellation` or at a deadline.
+
+To recover from `Ended::Overflowed`, call `feed.resubscribe()` first, then read a snapshot of the state the events describe, then apply the new feed's events. Subscribing first means no event falls between the snapshot and the feed. The new feed can repeat a change the snapshot already has, so applying an event twice must do no harm.
+
+Use `Topic` when the sender should wait for a slow subscriber instead, and `Watch` when only the latest value matters.
+
+`Fanout` works with `default-features = false`. `receive_until` needs the `tokio` feature.
 
 ## Reply
 

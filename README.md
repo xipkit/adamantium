@@ -63,6 +63,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `AsyncActor` | One worker that owns its state and handles one message at a time. Use it when the state must `await`. |
 | `Channel`, `Reply`, `Watch` | A bounded queue, a one-shot reply, and the latest value of some state. |
 | `Topic` | Sends each message to every subscriber. It waits for a slow subscriber and drops no message. |
+| `Fanout` | Sends each event to every subscriber without waiting. It disconnects a subscriber that falls behind, which can then resubscribe. |
 | `race` | Waits for the first of several futures and drops the others. Use it in place of `select!`. |
 | `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. `Tasks::run_with_grace` lets admitted work finish first. |
 | `retry`, `RateLimit`, `Limit`, `KeyedLimit` | Retry with backoff, cap the call rate or concurrency, or serialize calls for the same key. |
@@ -82,7 +83,7 @@ The [library guide](docs/library.md) describes each type, and [`examples/server.
 | `tracing` | No | Named task spans, and a warning that lists unfinished tasks when a deadline expires |
 | `deterministic` | No | A test harness with random, PCT, and bounded DFS scheduling and replay. See [Deterministic tests](docs/testing.md). |
 
-With `default-features = false`, the values, `Actor`, `Channel`, `Topic`, `Reply`, `Watch`, `Limit`, `KeyedLimit`, `SingleFlight`, and `race` work without Tokio.
+With `default-features = false`, the values, `Actor`, `Channel`, `Topic`, `Fanout`, `Reply`, `Watch`, `Limit`, `KeyedLimit`, `SingleFlight`, and `race` work without Tokio.
 
 ### WASI
 
@@ -143,7 +144,7 @@ Code that follows the rules has these properties:
 | No task outlives its scope | `tokio::spawn`, `JoinSet`, and `std::thread::spawn` are not allowed. Use `Tasks`. |
 | No lock is held across an `await` or inside another lock | `Mutex` and `RwLock` are not allowed. Use `Actor`. |
 | No queue grows without a limit | Unbounded channels are not allowed. Use `Channel`. |
-| No channel drops messages | Tokio's `broadcast` channel is not allowed. Use `Topic`. |
+| No channel drops messages | Tokio's `broadcast` channel is not allowed. Use `Topic`, or `Fanout` to disconnect a subscriber that falls behind. |
 | No worker thread is blocked | `std::thread::sleep`, `block_in_place`, and `spawn_blocking` are not allowed. Use `blocking`. |
 | No timeout drops a future in the middle of its work | `tokio::time::timeout` is not allowed. Use `Tasks::run_until` or the `_until` methods. |
 | Unstructured selection restricted | The rules report `futures::select!` and, on Tokio 1.44 or later, `tokio::select!` invocations with future branches. Use `first_ok`, `Tasks::run_until` with `Cancellation`, or `receive_until` and `send_until` for channel operations. |

@@ -1,7 +1,8 @@
 //! Deterministic interleaving tests, enabled by the `deterministic` feature.
 //!
-//! Models [`crate::Actor`], [`crate::Channel`], [`crate::Reply`], [`crate::Watch`],
-//! [`crate::SingleFlight`], [`crate::Tasks`] and [`crate::Cancellation`], including concurrent maps and
+//! Models [`crate::Actor`], [`crate::Channel`], [`crate::Fanout`],
+//! [`crate::Reply`], [`crate::Watch`], [`crate::SingleFlight`],
+//! [`crate::Tasks`] and [`crate::Cancellation`], including concurrent maps and
 //! streams, result claiming, panic transport, scope abort and draining.
 //! [`parallel`] also supplies independent workers. Blocking closures model the
 //! queued/started boundary: abort can prevent entry, but started work finishes.

@@ -65,12 +65,12 @@ Each run starts with fresh fixture state and must follow the entire recorded pre
 
 ## What the harness schedules
 
-`Actor`, `Channel`, `Reply`, `Watch`, `SingleFlight`, `Tasks`, and `Cancellation` support deterministic scheduling.
+`Actor`, `Channel`, `Fanout`, `Reply`, `Watch`, `SingleFlight`, `Tasks`, and `Cancellation` support deterministic scheduling.
 
 Channels and watches:
 
 - The harness covers synchronous channel operations, competing senders and receivers, streams, close-and-drain, endpoint drops, and cancellation by drop of a pending future.
-- `Channel` and `Watch` share a private notification boundary that registers and then checks again.
+- `Channel`, `Fanout`, and `Watch` share a private notification boundary that registers and then checks again.
 - The bounded storage of `Channel` is a concurrent ring in production and a locked FIFO in the harness. The notification, closure, and endpoint ownership logic is shared.
 - The harness schedules registration, notification, polling, and cancellation handoff. It treats each event-listener operation as one atomic notification step. It does not model the internal atomics of event-listener.
 

@@ -278,7 +278,7 @@ async fn example() {
         "disallowed_methods",
         "panicking index methods, unmodeled channel constructors, unstructured spawns, Tokio select!, drop-to-cancel timeouts, blocking calls, clocks outside adamantium::time, uncontrolled randomness, thread-local access, leaks and weak references, listed in clippy.toml",
         example(
-            "Use adamantium::Array::remove/insert and split_at_checked for checked index operations, Channel for bounded queues, Reply for one reply, Topic for delivery to every subscriber, and Watch for latest-value state. Use Tasks::run and Tasks::spawn for scoped tasks. Replace tokio::select! with adamantium::first_ok for the first success. Use Tasks::run_until with Cancellation for scoped work and receive_until/send_until for channel operations with cancellation or deadlines. Use adamantium::blocking for blocking work and adamantium::time::sleep or sleep_until for timers. Build deadlines with adamantium::time::now and periodic waits with a loop over adamantium::time::sleep_until. Use adamantium::random for draws that the deterministic harness can seed and replay. Pass values in, or share them through an Actor, instead of keeping them in a thread-local. Let resources drop and use owned values in place of weak references.",
+            "Use adamantium::Array::remove/insert and split_at_checked for checked index operations, Channel for bounded queues, Reply for one reply, Topic or Fanout for delivery to every subscriber, and Watch for latest-value state. Use Tasks::run and Tasks::spawn for scoped tasks. Replace tokio::select! with adamantium::first_ok for the first success. Use Tasks::run_until with Cancellation for scoped work and receive_until/send_until for channel operations with cancellation or deadlines. Use adamantium::blocking for blocking work and adamantium::time::sleep or sleep_until for timers. Build deadlines with adamantium::time::now and periodic waits with a loop over adamantium::time::sleep_until. Use adamantium::random for draws that the deterministic harness can seed and replay. Pass values in, or share them through an Actor, instead of keeping them in a thread-local. Let resources drop and use owned values in place of weak references.",
             r#"async fn example() -> Result<u32, tokio::task::JoinError> {
     let task = tokio::spawn(async { 42 });
     task.await
@@ -295,7 +295,7 @@ async fn example() {
         "disallowed_types",
         "shared identity, runtime borrow checking, raw locks, unmodeled synchronization and unscoped task sets, listed in clippy.toml",
         example(
-            "Use Adamantium values (Str, Bytes, Array, Deque, Map, Set) for owned data, Actor for shared state, and Tasks for scoped concurrency. Use Topic, Reply, Watch, Channel, Cancellation, or Limit to model the kind of synchronization the code needs.",
+            "Use Adamantium values (Str, Bytes, Array, Deque, Map, Set) for owned data, Actor for shared state, and Tasks for scoped concurrency. Use Topic, Fanout, Reply, Watch, Channel, Cancellation, or Limit to model the kind of synchronization the code needs.",
             r#"fn example() {
     let state = std::sync::Mutex::new(0);
     *state.lock().unwrap() += 1;
