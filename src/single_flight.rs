@@ -291,12 +291,20 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
         held: &mut Option<Operation<T>>,
         waiter: &mut Option<Waiter>,
     ) -> Poll<T> {
+        // The operation is polled at most once per poll of this call. One
+        // that wakes itself and returns `Pending`, as a yield does, must
+        // let the executor run other tasks before it is polled again.
+        let mut polled_once = false;
         loop {
             let mut operation = match held.take() {
                 Some(operation) => operation,
-                None => match self.take_or_collect(waiter) {
+                None => match self.take_or_collect(waiter, !polled_once) {
                     Taken::Operation(operation) => operation,
                     Taken::Output(output) => return Poll::Ready(output),
+                    Taken::Yield => {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
                     Taken::Nothing => {
                         let Some(listening) = waiter.as_mut() else {
                             continue;
@@ -320,6 +328,7 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
                 unwinding.disarm();
                 polled
             };
+            polled_once = true;
             match polled {
                 Poll::Ready(output) => return Poll::Ready(self.finish(output)),
                 Poll::Pending => {
@@ -331,8 +340,10 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
     }
 
     /// Takes the operation if it was woken and no one else is polling it,
-    /// or this call's copy of the output if it has finished.
-    fn take_or_collect(&mut self, waiter: &mut Option<Waiter>) -> Taken<T> {
+    /// or this call's copy of the output if it has finished. Without
+    /// `may_poll`, a woken operation is left for the next poll, and the
+    /// call yields to be polled again.
+    fn take_or_collect(&mut self, waiter: &mut Option<Waiter>, may_poll: bool) -> Taken<T> {
         // Listen before looking, so a wake or an ending after the look is
         // not missed.
         if waiter.is_none() {
@@ -340,6 +351,13 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
         }
         let mut state = self.flight.lock();
         match &mut state.stage {
+            Stage::Idle(_) if !may_poll => {
+                if self.flight.signal.woken.load(Ordering::SeqCst) {
+                    Taken::Yield
+                } else {
+                    Taken::Nothing
+                }
+            }
             Stage::Idle(_) if self.flight.signal.woken.swap(false, Ordering::SeqCst) => {
                 match std::mem::replace(&mut state.stage, Stage::Polling) {
                     Stage::Idle(operation) => {
@@ -429,6 +447,8 @@ impl<K: Hash + Eq, T> Caller<K, T> {
 enum Taken<T> {
     Operation(Operation<T>),
     Output(T),
+    /// The operation was woken, but this poll has already polled it.
+    Yield,
     Nothing,
 }
 

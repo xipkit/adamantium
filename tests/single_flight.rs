@@ -321,6 +321,51 @@ fn creating_the_operation_cannot_call_for_its_own_key() {
     assert!(flights.is_empty());
 }
 
+/// Wakes itself and returns `Pending` on its first poll, as a yield does.
+struct YieldOnce {
+    yielded: bool,
+}
+
+impl Future for YieldOnce {
+    type Output = u32;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<u32> {
+        if std::mem::replace(&mut self.yielded, true) {
+            Poll::Ready(12)
+        } else {
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
+#[test]
+fn an_operation_that_wakes_itself_is_not_polled_again_until_the_call_is() {
+    let flights = SingleFlight::new();
+    let wakes = Arc::new(Wakes::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut call = pin!(flights.run(1, || YieldOnce { yielded: false }));
+    let polled = call.as_mut().poll(&mut Context::from_waker(&waker));
+    assert_eq!(polled, Poll::Pending, "the call returns to the executor");
+    assert_eq!(
+        wakes.0.load(Ordering::SeqCst),
+        1,
+        "and asks to be polled again"
+    );
+    assert_eq!(poll_once(call.as_mut()), Poll::Ready(12));
+}
+
+#[test]
+fn a_yielding_operation_lets_another_caller_take_its_turn() {
+    let flights = SingleFlight::new();
+    let mut first = pin!(flights.run(1, || YieldOnce { yielded: false }));
+    let mut second = pin!(flights.run(1, || YieldOnce { yielded: false }));
+    assert_eq!(poll_once(first.as_mut()), Poll::Pending);
+    // The operation is still woken, so the second caller polls it next.
+    assert_eq!(poll_once(second.as_mut()), Poll::Ready(12));
+    assert_eq!(poll_once(first.as_mut()), Poll::Ready(12));
+}
+
 #[test]
 fn a_call_polled_between_the_polls_of_the_operation_is_not_nested() {
     let flights = SingleFlight::new();
