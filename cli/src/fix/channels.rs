@@ -944,7 +944,7 @@ impl<'t> Analysis<'t> {
             }
             (Shape::Result | Shape::Sent | Shape::Option, "map_err", 1)
             | (Shape::Option, "unwrap_or_else", 1) => {
-                let Some(body) = ignored_error(call) else {
+                let Some(handler) = ignored_error(call) else {
                     return false;
                 };
                 self.take(&op);
@@ -955,7 +955,8 @@ impl<'t> Analysis<'t> {
                         self.closure_without_argument(call);
                     }
                 }
-                self.visit_expr(body);
+                // As a closure, so a `move` handler's captures count.
+                self.visit_expr(handler);
             }
             _ => return false,
         }
@@ -1114,9 +1115,10 @@ fn is_drop(call: &syn::ExprCall) -> bool {
                 && segments.get(2).is_some_and(|name| name == "drop")))
 }
 
-/// The body of a closure argument `|_| body`, which ignores the error.
+/// The closure argument `|_| body`, which ignores the error.
 fn ignored_error(call: &ExprMethodCall) -> Option<&Expr> {
-    let [Expr::Closure(closure)] = call.args.iter().collect::<Vec<_>>().as_slice() else {
+    let mut args = call.args.iter();
+    let (Some(argument @ Expr::Closure(closure)), None) = (args.next(), args.next()) else {
         return None;
     };
     let [Pat::Wild(wild)] = closure.inputs.iter().collect::<Vec<_>>().as_slice() else {
@@ -1128,7 +1130,7 @@ fn ignored_error(call: &ExprMethodCall) -> Option<&Expr> {
         && closure.lifetimes.is_none()
         && closure.constness.is_none()
         && matches!(closure.output, syn::ReturnType::Default))
-    .then_some(&*closure.body)
+    .then_some(argument)
 }
 
 /// Whether `pat` binds the whole value to one name, which moves it there.
@@ -1796,6 +1798,10 @@ mod tests {
             ),
             (
                 "let (tx, rx) = watch::channel(0u8); let task = async move { tx.send(1).ok(); }; task.await; let _v = *rx.borrow();",
+                WATCH_UNWATCHED,
+            ),
+            (
+                "let (tx, mut rx) = watch::channel(0u8); rx.changed().await.map_err(move |_| { let copy = rx.clone(); drop(copy); }).ok(); tx.send(1).ok();",
                 WATCH_UNWATCHED,
             ),
             // A panic would print another error.
