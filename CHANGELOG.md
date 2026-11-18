@@ -36,6 +36,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   one operation and its output. Dropping the call that started the operation
   leaves it to the others, and dropping the last call drops it. It works
   without Tokio.
+- In `adamantium`, `Bytes::slice` checks byte ranges and shares storage.
+  Editing a window through `make_mut` copies only the selected bytes.
 
 ### Changed
 
