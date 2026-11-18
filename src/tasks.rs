@@ -279,6 +279,52 @@ fn lock<V>(shared: &Shared<V>) -> Guard<'_, V> {
     shared.lock()
 }
 
+/// Keep unstarted work alive until registration releases the set lock. Tokio
+/// can destroy a submitted task synchronously when its runtime is shut down;
+/// that work's destructor may itself use a spawner for this set.
+#[allow(
+    clippy::expect_used,
+    reason = "the returned FnOnce takes the work exactly once"
+)]
+fn retain<W: Send>(work: W) -> (Shared<Option<W>>, impl FnOnce() -> W + Send) {
+    let retained = shared(Some(work));
+    let task = Arc::clone(&retained);
+    (retained, move || {
+        lock(&task).take().expect("task starts once")
+    })
+}
+
+// If runtime cancellation left the caller holding the last reference, preserve
+// the task's destructor panic just as the runtime would have done.
+fn release_work<E, W>(errors: &SharedErrors<E>, retained: Shared<Option<W>>) {
+    if let Err(payload) = panic::catch_unwind(panic::AssertUnwindSafe(|| drop(retained))) {
+        keep_panic(errors, JoinError::Panic(payload));
+    }
+}
+
+fn spawn<E>(
+    set: &Shared<JoinSet>,
+    errors: &SharedErrors<E>,
+    future: impl Future<Output = ()> + Send + 'static,
+) {
+    let (retained, work) = retain(future);
+    lock(set).spawn(async move { work().await });
+    release_work(errors, retained);
+}
+
+struct Registering<'a> {
+    set: &'a Shared<JoinSet>,
+    admitted: bool,
+}
+
+impl Drop for Registering<'_> {
+    fn drop(&mut self) {
+        if self.admitted {
+            lock(self.set).finish_spawn();
+        }
+    }
+}
+
 fn record<E>(errors: &SharedErrors<E>, error: E) -> Receipt {
     let mut errors = errors.lock();
     let place = errors.next;
@@ -353,9 +399,9 @@ async fn join_next(set: &Shared<JoinSet>) -> Option<Result<(), JoinError>> {
 /// has panicked, with the panic kept for the scope to resume.
 async fn reap<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
     poll_fn(|cx| {
-        let mut set = lock(set);
         loop {
-            match set.poll_join_next(cx) {
+            let next = lock(set).poll_join_next(cx);
+            match next {
                 Poll::Ready(Some(result)) => {
                     if reaped(errors, result) {
                         return Poll::Ready(());
@@ -456,6 +502,108 @@ pub struct Tasks<E> {
     named: Option<Shared<trace::Running>>,
 }
 
+/// A cloneable capability to add tasks to one [`Tasks`] scope.
+///
+/// Obtain one with [`Tasks::spawner`]. Registered children can add siblings
+/// even after the body returns successfully. Idle handles do not keep the
+/// scope alive: joining closes admission when the last registered task has
+/// been drained. Failure shutdown and owner drop also close admission.
+/// A spawn racing closure either joins the scope or returns [`SpawnError`].
+///
+/// Only `Tasks` can join, cancel, or claim task results with [`Tasks::value`].
+/// This handle does not limit concurrency or provide sibling-to-sibling waits.
+pub struct Spawner<E> {
+    set: Shared<JoinSet>,
+    world: World,
+    errors: SharedErrors<E>,
+}
+
+/// The scope has closed admission and the submitted future was not started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpawnError;
+
+impl fmt::Display for SpawnError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("task scope is closed")
+    }
+}
+
+impl std::error::Error for SpawnError {}
+
+impl<E: Send + 'static> Spawner<E> {
+    /// Starts `future` in this scope, or drops it without polling if the
+    /// scope has closed admission. Dropping rejected work happens outside
+    /// the admission lock, so its cleanup may safely attempt another spawn.
+    ///
+    /// Errors and panics follow [`Tasks::spawn`]'s rules. The returned handle
+    /// can be sent to the owner for [`Tasks::value`], or dropped to leave its
+    /// result to the scope. `SpawnError` is returned to the caller rather
+    /// than recorded as a task failure.
+    pub fn spawn<T, F>(&self, future: F) -> Result<Task<T, E>, SpawnError>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, E>> + Send + 'static,
+    {
+        self.world.check();
+        let (tx, rx) = Reply::pair();
+        let errors = Arc::clone(&self.errors);
+        // Declared before retained work so its destruction is included in
+        // registration, even if the runtime panics or cancels synchronously.
+        let mut registering = Registering {
+            set: &self.set,
+            admitted: false,
+        };
+        let (retained, work) = retain(async move {
+            let result = future.await.map_err(|error| record(&errors, error));
+            deliver(&errors, tx, result);
+        });
+        {
+            let mut set = lock(&self.set);
+            if set.begin_spawn() {
+                registering.admitted = true;
+                set.spawn(async move { work().await });
+            }
+        }
+        if registering.admitted {
+            release_work(&self.errors, retained);
+            Ok(Task {
+                world: self.world,
+                rx,
+                errors: Arc::clone(&self.errors),
+            })
+        } else {
+            Err(SpawnError)
+        }
+    }
+}
+
+impl<E> Clone for Spawner<E> {
+    fn clone(&self) -> Self {
+        self.world.check();
+        Self {
+            set: Arc::clone(&self.set),
+            world: self.world,
+            errors: Arc::clone(&self.errors),
+        }
+    }
+}
+
+impl<E> fmt::Debug for Spawner<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.world.check();
+        f.debug_struct("Spawner").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "deterministic")]
+impl<E> Drop for Spawner<E> {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            self.world.check();
+        }
+    }
+}
+
 /// The handle to a task spawned in a [`Tasks`] scope.
 ///
 /// Pass it to [`Tasks::value`] on the scope that spawned the task to wait for
@@ -479,6 +627,40 @@ pub struct Task<T, E> {
 }
 
 impl<E: Send + 'static> Tasks<E> {
+    /// Gives children permission to add siblings to this scope. Keeping a
+    /// spawner alive does not delay joining or shutdown.
+    ///
+    /// ```
+    /// use adamantium::{Actor, Tasks};
+    /// # #[tokio::main] async fn main() -> Result<(), &'static str> {
+    /// let visited = Actor::new(Vec::new());
+    /// Tasks::<&'static str>::run(async |tasks| {
+    ///     let spawner = tasks.spawner();
+    ///     let visited = visited.clone();
+    ///     tasks.spawn(async move {
+    ///         for page in ["home", "about", "contact"] {
+    ///             let visited = visited.clone();
+    ///             spawner.spawn(async move {
+    ///                 visited.with(|pages| pages.push(page));
+    ///                 Ok(())
+    ///             }).map_err(|_| "scope closed")?;
+    ///         }
+    ///         Ok(())
+    ///     });
+    ///     Ok(())
+    /// }).await?;
+    /// assert_eq!(visited.read(Vec::len), 3);
+    /// # Ok(()) }
+    /// ```
+    pub fn spawner(&self) -> Spawner<E> {
+        self.world.check();
+        Spawner {
+            set: Arc::clone(&self.set),
+            world: self.world,
+            errors: Arc::clone(&self.errors),
+        }
+    }
+
     /// An empty scope.
     pub fn new() -> Self {
         Self {
@@ -634,7 +816,7 @@ impl<E: Send + 'static> Tasks<E> {
         self.reap();
         let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
-        lock(&self.set).spawn(async move {
+        spawn(&self.set, &self.errors, async move {
             let result = future.await.map_err(|error| record(&errors, error));
             // Without a handle to take it, a value is dropped.
             deliver(&errors, tx, result);
@@ -713,7 +895,7 @@ impl<E: Send + 'static> Tasks<E> {
     {
         self.world.check();
         self.reap();
-        lock(&self.set).spawn(handled(future, on_error));
+        spawn(&self.set, &self.errors, handled(future, on_error));
     }
 
     /// Starts a named task whose error goes to `on_error`, with the contract
@@ -737,7 +919,7 @@ impl<E: Send + 'static> Tasks<E> {
         {
             self.reap();
             let task = self.instrument(name.into(), handled(future, on_error));
-            lock(&self.set).spawn(task);
+            spawn(&self.set, &self.errors, task);
         }
         #[cfg(not(feature = "tracing"))]
         {
@@ -762,11 +944,13 @@ impl<E: Send + 'static> Tasks<E> {
         self.reap();
         let (tx, rx) = Reply::pair();
         let errors = Arc::clone(&self.errors);
-        lock(&self.set).spawn_blocking(move || {
+        let (retained, work) = retain(move || {
             let result = f().map_err(|error| record(&errors, error));
             // A dropped handle discards the value.
             deliver(&errors, tx, result);
         });
+        lock(&self.set).spawn_blocking(move || work()());
+        release_work(&self.errors, retained);
         Task {
             world: self.world,
             rx,
@@ -880,7 +1064,16 @@ impl<E: Send + 'static> Tasks<E> {
                 self.abort();
                 aborted = true;
             }
-            match join_next(&self.set).await {
+            let next = poll_fn(|cx| {
+                let mut set = lock(&self.set);
+                let next = set.poll_join_next(cx);
+                if matches!(next, Poll::Ready(None)) {
+                    set.close();
+                }
+                next
+            })
+            .await;
+            match next {
                 Some(Ok(())) => {}
                 Some(Err(join_error)) => self.remember_panic(join_error),
                 None => break,
@@ -909,12 +1102,15 @@ impl<E: Send + 'static> Tasks<E> {
     }
 
     /// The number of unfinished tasks, including work being dropped on abort.
+    /// A concurrent [`Spawner::spawn`] call may still be registering or cleaning
+    /// up work not reflected here; joining waits for those calls as well.
     pub fn len(&self) -> usize {
         self.world.check();
         lock(&self.set).unfinished()
     }
 
-    /// Whether every spawned task has finished.
+    /// Whether every spawned task has finished, with [`len`](Self::len)'s
+    /// caveat for concurrent registration.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -973,10 +1169,10 @@ impl<E: Send + 'static> Tasks<E> {
     }
 
     fn abort(&mut self) {
+        lock(&self.set).abort_all();
         if let Some(cancellation) = &self.cancellation {
             cancellation.cancel();
         }
-        lock(&self.set).abort_all();
     }
 
     async fn drain(&mut self) {
@@ -998,10 +1194,10 @@ impl<E> Drop for Tasks<E> {
         if std::thread::panicking() && self.world.is_model() && self.world != World::current() {
             return;
         }
+        lock(&self.set).abort_all();
         if let Some(cancellation) = &self.cancellation {
             cancellation.request();
         }
-        // JoinSet's destructor requests aborts, but cannot await their completion.
     }
 }
 

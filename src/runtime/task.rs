@@ -43,6 +43,11 @@ fn production_error(error: tokio::task::JoinError) -> JoinError {
 pub(crate) struct JoinSet {
     inner: Set,
     world: World,
+    /// Shared admission closes under the same lock as registration and abort.
+    closed: bool,
+    /// A shared spawn may still be destroying synchronously cancelled work
+    /// outside the set lock. Draining must include that cleanup.
+    registering: usize,
     /// Who polled the set while it was empty, woken by the next spawn.
     idle: Option<Waker>,
 }
@@ -115,6 +120,8 @@ impl JoinSet {
                     waiter: None,
                 },
                 idle: None,
+                closed: false,
+                registering: 0,
             };
         }
         Self {
@@ -124,6 +131,8 @@ impl JoinSet {
                 unfinished: Arc::new(AtomicUsize::new(0)),
             },
             idle: None,
+            closed: false,
+            registering: 0,
         }
     }
 
@@ -140,6 +149,24 @@ impl JoinSet {
             Set::Model { tasks, changed, .. } => tasks.push(model::spawn(future, changed.clone())),
         }
         self.wake_idle();
+    }
+
+    pub(crate) fn begin_spawn(&mut self) -> bool {
+        self.world.check();
+        if self.closed {
+            return false;
+        }
+        self.registering += 1;
+        true
+    }
+
+    pub(crate) fn finish_spawn(&mut self) {
+        self.registering -= 1;
+        self.wake_idle();
+    }
+
+    pub(crate) fn close(&mut self) {
+        self.closed = true;
     }
 
     pub(crate) fn spawn_blocking(&mut self, f: impl FnOnce() + Send + 'static) {
@@ -206,6 +233,7 @@ impl JoinSet {
 
     pub(crate) fn abort_all(&mut self) {
         self.world.step_unless_panicking();
+        self.close();
         match &mut self.inner {
             Set::Production { tasks, .. } => tasks.abort_all(),
             #[cfg(feature = "deterministic")]
@@ -237,7 +265,8 @@ impl JoinSet {
     }
 
     /// Polls for a finished task and takes it out of the set, returning
-    /// `Ready(None)` if the set is empty. Whatever it returns, `cx` is woken
+    /// `Ready(None)` if the set and its registrations are empty. Whatever it
+    /// returns, `cx` is woken
     /// when there may be something new to take: when a task finishes, or,
     /// unlike Tokio's set, when the next task is spawned into an empty set.
     /// So a caller can keep polling for finished tasks while others are
@@ -282,6 +311,9 @@ impl JoinSet {
         };
         if let Poll::Ready(None) = polled {
             self.idle = Some(cx.waker().clone());
+            if self.registering != 0 {
+                return Poll::Pending;
+            }
         }
         polled
     }

@@ -88,8 +88,9 @@ pub use set::Set;
 pub use string::Str;
 #[cfg(feature = "tokio")]
 pub use tasks::{
-    Cancellation, ScopeError, Task, Tasks, blocking, concurrently, concurrently_ordered,
-    concurrently_ordered_until, concurrently_unordered, concurrently_unordered_until, first_ok,
+    Cancellation, ScopeError, SpawnError, Spawner, Task, Tasks, blocking, concurrently,
+    concurrently_ordered, concurrently_ordered_until, concurrently_unordered,
+    concurrently_unordered_until, first_ok,
 };
 pub use topic::{Subscriptions, Topic};
 pub use watch::{Watch, Watcher};

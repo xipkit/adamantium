@@ -37,6 +37,7 @@ The buffer of Serde reports that it is human-readable, so `Bytes` requests a seq
 `Tasks<E>` manages a scope of tasks.
 
 - `spawn` starts a task. `value` waits for its result.
+- `spawner` gives children a cloneable handle to add siblings to the same scope.
 - `spawn_handled` starts a task whose error goes to a handler instead of the scope. See [Handled tasks](#handled-tasks).
 - `join` and `Tasks::run` wait for the remaining tasks.
 - `join` returns the task errors that nothing observed.
@@ -45,6 +46,30 @@ The buffer of Serde reports that it is human-readable, so `Bytes` requests a seq
 - A task panic resumes in the scope. In `Tasks::run` and `Tasks::run_until`, a task panic also stops the body at its next `await`. The scope then aborts and drains the other tasks and resumes the panic.
 - Finished task entries are reaped without waiting when new async or blocking work is spawned. In `Tasks::run` and `Tasks::run_until`, they are also reaped as soon as the task finishes, even if the body spawns nothing more. `len()` counts unfinished tasks and `is_empty()` reports whether all work has finished; neither waits for joining.
 - When the error type cannot be inferred, specify it with `Tasks::<E>::run`. This occurs when all errors pass through `?`.
+
+### Discovering more work
+
+Use `tasks.spawner()` when a task discovers work that should join the same
+scope, such as a crawler finding links. `Spawner::spawn` takes `&self` and
+returns `Result<Task<T, E>, SpawnError>`. Its task handles and errors follow
+the same rules as `Tasks::spawn`; only the scope owner can call `value` or join.
+
+A successful body return begins joining. Registered children may continue
+adding siblings until the last registered task is drained. Keeping an idle
+spawner does not keep the scope alive. Registration and closure are atomic:
+each racing spawn either registers work that the scope joins, or returns
+`SpawnError` and drops the future without polling it.
+
+Failure shutdown, cancellation, deadlines and owner drop close shared admission
+before aborting. Surviving handles stay closed. Rejected futures are destroyed
+outside the admission lock, including cleanup that tries to spawn again.
+As with other scope work, dropping the owner cannot wait for cleanup or stop
+already running blocking closures.
+
+The handle does not bound concurrency or deduplicate work. Keep spawning in
+the body and send discoveries through a channel when a central coordinator
+is useful for those policies. See `cargo run --example discovery` for a
+self-contained graph traversal using a shared spawner.
 
 ### Handled tasks
 

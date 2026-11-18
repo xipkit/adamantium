@@ -36,6 +36,9 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.toolchain == 'beta' }}
+    env:
+      # Cargo 1.96 repeatedly hits HTTP/2 framing errors fetching the crates.io index.
+      CARGO_HTTP_MULTIPLEXING: ${{ matrix.toolchain == '1.96.0' && 'false' || 'true' }}
     strategy:
       fail-fast: false
       matrix:
