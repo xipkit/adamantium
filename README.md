@@ -78,7 +78,7 @@ The [library guide](docs/library.md) describes each type, and [`examples/server.
 | `serde` | No | Serialization for the values |
 | `signal` | No | `Cancellation::cancel_on_signal` for SIGINT, SIGTERM, and Ctrl-C |
 | `tracing` | No | Named task spans, and a warning that lists unfinished tasks when a deadline expires |
-| `deterministic` | No | A test harness that explores task interleavings from a seed. See [Deterministic tests](docs/testing.md). |
+| `deterministic` | No | A test harness with random, PCT, and bounded DFS scheduling and replay. See [Deterministic tests](docs/testing.md). |
 
 With `default-features = false`, the values, `Actor`, `Channel`, `Topic`, `Reply`, `Watch`, `Limit`, and `race` work without Tokio.
 
