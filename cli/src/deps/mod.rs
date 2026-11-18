@@ -6,6 +6,7 @@
 mod cfg;
 mod disallowed;
 pub(crate) mod metadata;
+mod policy;
 mod rules;
 mod scan;
 
@@ -18,7 +19,7 @@ use std::{
 
 use anyhow::Result;
 use clap::ValueEnum;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use self::{
     cfg::{Cfg, Target},
@@ -27,6 +28,8 @@ use self::{
     scan::{Crate, Site, UnsafeCounts, Unscanned},
 };
 use crate::manifest;
+
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum Format {
@@ -47,12 +50,15 @@ pub struct Report {
 }
 
 /// One dependency's `unsafe` code and disallowed calls.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Dependency {
     pub name: String,
     pub version: String,
     /// Where Cargo gets it from, or null for a path dependency.
     pub source: Option<String>,
+    /// The package directory of a path dependency, relative to the audit root when possible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub kind: Kind,
     pub forbids_unsafe: bool,
     #[serde(rename = "unsafe")]
@@ -63,27 +69,60 @@ pub struct Dependency {
 }
 
 /// The uses of one disallowed path.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Call {
     pub path: String,
     pub reason: String,
     pub sites: Vec<Site>,
 }
 
+#[derive(Serialize)]
+struct Output<'a> {
+    #[serde(flatten)]
+    report: &'a Report,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<policy::Evaluation<'a>>,
+}
+
 /// Audits the dependencies of the workspace at `path` and prints the report.
 /// `cargo_args` go to `cargo metadata` and `cargo tree`, to choose features.
-pub fn run(path: &Path, format: Format, cargo_args: &[String]) -> Result<ExitCode> {
+/// With `deny_new`, the exit status indicates regressions or an incomplete audit.
+pub fn run(
+    path: &Path,
+    format: Format,
+    cargo_args: &[String],
+    deny_new: bool,
+    baseline: Option<&Path>,
+) -> Result<ExitCode> {
+    let baseline = baseline.map(policy::Baseline::load).transpose()?;
     let root = manifest::root(path)?;
     let report = audit(&root, cargo_args)?;
+    let policy = deny_new
+        .then(|| policy::evaluate(&report, baseline.as_ref()))
+        .transpose()?;
+    let exit = policy
+        .as_ref()
+        .map_or(ExitCode::SUCCESS, policy::Evaluation::exit_code);
     let mut stdout = io::stdout().lock();
     match format {
         Format::Json => {
-            serde_json::to_writer_pretty(&mut stdout, &report)?;
+            serde_json::to_writer_pretty(
+                &mut stdout,
+                &Output {
+                    report: &report,
+                    policy,
+                },
+            )?;
             writeln!(stdout)?;
         }
-        Format::Text => print_text(&mut stdout, &report)?,
+        Format::Text => {
+            print_text(&mut stdout, &report)?;
+            if let Some(policy) = policy {
+                policy.print_text(&mut stdout)?;
+            }
+        }
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(exit)
 }
 
 fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
@@ -165,6 +204,20 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
             name: dependency.name.clone(),
             version: dependency.version.clone(),
             source: dependency.source.clone(),
+            path: dependency.source.is_none().then(|| {
+                let dir = dependency
+                    .root
+                    .strip_prefix(root)
+                    .unwrap_or(&dependency.root);
+                let path = dir.to_string_lossy();
+                if path.is_empty() {
+                    ".".to_owned()
+                } else if cfg!(windows) {
+                    path.replace('\\', "/")
+                } else {
+                    path.into_owned()
+                }
+            }),
             kind: dependency.kind,
             forbids_unsafe: scan.forbids_unsafe,
             unsafe_code: scan.unsafe_code,
@@ -174,7 +227,7 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
         });
     }
     Ok(Report {
-        schema_version: 1,
+        schema_version: SCHEMA_VERSION,
         root: root.to_path_buf(),
         target: triple,
         dependencies,
