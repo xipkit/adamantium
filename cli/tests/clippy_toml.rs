@@ -24,7 +24,11 @@ const LISTS: [&str; 3] = [
 
 /// Every feature that defines an item `clippy.toml` names. `tokio::task::Builder`
 /// also needs `--cfg tokio_unstable`.
-const ALL_FEATURES: &str = "async-channel,async-std/unstable,crossbeam-channel,flume,futures,parking_lot,smol,tokio/full,tokio/tracing";
+const ALL_FEATURES: &str = concat!(
+    "async-channel,async-std/unstable,crossbeam-channel,fastrand/std,flume,futures,parking_lot,",
+    "rand/thread_rng,rand/sys_rng,rand_08/std,rand_08/std_rng,rand_09/thread_rng,",
+    "smol,tokio/full,tokio/tracing",
+);
 
 /// A line of `cargo --message-format=json`, with the fields these tests read.
 #[derive(Deserialize)]
@@ -249,4 +253,10 @@ fn no_tokio_feature_set_warns() {
             "{features}"
         );
     }
+}
+
+#[test]
+fn randomness_paths_are_quiet_without_their_features() {
+    let reported = unresolved(&shipped().unwrap(), "fastrand,rand,rand_08,rand_09", &[]).unwrap();
+    assert!(reported.is_empty(), "{reported:?}");
 }

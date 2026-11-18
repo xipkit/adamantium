@@ -35,6 +35,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and `std::sync::mpsc::sync_channel`. Strict rules also report bounded Tokio
   `mpsc`, `Notify`, and `Semaphore`. Broadcast diagnostics recommend
   Adamantium's `Watch` when only the latest value matters.
+- `cargo-adamantium`: Default rules report thread-local and implicitly
+  seeded randomness from `rand` and `fastrand` and recommend
+  `adamantium::random` for replayable draws.
 
 ### Fixed
 

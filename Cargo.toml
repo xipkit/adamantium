@@ -15,6 +15,7 @@ exclude = [
     "cli/tests/fixtures/channels",
     "cli/tests/fixtures/strict",
     "cli/tests/fixtures/time",
+    "cli/tests/fixtures/random",
     "cli/tests/fixtures/deps",
     "cli/tests/fixtures/sync",
     "cli/tests/fixtures/state",
