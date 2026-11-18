@@ -30,6 +30,8 @@ changes behavior in a way to check.
 | `JoinSet::join_next` | `concurrently_unordered` | No |
 | `select!` racing futures for the first success | `first_ok` | Mostly |
 | `select!` waiting for the first of several events | `race` | Mostly |
+| `tokio::sync::oneshot` | `Reply::pair` | Yes |
+| `tokio::sync::watch` | `Watch::new` and `subscribe` | Mostly |
 | `tokio::sync::broadcast` | `Topic` | Mostly |
 | `tokio::sync::broadcast` whose sender must not wait for a slow receiver | `Fanout` | Mostly |
 | A detached worker fed by a channel | A worker task in the scope that sends to it | No |
@@ -1080,6 +1082,123 @@ async fn main() {
     })
     .await;
     assert_eq!(total, 6);
+}
+```
+
+## Channels
+
+`cargo adamantium fix` rewrites a local oneshot or watch channel whose sender
+and receiver are bound by one `let (sender, receiver) = ...` statement, when
+every use of both halves reads the same after the rewrite. A half can be moved
+into a task or another local, or cloned where Tokio allows it. Any other use,
+such as passing a half to a function, storing it in a struct, naming its type,
+or using it in a macro, leaves the channel as it was, and `fix` says why.
+
+### A single reply
+
+`oneshot::channel()` becomes `Reply::pair()`. The two behave the same way:
+`send` consumes the reply and hands the value back when the receiver was
+dropped or closed, dropping the reply unsent ends the wait with nothing, and
+a value sent before the receiver's `close` can still be received. The
+receiver isn't a future. Its `receive().await` gives an `Option` where
+awaiting Tokio's receiver gave a `Result`, so `fix` rewrites what reads the
+result: `is_ok` becomes `is_some`, `Ok(v)` becomes `Some(v)`, `Err(_)` becomes
+`None`, and `map_err(|_| e)` becomes `ok_or_else(|| e)`. A send's error is
+`Closed<T>` rather than `T`, so `fix` rewrites a send only when its result is
+discarded or tested. `unwrap` and `expect` would panic with another message,
+so `fix` leaves them for review, except on `try_recv`, whose errors print the
+same as `try_receive`'s.
+
+Before:
+
+```rust
+#[tokio::main]
+async fn main() {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        reply.send(42).ok();
+    });
+    assert_eq!(answer.await.ok(), Some(42));
+}
+```
+
+After:
+
+```rust
+use adamantium::{Reply, Tasks};
+
+#[tokio::main]
+async fn main() {
+    let (reply, answer) = Reply::pair();
+    let value = Tasks::<()>::run(async |t| {
+        t.spawn(async move {
+            reply.send(42).ok();
+            Ok(())
+        });
+        Ok(answer.receive().await)
+    })
+    .await;
+    assert_eq!(value, Ok(Some(42)));
+}
+```
+
+`fix` leaves the `tokio::spawn` for the [tasks](#tasks) rewrite.
+
+### The latest value
+
+`watch::channel(value)` becomes `Watch::new(value)` and a `Watcher` from
+`subscribe`. Both have seen the initial value, a clone of either starts
+where the original is, and when the last sender is dropped a receiver still
+gets a value it hasn't seen before it learns the channel is closed.
+`changed().await` becomes `receive().await`, which also marks the value seen
+and returns a copy of it, so the value must be `Clone`, and
+`*rx.borrow_and_update()` becomes `rx.get()`. As with a reply, `unwrap` and
+`expect` on a wait would panic with another message, so `fix` leaves them.
+
+Three differences make `fix` leave a channel for review:
+
+- Tokio's `send` fails, and drops the value, when no receiver is alive.
+  `Watch::send` keeps it for watchers subscribed later. `fix` rewrites a send
+  only when its result is discarded, and leaves a channel whose sender is
+  read, subscribed to or asked whether receivers remain.
+- `borrow` reads without marking the value seen, and `get` marks it. `fix`
+  rewrites `borrow` to `get` only when no receiver of the channel waits for
+  changes.
+- Tokio's `has_changed` fails once the sender is gone, even with an unseen
+  value, and `Watcher::has_changed` doesn't fail.
+
+Before:
+
+```rust
+#[tokio::main]
+async fn main() {
+    let (limit, mut watcher) = tokio::sync::watch::channel(10);
+    limit.send(20).ok();
+    drop(limit);
+    let mut seen = vec![*watcher.borrow_and_update()];
+    while watcher.changed().await.is_ok() {
+        seen.push(*watcher.borrow_and_update());
+    }
+    assert_eq!(seen, [20]);
+}
+```
+
+After:
+
+```rust
+use adamantium::Watch;
+
+#[tokio::main]
+async fn main() {
+    let limit = Watch::new(10);
+    let mut watcher = limit.subscribe();
+    limit.send(20).ok();
+    drop(limit);
+    let mut seen = vec![watcher.get()];
+    while watcher.receive().await.is_some() {
+        seen.push(watcher.get());
+    }
+    assert_eq!(seen, [20]);
 }
 ```
 

@@ -38,6 +38,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   without Tokio.
 - `cargo-adamantium`: `deps --deny-new` lets CI reject increases in unsafe
   code or unscoped task starts across dependency updates using a JSON baseline.
+- `cargo-adamantium`: `fix` rewrites a local Tokio `oneshot` channel to
+  `Reply::pair` and a local Tokio `watch` channel to `Watch::new` and
+  `subscribe`, when every use of both halves reads the same afterwards. It
+  leaves any other channel for review and says why, such as a watch send
+  whose result is checked, which fails in Tokio once no receiver is alive.
 
 ### Changed
 

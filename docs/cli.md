@@ -215,6 +215,28 @@ The parameter, the return value, and every value passed or taken are rewritten t
 - `clone` on a `&Mutex<T>`. That call copies the reference, but the same call on an actor copies the actor.
 - `RwLock`.
 
+### Oneshot and watch channels
+
+`fix` changes a local Tokio channel when one `let (sender, receiver) = ...` statement binds its halves and every use of each half reads the same after the rewrite. `fix` follows a half through moves into tasks and other locals, clones of watch halves, and shadowing. The migration guide compares the two APIs for [replies](migrating.md#a-single-reply) and [latest values](migrating.md#the-latest-value).
+
+| Before | After |
+| --- | --- |
+| `oneshot::channel()` | `Reply::pair()` |
+| `rx.await` with `ok`, `is_ok`, `is_err`, `unwrap_or`, `map_err(\|_\| e)`, or an `Ok(v)` and `Err(_)` pattern | `rx.receive().await` with `ok` removed, `is_some`, `is_none`, `unwrap_or`, `ok_or_else(\|\| e)`, or a `Some(v)` and `None` pattern |
+| `rx.try_recv()` | `rx.try_receive()` |
+| `watch::channel(v)` | `Watch::new(v)` and `subscribe()` |
+| `rx.changed().await` with `is_ok`, `is_err`, `map_err(\|_\| e)?`, or an `Ok(())` and `Err(_)` pattern | `rx.receive().await` with `is_some`, `is_none`, `ok_or_else(\|\| e)?`, or a `Some(_)` and `None` pattern |
+| `*rx.borrow_and_update()` or `rx.borrow_and_update().clone()` | `rx.get()` |
+
+`fix` leaves these channels for review, and names the reason:
+
+- A half passed to a function, stored in a field, returned, borrowed, or named in a macro or a type.
+- `unwrap` or `expect` on a send or a wait, which would panic with another message.
+- A oneshot receiver awaited inside a closure or an async block without `move`, which would borrow it instead of moving it.
+- A watch send whose result is used, and a watch sender that is read, subscribed to, or asked about its receivers. Tokio drops a value sent while no receiver is alive, and a `Watch` keeps it.
+- A watch receiver read with `borrow` that also waits for changes. `borrow` doesn't mark the value seen, and `get` does.
+- A watch receiver's `has_changed`, which in Tokio fails once the sender is gone.
+
 ## `init`
 
 `init` adds the rules to a project. After that, `cargo clippy` applies them without the command.

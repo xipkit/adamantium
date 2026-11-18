@@ -13,6 +13,7 @@ use syn::{spanned::Spanned, visit::Visit};
 
 use crate::{check, manifest};
 
+mod channels;
 mod scan;
 mod source;
 mod state;
@@ -117,6 +118,40 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
                     file.display()
                 );
             }
+        }
+    }
+    // A channel's rewrite changes its constructor and every use of its
+    // halves, so the edits for a file stand or fall together.
+    for (file, constructors) in channels(&diagnostics, &root) {
+        if !migration_available(&file, &root, Api::Core)? {
+            continue;
+        }
+        let source = fs::read_to_string(&file)?;
+        let outcome = channels::plan(&file, &source, &constructors);
+        for refusal in &outcome.refusals {
+            eprintln!(
+                "{}:{}: `{}` stays {}: {}\n  Review {GUIDE}#{}",
+                file.strip_prefix(&root).unwrap_or(&file).display(),
+                refusal.line,
+                refusal.name,
+                refusal.kind.describe(),
+                refusal.reason,
+                refusal.kind.section()
+            );
+        }
+        if outcome.edits.is_empty() {
+            continue;
+        }
+        if accept(&mut edits, outcome.edits) {
+            imports
+                .entry(file)
+                .or_default()
+                .extend_from_slice(channels::IMPORTS);
+        } else {
+            eprintln!(
+                "adamantium: {}: channel rewrites overlap another fix; run fix again once it applies",
+                file.display()
+            );
         }
     }
     // One pass per file sees every rewrite at once, so the imports they leave
@@ -487,6 +522,53 @@ fn mutexes(diagnostics: &[Value], root: &Path) -> BTreeMap<PathBuf, BTreeSet<(us
     files
 }
 
+/// The callees in each project file that Clippy resolved to a Tokio channel
+/// constructor fix can rewrite, outside macro expansions, by start, with
+/// their end and the channel they make.
+fn channels(
+    diagnostics: &[Value],
+    root: &Path,
+) -> BTreeMap<PathBuf, BTreeMap<usize, (usize, channels::Kind)>> {
+    let mut files: BTreeMap<PathBuf, BTreeMap<usize, (usize, channels::Kind)>> = BTreeMap::new();
+    for diagnostic in diagnostics {
+        let message = diagnostic["message"].as_str().unwrap_or("");
+        let kind = if message.contains("`tokio::sync::oneshot::channel`") {
+            channels::Kind::Oneshot
+        } else if message.contains("`tokio::sync::watch::channel`") {
+            channels::Kind::Watch
+        } else {
+            continue;
+        };
+        if diagnostic
+            .get("code")
+            .and_then(|code| code.get("code"))
+            .and_then(Value::as_str)
+            != Some("clippy::disallowed_methods")
+        {
+            continue;
+        }
+        for span in diagnostic["spans"].as_array().into_iter().flatten() {
+            if span["is_primary"] != true || !span["expansion"].is_null() {
+                continue;
+            }
+            let range = span["byte_start"]
+                .as_u64()
+                .zip(span["byte_end"].as_u64())
+                .and_then(|(start, end)| {
+                    Some((usize::try_from(start).ok()?, usize::try_from(end).ok()?))
+                });
+            if let Some(file) = span["file_name"]
+                .as_str()
+                .and_then(|name| source_file(root, name))
+                && let Some((start, end)) = range
+            {
+                files.entry(file).or_default().insert(start, (end, kind));
+            }
+        }
+    }
+    files
+}
+
 /// How much of Adamantium a file's package can name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Api {
@@ -706,6 +788,8 @@ const DISALLOWED_METHODS: &[(&str, &[&str])] = &[
         "messages-for-every-receiver",
         &["tokio::sync::broadcast::channel"],
     ),
+    ("a-single-reply", &["tokio::sync::oneshot::channel"]),
+    ("the-latest-value", &["tokio::sync::watch::channel"]),
     (
         "stopping-a-long-lived-task",
         &[
@@ -740,6 +824,17 @@ const DISALLOWED_TYPES: &[(&str, &[&str])] = &[
             "tokio::sync::broadcast::Sender",
             "tokio::sync::broadcast::Receiver",
         ],
+    ),
+    (
+        "a-single-reply",
+        &[
+            "tokio::sync::oneshot::Sender",
+            "tokio::sync::oneshot::Receiver",
+        ],
+    ),
+    (
+        "the-latest-value",
+        &["tokio::sync::watch::Sender", "tokio::sync::watch::Receiver"],
     ),
     ("results-as-they-finish", &["tokio::task::JoinSet"]),
 ];
@@ -1038,6 +1133,9 @@ mod tests {
             state::Reason::Unfollowed(""),
         ] {
             assert!(anchors.contains(reason.section()), "{}", reason.section());
+        }
+        for kind in [channels::Kind::Oneshot, channels::Kind::Watch] {
+            assert!(anchors.contains(kind.section()), "{}", kind.section());
         }
     }
 
