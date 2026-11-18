@@ -18,6 +18,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `adamantium`: `random::u64` and `random::up_to` give application code random
   draws that the deterministic harness takes from its seed and a `Replay`
   repeats.
+- `adamantium`: `Backoff::jitter` spreads each retry or restart wait between
+  half of its delay and the whole of it, drawn from `random`. A backoff without
+  it waits and schedules exactly as before.
 
 ## [0.3.0] - 2026-11-17
 

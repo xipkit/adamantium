@@ -6,13 +6,17 @@
 )]
 
 use adamantium::{
-    random,
+    Backoff, Cancellation, Restarts, ScopeError, Tasks, random,
     testing::{self, Config, FailureKind, Replay},
+    time,
 };
 use std::{
     future::Future,
     sync::{Arc, Mutex},
+    time::Duration,
 };
+
+const SECOND: Duration = Duration::from_secs(1);
 
 fn config() -> Config {
     Config {
@@ -62,6 +66,27 @@ async fn draws() -> Vec<u64> {
     draws.extend((0..4).map(|_| random::up_to(9)));
     draws
 }
+
+/// The waits between the attempts of a retry that never succeeds.
+async fn retry_waits(backoff: Backoff) -> Vec<Duration> {
+    let mut starts = Vec::new();
+    let result = adamantium::retry(&Cancellation::new(), None, backoff, || {
+        starts.push(time::now());
+        async { Err::<(), _>("no") }
+    })
+    .await;
+    assert_eq!(result, Err(ScopeError::Failed("no")));
+    starts.windows(2).map(|pair| pair[1] - pair[0]).collect()
+}
+
+fn jittered() -> Backoff {
+    Backoff::exponential(SECOND, SECOND * 16)
+        .attempts(9)
+        .jitter()
+}
+
+/// The delays `jittered` would wait without jitter.
+const DELAYS: [u64; 8] = [1, 2, 4, 8, 16, 16, 16, 16];
 
 /// How many random draws a record made, read from its saved form.
 fn random_steps(record: &Replay) -> usize {
@@ -126,5 +151,93 @@ fn a_replay_that_draws_differently_is_a_mismatch() {
             FailureKind::ReplayMismatch,
             "{draws} draws"
         );
+    }
+}
+
+#[test]
+fn jittered_retry_waits_stay_between_half_and_all_of_each_delay() {
+    let observed = log();
+    testing::check(config(), logging(&observed, || retry_waits(jittered()))).unwrap();
+    let observed = entries(&observed);
+    for waits in &observed {
+        assert_eq!(waits.len(), DELAYS.len());
+        for (wait, delay) in waits.iter().zip(DELAYS) {
+            let delay = SECOND * u32::try_from(delay).unwrap();
+            assert!(
+                delay / 2 <= *wait && *wait <= delay,
+                "{wait:?} for {delay:?}"
+            );
+        }
+    }
+    // Callers that fail together retry apart.
+    let mut distinct = observed.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), observed.len());
+}
+
+#[test]
+fn a_saved_record_replays_the_whole_jittered_delay_sequence() {
+    let observed = log();
+    let factory = logging(&observed, || retry_waits(jittered()));
+    let record = testing::check(config(), factory).unwrap();
+    assert_eq!(random_steps(&record), DELAYS.len());
+    let path = std::env::temp_dir().join(format!(
+        "adamantium-jitter-replay-{}.json",
+        std::process::id()
+    ));
+    record.save(&path).unwrap();
+    let loaded = Replay::load(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(loaded, record);
+    let replayed = log();
+    let factory = logging(&replayed, || retry_waits(jittered()));
+    assert_eq!(testing::replay(&loaded, factory).unwrap(), record);
+    assert_eq!(entries(&replayed), [last(&observed)]);
+}
+
+#[test]
+fn backoff_without_jitter_waits_each_delay_and_draws_nothing() {
+    let observed = log();
+    let plain = Backoff::exponential(SECOND, SECOND * 16).attempts(9);
+    let record = testing::check(config(), logging(&observed, move || retry_waits(plain))).unwrap();
+    let expected = DELAYS.map(|delay| SECOND * u32::try_from(delay).unwrap());
+    assert!(entries(&observed).iter().all(|waits| *waits == expected));
+    assert_eq!(random_steps(&record), 0);
+}
+
+#[test]
+fn jittered_restarts_wait_between_half_and_all_of_each_delay() {
+    let observed = log();
+    let factory = logging(&observed, || async {
+        let backoff = Backoff::exponential(SECOND, SECOND * 4).jitter();
+        let restarts = Restarts::new(4, Duration::from_secs(3600)).backoff(backoff);
+        let result = Tasks::run(async |tasks| {
+            let mut starts = Vec::new();
+            let worker = tasks.spawn_supervised(restarts, move |_| {
+                starts.push(time::now());
+                let failed = starts.len() <= 4;
+                let waits = starts
+                    .windows(2)
+                    .map(|pair| pair[1] - pair[0])
+                    .collect::<Vec<_>>();
+                async move { if failed { Err(()) } else { Ok(waits) } }
+            });
+            tasks.value(worker).await
+        })
+        .await;
+        result.unwrap()
+    });
+    let record = testing::check(config(), factory).unwrap();
+    assert_eq!(random_steps(&record), 4);
+    for waits in entries(&observed) {
+        assert_eq!(waits.len(), 4);
+        for (wait, delay) in waits.iter().zip([1, 2, 4, 4]) {
+            let delay = SECOND * delay;
+            assert!(
+                delay / 2 <= *wait && *wait <= delay,
+                "{wait:?} for {delay:?}"
+            );
+        }
     }
 }

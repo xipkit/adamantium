@@ -149,7 +149,7 @@ Tasks::run(async |tasks| {
 
 - A restart that is older than the window does not count. A task that fails occasionally continues to run.
 - A task that fails with no restart left ends with that error. The scope handles the error like the error of any other task.
-- `.backoff(backoff)` adds a wait before each restart. Each further restart in the same window waits longer. Only the delays of the `Backoff` apply. Its limit on attempts does not.
+- `.backoff(backoff)` adds a wait before each restart. Each further restart in the same window waits longer. Only the delays and jitter of the `Backoff` apply. Its limit on attempts does not.
 
 `tasks.spawn_supervised_named(name, restarts, work)` gives the task a name for the `tracing` feature. See [Task names and tracing](#task-names-and-tracing).
 
@@ -505,6 +505,7 @@ Keyed work may run on its own or under a `Limit`. While holding a key, entering 
 - `Backoff::exponential(first, max)` doubles the wait, up to `max`.
 - `Backoff::constant(delay)` keeps the wait fixed.
 - `.attempts(n)` limits the number of attempts. Without it, only the cancellation and the deadline end the retries.
+- `.jitter()` waits a random time between half of each delay and the whole delay, so callers that failed together retry apart. The delays grow as they would without it. The draws come from `adamantium::random`, so a deterministic test repeats them.
 - `retry_if` takes a predicate that decides which errors get another attempt.
 
 ### `RateLimit`
