@@ -80,7 +80,7 @@ steps:
 
 ## `fix`
 
-`fix` applies the rewrites that are safe to automate. It reports the others with a link to the [migration guide](migrating.md). It uses the same Clippy run and the same skip list as `check`.
+`fix` applies the rewrites that are safe to automate. It reports the others with a link to the section of the [migration guide](migrating.md) that covers them, or, for a rule the guide doesn't cover, the `cargo adamantium explain` command for it. It uses the same Clippy run and the same skip list as `check`.
 
 ### How to run it
 
