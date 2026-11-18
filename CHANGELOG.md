@@ -38,6 +38,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   without Tokio.
 - `cargo-adamantium`: `deps --deny-new` lets CI reject increases in unsafe
   code or unscoped task starts across dependency updates using a JSON baseline.
+- In `adamantium`, `Bytes::slice` checks byte ranges and shares storage.
+  Editing a window through `make_mut` copies only the selected bytes.
 
 ### Changed
 
