@@ -40,10 +40,11 @@ The exit status is the same for every output format.
 
 `--format json` prints a report to stdout. The report uses `schema_version: 3`.
 
-Each finding has the rule, message, file, line, column, and source.
+Each finding has the rule, message, file, line, column, source, and an optional `remediation`.
 
 - The source is the text of the line where the finding starts, without leading and trailing whitespace.
 - A finding without a line has `null` for the line, column, and source.
+- `remediation` combines the applicable replacement (from the disallowed path's reason in `clippy.toml` or the rule's explanation) with the migration guide section or `cargo adamantium explain` command for the finding. It is omitted when no guidance applies, and `check --baseline` ignores it when reading earlier `schema_version: 3` reports.
 
 The `warnings` array holds warnings about the Adamantium Clippy configuration and about unknown, renamed, or removed lints. Each warning has a message, file, and line.
 
@@ -56,7 +57,7 @@ The `warnings` array holds warnings about the Adamantium Clippy configuration an
 
 `--format sarif` prints a [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html) log to stdout. GitHub code scanning shows it as annotations on pull requests.
 
-- Each finding is an `error` result for its rule.
+- Each finding is an `error` result for its rule. When a finding has `remediation`, its SARIF result carries `properties.remediation`.
 - Build errors and warnings are tool notifications, not results. They raise no alerts.
 - File URIs are relative to the root of the git repository that holds the workspace. Outside git, they are relative to the workspace root.
 - A finding without a line, such as a missing `overflow-checks`, points at the first line of its file.
