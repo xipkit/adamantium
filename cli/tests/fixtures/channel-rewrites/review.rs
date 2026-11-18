@@ -70,17 +70,27 @@ async fn unwatched() -> bool {
     ended
 }
 
+/// A read in place, which copies nothing, where `Watcher::get` would clone
+/// the string.
+fn compared() -> bool {
+    let (compared_tx, compared_rx) = watch::channel(String::from("a"));
+    let same = *compared_rx.borrow() == "a";
+    drop(compared_tx);
+    same
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     printed();
     println!(
-        "{:?} {:?} {} {} {} {:?} {}",
+        "{:?} {:?} {} {} {} {:?} {} {}",
         passed().await,
         propagated().await,
         unbound(),
         checked(),
         subscribed(),
         borrowed().await,
-        unwatched().await
+        unwatched().await,
+        compared()
     );
 }

@@ -35,7 +35,10 @@
 //! value seen, where `Watcher::get` marks it; that is unseen unless the
 //! receiver also waits for changes, which is refused. `get` copies the value
 //! with `Clone`, as `borrow_and_update().clone()` does, and for `Copy` values
-//! `Clone` is the copy that `*rx.borrow()` makes.
+//! `Clone` is the copy that `*rx.borrow()` makes. That copy happens only
+//! where the dereference's value is moved out, as into a `let` binding, an
+//! argument or an arithmetic operand, so a dereference read in place, as in
+//! a comparison, is refused.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -123,6 +126,7 @@ const WATCH_SENDER: &str = "its sender is read, subscribed to or asked about rec
 const HAS_CHANGED: &str = "Tokio's `has_changed` fails once the sender is gone, even with an unseen value, where `Watcher::has_changed` doesn't";
 const BORROW_SEEN: &str = "`borrow` leaves the value unseen, but `Watcher::get` marks it seen, and the receiver also waits for changes";
 const AWAIT_CAPTURED: &str = "it is awaited inside a closure or an async block without `move`, which would borrow the receiver that awaiting Tokio's moves";
+const READ_IN_PLACE: &str = "`*rx.borrow()` reads the value where it is, as in a comparison, without the copy that `Watcher::get` would make with `Clone`";
 const BORROW_CAPTURED: &str = "`borrow` would become `Watcher::get`, which needs the receiver mutably, inside a closure or async block";
 
 /// Plans the channel rewrites for one file. `constructors` maps the start of
@@ -1078,6 +1082,7 @@ impl<'t> Analysis<'t> {
                 }
                 self.visit_expr(diverge);
             }
+            (pat, None) if binds_whole(pat) => self.value(&init.expr),
             _ => self.visit_expr(&init.expr),
         }
         self.declare(&local.pat);
@@ -1126,6 +1131,15 @@ fn ignored_error(call: &ExprMethodCall) -> Option<&Expr> {
     .then_some(&*closure.body)
 }
 
+/// Whether `pat` binds the whole value to one name, which moves it there.
+fn binds_whole(pat: &Pat) -> bool {
+    match pat {
+        Pat::Ident(ident) => ident.by_ref.is_none() && ident.subpat.is_none(),
+        Pat::Type(typed) => binds_whole(&typed.pat),
+        _ => false,
+    }
+}
+
 /// Whether `attr` only sets lint levels.
 fn lint_attribute(attr: &Attribute) -> bool {
     ["allow", "expect", "warn", "deny", "forbid"]
@@ -1151,7 +1165,7 @@ impl<'t> Visit<'t> for Analysis<'t> {
                     self.visit_expr(expr);
                 }
             }
-            Stmt::Expr(expr, None) => self.visit_expr(expr),
+            Stmt::Expr(expr, None) => self.value(expr),
             Stmt::Macro(mac) => {
                 if self.mentions(mac.mac.tokens.clone()) {
                     self.refuse(MACRO);
@@ -1184,7 +1198,7 @@ impl<'t> Visit<'t> for Analysis<'t> {
             if let Pat::Guard(guarded) = &arm.pat {
                 this.visit_expr(&guarded.guard);
             }
-            this.visit_expr(&arm.body);
+            this.value(&arm.body);
         });
     }
 
@@ -1234,7 +1248,10 @@ impl<'t> Visit<'t> for Analysis<'t> {
                 if self.half_method(call) {
                     return;
                 }
-                syn::visit::visit_expr_method_call(self, call);
+                self.visit_expr(&call.receiver);
+                for arg in &call.args {
+                    self.value(arg);
+                }
             }
             Expr::Await(awaited) => {
                 // A oneshot sender's `closed().await`.
@@ -1246,8 +1263,12 @@ impl<'t> Visit<'t> for Analysis<'t> {
                 }
                 syn::visit::visit_expr_await(self, awaited);
             }
+            // A dereference outside the places `value` follows reads the
+            // value where it is, and copies nothing.
             Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
-                if !self.read(expr, &unary.expr) {
+                if self.borrowed(&unary.expr).is_some() {
+                    self.refuse(READ_IN_PLACE);
+                } else {
                     syn::visit::visit_expr_unary(self, unary);
                 }
             }
@@ -1262,7 +1283,70 @@ impl<'t> Visit<'t> for Analysis<'t> {
                 }
                 match self.op(arg) {
                     Some(op) => self.take(&op),
-                    None => syn::visit::visit_expr_call(self, call),
+                    None => self.value(arg),
+                }
+            }
+            Expr::Call(call) if call.attrs.is_empty() => {
+                self.visit_expr(&call.func);
+                for arg in &call.args {
+                    self.value(arg);
+                }
+            }
+            Expr::Tuple(tuple) if tuple.attrs.is_empty() => {
+                for elem in &tuple.elems {
+                    self.value(elem);
+                }
+            }
+            Expr::Array(array) if array.attrs.is_empty() => {
+                for elem in &array.elems {
+                    self.value(elem);
+                }
+            }
+            Expr::Return(returned) if returned.attrs.is_empty() => {
+                if let Some(value) = &returned.expr {
+                    self.value(value);
+                }
+            }
+            Expr::Assign(assign) if assign.attrs.is_empty() => {
+                self.visit_expr(&assign.left);
+                self.value(&assign.right);
+            }
+            Expr::Binary(binary) if binary.attrs.is_empty() => {
+                use syn::BinOp;
+                match binary.op {
+                    // Arithmetic, bitwise and logical operators take both
+                    // operands by value.
+                    BinOp::Add(_)
+                    | BinOp::Sub(_)
+                    | BinOp::Mul(_)
+                    | BinOp::Div(_)
+                    | BinOp::Rem(_)
+                    | BinOp::And(_)
+                    | BinOp::Or(_)
+                    | BinOp::BitXor(_)
+                    | BinOp::BitAnd(_)
+                    | BinOp::BitOr(_)
+                    | BinOp::Shl(_)
+                    | BinOp::Shr(_) => {
+                        self.value(&binary.left);
+                        self.value(&binary.right);
+                    }
+                    // A compound assignment takes its right operand by value.
+                    BinOp::AddAssign(_)
+                    | BinOp::SubAssign(_)
+                    | BinOp::MulAssign(_)
+                    | BinOp::DivAssign(_)
+                    | BinOp::RemAssign(_)
+                    | BinOp::BitXorAssign(_)
+                    | BinOp::BitAndAssign(_)
+                    | BinOp::BitOrAssign(_)
+                    | BinOp::ShlAssign(_)
+                    | BinOp::ShrAssign(_) => {
+                        self.visit_expr(&binary.left);
+                        self.value(&binary.right);
+                    }
+                    // Comparisons take their operands by reference.
+                    _ => syn::visit::visit_expr_binary(self, binary),
                 }
             }
             Expr::Let(binding) => {
@@ -1319,7 +1403,7 @@ impl<'t> Visit<'t> for Analysis<'t> {
                     for input in &closure.inputs {
                         this.declare(input);
                     }
-                    this.visit_expr(&closure.body);
+                    this.value(&closure.body);
                 });
                 self.captured -= 1;
                 self.nested -= 1;
@@ -1380,23 +1464,44 @@ impl<'t> Analysis<'t> {
         true
     }
 
+    /// The call, receiver and whether it marks the value seen, when
+    /// `borrowed` is `rx.borrow()` or `rx.borrow_and_update()` on a watch
+    /// receiver.
+    fn borrowed<'e>(&self, borrowed: &'e Expr) -> Option<(&'e ExprMethodCall, usize, bool)> {
+        if self.kind != Kind::Watch {
+            return None;
+        }
+        let Expr::MethodCall(call) = borrowed else {
+            return None;
+        };
+        match self.method(borrowed, "borrow_and_update", Role::Receiver) {
+            Some(var) => Some((call, var, true)),
+            None => self
+                .method(borrowed, "borrow", Role::Receiver)
+                .map(|var| (call, var, false)),
+        }
+    }
+
+    /// Follows an expression whose value is moved or copied out, where
+    /// `*rx.borrow()` must copy the value, as `Watcher::get` does. Tokio
+    /// can't move it out from behind the borrow, so the value is `Copy`, and
+    /// for `Copy` values `Clone` is that copy.
+    fn value(&mut self, expr: &'t Expr) {
+        if let Expr::Unary(unary) = expr
+            && matches!(unary.op, syn::UnOp::Deref(_))
+            && unary.attrs.is_empty()
+            && self.read(expr, &unary.expr)
+        {
+            return;
+        }
+        self.visit_expr(expr);
+    }
+
     /// Follows `*rx.borrow()` and `rx.borrow().clone()` on a watch receiver,
     /// and their `borrow_and_update` forms, which become `rx.get()`. Returns
     /// whether `whole` was one.
     fn read(&mut self, whole: &'t Expr, borrowed: &'t Expr) -> bool {
-        if self.kind != Kind::Watch {
-            return false;
-        }
-        let Expr::MethodCall(call) = borrowed else {
-            return false;
-        };
-        let marks = match self.method(borrowed, "borrow_and_update", Role::Receiver) {
-            Some(var) => Some((var, true)),
-            None => self
-                .method(borrowed, "borrow", Role::Receiver)
-                .map(|var| (var, false)),
-        };
-        let Some((var, marks)) = marks else {
+        let Some((call, var, marks)) = self.borrowed(borrowed) else {
             return false;
         };
         if !marks {
@@ -1566,7 +1671,7 @@ mod tests {
     #[test]
     fn a_watch_channel_becomes_a_watch_and_a_watcher() {
         rewrites(
-            "use tokio::sync::{oneshot, watch};\n\nasync fn f(stop: oneshot::Sender<()>) -> u32 {\n    let (tx, mut rx) = watch::channel(0u32);\n    let _ = tx.send(1);\n    tx.send(2).ok();\n    while rx.changed().await.is_ok() {\n        if *rx.borrow_and_update() == 2 {\n            break;\n        }\n    }\n    drop(stop);\n    rx.borrow_and_update().clone()\n}\n",
+            "use tokio::sync::{oneshot, watch};\n\nasync fn f(stop: oneshot::Sender<()>) -> u32 {\n    let (tx, mut rx) = watch::channel(0u32);\n    let _ = tx.send(1);\n    tx.send(2).ok();\n    while rx.changed().await.is_ok() {\n        if rx.borrow_and_update().clone() == 2 {\n            break;\n        }\n    }\n    drop(stop);\n    rx.borrow_and_update().clone()\n}\n",
             "use tokio::sync::oneshot;\n\nasync fn f(stop: oneshot::Sender<()>) -> u32 {\n    let tx = ::adamantium::Watch::new(0u32);\n    let mut rx = tx.subscribe();\n    let _ = tx.send(1);\n    tx.send(2).ok();\n    while rx.changed().await.is_some() {\n        if rx.get() == 2 {\n            break;\n        }\n    }\n    drop(stop);\n    rx.get()\n}\n",
         );
     }
@@ -1621,6 +1726,50 @@ mod tests {
     }
 
     #[test]
+    fn watch_dereferences_that_copy_the_value_become_get() {
+        for (before, after) in [
+            ("let v: u8 = *rx.borrow();", "let v: u8 = rx.get();"),
+            ("let v = *rx.borrow() + 1;", "let v = rx.get() + 1;"),
+            (
+                "let mut v = 1; v += *rx.borrow();",
+                "let mut v = 1; v += rx.get();",
+            ),
+            (
+                "let v = u8::from(*rx.borrow());",
+                "let v = u8::from(rx.get());",
+            ),
+            (
+                "let v = 1u8.max(*rx.borrow());",
+                "let v = 1u8.max(rx.get());",
+            ),
+            ("let v = (*rx.borrow(), 1).0;", "let v = (rx.get(), 1).0;"),
+            ("let v = [*rx.borrow()][0];", "let v = [rx.get()][0];"),
+            ("let v; v = *rx.borrow();", "let v; v = rx.get();"),
+            (
+                "let v = match 1 { 1 => *rx.borrow(), _ => 0 };",
+                "let v = match 1 { 1 => rx.get(), _ => 0 };",
+            ),
+            (
+                "let v = { *rx.borrow() }; if v > 9 { return *rx.borrow(); }",
+                "let v = { rx.get() }; if v > 9 { return rx.get(); }",
+            ),
+            (
+                "drop(*rx.borrow()); let v = 0;",
+                "drop(rx.get()); let v = 0;",
+            ),
+        ] {
+            rewrites(
+                &format!(
+                    "fn f() -> u8 {{\n    let (tx, rx) = watch::channel(1u8);\n    {before}\n    drop(tx);\n    v\n}}\n"
+                ),
+                &format!(
+                    "fn f() -> u8 {{\n    let tx = ::adamantium::Watch::new(1u8);\n    let mut rx = tx.subscribe();\n    {after}\n    drop(tx);\n    v\n}}\n"
+                ),
+            );
+        }
+    }
+
+    #[test]
     fn shadowed_names_are_not_the_channel() {
         rewrites(
             "async fn f() -> Option<u8> {\n    let (tx, rx) = oneshot::channel();\n    {\n        let tx = 5u8;\n        println!(\"{tx}\");\n    }\n    let check = |rx: u8| rx + 1;\n    for tx in [1u8] {\n        let _ = check(tx);\n    }\n    if let Some(rx) = Some(2u8) {\n        let _ = check(rx);\n    }\n    tx.send(1).unwrap_or(());\n    rx.await.ok()\n}\n",
@@ -1642,11 +1791,11 @@ mod tests {
                 WATCH_UNWATCHED,
             ),
             (
-                "let (tx, rx) = watch::channel(0u8); let task = async move { let _ = *rx.borrow(); }; task.await; tx.send(1).ok();",
+                "let (tx, rx) = watch::channel(0u8); let task = async move { let _v = *rx.borrow(); }; task.await; tx.send(1).ok();",
                 WATCH_UNWATCHED,
             ),
             (
-                "let (tx, rx) = watch::channel(0u8); let task = async move { tx.send(1).ok(); }; task.await; let _ = *rx.borrow();",
+                "let (tx, rx) = watch::channel(0u8); let task = async move { tx.send(1).ok(); }; task.await; let _v = *rx.borrow();",
                 WATCH_UNWATCHED,
             ),
             // A panic would print another error.
@@ -1729,7 +1878,7 @@ mod tests {
                 HAS_CHANGED,
             ),
             (
-                "let (tx, mut rx) = watch::channel(0u8); let _ = rx.changed().await; let _ = *rx.borrow(); drop(tx);",
+                "let (tx, mut rx) = watch::channel(0u8); let _ = rx.changed().await; let _v = *rx.borrow(); drop(tx);",
                 BORROW_SEEN,
             ),
             (
@@ -1743,6 +1892,27 @@ mod tests {
             (
                 "let (tx, rx) = watch::channel(0u8); let _ = rx.borrow().len(); drop(tx);",
                 USE,
+            ),
+            // Reads in place, which copy nothing in Tokio.
+            (
+                "let (tx, rx) = watch::channel(0u8); let _ = *rx.borrow() == 1; drop(tx);",
+                READ_IN_PLACE,
+            ),
+            (
+                "let (tx, rx) = watch::channel(0u8); let _ = *rx.borrow(); drop(tx);",
+                READ_IN_PLACE,
+            ),
+            (
+                "let (tx, rx) = watch::channel((0u8, 1u8)); let _v = (*rx.borrow()).0; drop(tx);",
+                READ_IN_PLACE,
+            ),
+            (
+                "let (tx, rx) = watch::channel(0u8); let _v = &*rx.borrow(); drop(tx);",
+                READ_IN_PLACE,
+            ),
+            (
+                "let (tx, rx) = watch::channel((0u8, 1u8)); let (_c, _) = *rx.borrow(); drop(tx);",
+                READ_IN_PLACE,
             ),
             (
                 "let (tx, rx) = oneshot::channel::<u8>(); drop(tx); let waiter = async { rx.await.ok() }; let _ = waiter.await;",
