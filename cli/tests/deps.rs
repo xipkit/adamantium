@@ -17,9 +17,13 @@ fn fixture() -> PathBuf {
 }
 
 fn deps(args: &[&str]) -> io::Result<Output> {
+    deps_at(&fixture(), args)
+}
+
+fn deps_at(path: &Path, args: &[&str]) -> io::Result<Output> {
     Command::new(env!("CARGO_BIN_EXE_cargo-adamantium"))
         .arg("deps")
-        .arg(fixture())
+        .arg(path)
         .args(args)
         .output()
 }
@@ -114,7 +118,9 @@ fn reported(dependency: &Value) -> TestResult<Sites> {
 #[test]
 fn deps_lists_runtime_and_build_dependencies_but_not_members_or_dev_dependencies() {
     let report = report(&[]).unwrap();
-    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["schema_version"], 2);
+    assert!(report.get("policy").is_none());
+    assert_eq!(dependency(&report, "safe").unwrap()["path"], "vendor/safe");
     let kinds: BTreeMap<&str, &str> = report["dependencies"]
         .as_array()
         .unwrap()
@@ -446,4 +452,232 @@ fn deps_without_a_manifest_is_an_error() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("no Cargo.toml"));
+}
+
+struct PolicyFixture {
+    dir: tempfile::TempDir,
+    baseline: PathBuf,
+}
+
+impl PolicyFixture {
+    fn new() -> TestResult<Self> {
+        let dir = tempfile::tempdir()?;
+        fs::create_dir_all(dir.path().join("src"))?;
+        fs::create_dir_all(dir.path().join("vendor/probe/src"))?;
+        fs::write(dir.path().join("src/lib.rs"), "")?;
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = 'app'\nversion = '0.1.0'\nedition = '2024'\n\
+             [dependencies]\nprobe = { path = 'vendor/probe' }\n",
+        )?;
+        let baseline = dir.path().join("deps-baseline.json");
+        Ok(Self { dir, baseline })
+    }
+
+    fn install(&self, version: &str, source: &str) -> TestResult<()> {
+        let probe = self.dir.path().join("vendor/probe");
+        fs::write(
+            probe.join("Cargo.toml"),
+            format!("[package]\nname = 'probe'\nversion = '{version}'\nedition = '2024'\n"),
+        )?;
+        fs::write(probe.join("src/lib.rs"), source)?;
+        let mut cargo = Command::new(env!("CARGO"));
+        if self.dir.path().join("Cargo.lock").exists() {
+            cargo.args(["update", "-p", "probe"]);
+        } else {
+            cargo.arg("generate-lockfile");
+        }
+        let output = cargo
+            .arg("--offline")
+            .current_dir(self.dir.path())
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
+    fn audit(&self, args: &[&str]) -> io::Result<Output> {
+        deps_at(
+            self.dir.path(),
+            &[args, &["--", "--locked", "--offline"]].concat(),
+        )
+    }
+
+    fn save_baseline(&self) -> TestResult<()> {
+        let output = self.audit(&["--format", "json"])?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::write(&self.baseline, output.stdout)?;
+        Ok(())
+    }
+
+    fn compare(&self, format: &str) -> io::Result<Output> {
+        let baseline = self
+            .baseline
+            .to_str()
+            .ok_or_else(|| io::Error::other("the test baseline path is not UTF-8"))?;
+        self.audit(&["--format", format, "--deny-new", "--baseline", baseline])
+    }
+}
+
+fn policy_report(output: &Output, code: i32) -> TestResult<Value> {
+    assert_eq!(
+        output.status.code(),
+        Some(code),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+#[test]
+fn deps_policy_compares_an_unchanged_lockfile_and_dependency_updates() -> TestResult<()> {
+    let fixture = PolicyFixture::new()?;
+    fixture.install(
+        "0.1.0",
+        "pub unsafe fn first() {}\npub fn work() { std::thread::spawn(|| {}); }\n",
+    )?;
+    let lockfile = fixture.dir.path().join("Cargo.lock");
+    let initial_lock = fs::read(&lockfile)?;
+    fixture.save_baseline()?;
+
+    let unchanged = policy_report(&fixture.compare("json")?, 0)?;
+    assert_eq!(
+        unchanged["policy"],
+        json!({
+            "status": "clean",
+            "changes": { "added": [], "removed": [] },
+        })
+    );
+    assert_eq!(fs::read(&lockfile)?, initial_lock);
+
+    let from_zero = policy_report(&fixture.audit(&["--format", "json", "--deny-new"])?, 1)?;
+    let original_findings = &from_zero["policy"]["changes"]["added"];
+    assert_eq!(
+        original_findings,
+        &json!([
+            {
+                "dependency": { "name": "probe", "path": "vendor/probe" },
+                "kind": "unsafe", "category": "functions", "count": 1
+            },
+            {
+                "dependency": { "name": "probe", "path": "vendor/probe" },
+                "kind": "detached_task", "path": "std::thread::spawn", "file": "src/lib.rs", "count": 1
+            },
+        ])
+    );
+
+    fixture.install(
+        "0.2.0",
+        "
+        pub unsafe fn first() {}
+        pub unsafe fn second() {}
+        pub fn work() {
+            std::thread::spawn(|| {});
+            std::thread::spawn(|| {});
+            std::thread::sleep(std::time::Duration::ZERO);
+        }",
+    )?;
+    assert_ne!(fs::read(&lockfile)?, initial_lock);
+    let updated = policy_report(&fixture.compare("json")?, 1)?;
+    let probe = dependency(&updated, "probe")?;
+    assert_eq!(probe["version"], "0.2.0");
+    assert_eq!(probe["unsafe"]["functions"], 2);
+    assert_eq!(probe["calls"].as_array().unwrap().len(), 2);
+    assert_eq!(updated["policy"]["changes"]["added"], *original_findings);
+    assert_eq!(updated["policy"]["changes"]["removed"], json!([]));
+    let text = fixture.compare("text")?;
+    assert_eq!(text.status.code(), Some(1));
+    let text = String::from_utf8(text.stdout)?;
+    assert!(text.contains("added 1 probe (path vendor/probe): unsafe functions"));
+    assert!(text.contains("added 1 probe (path vendor/probe): std::thread::spawn in src/lib.rs"));
+
+    fixture.install(
+        "0.3.0",
+        "pub fn work() { std::thread::sleep(std::time::Duration::ZERO); }",
+    )?;
+    let reduced = policy_report(&fixture.compare("json")?, 0)?;
+    assert_eq!(reduced["policy"]["changes"]["added"], json!([]));
+    assert_eq!(reduced["policy"]["changes"]["removed"], *original_findings);
+    Ok(())
+}
+
+#[test]
+fn deps_policy_rejects_an_incomplete_scan_and_an_incomplete_baseline() -> TestResult<()> {
+    let fixture = PolicyFixture::new()?;
+    fixture.install("0.1.0", "")?;
+    fixture.save_baseline()?;
+    fixture.install("0.2.0", "mod missing;\npub unsafe fn new_finding() {}")?;
+
+    let partial = policy_report(&fixture.compare("json")?, 2)?;
+    assert_eq!(partial["policy"], json!({"status": "error"}));
+    let probe = dependency(&partial, "probe")?;
+    assert_eq!(probe["unsafe"]["functions"], 1);
+    assert!(
+        probe["unscanned"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("module `missing`")
+    );
+    fixture.save_baseline()?;
+    fixture.install("0.3.0", "")?;
+    let output = fixture.compare("json")?;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8(output.stderr)?.contains("its dependency findings are incomplete"));
+    Ok(())
+}
+
+#[test]
+fn deps_policy_distinguishes_path_sources_with_the_same_name() -> TestResult<()> {
+    let fixture = PolicyFixture::new()?;
+    fixture.install("0.1.0", "pub unsafe fn first() {}")?;
+    fixture.save_baseline()?;
+
+    let root = fixture.dir.path();
+    let manifest = root.join("Cargo.toml");
+    let updated = fs::read_to_string(&manifest)?.replace("vendor/probe", "vendor/other");
+    fs::rename(root.join("vendor/probe"), root.join("vendor/other"))?;
+    fs::write(&manifest, updated)?;
+
+    let report = policy_report(&fixture.compare("json")?, 1)?;
+    let changes = &report["policy"]["changes"];
+    assert_eq!(
+        changes["added"][0]["dependency"],
+        json!({"name": "probe", "path": "vendor/other"})
+    );
+    assert_eq!(
+        changes["removed"][0]["dependency"],
+        json!({"name": "probe", "path": "vendor/probe"})
+    );
+    Ok(())
+}
+
+#[test]
+fn deps_policy_treats_unresolved_task_calls_as_scan_gaps() -> TestResult<()> {
+    let fixture = PolicyFixture::new()?;
+    fixture.install("0.1.0", "pub fn work() { Vec::new().insert(0, 1); }")?;
+    let unrelated = policy_report(&fixture.audit(&["--format", "json", "--deny-new"])?, 0)?;
+    assert_eq!(
+        dependency(&unrelated, "probe")?["unresolved"],
+        json!({"insert": 1})
+    );
+
+    fixture.install(
+        "0.2.0",
+        "pub fn work() { std::thread::Builder::new().spawn(|| {}); }",
+    )?;
+    let partial = policy_report(&fixture.audit(&["--format", "json", "--deny-new"])?, 2)?;
+    assert_eq!(partial["policy"], json!({"status": "error"}));
+    assert_eq!(
+        dependency(&partial, "probe")?["unresolved"],
+        json!({"spawn": 1})
+    );
+    Ok(())
 }
