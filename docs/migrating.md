@@ -1285,7 +1285,10 @@ receiver needed.
 `fix` leaves a channel for review where the two differ:
 
 - Tokio panics on a capacity of zero, and `Channel` rounds it up to one, so
-  `fix` rewrites only a capacity that is a positive integer literal.
+  `fix` rewrites only a capacity that is a positive integer literal. A
+  `Channel` sets aside room for its whole capacity when it is made, where
+  Tokio's grows as values queue, so a large capacity costs that memory up
+  front.
 - Tokio admits waiting sends in the order they arrived. In a `Channel`, a
   send that arrives while another waits can take the freed room first. `fix`
   rewrites a channel only when at most one send can wait: the sender isn't
