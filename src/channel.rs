@@ -75,9 +75,10 @@ pub struct Sender<T> {
 /// The receiving half of a bounded channel, created by [`Channel::split`].
 ///
 /// Clones compete for messages: each message goes to exactly one receiver.
-/// Dropping the last receiver closes the channel and wakes pending sends
-/// with [`Closed`]. A combined [`Channel`] also owns a receiver and keeps
-/// the receiving side alive.
+/// Dropping the last receiver closes the channel, wakes pending sends with
+/// [`Closed`], and then drops the messages still queued, since nothing can
+/// receive them. A combined [`Channel`] also owns a receiver and keeps the
+/// receiving side alive.
 ///
 /// With the `tokio` feature, receivers implement `futures_core::Stream`,
 /// yielding queued messages until the channel is closed and drained.
@@ -771,8 +772,17 @@ impl<T> Queue<T> {
         *count -= 1;
         let last = *count == 0;
         drop(state);
-        if last && self.values.close() {
+        if !last {
+            return;
+        }
+        if self.values.close() {
             self.wake_closed();
+        }
+        if !sender {
+            // Nobody can receive these any more. Drop them now, after waking
+            // waiters and outside every lock, so a destructor that sends on or
+            // drops a handle to this channel sees it closed and cannot deadlock.
+            self.values.clear();
         }
     }
 }

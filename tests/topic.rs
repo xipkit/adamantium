@@ -189,7 +189,7 @@ impl Drop for Message {
 }
 
 #[test]
-fn subscribing_frees_the_queues_of_subscribers_that_left() {
+fn a_subscriber_that_leaves_frees_its_queue() {
     use std::sync::atomic::Ordering;
 
     let drops = std::sync::Arc::default();
@@ -200,11 +200,10 @@ fn subscribing_frees_the_queues_of_subscribers_that_left() {
         resubscribe: None,
     };
     assert_eq!(send_now(&mut topic, message), 1);
-    drop(leaves);
     assert_eq!(drops.load(Ordering::Relaxed), 0);
-
-    let _stays = topic.subscribe();
+    drop(leaves);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(topic.subscriber_count(), 0);
 }
 
 #[test]

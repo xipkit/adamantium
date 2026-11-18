@@ -1,5 +1,5 @@
 #![allow(dead_code, unused_must_use)]
-use metal::{Actor, Tasks, blocking};
+use metal::{Actor, KeyedLimit, Limit, Tasks, blocking};
 use std::{fs as disk, io::{Cursor, Read, Write}, time::Duration};
 
 type State = Actor<u8>;
@@ -194,4 +194,131 @@ async fn race_with_timer(
     race((custom_work(), custom_work())).await;
     #[allow(adamantium_race_with_timer)]
     race((time::sleep(delay), custom_work())).await;
+}
+
+// Helpers: an effect is reported where its helper is called, or where the
+// helper's future is awaited, in the caller's context.
+fn load() -> std::io::Result<Vec<u8>> { disk::read("missing") }
+fn load_twice() { load(); load(); }
+fn offload() { let _ = blocking(|| load()); }
+fn construct() -> impl std::future::Future<Output = ()> { async { load(); } } // blocking
+async fn load_async() { load(); } // blocking
+fn retry<F: FnMut()>(mut f: F) { f(); }
+fn retry_twice<F: FnMut()>(mut f: F) { retry(&mut f); retry(f); }
+fn walk(n: u32) { if n == 0 { load(); } else { walk(n - 1); } }
+fn count(n: u32) -> u32 { if n == 0 { 0 } else { count(n - 1) + 1 } }
+fn even(n: u32) { if n == 0 { load(); } else { odd(n - 1); } }
+fn odd(n: u32) { if n != 0 { even(n - 1); } }
+fn is_even(n: u32) -> bool { n == 0 || is_odd(n - 1) }
+fn is_odd(n: u32) -> bool { n != 0 && is_even(n - 1) }
+
+pub async fn blocking_helpers() {
+    load(); // blocking
+    load_twice(); // blocking
+    walk(3); // blocking
+    odd(3); // blocking
+    retry(|| { load(); }); // blocking
+    retry(load_twice); // blocking
+    retry_twice(|| { load(); }); // blocking
+    Some("missing").map(disk::read); // blocking
+    blocking({ load(); || () }).await; // blocking
+    count(3);
+    is_even(3);
+    offload();
+    blocking(|| load()).await;
+    blocking(|| walk(3)).await;
+    let _later = construct();
+    construct().await;
+    let _closure = || load();
+    let _future = load_async();
+    load_async().await;
+}
+
+pub fn sync_helpers() {
+    load();
+    walk(3);
+    odd(3);
+    retry(|| { load(); });
+}
+
+fn peek(b: &State) -> u8 { b.snapshot() }
+fn peek_deep(b: &State, n: u32) -> u8 { if n == 0 { peek(b) } else { peek_deep(b, n - 1) } }
+fn deferred(b: &State) -> impl Fn() -> u8 + '_ { move || b.snapshot() }
+fn update<F: FnOnce(&mut u8)>(a: &State, f: F) { a.with(f); }
+async fn peek_async(b: &State) -> u8 { b.snapshot() }
+fn offload_nested(a: State, b: State) {
+    let _ = blocking(move || a.with(|_| { peek(&b); })); // nested
+}
+
+pub fn actor_helpers(a: &State, b: &State) {
+    a.with(|_| { peek(b); }); // nested
+    a.read(|_| peek_deep(b, 3)); // nested
+    update(a, |_| { b.snapshot(); }); // nested
+    a.with(|_| update(b, |_| ())); // nested
+    a.with(|_| { count(3); });
+    a.with(|_| { let _later = deferred(b); });
+    a.with(|_| { let _future = peek_async(b); });
+    update(a, |_| ());
+    peek(b);
+    peek_deep(b, 3);
+    let _ = blocking({ let a = a.clone(); move || { peek(&a); } });
+}
+
+async fn enter(l: &Limit) { l.run(|| async {}).await; }
+async fn enter_keyed(k: &KeyedLimit<u8>) { k.run(1, || async {}).await; }
+async fn descend(l: &Limit, n: u32) { if n == 0 { enter(l).await } else { Box::pin(descend(l, n - 1)).await } }
+async fn countdown(n: u32) -> u32 { if n == 0 { 0 } else { Box::pin(countdown(n - 1)).await + 1 } }
+async fn ping(l: &Limit, n: u32) { if n == 0 { enter(l).await } else { Box::pin(pong(l, n - 1)).await } }
+async fn pong(l: &Limit, n: u32) { if n != 0 { Box::pin(ping(l, n - 1)).await } }
+async fn guarded<F: std::future::Future<Output = ()>>(l: &Limit, f: F) { l.run(|| f).await }
+async fn guarded_work<W: FnOnce() -> Fut, Fut: std::future::Future<Output = ()>>(l: &Limit, work: W) { l.run(work).await }
+fn enter_sync(l: &Limit) -> impl std::future::Future<Output = ()> + '_ { l.run(|| async {}) }
+
+pub async fn limit_helpers(outer: &Limit, inner: &Limit, keys: &KeyedLimit<u8>) {
+    outer.run(|| inner.run(|| async {})).await; // limit
+    outer.run(|| async { inner.run(|| async {}).await; }).await; // limit
+    outer.run(|| enter(inner)).await; // limit
+    outer.run(|| async { enter(inner).await }).await; // limit
+    outer.run(|| descend(inner, 3)).await; // limit
+    outer.run(|| pong(inner, 3)).await; // limit
+    keys.run(1, || enter_keyed(keys)).await; // limit
+    keys.run(1, || async { outer.run(|| async {}).await }).await; // limit
+    guarded(outer, inner.run(|| async {})).await; // limit
+    guarded_work(outer, || inner.run(|| async {})).await; // limit
+    outer.run(|| enter_sync(inner)).await; // limit
+    outer.run(|| keys.run(1, || async {})).await;
+    outer.run(|| enter_keyed(keys)).await;
+    outer.run(|| async { let _later = enter(inner); }).await;
+    outer.run(|| async { countdown(3).await; }).await;
+    outer.run(|| countdown(3)).await;
+    guarded(outer, enter_keyed(keys)).await;
+    guarded_work(outer, || keys.run(1, || async {})).await;
+    outer.run(|| async { let _later = enter_sync(inner); }).await;
+    enter_sync(inner).await;
+    descend(inner, 3).await;
+    let _unpolled = outer.run(|| enter(inner));
+}
+
+trait Source { fn fetch(&self); }
+struct Disk;
+impl Source for Disk { fn fetch(&self) { load(); } }
+fn through_generic<S: Source>(source: &S) { source.fetch(); }
+struct Stalls;
+impl std::future::Future for Stalls {
+    type Output = ();
+    fn poll(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        load();
+        std::task::Poll::Ready(())
+    }
+}
+
+pub async fn dispatch(source: &dyn Source, pointer: fn()) {
+    Disk.fetch(); // blocking
+    Source::fetch(&Disk); // blocking
+    Stalls.await; // blocking
+    // Not followed: generic trait calls inside helpers, dynamic dispatch and
+    // function pointers.
+    through_generic(&Disk);
+    source.fetch();
+    pointer();
 }

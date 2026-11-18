@@ -2,8 +2,8 @@
 
 This opt-in prototype checks operations that Clippy's path lists cannot express:
 blocking work in async execution, actor access nested inside an actor callback,
-and `adamantium::race` calls that pair a timer with a future that may not be
-drop-safe.
+a limit entered inside limit work that forbids it, and `adamantium::race` calls
+that pair a timer with a future that may not be drop-safe.
 Ordinary `cargo adamantium check`, `init`, and library builds do not install or
 load it. Actor-cycle detection is outside its scope. Keep the runtime nesting guard.
 
@@ -57,6 +57,7 @@ Use the existing `skip`, `allow`, and `exceptions` metadata with the exact names
 
 - `adamantium_blocking_in_async`
 - `adamantium_nested_actor_access`
+- `adamantium_nested_limit`
 - `adamantium_race_with_timer`
 
 These names are experimental, separate from the standard `rules` list. `init`
@@ -86,6 +87,12 @@ merely created inside a callback does not inherit its actor context; calling tha
 closure inline does. A future returned for later polling starts a fresh actor
 context. Its body still gets the async blocking check.
 
+`adamantium_nested_limit` checks `Limit::run` and `run_until`, and
+`KeyedLimit::run` and `run_until`, polled inside the work of a limit: the work
+closure and the future it returns. Limit work may enter a `KeyedLimit`; any other
+nesting panics at runtime and is reported. Only polling enters a limit, so a `run`
+future constructed inside limit work and polled after it is allowed.
+
 `adamantium_race_with_timer` checks `adamantium::race` (and `Race::race`) calls
 on tuple literals when at least one arm is a timer (`time::sleep` or
 `time::sleep_until`), flagging the call unless every arm is on the documented
@@ -98,21 +105,45 @@ blocks whose awaited calls are all on that list.
 Inline closure calls (including locally aliased closures), actor callbacks,
 `Option`/`Result` mapping and fallback callbacks, and the listed eager `Iterator`
 callbacks inherit execution context. Lazy iterator adapters are not followed.
-`blocking` and `Tasks::spawn_blocking` callbacks start outside the caller's async
-and actor context. Their **argument expressions** still execute on the caller.
+`blocking` and `Tasks::spawn_blocking` callbacks start outside the caller's async,
+actor and limit context, so a helper that only hands work to them neither blocks
+nor accesses an actor. Their **argument expressions** still execute on the caller.
 An async body created inside a blocking callback is async code when later polled.
 The visitor memoizes each body/context pair to avoid expanding repeated closure
 calls exponentially.
 
-This is local, conservative analysis, not a proof of nonblocking or deadlock-free
-execution. It does not follow arbitrary helper functions, callbacks passed through
-unknown APIs, function-pointer coercions, dynamic dispatch, custom I/O wrappers,
-indirect dependency internals, or lazy iterator pipelines. It does not reason
-about reachability, conditional execution, or which thread later polls a future.
-Directly invoking a known blocking function as a higher-order function item
-callback, rather than inside a closure, is also outside the prototype's coverage.
-Unknown synchronous callback APIs can hide violations. Keep the runtime actor
-checks; the lint cannot establish absence of indirect nesting or ownership cycles.
+Local functions and methods are followed through any depth of calls, including
+direct and mutual recursion. Each has a summary of what calling it may do:
+block, access an actor, or enter a limit, and which of its closure or future
+parameters it invokes or awaits, and inside which actor callback or limit work.
+A summary does not depend on the caller, so a finding is reported where the
+helper is called, in the caller's context, with notes leading to the operation.
+`fn load() { fs::read(..) }` is fine in synchronous code and reported where async
+code calls it. Recursive summaries are the least fixed point: a function that
+could block only by calling itself does not block.
+
+Calling an async function only constructs its future, which has no effects. The
+future's body runs where it is awaited, so its effects apply at the `.await`,
+including through references, `Pin` and `Box`, which covers boxed recursion. A
+helper that returns `impl Future`, such as another function's future, is
+followed the same way, and so is the future returned by generic limit work.
+Its blocking calls are reported inside its own body, which is always async code.
+Function items passed to the callback APIs above are followed like closures, as
+are trait methods whose implementation is known at the call site.
+
+This is conservative analysis, not a proof of nonblocking or deadlock-free
+execution. Calls that cannot be resolved to one local body have no effects:
+dynamic dispatch, function pointers, trait methods called on a generic type
+inside a helper, and code in other crates beyond the operation lists above.
+Futures are followed only through `.await`: not when boxed into `dyn Future`,
+polled by hand, spawned, or handed to an unknown combinator. Callbacks passed
+through unknown APIs, custom I/O wrappers and lazy iterator pipelines are not
+followed. It does not reason about reachability or conditional execution: a
+helper that blocks on any path is reported wherever async code calls it. Lint
+levels apply where a finding is reported, so allow it at that call, not inside
+the helper. Unknown synchronous callback APIs can hide violations. Keep the
+runtime actor and limit checks; the lint cannot establish absence of indirect
+nesting or ownership cycles.
 
 ## Validation
 

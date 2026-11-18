@@ -13,7 +13,7 @@ use std::{
 };
 
 use adamantium::{
-    Channel, Closed, TryReceiveError, TrySendError,
+    Channel, Closed, Reply, TryReceiveError, TrySendError,
     testing::{self, Config, FailureKind},
 };
 use futures_util::{FutureExt, StreamExt};
@@ -141,6 +141,41 @@ fn last_receiver_drop_wakes_every_blocked_sender() {
                 }),
             ];
             testing::parallel(workers).await;
+        })
+    });
+}
+
+#[test]
+fn last_receiver_drop_ends_queued_and_blocked_replies_while_senders_remain() {
+    check(|| {
+        Box::pin(async {
+            let (requests, mailbox) = Channel::bounded(1).split();
+            let (queued, queued_answer) = Reply::<u8>::pair();
+            requests.try_send(queued).unwrap();
+            let (blocked, blocked_answer) = Reply::<u8>::pair();
+            let other = requests.clone();
+            let observer = requests.clone();
+            let workers: Vec<Worker> = vec![
+                Box::pin(async move {
+                    assert_eq!(queued_answer.receive().await, None);
+                    // Ending the reply must not wait for this sender to drop.
+                    assert!(requests.is_closed());
+                    drop(requests);
+                }),
+                Box::pin(async move {
+                    let Err(Closed(blocked)) = other.send(blocked).await else {
+                        panic!("nothing receives, so the send must fail");
+                    };
+                    drop(blocked);
+                    assert_eq!(blocked_answer.receive().await, None);
+                }),
+                Box::pin(async move {
+                    drop(mailbox);
+                }),
+            ];
+            testing::parallel(workers).await;
+            assert!(observer.is_closed());
+            assert!(observer.is_empty());
         })
     });
 }

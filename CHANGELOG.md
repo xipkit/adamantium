@@ -10,6 +10,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `cargo-adamantium`: the experimental lints follow local helper functions,
+  including recursive ones, and report blocking, nested actor access and the
+  new `adamantium_nested_limit` where async code or a callback calls the
+  helper or awaits its future.
 - `adamantium`: `Tasks::spawner()` returns a cloneable `Spawner` so children
   can add siblings to their scope, with the same joining and error rules.
   Spawning after the scope closes returns `SpawnError` without starting work.
@@ -69,6 +73,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- `adamantium`: Dropping a `Channel`'s last receiver drops the values still
+  queued, as Tokio's `mpsc` receivers do. Before, they lived until the last
+  sender dropped too, so a queued `Reply` kept its requester waiting.
 - `adamantium`: `time::sleep` caps waits longer than 30 years at 30 years on
   every supported Tokio version. Tokio before 1.54 kept them, so production
   could wait longer than the deterministic clock.
