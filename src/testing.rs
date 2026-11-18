@@ -32,11 +32,15 @@
 //! }).unwrap();
 //! ```
 //!
-//! A failure returns and prints a payload-free [`Replay`], including the seed,
-//! one-based iteration, step limit and engine versions. Save it with
-//! [`Replay::save`] and load it with [`Replay::load`] for [`replay`]. Replay
-//! requires the same code, dependency versions and fixture inputs. Passing
-//! seeded exploration does not prove that every possible execution is correct.
+//! [`check`] defaults to seeded random scheduling. Use [`Config::with_scheduler`]
+//! to select probabilistic concurrency testing (PCT) or bounded depth-first
+//! search (DFS). [`Replay::dfs_status`] reports whether DFS explored every
+//! reachable schedule or reached the execution limit with choices remaining.
+//!
+//! A failure returns and prints a payload-free [`Replay`] with the scheduler,
+//! bounds, engine versions and exact schedule. Save records with [`Replay::save`]
+//! and use [`replay_corpus`] to exercise them against one scenario. Replay
+//! requires compatible dependencies, scheduling behavior and fixture inputs.
 //!
 //! Real I/O, native threads, wall-clock time, uncontrolled randomness and foreign
 //! executors are outside the model: replace them with deterministic fixtures.
@@ -54,27 +58,35 @@ use std::{
     future::Future,
     io,
     panic::{self, AssertUnwindSafe},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
 };
 
 use serde::{Deserialize, Serialize};
-use shuttle::scheduler::{RandomScheduler, ReplayScheduler, Schedule, Scheduler, Task, TaskId};
+use shuttle::scheduler::{
+    DataSource, DfsScheduler, PctScheduler, RandomDataSource, RandomScheduler, Schedule, Scheduler,
+    Task, TaskId,
+};
 
 use crate::runtime::execution::Execution;
 
-const ENGINE: &str = "shuttle=0.9.10;engine=0.1.8;std=0.1.5;schedulers=0.1.1";
-// The clock driver changes task identities and scheduling choices in v1 traces.
-const FORMAT: u32 = 2;
+mod duplex;
+pub use duplex::{
+    DuplexConfig, DuplexControl, DuplexStream, LinkConfig, TransportFault, duplex,
+    duplex_controlled, duplex_with,
+};
 
-/// Bounds for seeded exploration. Every execution gets fresh factory state.
+const ENGINE: &str = "shuttle=0.9.10;engine=0.1.8;std=0.1.5;schedulers=0.1.1";
+const FORMAT: u32 = 3;
+
+/// Bounds for schedule exploration. Every execution gets fresh factory state.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
-    /// Seed for scheduling choices. Independent of wall-clock time.
+    /// Seed for random and PCT scheduling. DFS uses a fixed data seed.
     pub seed: u64,
-    /// Number of executions to explore; must be nonzero.
+    /// Maximum number of executions to explore. Must be nonzero.
     pub iterations: usize,
-    /// Maximum scheduling steps per execution; exhaustion fails the test.
+    /// Scheduling step limit per execution. Must be nonzero.
     pub max_steps: usize,
 }
 
@@ -88,13 +100,67 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Selects the scheduler for [`check`]. Passing a `Config` directly uses random scheduling.
+    pub fn with_scheduler(self, scheduler: SchedulerMode) -> Exploration {
+        Exploration {
+            config: self,
+            scheduler,
+        }
+    }
+}
+
+/// The scheduler and its exploration bounds, configured with [`Config::with_scheduler`].
+#[derive(Clone, Copy, Debug)]
+pub struct Exploration {
+    config: Config,
+    scheduler: SchedulerMode,
+}
+
+impl From<Config> for Exploration {
+    fn from(config: Config) -> Self {
+        config.with_scheduler(SchedulerMode::Random)
+    }
+}
+
+/// How [`check`] chooses which modeled task runs next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SchedulerMode {
+    /// Choose among runnable tasks using the configured seed.
+    Random,
+    /// Probabilistic concurrency testing. Randomize priorities after a calibration execution.
+    Pct {
+        /// At most `depth - 1` sampled priority changes per execution. Must be nonzero.
+        /// An explicit yield may also lower a task's priority.
+        depth: usize,
+    },
+    /// Enumerate task choices in depth-first order with the same random data stream each time.
+    Dfs,
+}
+
+/// Coverage of a DFS check whose explored schedules all passed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DfsStatus {
+    /// Every reachable modeled schedule for the fixed inputs passed.
+    Complete,
+    /// The execution limit was reached with schedules still to explore.
+    IterationLimit,
+}
+
 /// A payload-free, versioned execution record. Use [`replay`] to run it again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Replay {
     format: u32,
     engine: String,
+    #[serde(deserialize_with = "deserialize_scheduler")]
+    scheduler: SchedulerMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dfs_status: Option<DfsStatus>,
     seed: u64,
+    iterations: usize,
     iteration: usize,
     max_steps: usize,
     data_seed: u64,
@@ -103,9 +169,40 @@ pub struct Replay {
 }
 
 impl Replay {
+    fn new(exploration: Exploration) -> Self {
+        Self {
+            format: FORMAT,
+            engine: ENGINE.into(),
+            scheduler: exploration.scheduler,
+            dfs_status: None,
+            seed: exploration.config.seed,
+            iterations: exploration.config.iterations,
+            iteration: 0,
+            max_steps: exploration.config.max_steps,
+            data_seed: 0,
+            steps: Vec::new(),
+        }
+    }
+
+    /// The original exploration scheduler, including any mode-specific bound.
+    pub fn scheduler(&self) -> SchedulerMode {
+        self.scheduler
+    }
+
+    /// Coverage of the original DFS check. Absent for other modes and for a
+    /// DFS check that found a failing schedule.
+    pub fn dfs_status(&self) -> Option<DfsStatus> {
+        self.dfs_status
+    }
+
     /// The configured exploration seed.
     pub fn seed(&self) -> u64 {
         self.seed
+    }
+
+    /// The configured limit on the number of executions.
+    pub fn iterations(&self) -> usize {
+        self.iterations
     }
 
     /// The one-based iteration in the original exploration.
@@ -129,41 +226,84 @@ impl Replay {
         std::fs::write(path, bytes)
     }
 
-    /// Loads a record, rejecting incompatible formats or scheduling engines.
+    /// Loads a record. Invalid data errors identify incompatible metadata.
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
-        let record: Self =
-            serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)?;
+        #[derive(Deserialize)]
+        struct Header {
+            format: u32,
+        }
+
+        let bytes = std::fs::read(path)?;
+        // Read the version before requiring fields that older records lack.
+        let header: Header = serde_json::from_slice(&bytes).map_err(invalid_replay)?;
+        validate_format(header.format)?;
+        let record: Self = serde_json::from_slice(&bytes).map_err(invalid_replay)?;
         record.validate()?;
         Ok(record)
     }
 
     fn validate(&self) -> io::Result<()> {
-        if self.format != FORMAT
-            || self.engine != ENGINE
-            || self.iteration == 0
-            || self.max_steps == 0
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "incompatible adamantium::testing replay metadata",
+        validate_format(self.format)?;
+        if self.engine != ENGINE {
+            return Err(invalid_replay(format_args!(
+                "engine is {:?}, expected {ENGINE:?}",
+                self.engine
+            )));
+        }
+        if self.iterations == 0 {
+            return Err(invalid_replay("iterations must be nonzero"));
+        }
+        if !(1..=self.iterations).contains(&self.iteration) {
+            return Err(invalid_replay(format_args!(
+                "iteration is {}, expected 1..={}",
+                self.iteration, self.iterations
+            )));
+        }
+        if self.max_steps == 0 {
+            return Err(invalid_replay("max_steps must be nonzero"));
+        }
+        if let SchedulerMode::Pct { depth: 0 } = self.scheduler {
+            return Err(invalid_replay("scheduler.pct.depth must be nonzero"));
+        }
+        if self.dfs_status.is_some() && self.scheduler != SchedulerMode::Dfs {
+            return Err(invalid_replay("dfs_status requires the DFS scheduler"));
+        }
+        if self.dfs_status == Some(DfsStatus::IterationLimit) && self.iteration != self.iterations {
+            return Err(invalid_replay(
+                "dfs_status iteration_limit requires the final iteration",
             ));
+        }
+        if !matches!(self.steps.first(), Some(Some(_))) {
+            return Err(invalid_replay("steps must start with a task choice"));
         }
         Ok(())
     }
-
-    fn schedule(&self) -> Schedule {
-        let mut schedule = Schedule::new(self.data_seed);
-        for step in &self.steps {
-            match step {
-                Some(task) => schedule.push_task(TaskId::from(*task)),
-                None => schedule.push_random(),
-            }
-        }
-        schedule
-    }
 }
 
-/// Why an execution failed. A bound exhaustion is never a passing execution.
+fn deserialize_scheduler<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SchedulerMode, D::Error> {
+    SchedulerMode::deserialize(deserializer)
+        .map_err(|error| serde::de::Error::custom(format_args!("scheduler: {error}")))
+}
+
+fn validate_format(format: u32) -> io::Result<()> {
+    if format != FORMAT {
+        return Err(invalid_replay(format_args!(
+            "format is {format}, expected {FORMAT}"
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_replay(message: impl fmt::Display) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("invalid adamantium::testing replay: {message}"),
+    )
+}
+
+/// Why an execution failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailureKind {
     /// An assertion, primitive misuse or other panic in the scenario.
@@ -211,55 +351,217 @@ impl fmt::Display for Failure {
 
 impl std::error::Error for Failure {}
 
-/// Explores `config.iterations` schedules and returns the last successful record.
+/// Explores schedules up to [`Config::iterations`] and returns the last successful record.
 /// Stops on the first failure. The factory runs anew inside each execution.
+///
+/// Random and PCT checks pass when their execution budget is spent. The first
+/// PCT execution calibrates the scheduler and counts against that budget. If
+/// calibration offers no task choices, the check ends after that execution.
+/// A successful DFS check reports either [`DfsStatus::Complete`] or
+/// [`DfsStatus::IterationLimit`] in its record. Any execution that exceeds
+/// [`Config::max_steps`] fails with [`FailureKind::StepLimit`].
 ///
 /// Panics for zero bounds, a nested harness, a current Tokio runtime, or Shuttle
 /// environment overrides that would silently change the recorded seed.
-pub fn check<F, Fut>(config: Config, factory: F) -> Result<Replay, Failure>
+pub fn check<F, Fut>(config: impl Into<Exploration>, factory: F) -> Result<Replay, Failure>
 where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()>,
 {
+    let exploration = config.into();
+    let Config {
+        seed,
+        iterations,
+        max_steps,
+    } = exploration.config;
     assert!(
-        config.iterations > 0 && config.max_steps > 0,
+        iterations > 0 && max_steps > 0,
         "adamantium::testing bounds must be nonzero"
+    );
+    assert!(
+        !matches!(exploration.scheduler, SchedulerMode::Pct { depth: 0 }),
+        "adamantium::testing PCT depth must be nonzero"
     );
     assert!(
         std::env::var_os("SHUTTLE_RANDOM_SEED").is_none()
             && std::env::var_os("SHUTTLE_ALWAYS_PERSIST_SEED").is_none(),
         "adamantium::testing uses Config::seed and Replay::save; remove Shuttle environment overrides"
     );
-    run(
-        config,
-        RandomScheduler::new_from_seed(config.seed, config.iterations),
-        None,
-        factory,
-    )
+    let record = Replay::new(exploration);
+    match exploration.scheduler {
+        SchedulerMode::Random => run(
+            record,
+            RandomScheduler::new_from_seed(seed, iterations),
+            None,
+            factory,
+        ),
+        SchedulerMode::Pct { depth } => run(
+            record,
+            PctScheduler::new_from_seed(seed, depth, iterations),
+            None,
+            factory,
+        ),
+        SchedulerMode::Dfs => run(record, DfsScheduler::new(None, true), None, factory),
+    }
 }
 
 /// Replays one saved execution with fresh state and the original step limit.
-/// Incompatible metadata panics before the scenario runs. Code and all fixture
-/// inputs must match the original run; changed schedules fail explicitly.
+/// Incompatible metadata panics before the scenario runs. The fixture inputs
+/// must match the original run. A change to the schedule fails explicitly.
 pub fn replay<F, Fut>(record: &Replay, factory: F) -> Result<Replay, Failure>
 where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()>,
 {
-    assert!(
-        record.validate().is_ok(),
-        "incompatible adamantium::testing replay metadata"
-    );
-    run(
-        Config {
-            seed: record.seed,
-            iterations: 1,
-            max_steps: record.max_steps,
-        },
-        ReplayScheduler::new_from_schedule(record.schedule()),
-        Some(record.clone()),
-        factory,
-    )
+    let validation = record.validate();
+    assert!(validation.is_ok(), "{validation:?}");
+    play(record, ReplayPolicy::Exact, factory)
+}
+
+/// Why replaying a saved corpus stopped. Each variant identifies the failing file.
+#[derive(Debug)]
+pub enum CorpusError {
+    /// The record could not be read or was incompatible.
+    Load {
+        /// The record's path.
+        path: PathBuf,
+        /// The loading or validation error.
+        source: io::Error,
+    },
+    /// The loaded schedule failed or diverged during replay.
+    Execution {
+        /// The record's path.
+        path: PathBuf,
+        /// The failure reported by the replay.
+        source: Box<Failure>,
+    },
+}
+
+impl fmt::Display for CorpusError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Load { path, source } => write!(f, "load {}: {source}", path.display()),
+            Self::Execution { path, source } => write!(f, "replay {}: {source}", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for CorpusError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Load { source, .. } => Some(source),
+            Self::Execution { source, .. } => Some(source.as_ref()),
+        }
+    }
+}
+
+/// Replays each saved schedule in input order with fresh state from the same factory.
+/// Once all recorded steps match, round-robin scheduling can finish a scenario
+/// that now runs past its original failure. The original step limit applies.
+/// Returns the first load error, execution failure or schedule mismatch with its path.
+/// An empty corpus passes.
+pub fn replay_corpus<P, F, Fut>(
+    paths: impl IntoIterator<Item = P>,
+    factory: F,
+) -> Result<(), CorpusError>
+where
+    P: AsRef<Path>,
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()>,
+{
+    let factory = Arc::new(factory);
+    for path in paths {
+        let path = path.as_ref();
+        let record = Replay::load(path).map_err(|source| CorpusError::Load {
+            path: path.to_owned(),
+            source,
+        })?;
+        let factory = Arc::clone(&factory);
+        play(&record, ReplayPolicy::Prefix, move || factory()).map_err(|source| {
+            CorpusError::Execution {
+                path: path.to_owned(),
+                source: Box::new(source),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ReplayPolicy {
+    Exact,
+    Prefix,
+}
+
+fn play<F, Fut>(record: &Replay, policy: ReplayPolicy, factory: F) -> Result<Replay, Failure>
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()>,
+{
+    let scheduler = Playback {
+        steps: record.steps.clone().into_iter(),
+        data: RandomDataSource::initialize(record.data_seed),
+        started: false,
+        policy,
+    };
+    run(record.clone(), scheduler, Some((record, policy)), factory)
+}
+
+struct Playback {
+    steps: std::vec::IntoIter<Option<usize>>,
+    data: RandomDataSource,
+    started: bool,
+    policy: ReplayPolicy,
+}
+
+impl Playback {
+    fn next_step(&mut self) -> Option<Option<usize>> {
+        let step = self.steps.next();
+        assert!(
+            step.is_some() || matches!(self.policy, ReplayPolicy::Prefix),
+            "schedule ended early"
+        );
+        step
+    }
+}
+
+impl Scheduler for Playback {
+    fn new_execution(&mut self) -> Option<Schedule> {
+        if std::mem::replace(&mut self.started, true) {
+            return None;
+        }
+        Some(Schedule::new(self.data.reinitialize()))
+    }
+
+    fn next_task(
+        &mut self,
+        runnable: &[&Task],
+        current: Option<TaskId>,
+        _yielding: bool,
+    ) -> Option<TaskId> {
+        let step = self.next_step();
+        assert!(!matches!(step, Some(None)), "expected context switch");
+        if let Some(task) = step.flatten().map(TaskId::from) {
+            assert!(
+                runnable.iter().any(|candidate| candidate.id() == task),
+                "scheduled task is not runnable: {task:?}"
+            );
+            return Some(task);
+        }
+        // Prefer the next higher task ID, wrapping to the lowest runnable ID.
+        runnable
+            .iter()
+            .map(|task| task.id())
+            .min_by_key(|id| (current.is_some_and(|current| *id <= current), *id))
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        assert!(
+            !matches!(self.next_step(), Some(Some(_))),
+            "expected random choice"
+        );
+        self.data.next_u64()
+    }
 }
 
 /// Runs independent test workers and joins their results in input order.
@@ -291,30 +593,48 @@ where
     values
 }
 
-struct Trace {
-    record: Replay,
-}
-
-fn lock(trace: &Mutex<Trace>) -> std::sync::MutexGuard<'_, Trace> {
+fn lock(trace: &Mutex<Replay>) -> std::sync::MutexGuard<'_, Replay> {
     trace.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 struct Recording<S> {
     scheduler: S,
-    trace: Arc<Mutex<Trace>>,
+    trace: Arc<Mutex<Replay>>,
     replaying: bool,
+    saw_choice: bool,
 }
 
 impl<S: Scheduler> Scheduler for Recording<S> {
     fn new_execution(&mut self) -> Option<Schedule> {
-        let schedule = self.scheduler.new_execution()?;
-        Execution::next();
         let mut trace = lock(&self.trace);
-        if !self.replaying {
-            trace.record.iteration += 1;
+        // PCT needs a contended scheduling decision to initialize priorities
+        // after calibration. With no task choices there is no path to vary.
+        if !self.replaying
+            && matches!(trace.scheduler, SchedulerMode::Pct { .. })
+            && trace.iteration == 1
+            && !self.saw_choice
+        {
+            return None;
         }
-        trace.record.data_seed = schedule.seed;
-        trace.record.steps.clear();
+        let schedule = self.scheduler.new_execution();
+        if !self.replaying && trace.scheduler == SchedulerMode::Dfs {
+            // Query before checking the limit so a tree that finishes on the
+            // final allowed execution counts as complete.
+            if schedule.is_none() {
+                trace.dfs_status = Some(DfsStatus::Complete);
+            } else if trace.iteration == trace.iterations {
+                trace.dfs_status = Some(DfsStatus::IterationLimit);
+                return None;
+            }
+        }
+        let schedule = schedule?;
+        if !self.replaying {
+            trace.iteration += 1;
+        }
+        trace.data_seed = schedule.seed;
+        trace.steps.clear();
+        drop(trace);
+        Execution::next();
         Some(schedule)
     }
 
@@ -325,22 +645,23 @@ impl<S: Scheduler> Scheduler for Recording<S> {
         yielding: bool,
     ) -> Option<TaskId> {
         let runnable = crate::runtime::clock::runnable(runnable);
+        self.saw_choice |= runnable.len() > 1;
         let task = self.scheduler.next_task(&runnable, current, yielding)?;
-        lock(&self.trace).record.steps.push(Some(usize::from(task)));
+        lock(&self.trace).steps.push(Some(usize::from(task)));
         Some(task)
     }
 
     fn next_u64(&mut self) -> u64 {
         let value = self.scheduler.next_u64();
-        lock(&self.trace).record.steps.push(None);
+        lock(&self.trace).steps.push(None);
         value
     }
 }
 
 fn run<S, F, Fut>(
-    config: Config,
+    record: Replay,
     scheduler: S,
-    original: Option<Replay>,
+    original: Option<(&Replay, ReplayPolicy)>,
     factory: F,
 ) -> Result<Replay, Failure>
 where
@@ -349,27 +670,19 @@ where
     Fut: Future<Output = ()>,
 {
     let _execution = Execution::enter();
-    let trace = Arc::new(Mutex::new(Trace {
-        record: Replay {
-            format: FORMAT,
-            engine: ENGINE.into(),
-            seed: config.seed,
-            iteration: original.as_ref().map_or(0, |r| r.iteration),
-            max_steps: config.max_steps,
-            data_seed: 0,
-            steps: Vec::new(),
-        },
-    }));
+    let max_steps = record.max_steps;
+    let trace = Arc::new(Mutex::new(record));
     let scheduler = Recording {
         scheduler,
         trace: Arc::clone(&trace),
         replaying: original.is_some(),
+        saw_choice: false,
     };
     let mut engine = shuttle::Config::default();
     // Nested scope/select/cleanup polls exceed Shuttle's 60 KiB default in
     // Rust 1.88 debug builds. Match an ordinary worker's 2 MiB stack budget.
     engine.stack_size = 2 * 1024 * 1024;
-    engine.max_steps = shuttle::MaxSteps::FailAfter(config.max_steps);
+    engine.max_steps = shuttle::MaxSteps::FailAfter(max_steps);
     engine.failure_persistence = shuttle::FailurePersistence::None;
     engine
         .ungraceful_shutdown_config
@@ -380,12 +693,15 @@ where
             shuttle::future::block_on(factory());
         });
     }));
-    let record = lock(&trace).record.clone();
-    let kind = if original.as_ref().is_some_and(|r| r.steps != record.steps) {
+    let record = lock(&trace).clone();
+    let kind = if original.is_some_and(|(original, policy)| match policy {
+        ReplayPolicy::Exact => original.steps != record.steps,
+        ReplayPolicy::Prefix => !record.steps.starts_with(&original.steps),
+    }) {
         FailureKind::ReplayMismatch
     } else {
         match result {
-            Ok(()) => return Ok(record),
+            Ok(_) => return Ok(record),
             Err(payload) => classify(&*payload, original.is_some()),
         }
     };
@@ -397,8 +713,8 @@ where
     Err(failure)
 }
 
-// Shuttle exposes engine failures as panic strings. Keep these exact prefixes
-// covered by integration tests and version pins, and never serialize payloads.
+// Shuttle exposes engine failures as panic strings. Keep the prefixes covered by
+// integration tests and version pins. Never serialize payloads.
 fn classify(payload: &(dyn Any + Send), replaying: bool) -> FailureKind {
     let message = payload
         .downcast_ref::<String>()
@@ -418,35 +734,5 @@ fn classify(payload: &(dyn Any + Send), replaying: bool) -> FailureKind {
         FailureKind::ReplayMismatch
     } else {
         FailureKind::Panic
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Actor;
-    use shuttle::scheduler::DfsScheduler;
-
-    #[test]
-    fn exhausts_two_actor_updates() {
-        let last = run(
-            Config {
-                seed: 0,
-                iterations: 1,
-                max_steps: 100,
-            },
-            DfsScheduler::new(None, false),
-            None,
-            || async {
-                let count = Arc::new(Actor::new(0));
-                let worker = Arc::clone(&count);
-                let child = shuttle::thread::spawn(move || worker.with(|n| *n += 1));
-                count.with(|n| *n += 1);
-                child.join().unwrap();
-                assert_eq!(count.snapshot(), 2);
-            },
-        )
-        .unwrap();
-        assert!(last.iteration() > 1);
     }
 }

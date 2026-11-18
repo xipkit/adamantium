@@ -66,7 +66,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `Fanout` | Sends each event to every subscriber without waiting. It disconnects a subscriber that falls behind, which can then resubscribe. |
 | `race` | Waits for the first of several futures and drops the others. Use it in place of `select!`. |
 | `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. |
-| `retry`, `RateLimit`, `Limit` | Retries with backoff, a limit on calls in a time window, and a limit on calls that run at the same time. |
+| `retry`, `RateLimit`, `Limit`, `KeyedLimit` | Retry with backoff, cap the call rate or concurrency, or serialize calls for the same key. |
 | `blocking` | Runs blocking code on the blocking pool. |
 
 The [library guide](docs/library.md) describes each type, and [`examples/server.rs`](examples/server.rs) puts them together in a TCP server.
@@ -79,9 +79,9 @@ The [library guide](docs/library.md) describes each type, and [`examples/server.
 | `serde` | No | Serialization for the values |
 | `signal` | No | `Cancellation::cancel_on_signal` for SIGINT, SIGTERM, and Ctrl-C |
 | `tracing` | No | Named task spans, and a warning that lists unfinished tasks when a deadline expires |
-| `deterministic` | No | A test harness that explores task interleavings from a seed. See [Deterministic tests](docs/testing.md). |
+| `deterministic` | No | A test harness with random, PCT, and bounded DFS scheduling and replay. See [Deterministic tests](docs/testing.md). |
 
-With `default-features = false`, the values, `Actor`, `Channel`, `Topic`, `Fanout`, `Reply`, `Watch`, `Limit`, and `race` work without Tokio.
+With `default-features = false`, the values, `Actor`, `Channel`, `Topic`, `Fanout`, `Reply`, `Watch`, `Limit`, `KeyedLimit`, and `race` work without Tokio.
 
 ### WASI
 
@@ -145,6 +145,7 @@ Code that follows the rules has these properties:
 | No channel drops messages | Tokio's `broadcast` channel is not allowed. Use `Topic`, or `Fanout` to disconnect a subscriber that falls behind. |
 | No worker thread is blocked | `std::thread::sleep`, `block_in_place`, and `spawn_blocking` are not allowed. Use `blocking`. |
 | No timeout drops a future in the middle of its work | `tokio::time::timeout` is not allowed. Use `Tasks::run_until` or the `_until` methods. |
+| Unstructured selection restricted | The rules report `futures::select!` and, on Tokio 1.44 or later, `tokio::select!` invocations with future branches. Use `first_ok`, `Tasks::run_until` with `Cancellation`, or `receive_until` and `send_until` for channel operations. |
 | No result or future is discarded by accident | A discard must be an explicit `drop`. |
 | No panic from indexing, `unwrap`, or `panic!` | These are not allowed outside tests. |
 | No silent integer truncation or overflow | Lossy casts are not allowed. Release builds check for overflow. |

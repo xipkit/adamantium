@@ -19,6 +19,7 @@ exclude = [
     "cli/tests/fixtures/sync",
     "cli/tests/fixtures/state",
     "cli/tests/fixtures/cancellation",
+    "cli/tests/fixtures/select",
     "cli/tests/fixtures/macros",
 ]
 
@@ -45,6 +46,7 @@ cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"
 cast_sign_loss = "deny"
 dbg_macro = "deny"
+disallowed_macros = "deny"
 disallowed_methods = "deny"
 disallowed_types = "deny"
 exit = "deny"
@@ -95,7 +97,7 @@ default = ["tokio"]
 tokio = ["dep:tokio", "dep:async-stream", "dep:futures-core"]
 signal = ["tokio", "tokio/signal"]
 serde = ["dep:serde", "indexmap/serde"]
-deterministic = ["tokio", "dep:shuttle", "dep:shuttle-engine", "dep:shuttle-std", "dep:shuttle-schedulers", "dep:serde", "dep:serde_json"]
+deterministic = ["tokio", "tokio/io-util", "dep:shuttle", "dep:shuttle-engine", "dep:shuttle-std", "dep:shuttle-schedulers", "dep:serde", "dep:serde_json"]
 tracing = ["dep:tracing"]
 
 [dependencies]
@@ -112,7 +114,7 @@ shuttle = { version = "=0.9.10", optional = true }
 shuttle-engine = { version = "=0.1.8", optional = true }
 shuttle-std = { version = "=0.1.5", optional = true }
 shuttle-schedulers = { version = "=0.1.1", optional = true }
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"], optional = true }
+tokio = { version = "1.44", features = ["macros", "rt", "sync", "time"], optional = true }
 tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
@@ -125,12 +127,12 @@ serde_yaml = "0.9"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt"] }
 
 [target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time", "test-util"] }
+tokio = { version = "1.44", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time", "test-util"] }
 
 # Tokio builds for WASI with only these features: one thread, no sockets and
 # no paused clock.
 [target.'cfg(target_os = "wasi")'.dev-dependencies]
-tokio = { version = "1", features = ["io-util", "macros", "rt", "sync", "time"] }
+tokio = { version = "1.44", features = ["io-util", "macros", "rt", "sync", "time"] }
 
 [[bench]]
 name = "cow"

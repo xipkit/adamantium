@@ -19,9 +19,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   event, so what a feed receives has no gaps. `Feed::resubscribe` starts a
   new feed to recover. Clones of a `Fanout` can all send, and every feed
   receives their sends in one order.
+- `adamantium`: `KeyedLimit` serializes calls for the same key, including
+  inside a connection `Limit`, and evicts keys after their last call ends.
+- `adamantium`: deterministic tests can select probabilistic concurrency testing
+  or bounded depth-first search and replay saved failure schedules as a corpus.
 
 ### Changed
 
+- `adamantium`: replay records use format 3 to capture the scheduler and its
+  bounds. Regenerate saved records from previous formats.
+- `cargo-adamantium`: Default rules report Tokio `oneshot`, Tokio `watch`,
+  and `std::sync::mpsc::sync_channel`. Strict rules also report bounded Tokio
+  `mpsc`, `Notify`, and `Semaphore`. Broadcast diagnostics recommend
+  Adamantium's `Watch` when only the latest value matters.
 - `cargo-adamantium`: The messages for Tokio's `broadcast` channel suggest
   `Fanout` alongside `Topic`.
 

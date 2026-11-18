@@ -7,13 +7,22 @@
 
 use adamantium::{
     Actor, Cancellation, Channel, Reply, Tasks, TryReceiveError, Watch,
-    testing::{self, Config, FailureKind, Replay},
+    testing::{self, Config, CorpusError, DfsStatus, FailureKind, Replay, SchedulerMode},
 };
 use std::{
     future::pending,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
+
+const MODES: [SchedulerMode; 3] = [
+    SchedulerMode::Random,
+    SchedulerMode::Pct { depth: 3 },
+    SchedulerMode::Dfs,
+];
 
 fn config() -> Config {
     Config {
@@ -23,7 +32,14 @@ fn config() -> Config {
     }
 }
 
-async fn broken_increment() {
+fn race_config() -> Config {
+    Config {
+        iterations: 2_000,
+        ..config()
+    }
+}
+
+async fn split_increment() -> usize {
     let count = Actor::new(0);
     let workers = (0..2)
         .map(|_| {
@@ -37,19 +53,79 @@ async fn broken_increment() {
         })
         .collect::<Vec<_>>();
     testing::parallel(workers).await;
-    assert_eq!(count.snapshot(), 2, "lost update");
+    count.snapshot()
+}
+
+async fn broken_increment() {
+    assert_eq!(split_increment().await, 2, "lost update");
 }
 
 #[test]
 fn finds_and_replays_a_race_without_awaits() {
-    let failure = testing::check(config(), broken_increment).unwrap_err();
-    assert_eq!(failure.kind(), FailureKind::Panic);
-    assert!(failure.replay().iteration() <= 100);
-    let again = testing::replay(failure.replay(), broken_increment).unwrap_err();
-    assert_eq!(again.kind(), FailureKind::Panic);
-    assert_eq!(failure.replay(), again.replay());
-    let same_seed = testing::check(config(), broken_increment).unwrap_err();
-    assert_eq!(failure.replay(), same_seed.replay());
+    for mode in MODES {
+        let config = race_config();
+        let exploration = config.with_scheduler(mode);
+        let failure = testing::check(exploration, broken_increment).unwrap_err();
+        assert_eq!(failure.kind(), FailureKind::Panic);
+        assert_eq!(failure.replay().scheduler(), mode);
+        assert_eq!(failure.replay().dfs_status(), None);
+        assert_eq!(failure.replay().iterations(), config.iterations);
+        assert_eq!(failure.replay().max_steps(), config.max_steps);
+        assert!(failure.replay().iteration() <= config.iterations);
+        let again = testing::replay(failure.replay(), broken_increment).unwrap_err();
+        assert_eq!(again.kind(), FailureKind::Panic);
+        assert_eq!(failure.replay(), again.replay());
+        let same_exploration = testing::check(exploration, broken_increment).unwrap_err();
+        assert_eq!(failure.replay(), same_exploration.replay());
+    }
+}
+
+async fn two_workers() {
+    let count = Actor::new(0);
+    let worker = count.clone();
+    let child = shuttle::future::spawn(async move { worker.with(|n| *n += 1) });
+    count.with(|n| *n += 1);
+    child.await.unwrap();
+    assert_eq!(count.snapshot(), 2);
+}
+
+#[test]
+fn dfs_distinguishes_a_complete_tree_from_the_iteration_limit() {
+    let dfs = |iterations| {
+        Config {
+            iterations,
+            ..config()
+        }
+        .with_scheduler(SchedulerMode::Dfs)
+    };
+    let last = testing::check(dfs(100), two_workers).unwrap();
+    assert!(last.iteration() > 1);
+    assert!(last.iteration() < last.iterations());
+    assert_eq!(last.dfs_status(), Some(DfsStatus::Complete));
+    let exact = testing::check(dfs(last.iteration()), two_workers).unwrap();
+    assert_eq!(exact.iteration(), last.iteration());
+    assert_eq!(exact.dfs_status(), Some(DfsStatus::Complete));
+
+    let limited = testing::check(dfs(last.iteration() - 1), two_workers).unwrap();
+    assert_eq!(limited.dfs_status(), Some(DfsStatus::IterationLimit));
+    assert_eq!(limited.iteration(), last.iteration() - 1);
+    assert_eq!(testing::replay(&limited, two_workers).unwrap(), limited);
+}
+
+#[test]
+fn pct_finishes_calibration_without_task_choices() {
+    let exploration = Config {
+        iterations: 5,
+        ..config()
+    }
+    .with_scheduler(SchedulerMode::Pct { depth: 1 });
+    let record = testing::check(exploration, || async {}).unwrap();
+    assert_eq!(record.iteration(), 1);
+    assert_eq!(testing::replay(&record, || async {}).unwrap(), record);
+
+    let record = testing::check(exploration, two_workers).unwrap();
+    assert_eq!(record.iteration(), 5);
+    assert_eq!(testing::replay(&record, two_workers).unwrap(), record);
 }
 
 async fn atomic_increment() {
@@ -133,19 +209,18 @@ fn step_exhaustion_and_deadlock_are_distinct_failures_and_replay() {
             actor.with(|n| *n += 1);
         }
     }
-    let failure = testing::check(
-        Config {
+    for mode in MODES {
+        let exploration = Config {
             max_steps: 20,
             ..config()
-        },
-        spin,
-    )
-    .unwrap_err();
-    assert_eq!(failure.kind(), FailureKind::StepLimit);
-    assert_eq!(
-        testing::replay(failure.replay(), spin).unwrap_err().kind(),
-        FailureKind::StepLimit
-    );
+        }
+        .with_scheduler(mode);
+        let failure = testing::check(exploration, spin).unwrap_err();
+        assert_eq!(failure.kind(), FailureKind::StepLimit);
+        let again = testing::replay(failure.replay(), spin).unwrap_err();
+        assert_eq!(again.kind(), FailureKind::StepLimit);
+        assert_eq!(again.replay(), failure.replay());
+    }
     let failure = testing::check(config(), pending::<()>).unwrap_err();
     assert_eq!(failure.kind(), FailureKind::Deadlock);
     assert_eq!(
@@ -336,7 +411,21 @@ fn nesting_harnesses_and_zero_bounds_are_errors() {
         ))
         .is_err()
     );
+    assert!(
+        catch_unwind(|| testing::check(
+            config().with_scheduler(SchedulerMode::Pct { depth: 0 }),
+            || async {}
+        ))
+        .is_err()
+    );
     testing::check(config(), || async {}).unwrap();
+}
+
+fn replay_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "adamantium-replay-{}-{name}.json",
+        std::process::id()
+    ))
 }
 
 #[test]
@@ -345,19 +434,127 @@ fn trace_files_round_trip_without_payloads_and_validate_versions() {
         panic!("private fixture payload");
     })
     .unwrap_err();
-    let path = std::env::temp_dir().join(format!("adamantium-replay-{}.json", std::process::id()));
+    let path = replay_path("metadata");
     failure.replay().save(&path).unwrap();
     let json = std::fs::read_to_string(&path).unwrap();
     assert!(!json.contains("private fixture payload"));
     assert_eq!(Replay::load(&path).unwrap(), *failure.replay());
-    let previous_format = json.replace("\"format\":2", "\"format\":1");
-    assert_ne!(previous_format, json);
-    std::fs::write(&path, previous_format).unwrap();
-    assert!(Replay::load(&path).is_err());
-    let incompatible = json.replace("shuttle=0.9.10", "shuttle=0.0.0");
-    std::fs::write(&path, incompatible).unwrap();
-    assert!(Replay::load(&path).is_err());
+    let record: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let assert_invalid = |record: serde_json::Value, message: &str| {
+        std::fs::write(&path, record.to_string()).unwrap();
+        let error = Replay::load(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains(message), "{error}");
+    };
+
+    let mut old = record.as_object().unwrap().clone();
+    old.insert("format".into(), 2.into());
+    old.remove("scheduler");
+    old.remove("iterations");
+    assert_invalid(old.into(), "format is 2, expected 3");
+
+    let cases = [
+        ("engine", "shuttle=0.0.0".into(), "engine is"),
+        ("iterations", 0.into(), "iterations must be nonzero"),
+        ("iteration", 0.into(), "iteration is 0, expected 1..="),
+        ("iteration", 101.into(), "iteration is 101, expected 1..="),
+        ("max_steps", 0.into(), "max_steps must be nonzero"),
+        (
+            "steps",
+            serde_json::json!([]),
+            "steps must start with a task choice",
+        ),
+        (
+            "dfs_status",
+            "complete".into(),
+            "dfs_status requires the DFS scheduler",
+        ),
+        (
+            "scheduler",
+            "unknown_mode".into(),
+            "scheduler: unknown variant `unknown_mode`",
+        ),
+        (
+            "scheduler",
+            serde_json::json!({"pct": {"depth": 0}}),
+            "scheduler.pct.depth must be nonzero",
+        ),
+    ];
+    for (field, value, message) in cases {
+        let mut invalid = record.as_object().unwrap().clone();
+        invalid.insert(field.into(), value);
+        assert_invalid(invalid.into(), message);
+    }
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn corpus_replays_saved_failures_and_identifies_the_first_error() {
+    let paths = MODES.map(|mode| {
+        let failure =
+            testing::check(race_config().with_scheduler(mode), broken_increment).unwrap_err();
+        let path = replay_path(&format!("corpus-{mode:?}"));
+        failure.replay().save(&path).unwrap();
+        assert_eq!(Replay::load(&path).unwrap(), *failure.replay());
+        path
+    });
+    let [first, second, ..] = &paths;
+    let error = testing::replay_corpus(&paths, broken_increment).unwrap_err();
+    assert!(matches!(error, CorpusError::Execution { path, source }
+        if &path == first && source.kind() == FailureKind::Panic));
+
+    let error = testing::replay_corpus(&paths, || async {}).unwrap_err();
+    assert!(matches!(error, CorpusError::Execution { path, source }
+        if &path == first && source.kind() == FailureKind::ReplayMismatch));
+
+    let visits = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&visits);
+    let factory = move || {
+        observed.fetch_add(1, Ordering::Relaxed);
+        async { assert_eq!(split_increment().await, 1) }
+    };
+    testing::replay_corpus(&paths, factory.clone()).unwrap();
+    assert_eq!(visits.swap(0, Ordering::Relaxed), paths.len());
+
+    std::fs::write(second, "{\"format\":2}").unwrap();
+    let error = testing::replay_corpus(&paths, factory).unwrap_err();
+    assert!(matches!(error, CorpusError::Load { path, source }
+        if &path == second && source.to_string().contains("format is 2, expected 3")));
+    assert_eq!(visits.load(Ordering::Relaxed), 1);
+    for path in paths {
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn dfs_uses_fixed_random_data_and_replay_detects_an_extra_draw() {
+    use shuttle::rand::RngCore;
+
+    let data = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&data);
+    let factory = move || {
+        let observed = Arc::clone(&observed);
+        async move {
+            two_workers().await;
+            let value = shuttle::rand::thread_rng().next_u64();
+            observed.lock().unwrap().push(value);
+        }
+    };
+    let record =
+        testing::check(config().with_scheduler(SchedulerMode::Dfs), factory.clone()).unwrap();
+    assert!(record.iteration() > 1);
+    assert_eq!(testing::replay(&record, factory).unwrap(), record);
+    let draws = data.lock().unwrap();
+    assert_eq!(draws.len(), record.iteration() + 1);
+    assert!(draws.windows(2).all(|pair| pair.first() == pair.last()));
+
+    let mismatch = testing::replay(&record, || async {
+        two_workers().await;
+        let _first = shuttle::rand::thread_rng().next_u64();
+        let _extra = shuttle::rand::thread_rng().next_u64();
+    })
+    .unwrap_err();
+    assert_eq!(mismatch.kind(), FailureKind::ReplayMismatch);
 }
 
 #[test]

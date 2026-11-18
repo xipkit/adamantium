@@ -16,7 +16,11 @@ use serde::Deserialize;
 use toml_edit::{Document, DocumentMut, InlineTable, Item, Value};
 
 /// The arrays of `clippy.toml` whose entries name paths.
-const LISTS: [&str; 2] = ["disallowed-types", "disallowed-methods"];
+const LISTS: [&str; 3] = [
+    "disallowed-types",
+    "disallowed-methods",
+    "disallowed-macros",
+];
 
 /// Every feature that defines an item `clippy.toml` names. `tokio::task::Builder`
 /// also needs `--cfg tokio_unstable`.
@@ -49,8 +53,20 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn shipped() -> Result<DocumentMut> {
-    let text = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("clippy.toml"))?;
-    Ok(text.parse()?)
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-adamantium"))
+        .args(["rules", "--strict", "--format", "json"])
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rules: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    Ok(rules
+        .get("clippy_toml")
+        .and_then(serde_json::Value::as_str)
+        .context("the rules contain no Clippy configuration")?
+        .parse()?)
 }
 
 fn path(entry: &InlineTable) -> Result<&str> {
@@ -203,11 +219,12 @@ fn every_slice_method_resolves() {
     );
 }
 
-/// A project with only some of Tokio's features gets no warnings from the
-/// shipped entries. One misspelled entry shows that Clippy loaded Tokio and
-/// resolved paths in it.
+/// The paths fixture uses Tokio without dependencies that can re-enable its
+/// optional features. One misspelled entry shows that Clippy loaded Tokio and
+/// resolved paths in it even when sync is off.
 #[test]
 fn no_tokio_feature_set_warns() {
+    let shipped = shipped().unwrap();
     for features in [
         "tokio",
         "tokio/rt",
@@ -216,7 +233,7 @@ fn no_tokio_feature_set_warns() {
         "tokio/rt,tokio/sync",
         "tokio/full",
     ] {
-        let mut config = shipped().unwrap();
+        let mut config = shipped.clone();
         let entries = config["disallowed-methods"].as_array_mut().unwrap();
         let probe = entries
             .iter()

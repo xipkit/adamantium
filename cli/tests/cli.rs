@@ -119,6 +119,15 @@ fn strict_project(workspace: bool) -> io::Result<tempfile::TempDir> {
 
 #[test]
 fn init_strict_upgrades_packages_and_workspaces_and_is_idempotent() {
+    let rules = adamantium()
+        .args(["rules", "--strict", "--format", "json"])
+        .output()
+        .unwrap();
+    assert!(rules.status.success(), "{rules:?}");
+    let rules: serde_json::Value = serde_json::from_slice(&rules.stdout).unwrap();
+    let strict_clippy = rules["clippy_toml"].as_str().unwrap();
+    assert!(strict_clippy.contains("tokio::sync::mpsc::channel"));
+
     for workspace in [false, true] {
         let dir = strict_project(workspace).unwrap();
         let output = adamantium().arg("init").arg(dir.path()).output().unwrap();
@@ -128,6 +137,12 @@ fn init_strict_upgrades_packages_and_workspaces_and_is_idempotent() {
             String::from_utf8_lossy(&output.stderr)
         );
         let path = dir.path().join("Cargo.toml");
+        let clippy_path = dir.path().join("clippy.toml");
+        assert!(
+            !fs::read_to_string(&clippy_path)
+                .unwrap()
+                .contains("tokio::sync::mpsc::channel")
+        );
         assert!(
             !fs::read_to_string(&path)
                 .unwrap()
@@ -145,6 +160,7 @@ fn init_strict_upgrades_packages_and_workspaces_and_is_idempotent() {
             String::from_utf8_lossy(&output.stderr)
         );
         let manifest = fs::read_to_string(&path).unwrap();
+        assert_eq!(fs::read_to_string(&clippy_path).unwrap(), strict_clippy);
         let doc: toml_edit::DocumentMut = manifest.parse().unwrap();
         let parent = if workspace {
             &doc["workspace"]
@@ -174,6 +190,7 @@ fn init_strict_upgrades_packages_and_workspaces_and_is_idempotent() {
             assert!(output.status.success());
             assert!(String::from_utf8_lossy(&output.stderr).contains("already has the rules"));
             assert_eq!(fs::read_to_string(&path).unwrap(), manifest);
+            assert_eq!(fs::read_to_string(&clippy_path).unwrap(), strict_clippy);
         }
 
         let output = Command::new("cargo")
@@ -408,18 +425,23 @@ fn check_reports_disallowed_methods() {
 }
 
 /// Checks the fixture `name` and asserts that it produces a finding on exactly
-/// the lines of `src/lib.rs` that end in `// disallowed_types` or
-/// `// disallowed_methods`, for that rule, and no other finding. Returns the
-/// findings.
-fn check_marked_rules(name: &str) -> TestResult<Vec<serde_json::Value>> {
+/// the lines of `src/lib.rs` marked with a disallowed lint, for that rule, and
+/// no other finding. Marks prefixed with `strict` apply only in that tier.
+fn check_marked_rules(name: &str, strict: bool) -> TestResult<Vec<serde_json::Value>> {
     let root = fixture(name);
     let mut marked = Vec::new();
     for (index, line) in fs::read_to_string(root.join("src/lib.rs"))?
         .lines()
         .enumerate()
     {
-        for rule in ["disallowed_types", "disallowed_methods"] {
-            if line.ends_with(&format!("// {rule}")) {
+        for rule in [
+            "disallowed_types",
+            "disallowed_methods",
+            "disallowed_macros",
+        ] {
+            if line.ends_with(&format!("// {rule}"))
+                || (strict && line.ends_with(&format!("// strict {rule}")))
+            {
                 marked.push((format!("clippy::{rule}"), u64::try_from(index + 1)?));
             }
         }
@@ -427,10 +449,14 @@ fn check_marked_rules(name: &str) -> TestResult<Vec<serde_json::Value>> {
     marked.sort();
     assert!(!marked.is_empty(), "{name} marks no lines");
 
-    let output = adamantium()
+    let mut command = adamantium();
+    command
         .args(["adamantium", "check", "--format", "json"])
-        .arg(&root)
-        .output()?;
+        .arg(&root);
+    if strict {
+        command.arg("--strict");
+    }
+    let output = command.output()?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
@@ -458,18 +484,10 @@ fn check_marked_rules(name: &str) -> TestResult<Vec<serde_json::Value>> {
     Ok(findings)
 }
 
-/// Tokio's broadcast channel is reported; a `Semaphore` permit held across an
-/// await or forgotten, `watch`, and one `Channel` per receiver are not.
 #[test]
-fn check_reports_broadcast_and_allows_semaphore() {
-    for finding in check_marked_rules("sync").unwrap() {
-        assert!(
-            finding["message"]
-                .as_str()
-                .unwrap()
-                .contains("tokio::sync::broadcast::"),
-            "{finding}"
-        );
+fn check_applies_the_selected_sync_rules() {
+    for strict in [false, true, false] {
+        check_marked_rules("sync", strict).unwrap();
     }
 }
 
@@ -477,7 +495,7 @@ fn check_reports_broadcast_and_allows_semaphore() {
 /// and reasoned local exceptions remain allowed.
 #[test]
 fn check_reports_timeouts_and_allows_structured_deadlines() {
-    for finding in check_marked_rules("cancellation").unwrap() {
+    for finding in check_marked_rules("cancellation", false).unwrap() {
         assert_eq!(
             finding["message"], "use of a disallowed method `tokio::time::timeout`",
             "{finding}"
@@ -485,12 +503,18 @@ fn check_reports_timeouts_and_allows_structured_deadlines() {
     }
 }
 
+#[test]
+fn check_reports_select_at_each_unexcepted_call() {
+    let findings = check_marked_rules("select", false).unwrap();
+    assert_eq!(findings.len(), 8, "{findings:?}");
+}
+
 /// Every access method of a `thread_local!` value is reported, called on the
 /// static or through a `&LocalKey`, unless a local allow exempts it. Atomics,
 /// `OnceLock` and `LazyLock` statics, and a static `Actor` are not.
 #[test]
 fn check_reports_thread_locals_and_allows_atomics_and_statics() {
-    let mut methods: Vec<String> = check_marked_rules("state")
+    let mut methods: Vec<String> = check_marked_rules("state", false)
         .unwrap()
         .iter()
         .filter(|finding| finding["rule"] == "clippy::disallowed_methods")
@@ -1575,10 +1599,12 @@ fn rules_match_the_repository_manifest() {
         }
         declared.sort();
         assert_eq!(listed, declared, "strict = {strict}");
-        assert_eq!(
-            rules["clippy_toml"].as_str().unwrap(),
-            fs::read_to_string(repository_root().join("cli/clippy.toml")).unwrap()
-        );
+        if !strict {
+            assert_eq!(
+                rules["clippy_toml"].as_str().unwrap(),
+                fs::read_to_string(repository_root().join("cli/clippy.toml")).unwrap()
+            );
+        }
     }
 }
 

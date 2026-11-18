@@ -14,8 +14,7 @@ use std::{
     time::Duration,
 };
 
-use adamantium::{Actor, Backoff, Cancellation, Restarts, ScopeError, Tasks, time};
-use tokio::sync::oneshot;
+use adamantium::{Actor, Backoff, Cancellation, Reply, Restarts, ScopeError, Tasks, time};
 use tracing::{
     Event, Subscriber,
     field::{Field, Visit},
@@ -100,7 +99,7 @@ async fn deadlines_report_only_unfinished_named_tasks_in_body_and_join() {
         let subscriber = tracing_subscriber::registry().with(capture.clone());
         async {
             let deadline = time::now() + Duration::from_secs(10);
-            let (ready, started) = oneshot::channel();
+            let (ready, started) = Reply::pair();
             let mut scope = Box::pin(Tasks::run_until(
                 Cancellation::new(),
                 Some(deadline),
@@ -114,7 +113,7 @@ async fn deadlines_report_only_unfinished_named_tasks_in_body_and_join() {
                     tasks.spawn_named("duplicate", forever());
                     tasks.spawn_named("duplicate", forever());
                     tasks.spawn(forever());
-                    let (finished, finished_rx) = oneshot::channel();
+                    let (finished, finished_rx) = Reply::pair();
                     tasks.spawn_named("unawaited", async move {
                         finished.send(()).unwrap();
                         Ok(())
@@ -122,7 +121,7 @@ async fn deadlines_report_only_unfinished_named_tasks_in_body_and_join() {
                     assert_eq!(tasks.value(completed).await, Ok(42));
                     assert_eq!(tasks.value(failed).await, Err("handled"));
                     tasks.value(duplicate).await.unwrap();
-                    finished_rx.await.unwrap();
+                    finished_rx.receive().await.unwrap();
                     ready.send(()).unwrap();
                     if pending_body {
                         forever().await?;
@@ -132,7 +131,7 @@ async fn deadlines_report_only_unfinished_named_tasks_in_body_and_join() {
             ));
             begin(scope.as_mut()).await;
             // Drive the body until completed children have sent their results.
-            let mut started = Box::pin(started);
+            let mut started = Box::pin(started.receive());
             std::future::poll_fn(|cx| {
                 assert!(scope.as_mut().poll(cx).is_pending());
                 started.as_mut().poll(cx)
@@ -166,7 +165,11 @@ async fn deadline_reports_blocking_work_before_waiting_for_cleanup() {
     async {
         let cancellation = Cancellation::new();
         let deadline = time::now() + Duration::from_secs(10);
-        let (ready, started) = oneshot::channel();
+        let (ready, started) = Reply::pair();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the synchronous test gate needs a bounded blocking wait"
+        )]
         let (release, released) = std::sync::mpsc::sync_channel(1);
         let mut tasks = Tasks::<&str>::new();
         tasks.spawn_blocking_named("blocking", move || {
@@ -174,7 +177,7 @@ async fn deadline_reports_blocking_work_before_waiting_for_cleanup() {
             released.recv_timeout(Duration::from_secs(30)).unwrap();
             Ok(())
         });
-        started.await.unwrap();
+        started.receive().await.unwrap();
         let mut join = Box::pin(tasks.join_until(cancellation.clone(), Some(deadline), Ok(())));
         begin(join.as_mut()).await;
         tokio::time::advance(Duration::from_secs(10)).await;
@@ -236,7 +239,7 @@ async fn panicked_tasks_are_excluded_and_their_panic_still_propagates() {
     let subscriber = tracing_subscriber::registry().with(capture.clone());
     async {
         let deadline = time::now() + Duration::from_secs(10);
-        let (panicking, panicked) = oneshot::channel();
+        let (panicking, panicked) = Reply::pair();
         let mut scope = Box::pin(Tasks::run_until(
             Cancellation::new(),
             Some(deadline),
@@ -252,7 +255,7 @@ async fn panicked_tasks_are_excluded_and_their_panic_still_propagates() {
             },
         ));
         begin(scope.as_mut()).await;
-        panicked.await.unwrap();
+        panicked.receive().await.unwrap();
         tokio::time::advance(Duration::from_secs(10)).await;
         let panic = std::panic::AssertUnwindSafe(scope)
             .catch_unwind()
@@ -494,13 +497,13 @@ async fn a_named_handled_task_runs_its_handler_in_its_span_and_is_reported_until
     let deadline = time::now() + Duration::from_secs(10);
     let result = async {
         Tasks::<&str>::run_until(Cancellation::new(), Some(deadline), async |tasks| {
-            let (handled, handled_rx) = oneshot::channel();
+            let (handled, handled_rx) = Reply::pair();
             tasks.spawn_handled_named("failed", async { Err("reset") }, move |error| {
                 tracing::warn!(error, "connection failed");
                 handled.send(()).unwrap();
             });
             tasks.spawn_handled_named("stuck", forever(), |_| {});
-            handled_rx.await.unwrap();
+            handled_rx.receive().await.unwrap();
             forever().await
         })
         .await

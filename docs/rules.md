@@ -3,9 +3,9 @@
 ## Where the rules are
 
 - The default lint levels are in the `[workspace.lints]` table of this repository.
-- The Clippy configuration is in [`cli/clippy.toml`](../cli/clippy.toml). The Cargo configuration of the repository points Clippy at that same bundled file.
+- The default Clippy configuration is in [`cli/clippy.toml`](../cli/clippy.toml). The Cargo configuration of the repository points Clippy at that same bundled file.
 - `cargo adamantium rules` prints both.
-- The optional strict rules are in `[workspace.metadata.adamantium-strict.lints]`. `cargo adamantium rules --strict` prints them. They do not apply to this repository.
+- The optional strict tier adds lint levels from `[workspace.metadata.adamantium-strict.lints]` and Clippy paths from [`cli/clippy-strict.toml`](../cli/clippy-strict.toml). `cargo adamantium rules --strict` prints the combined rules.
 
 ## Properties
 
@@ -26,14 +26,27 @@ The rules and the library give these properties to code that follows them:
 | Explicit leak APIs and weak references restricted | `mem_forget`, `Box::leak`, `ManuallyDrop`, `Arc::downgrade`, and `Weak` are not allowed. |
 | No skipped cleanup | `exit`. `std::process::abort` is not allowed. |
 
+## Synchronization
+
+Adamantium's synchronization primitives use the deterministic runtime's scheduler when a test runs under it. Use `Topic` to deliver every broadcast message to each subscriber with backpressure. Use `Fanout` when the sender must not wait, so a subscriber that falls behind is disconnected. Use `Watch` when subscribers only need the latest value.
+
+| Primitive | Tier | Modeled replacement and behavior |
+| --- | --- | --- |
+| Bounded Tokio `mpsc` | Strict | Use `Channel::bounded(n).split()` for an async queue with backpressure. Adamantium receivers can be cloned to compete for work. Tokio has one receiver and serves sends and reservations in queue order. Adamantium has no reservation permits or admission-order guarantee. |
+| Tokio `oneshot` | Default | Use `Reply::pair()`. Sending consumes the reply and returns the payload in `Closed<T>` if the receiver closed. Use `receive().await` for an `Option<T>` in place of awaiting the Tokio receiver for a `Result`. |
+| Tokio `watch` | Default | Use `Watch` and `Watcher` for latest-value state. A watcher reads cloned snapshots. Adamantium replaces the whole value and retains updates even with zero watchers. Check any use of borrowed reads, in-place mutations, or Tokio's failed `send` when its last receiver goes away. |
+| Tokio `Notify` | Strict | Use `Cancellation` for sticky shutdown, `Watch` for a change in state, or `Channel::bounded(1)` with `try_send(())` for a coalescing single-consumer signal. Handle a full channel as an already pending signal. Tokio's stored single permit and its wake-all operation for existing waiters have different delivery semantics, so choose by intent. |
+| Tokio `Semaphore` | Strict | Use `Limit::run` for a shared concurrency limit and `concurrently` for one batch. `Limit` scopes each place to one call and serves waiting calls without FIFO ordering. Code that needs weighted, transferable, or dynamically adjustable permits needs a scoped exception. |
+| `std::sync::mpsc::sync_channel` | Default | Use `Channel::bounded(n).split()` for positive-capacity queues with async send and receive. Std can block the caller and supports a zero-capacity rendezvous. Adamantium treats zero as one. Keep a genuine blocking rendezvous at a blocking boundary with a scoped exception. |
+
 ## Allowed, and why
 
 ### Semaphores
 
-Tokio's `Semaphore` is allowed. A task can hold a permit across an `await`, because a permit guards no data.
+The default tier allows Tokio's `Semaphore`. A task can hold a permit across an `await`, because a permit guards no data.
 
 - To limit how many items run at one time, use `concurrently` or the streaming variants.
-- To share one limit between tasks, use `Limit`. Its work cannot take a second place, so it cannot deadlock in that way.
+- To share one limit between tasks, use `Limit`. Its work may enter one `KeyedLimit` for per-key exclusion. All other direct nesting of these limits panics before waiting.
 - Do not acquire a second permit while you hold one. Two tasks that do so in opposite orders deadlock.
 
 ### Tests
@@ -64,11 +77,25 @@ The rules do not allow `tokio::time::timeout`. When the time expires, it drops t
 - For channel operations, use `receive_until` and `send_until`.
 - For a single drop-safe future (such as a receive, `Reply::closed`, `Watcher::wait_for`, or a socket read that loses nothing on drop), use `until` with a `Cancellation` and a deadline. Only race or pass to `until` futures that lose nothing when dropped.
 
+## Selecting between futures
+
+`futures::select!` is reported by `clippy::disallowed_macros`. For Tokio 1.44
+and later, `clippy::disallowed_methods` reports `tokio::select!` through the
+internal `tokio::macros::support::poll_budget_available` helper used by
+invocations with future branches. An `else`-only invocation expands directly to
+its fallback. The helper lets scoped exceptions work while Clippy's
+[scoped macro allowances bug](https://github.com/rust-lang/rust-clippy/pull/17862)
+affects a direct Tokio macro ban. Scope an exception to the `let` statement
+containing the call.
+
+- Use `first_ok` for the first successful task. It aborts and drains the remaining tasks.
+- Use `Tasks::run_until` with `Cancellation` for scoped work that can be stopped.
+- Use `receive_until` and `send_until` for channel operations with cancellation or a deadline.
+
 ## Limits
 
 The rules have limits.
 
-- **`select!` is still allowed.** `tokio::select!` and `futures::select!` are not banned yet, because Clippy ignores scoped allowances for some macro expansions. The ban waits for [the upstream fix](https://github.com/rust-lang/rust-clippy/pull/17862) to reach stable.
 - **A plain `receive` or `send` can wait without a limit** while the channel stays open and empty, or open and full. Use `receive_until` or `send_until` to limit the wait with a `Cancellation` or a deadline.
 - **Dependencies are not checked.** A dependency can still use unsafe code or panic. [`cargo adamantium deps`](cli.md#dependencies) shows which dependencies use `unsafe` or call disallowed paths.
 - **Clippy cannot detect every call that blocks a worker thread.**

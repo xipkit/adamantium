@@ -14,13 +14,13 @@ use std::{
 };
 
 use adamantium::{
-    Cancellation, ScopeError, concurrently_ordered, concurrently_ordered_until,
+    Cancellation, Reply, ScopeError, concurrently_ordered, concurrently_ordered_until,
     concurrently_unordered, concurrently_unordered_until,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
 use support::timeout;
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::Semaphore;
 
 const HUNG: Duration = Duration::from_secs(30);
 
@@ -250,7 +250,7 @@ on_both_runtimes! {
 
         let cancellation = Cancellation::new();
         let dropped = Arc::new(AtomicUsize::new(0));
-        let (cancel, cancelled) = oneshot::channel();
+        let (cancel, cancelled) = Reply::pair();
         let mut cancel = Some(cancel);
         let mut stream = Box::pin(concurrently_unordered_until(0..100, 2, cancellation.clone(), |_| {
             let guard = Dropped(dropped.clone());
@@ -265,7 +265,7 @@ on_both_runtimes! {
             }
         }));
         pending(stream.as_mut()).await;
-        timeout(HUNG, cancelled).await.unwrap().unwrap().cancel();
+        timeout(HUNG, cancelled.receive()).await.unwrap().unwrap().cancel();
         assert_eq!(timeout(HUNG, stream.next()).await.unwrap(), Some(Err(ScopeError::Cancelled)));
         assert_eq!(dropped.load(Ordering::SeqCst), 2);
         assert_eq!(stream.next().await, None);
@@ -317,11 +317,15 @@ on_both_runtimes! {
             }
         }));
         // A select loser drops next(), but must not cancel or discard its task.
-        tokio::select! {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "exercise dropping next() when it loses a select"
+        )]
+        let () = tokio::select! {
             biased;
             _ = stream.next() => panic!("not ready"),
             () = future::ready(()) => {}
-        }
+        };
         assert_eq!(dropped.load(Ordering::SeqCst), 0);
         gate.add_permits(1);
         assert_eq!(timeout(HUNG, stream.next()).await.unwrap(), Some(Ok(0)));
@@ -454,7 +458,7 @@ async fn recorded_panic_wins_over_error_and_cancellation() {
 
 #[tokio::test]
 async fn oldest_error_wins_even_when_input_order_differs() {
-    let (send, receive) = oneshot::channel();
+    let (send, receive) = Reply::pair();
     let mut send = Some(send);
     let mut receive = Some(receive);
     let mut stream = Box::pin(concurrently_ordered(0..3, 3, |n| {
@@ -462,7 +466,7 @@ async fn oldest_error_wins_even_when_input_order_differs() {
         let receive = if n == 1 { receive.take() } else { None };
         async move {
             if let Some(receive) = receive {
-                receive.await.unwrap();
+                receive.receive().await.unwrap();
                 Err("later error at index 1")
             } else if let Some(send) = send {
                 send.send(()).unwrap();
@@ -583,13 +587,10 @@ async fn exhausted_cooperative_budget_pauses_intake_and_preserves_results() {
     }));
     pending(stream.as_mut()).await;
     tokio::task::yield_now().await;
+    while tokio::task::coop::has_budget_remaining() {
+        tokio::task::coop::consume_budget().await;
+    }
     future::poll_fn(|cx| {
-        while tokio::task::coop::has_budget_remaining() {
-            let Poll::Ready(budget) = tokio::task::coop::poll_proceed(cx) else {
-                panic!("budget was available");
-            };
-            budget.made_progress();
-        }
         // Even ready results wait for a fresh budget. Do not bypass Tokio's
         // cooperative yield by refilling or emitting buffered values here.
         assert!(stream.as_mut().poll_next(cx).is_pending());
@@ -607,7 +608,7 @@ async fn exhausted_cooperative_budget_pauses_intake_and_preserves_results() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancellation_waits_for_synchronous_destructors() {
     struct Cleanup {
-        started: Option<oneshot::Sender<()>>,
+        started: Option<Reply<()>>,
         release: std::sync::mpsc::Receiver<()>,
     }
     impl Drop for Cleanup {
@@ -617,7 +618,11 @@ async fn cancellation_waits_for_synchronous_destructors() {
         }
     }
     let cancel = Cancellation::new();
-    let (started, cleaning) = oneshot::channel();
+    let (started, cleaning) = Reply::pair();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the synchronous test gate needs a bounded blocking wait"
+    )]
     let (release, wait) = std::sync::mpsc::sync_channel(1);
     let mut guard = Some(Cleanup {
         started: Some(started),
@@ -637,7 +642,7 @@ async fn cancellation_waits_for_synchronous_destructors() {
     ));
     pending(stream.as_mut()).await;
     cancel.cancel();
-    let (sent, received) = oneshot::channel();
+    let (sent, received) = Reply::pair();
     #[allow(
         clippy::disallowed_methods,
         reason = "observe the consumer independently while cleanup is blocked"
@@ -647,8 +652,8 @@ async fn cancellation_waits_for_synchronous_destructors() {
         sent.send(result).unwrap();
         stream
     });
-    timeout(HUNG, cleaning).await.unwrap().unwrap();
-    let mut received = Box::pin(received);
+    timeout(HUNG, cleaning.receive()).await.unwrap().unwrap();
+    let mut received = Box::pin(received.receive());
     future::poll_fn(|cx| {
         assert!(
             received.as_mut().poll(cx).is_pending(),

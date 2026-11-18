@@ -12,6 +12,7 @@ include = [
     "src/**",
     "tests/**",
     "clippy.toml",
+    "clippy-strict.toml",
     "CHANGELOG.md",
     "README.md",
     "LICENSE",

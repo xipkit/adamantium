@@ -436,6 +436,10 @@ impl<T> Feed<T> {
         deadline: Option<Instant>,
     ) -> Result<T, FeedError> {
         crate::runtime::in_world(self.shared.world, async move {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "receive_until checks shutdown before taking a queued event"
+            )]
             let reason = tokio::select! {
                 biased;
                 reason = shutdown(cancellation, deadline) => reason,

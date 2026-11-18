@@ -507,11 +507,23 @@ let rows = connections.run(|| query(7)).await;
 - `run_until(&cancellation, deadline, work)` stops the wait or the work on a `Cancellation` or at a deadline. It returns `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExceeded`. It needs the `tokio` feature.
 - `available()` returns the number of free places.
 
-The work of one call must not start a second call on any limit. That call panics. A task that holds one place and waits for a second place can deadlock.
-
-The check finds only a call that the work makes itself. It does not find a call in a task that the work spawns. Do not let such a task use a limit that the work holds.
+A call to `Limit` inside another `Limit` panics before waiting. This covers taking the same limit twice and taking two different limits in either order.
 
 To limit the items of one collection, use `concurrently`. It needs no shared limit.
+
+### Per-key exclusion
+
+`KeyedLimit::new()` lets one call run per key. Clones share the table. A server can use a connection limit around a per-session refresh. Re-read the session inside the keyed work so a waiting request sees the token its predecessor rotated.
+
+```rust
+let connections = Limit::new(3);
+let sessions = KeyedLimit::new();
+connections.run(|| sessions.run(id, || refresh_if_stale(id))).await;
+```
+
+`run(key, work)` releases the key on completion or drop. Dropping a waiter gives up its wait. The table evicts each key when its final holder or waiter leaves. With Tokio, `run_until(key, &cancellation, deadline, work)` applies the same cancellation rules as `Limit::run_until`.
+
+Keyed work may run on its own or under a `Limit`. While holding a key, entering any `Limit` or `KeyedLimit` panics, even for a different key or table. The check covers directly polled work. A holder must also avoid awaiting a spawned task that needs a resource it holds.
 
 ## Retries and rate limits
 

@@ -1,6 +1,6 @@
 # Deterministic Actor tests
 
-The `deterministic` feature lets a test explore the interleavings of concurrent code from a seed. The same seed gives the same schedule.
+The `deterministic` feature lets a test explore concurrent interleavings and replay saved schedules. Seeded checks repeat the same scheduling choices for the same scenario and inputs.
 
 Enable `deterministic` in a test dependency. The backend is selected for each execution. In the same build, ordinary application code and Tokio tests continue to use the production primitives.
 
@@ -26,18 +26,42 @@ fn concurrent_updates() {
 - The factory closure creates new state for every execution.
 - The harness also schedules synchronous `Actor` calls and ownership operations. A `read` followed by a separate `with` can thus show a lost update, even with no `await` between them.
 - `testing::parallel` provides independent test workers.
-- Deadlock and step exhaustion are failures.
-- A test that passes is not a proof for all executions.
+- A panic, deadlock, or exhaustion of the per-execution step limit stops exploration and returns a failure.
+
+## Choose a scheduler
+
+Pass `Config` directly for seeded random sampling. Use `config.with_scheduler(SchedulerMode::Pct { depth: 3 })` for probabilistic concurrency testing (PCT), or `config.with_scheduler(SchedulerMode::Dfs)` for bounded depth-first search (DFS).
+
+| Mode | What it explores | How exploration ends when executions pass |
+| --- | --- | --- |
+| `Random` | Samples scheduling choices among runnable tasks using `seed`. | Runs `iterations` executions. |
+| `Pct { depth }` | Samples task priorities using `seed`. After calibration, each execution has at most `depth - 1` sampled priority changes. Explicit yields can also lower priorities. | Runs `iterations` executions, including calibration. Stops after calibration if that execution offered no task choices. |
+| `Dfs` | Enumerates modeled task choices. Each execution starts with the same fixed random data stream. | `record.dfs_status()` gives `Some(DfsStatus::Complete)` after all reachable schedules pass, or `Some(DfsStatus::IterationLimit)` if schedules remain when the execution budget runs out. |
+
+`iterations` limits executions. `max_steps` limits scheduling operations in each execution and returns `FailureKind::StepLimit` on exhaustion. Both must be positive, as must PCT `depth`. Random and PCT sample schedules. DFS covers the modeled task choices for the supplied fixture and fixed data stream, so vary the fixture separately to cover other inputs.
 
 ## Replay a failure
 
-On failure, the harness prints a JSON replay record. The record has the seed, the failing iteration, the step bound, the pinned engine versions, and the exact schedule. It does not include user payloads.
+On failure, the harness prints a JSON replay record. It contains the scheduler mode and its bounds, the seed, the one-based iteration, the pinned engine versions, and the exact schedule. The record omits user payloads.
 
 1. Save `failure.replay()` with `Replay::save`.
 2. Load it with `Replay::load`.
 3. Pass it and the same factory to `testing::replay`.
 
-Keep the code, the dependencies, and the fixture inputs unchanged for a replay.
+Single-record replay requires an exact schedule. Keep the scheduling behavior, dependencies, and fixture inputs compatible. `Replay::load` reports incompatible metadata by field. The current format is version 3, so regenerate records from earlier versions.
+
+## Run a regression corpus
+
+Save failure records for one scenario as test fixtures and pass their paths and the current scenario factory to `testing::replay_corpus`.
+
+```rust
+testing::replay_corpus(
+    ["tests/schedules/lost-update.json", "tests/schedules/late-wakeup.json"],
+    scenario,
+).unwrap();
+```
+
+Each run starts with fresh fixture state and must follow the entire recorded prefix. After the prefix, round-robin scheduling lets a fixed scenario run past the previous failure while the recorded step limit still applies. The first incompatible file, changed prefix, or failed execution ends the corpus run with the path and cause.
 
 ## What the harness schedules
 
