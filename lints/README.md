@@ -124,7 +124,9 @@ could block only by calling itself does not block.
 
 Calling an async function only constructs its future, which has no effects. The
 future's body runs where it is awaited, so its effects apply at the `.await`,
-including through references, `Pin` and `Box`, which covers boxed recursion.
+including through references, `Pin` and `Box`, which covers boxed recursion. A
+helper that returns `impl Future`, such as another function's future, is
+followed the same way, and so is the future returned by generic limit work.
 Its blocking calls are reported inside its own body, which is always async code.
 Function items passed to the callback APIs above are followed like closures, as
 are trait methods whose implementation is known at the call site.

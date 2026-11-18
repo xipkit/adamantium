@@ -271,6 +271,8 @@ async fn countdown(n: u32) -> u32 { if n == 0 { 0 } else { Box::pin(countdown(n 
 async fn ping(l: &Limit, n: u32) { if n == 0 { enter(l).await } else { Box::pin(pong(l, n - 1)).await } }
 async fn pong(l: &Limit, n: u32) { if n != 0 { Box::pin(ping(l, n - 1)).await } }
 async fn guarded<F: std::future::Future<Output = ()>>(l: &Limit, f: F) { l.run(|| f).await }
+async fn guarded_work<W: FnOnce() -> Fut, Fut: std::future::Future<Output = ()>>(l: &Limit, work: W) { l.run(work).await }
+fn enter_sync(l: &Limit) -> impl std::future::Future<Output = ()> + '_ { l.run(|| async {}) }
 
 pub async fn limit_helpers(outer: &Limit, inner: &Limit, keys: &KeyedLimit<u8>) {
     outer.run(|| inner.run(|| async {})).await; // limit
@@ -282,12 +284,17 @@ pub async fn limit_helpers(outer: &Limit, inner: &Limit, keys: &KeyedLimit<u8>) 
     keys.run(1, || enter_keyed(keys)).await; // limit
     keys.run(1, || async { outer.run(|| async {}).await }).await; // limit
     guarded(outer, inner.run(|| async {})).await; // limit
+    guarded_work(outer, || inner.run(|| async {})).await; // limit
+    outer.run(|| enter_sync(inner)).await; // limit
     outer.run(|| keys.run(1, || async {})).await;
     outer.run(|| enter_keyed(keys)).await;
     outer.run(|| async { let _later = enter(inner); }).await;
     outer.run(|| async { countdown(3).await; }).await;
     outer.run(|| countdown(3)).await;
     guarded(outer, enter_keyed(keys)).await;
+    guarded_work(outer, || keys.run(1, || async {})).await;
+    outer.run(|| async { let _later = enter_sync(inner); }).await;
+    enter_sync(inner).await;
     descend(inner, 3).await;
     let _unpolled = outer.run(|| enter(inner));
 }

@@ -14,6 +14,7 @@ use std::collections::HashSet;
 
 use rustc_hir::{
     Body, Expr, ExprKind, HirId, MatchSource,
+    attrs::lang_items::LangItem,
     def::DefKind,
     def_id::{DefId, LocalDefId},
     intravisit::{self, Visitor},
@@ -152,7 +153,12 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
         summaries: &'a mut Summaries,
         node: LocalDefId,
     ) -> Summary {
-        let Some(body) = cx.tcx.hir_maybe_body_owned_by(node) else {
+        let tcx = cx.tcx;
+        // An opaque future stands for its hidden type, which is polled from
+        // the expression its defining function returns.
+        let opaque = tcx.def_kind(node) == DefKind::OpaqueTy;
+        let owner = if opaque { tcx.local_parent(node) } else { node };
+        let Some(body) = tcx.hir_maybe_body_owned_by(owner) else {
             return Summary::default();
         };
         let mut walker = Walker {
@@ -161,12 +167,17 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
             context: Context::default(),
             mode: Mode::Summarize {
                 node,
-                root: cx.tcx.typeck_root_def_id(node.to_def_id()),
+                root: tcx.typeck_root_def_id(owner.to_def_id()),
                 summary: Summary::default(),
                 visited: HashSet::new(),
             },
         };
-        walker.visit_body(body);
+        if opaque {
+            let hidden = tcx.type_of(node).instantiate_identity().skip_norm_wip();
+            walker.poll(tail(body.value), hidden, Context::default());
+        } else {
+            walker.visit_body(body);
+        }
         match walker.mode {
             Mode::Summarize { summary, .. } => summary,
             Mode::Check { .. } => unreachable!("a summary walk stays in summary mode"),
@@ -313,7 +324,10 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
                 let ty::AliasTyKind::Opaque { def_id } = alias.kind else {
                     return;
                 };
-                if def_id.is_local() {
+                if let Some(opaque) = def_id.as_local() {
+                    // An async function's future is its coroutine. Any other
+                    // local future, such as another function's future that a
+                    // helper returns, is summarized as its hidden type.
                     if let ty::Coroutine(coroutine, _) = *tcx
                         .type_of(def_id)
                         .instantiate_identity()
@@ -324,6 +338,8 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
                         && tcx.hir_maybe_body_owned_by(coroutine).is_some()
                     {
                         walker.apply(site, coroutine, alias.args, true);
+                    } else {
+                        walker.apply(site, opaque, alias.args, true);
                     }
                 } else if let Some(function) = tcx.opt_parent(def_id)
                     && let Some(kind) = limit_kind(walker.cx, function)
@@ -358,7 +374,7 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
             ..self.context
         };
         self.invoke(site, work, held);
-        if let Some(future) = returned(self.cx, work) {
+        if let Some(future) = work_future(self.cx, function, args, work) {
             self.poll(site, future, held);
         }
     }
@@ -604,20 +620,36 @@ fn pointee(mut ty: Ty<'_>) -> Ty<'_> {
     }
 }
 
-/// The type a callable returns, for closures and function items.
-fn returned<'tcx>(cx: &LateContext<'tcx>, callable: Ty<'tcx>) -> Option<Ty<'tcx>> {
-    match *callable.peel_refs().kind() {
-        ty::Closure(_, args) => Some(args.as_closure().sig().output().skip_binder()),
-        ty::FnDef(id, args) => Some(
-            cx.tcx
-                .fn_sig(id)
-                .instantiate(cx.tcx, args.skip_binder())
-                .skip_norm_wip()
-                .output()
-                .skip_binder(),
-        ),
-        _ => None,
+/// The future that limit work returns, from the `FnOnce` bound on the
+/// work in `function`'s signature. A generic work type keeps its future
+/// generic, so a helper that wraps a limit records polling it.
+fn work_future<'tcx>(
+    cx: &LateContext<'tcx>,
+    function: DefId,
+    args: GenericArgsRef<'tcx>,
+    work: Ty<'tcx>,
+) -> Option<Ty<'tcx>> {
+    cx.tcx
+        .clauses_of(function)
+        .instantiate_own(cx.tcx, args)
+        .find_map(|(clause, _)| {
+            let projection = clause.skip_norm_wip().as_projection_clause()?.skip_binder();
+            (cx.tcx
+                .is_lang_item(projection.def_id().into(), LangItem::FnOnceOutput)
+                && projection.self_ty() == work)
+                .then(|| projection.term.as_type())
+                .flatten()
+        })
+}
+
+/// The expression a body evaluates to, inside any enclosing blocks.
+fn tail<'tcx>(mut expr: &'tcx Expr<'tcx>) -> &'tcx Expr<'tcx> {
+    while let ExprKind::Block(block, _) = expr.kind
+        && let Some(inner) = block.expr
+    {
+        expr = inner;
     }
+    expr
 }
 
 /// Which limit a `run` or `run_until` function enters, if any.
