@@ -248,3 +248,34 @@ async fn cancellation_wins_over_an_equally_ready_deadline() {
     .await;
     assert_eq!(result, Err(ScopeError::Cancelled));
 }
+
+#[tokio::test(start_paused = true)]
+async fn jitter_waits_between_half_and_all_of_each_delay() {
+    let backoff = Backoff::exponential(secs(1), secs(64)).attempts(8).jitter();
+    let delays = [1, 2, 4, 8, 16, 32, 64].map(secs);
+    let mut sequences = Vec::new();
+    for _ in 0..8 {
+        let mut starts = Vec::new();
+        let result = retry(&Cancellation::new(), None, backoff, || {
+            starts.push(time::now());
+            async { Err::<(), _>("no") }
+        })
+        .await;
+        assert_eq!(result, Err(ScopeError::Failed("no")));
+        let waits = starts
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .collect::<Vec<_>>();
+        assert_eq!(waits.len(), delays.len());
+        for (wait, delay) in waits.iter().zip(delays) {
+            assert!(
+                delay / 2 <= *wait && *wait <= delay,
+                "{wait:?} for {delay:?}"
+            );
+        }
+        sequences.push(waits);
+    }
+    sequences.sort();
+    sequences.dedup();
+    assert_eq!(sequences.len(), 8);
+}

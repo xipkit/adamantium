@@ -12,12 +12,16 @@ use crate::{Cancellation, ScopeError, tasks::shutdown, time};
 /// by the backoff's factor, up to its largest delay. A backoff makes attempts
 /// until one succeeds unless [`attempts`](Self::attempts) caps them; the
 /// cancellation and deadline given to [`retry`] bound it either way.
+///
+/// With [`jitter`](Self::jitter), each wait is drawn at random from the upper
+/// half of its delay, so that callers who failed together retry apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Backoff {
     pub(crate) first: Duration,
     max: Duration,
     factor: u32,
     attempts: Option<u32>,
+    jitter: bool,
 }
 
 impl Backoff {
@@ -28,6 +32,7 @@ impl Backoff {
             max: delay,
             factor: 1,
             attempts: None,
+            jitter: false,
         }
     }
 
@@ -39,6 +44,7 @@ impl Backoff {
             max,
             factor: 2,
             attempts: None,
+            jitter: false,
         }
     }
 
@@ -52,8 +58,35 @@ impl Backoff {
         }
     }
 
+    /// Waits a random time between half of each delay and the whole of it,
+    /// drawn from [`crate::random`]. The delays themselves still grow as
+    /// they would without jitter, so the longest wait stays the largest
+    /// delay. Seeded deterministic tests draw the same waits again, and an
+    /// `adamantium::testing::Replay` repeats them exactly.
+    #[must_use]
+    pub fn jitter(self) -> Self {
+        Self {
+            jitter: true,
+            ..self
+        }
+    }
+
     pub(crate) fn after(&self, delay: Duration) -> Duration {
         delay.saturating_mul(self.factor).min(self.max)
+    }
+
+    /// How long to wait for `delay`, the current delay of the sequence.
+    pub(crate) fn wait(&self, delay: Duration) -> Duration {
+        if !self.jitter {
+            return delay;
+        }
+        let half = delay / 2;
+        let spread = delay.saturating_sub(half);
+        // A spread beyond u64 nanoseconds, over 584 years, is drawn from its
+        // first 584 years. Its half alone is past the 30-year cap on sleeps,
+        // so the wait is the same.
+        let nanos = u64::try_from(spread.as_nanos()).unwrap_or(u64::MAX);
+        half.saturating_add(Duration::from_nanos(crate::random::up_to(nanos)))
     }
 }
 
@@ -146,7 +179,7 @@ where
         let () = tokio::select! {
             biased;
             reason = &mut stop => return Err(reason.scope_error()),
-            () = time::sleep(delay) => {}
+            () = time::sleep(backoff.wait(delay)) => {}
         };
         delay = backoff.after(delay);
     }

@@ -9,9 +9,10 @@
 //! waits and disconnects a subscriber that falls behind ([`Fanout`]), a
 //! one-shot reply ([`Reply`]), the latest value of shared state
 //! ([`Watch`]), [`race`] to wait for the first of several events, a limit
-//! on how many calls run at once ([`Limit`]), and `blocking` for code that
-//! must block a thread. The `cargo adamantium` subcommand applies the Clippy
-//! rules that keep a crate inside the fragment.
+//! on how many calls run at once ([`Limit`]), random draws that tests can
+//! replay ([`random`]), and `blocking` for code that must block a thread.
+//! The `cargo adamantium` subcommand applies the Clippy rules that keep a
+//! crate inside the fragment.
 //!
 //! Everything here is `Send + Sync + 'static` when its element types are, so
 //! a value of any of these types can be handed to a task without ceremony.
@@ -46,6 +47,7 @@ mod fanout;
 mod limit;
 mod map;
 mod race;
+pub mod random;
 #[cfg(feature = "tokio")]
 mod rate_limit;
 mod reply;

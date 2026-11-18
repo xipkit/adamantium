@@ -39,8 +39,8 @@ impl Restarts {
 
     /// Waits before each restart as `backoff` says. The first restart in a
     /// window waits the backoff's first delay, and each further restart in
-    /// the same window waits longer. Only the delays of the backoff are
-    /// used; its limit on attempts is ignored.
+    /// the same window waits longer. Only the delays and jitter of the
+    /// backoff are used; its limit on attempts is ignored.
     #[must_use]
     pub fn backoff(self, backoff: Backoff) -> Self {
         Self {
@@ -50,8 +50,8 @@ impl Restarts {
     }
 
     /// The wait before a restart that is number `count` in its window,
-    /// counting from one.
-    fn delay(&self, count: usize) -> Duration {
+    /// counting from one, with the backoff's jitter applied.
+    fn wait(&self, count: usize) -> Duration {
         let Some(backoff) = self.backoff else {
             return Duration::ZERO;
         };
@@ -63,7 +63,7 @@ impl Restarts {
             }
             delay = next;
         }
-        delay
+        backoff.wait(delay)
     }
 }
 
@@ -181,7 +181,7 @@ where
             return Err(error);
         }
         let restart = restarted.len().saturating_add(1);
-        let delay = restarts.delay(restart);
+        let delay = restarts.wait(restart);
         #[cfg(feature = "tracing")]
         if report {
             tracing::warn!(restart, ?delay, "supervised task restarting");
