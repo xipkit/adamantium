@@ -12,9 +12,8 @@ use std::{
     time::Duration,
 };
 
-use adamantium::{Cancellation, ScopeError, Tasks, time};
+use adamantium::{Cancellation, Reply, ScopeError, Tasks, time};
 use support::timeout;
-use tokio::sync::oneshot;
 
 const HUNG: Duration = Duration::from_secs(30);
 
@@ -85,7 +84,7 @@ on_both_runtimes! {
         let cancel = Cancellation::new();
         let body_dropped = Arc::new(AtomicBool::new(false));
         let child_dropped = Arc::new(AtomicBool::new(false));
-        let (started, running) = oneshot::channel();
+        let (started, running) = Reply::pair();
         let mut scope = Box::pin(Tasks::<&str>::run_until(cancel.clone(), None, async |t| {
             let _body = Dropped(body_dropped.clone());
             let guard = Dropped(child_dropped.clone());
@@ -99,7 +98,7 @@ on_both_runtimes! {
             Ok(())
         }));
         begin(scope.as_mut()).await;
-        timeout(HUNG, running).await.unwrap().unwrap();
+        timeout(HUNG, running.receive()).await.unwrap().unwrap();
         cancel.cancel();
         assert_eq!(timeout(HUNG, scope).await.unwrap(), Err(ScopeError::Cancelled));
         assert!(body_dropped.load(Ordering::SeqCst));
@@ -184,7 +183,8 @@ on_both_runtimes! {
     async fn started_blocking_work_is_awaited_and_its_error_wins() {
         let cancel = Cancellation::new();
         let token = cancel.clone();
-        let (started, running) = oneshot::channel();
+        let (started, running) = Reply::pair();
+        #[expect(clippy::disallowed_methods, reason = "the synchronous test gate needs a bounded blocking wait")]
         let (release, released) = std::sync::mpsc::sync_channel(1);
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = Dropped(dropped.clone());
@@ -196,7 +196,7 @@ on_both_runtimes! {
             assert!(token.is_cancelled());
             Err::<(), _>("blocking cleanup")
         });
-        timeout(HUNG, running).await.unwrap().unwrap();
+        timeout(HUNG, running.receive()).await.unwrap().unwrap();
         cancel.cancel();
         let mut joined = Box::pin(tasks.join_until(cancel, None, Ok(())));
         begin(joined.as_mut()).await;
@@ -210,7 +210,7 @@ on_both_runtimes! {
     async fn a_body_error_signals_cooperative_blocking_work() {
         let cancel = Cancellation::new();
         let token = cancel.clone();
-        let (started, running) = oneshot::channel();
+        let (started, running) = Reply::pair();
         let mut tasks = Tasks::<&str>::new();
         tasks.spawn_blocking(move || {
             started.send(()).unwrap();
@@ -221,7 +221,7 @@ on_both_runtimes! {
             }
             Ok(())
         });
-        timeout(HUNG, running).await.unwrap().unwrap();
+        timeout(HUNG, running.receive()).await.unwrap().unwrap();
         assert_eq!(timeout(HUNG, tasks.join_until(cancel, None, Err::<(), _>("body"))).await.unwrap(),
             Err(ScopeError::Failed("body")));
     }
@@ -229,7 +229,8 @@ on_both_runtimes! {
     #[cfg_attr(target_os = "wasi", ignore = "the closure waits for a second thread")]
     async fn blocking_panic_during_cleanup_wins_and_drains_siblings() {
         let cancel = Cancellation::new();
-        let (started, running) = oneshot::channel();
+        let (started, running) = Reply::pair();
+        #[expect(clippy::disallowed_methods, reason = "the synchronous test gate needs a bounded blocking wait")]
         let (release, released) = std::sync::mpsc::sync_channel(1);
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = Dropped(dropped.clone());
@@ -246,7 +247,7 @@ on_both_runtimes! {
             #[allow(unreachable_code)]
             Ok(())
         });
-        timeout(HUNG, running).await.unwrap().unwrap();
+        timeout(HUNG, running.receive()).await.unwrap().unwrap();
         cancel.cancel();
         let mut joining = Box::pin(tasks.join_until(cancel, None, Err::<(), _>("body")));
         begin(joining.as_mut()).await;
@@ -262,9 +263,10 @@ on_both_runtimes! {
     async fn dropping_the_scope_signals_but_does_not_wait_for_blocking_work() {
         let cancel = Cancellation::new();
         let token = cancel.clone();
-        let (started, running) = oneshot::channel();
+        let (started, running) = Reply::pair();
+        #[expect(clippy::disallowed_methods, reason = "the synchronous test gate needs a bounded blocking wait")]
         let (release, released) = std::sync::mpsc::sync_channel(1);
-        let (finished, complete) = oneshot::channel();
+        let (finished, complete) = Reply::pair();
         let mut scope = Box::pin(Tasks::<&str>::run_until(cancel.clone(), None, async |t| {
             t.spawn_blocking(move || {
                 started.send(()).unwrap();
@@ -277,16 +279,16 @@ on_both_runtimes! {
             Ok(())
         }));
         begin(scope.as_mut()).await;
-        timeout(HUNG, running).await.unwrap().unwrap();
+        timeout(HUNG, running.receive()).await.unwrap().unwrap();
         drop(scope);
         assert!(cancel.is_cancelled());
         release.send(()).unwrap();
-        timeout(HUNG, complete).await.unwrap().unwrap();
+        timeout(HUNG, complete.receive()).await.unwrap().unwrap();
     }
 
     async fn dropping_an_unpolled_join_signals_and_aborts() {
         let cancel = Cancellation::new();
-        let (held, dropped) = oneshot::channel::<()>();
+        let (held, dropped) = Reply::<()>::pair();
         let mut tasks = Tasks::<&str>::new();
         tasks.spawn(async move {
             let _held = held;
@@ -295,7 +297,7 @@ on_both_runtimes! {
         });
         drop(tasks.join_until(cancel.clone(), None, Ok(())));
         assert!(cancel.is_cancelled());
-        assert!(timeout(HUNG, dropped).await.unwrap().is_err());
+        assert!(timeout(HUNG, dropped.receive()).await.unwrap().is_none());
     }
 
     async fn successful_scope_preserves_values_and_claimed_errors() {
@@ -314,9 +316,10 @@ on_both_runtimes! {
     async fn cancellation_cannot_discard_a_panic_already_being_drained() {
         for use_value in [false, true] {
             let cancel = Cancellation::new();
-            let (started, running) = oneshot::channel();
+            let (started, running) = Reply::pair();
+            #[expect(clippy::disallowed_methods, reason = "the synchronous test gate needs a bounded blocking wait")]
             let (release, released) = std::sync::mpsc::sync_channel(1);
-            let (fail, failure) = oneshot::channel();
+            let (fail, failure) = Reply::pair();
             let mut scope = Box::pin(Tasks::<&str>::run_until(cancel.clone(), None, async move |t| {
                 t.spawn_blocking(move || {
                     started.send(()).unwrap();
@@ -324,7 +327,7 @@ on_both_runtimes! {
                     Ok(())
                 });
                 let panicking = t.spawn(async move {
-                    failure.await.unwrap();
+                    failure.receive().await.unwrap();
                     panic!("retained panic");
                     #[allow(unreachable_code)]
                     Ok(())
@@ -335,7 +338,7 @@ on_both_runtimes! {
                 Ok(())
             }));
             begin(scope.as_mut()).await;
-            timeout(HUNG, running).await.unwrap().unwrap();
+            timeout(HUNG, running.receive()).await.unwrap().unwrap();
             fail.send(()).unwrap();
             // The panic path signals shutdown before waiting for the blocking
             // sibling. Poll again so cancellation interrupts that drain.
@@ -355,9 +358,10 @@ on_both_runtimes! {
     #[cfg_attr(target_os = "wasi", ignore = "the closure waits for a second thread")]
     async fn body_panic_signals_shutdown_without_waiting_for_blocking_work() {
         let cancel = Cancellation::new();
-        let (started, running) = oneshot::channel();
+        let (started, running) = Reply::pair();
+        #[expect(clippy::disallowed_methods, reason = "the synchronous test gate needs a bounded blocking wait")]
         let (release, released) = std::sync::mpsc::sync_channel(1);
-        let (finished, complete) = oneshot::channel();
+        let (finished, complete) = Reply::pair();
         let scope = Tasks::<&str>::run_until(cancel.clone(), None, async move |t| {
             t.spawn_blocking(move || {
                 started.send(()).unwrap();
@@ -365,7 +369,7 @@ on_both_runtimes! {
                 finished.send(()).unwrap();
                 Ok(())
             });
-            running.await.unwrap();
+            running.receive().await.unwrap();
             panic!("body panic");
             #[allow(unreachable_code)]
             Ok(())
@@ -376,7 +380,7 @@ on_both_runtimes! {
         assert_eq!(panic.downcast_ref::<&str>(), Some(&"body panic"));
         assert!(cancel.is_cancelled());
         release.send(()).unwrap();
-        timeout(HUNG, complete).await.unwrap().unwrap();
+        timeout(HUNG, complete.receive()).await.unwrap().unwrap();
     }
 }
 
@@ -390,7 +394,11 @@ fn cancellation_prevents_queued_blocking_work_from_starting() {
         .unwrap();
     runtime.block_on(async {
         let cancel = Cancellation::new();
-        let (started, running) = oneshot::channel();
+        let (started, running) = Reply::pair();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the synchronous test gate needs a bounded blocking wait"
+        )]
         let (release, released) = std::sync::mpsc::sync_channel(1);
         let queued_ran = Arc::new(AtomicBool::new(false));
         let ran = queued_ran.clone();
@@ -400,7 +408,7 @@ fn cancellation_prevents_queued_blocking_work_from_starting() {
             released.recv_timeout(HUNG).unwrap();
             Ok(())
         });
-        timeout(HUNG, running).await.unwrap().unwrap();
+        timeout(HUNG, running.receive()).await.unwrap().unwrap();
         tasks.spawn_blocking(move || {
             ran.store(true, Ordering::SeqCst);
             Ok(())
@@ -448,7 +456,11 @@ async fn deadline_interrupts_body_and_drains_children() {
 #[tokio::test(start_paused = true)]
 async fn deadline_during_join_waits_for_blocking_cleanup_and_keeps_its_reason() {
     let cancel = Cancellation::new();
-    let (started, running) = oneshot::channel();
+    let (started, running) = Reply::pair();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the synchronous test gate needs a bounded blocking wait"
+    )]
     let (release, released) = std::sync::mpsc::sync_channel(1);
     let deadline = time::now() + Duration::from_secs(10);
     let mut tasks = Tasks::<&str>::new();
@@ -458,7 +470,7 @@ async fn deadline_during_join_waits_for_blocking_cleanup_and_keeps_its_reason() 
         Ok(())
     });
     // Avoid a virtual-time timeout while waiting for an actual OS thread.
-    running.await.unwrap();
+    running.receive().await.unwrap();
     let mut joined = Box::pin(tasks.join_until(cancel.clone(), Some(deadline), Ok(())));
     begin(joined.as_mut()).await;
     tokio::time::advance(Duration::from_secs(10)).await;
@@ -500,13 +512,13 @@ on_both_runtimes! {
 #[tokio::test]
 async fn an_orphaned_error_wins_the_result_over_a_shutdown_ready_at_the_same_poll() {
     let cancel = Cancellation::new();
-    let (failed, failure) = oneshot::channel();
+    let (failed, failure) = Reply::pair();
     let scope = Tasks::<&str>::run_until(cancel.clone(), None, async |t| {
         t.spawn(async move {
             failed.send(()).unwrap();
             Err::<(), _>("orphaned")
         });
-        failure.await.unwrap();
+        failure.receive().await.unwrap();
         cancel.cancel();
         std::future::pending::<()>().await;
         Ok(())

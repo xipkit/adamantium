@@ -13,9 +13,9 @@ use std::{
 };
 
 use adamantium::time::sleep;
-use adamantium::{Cancellation, Tasks, blocking, concurrently, first_ok};
+use adamantium::{Cancellation, Reply, Tasks, blocking, concurrently, first_ok};
 use support::timeout;
-use tokio::sync::{Barrier, Semaphore, oneshot};
+use tokio::sync::{Barrier, Semaphore};
 
 /// How long a test waits before calling a join hung. No test relies on it for
 /// ordering; it only turns a hang into a failure.
@@ -169,6 +169,7 @@ on_both_runtimes! {
 
     async fn an_error_from_a_dropped_blocking_handle_is_reported_at_join() {
         let mut tasks = Tasks::<&str>::new();
+        #[expect(clippy::disallowed_methods, reason = "the synchronous test gate needs a bounded blocking wait")]
         let (release, released) = std::sync::mpsc::sync_channel(1);
         let failed = tasks.spawn_blocking(move || {
             released.recv_timeout(HUNG).unwrap();
@@ -184,13 +185,13 @@ on_both_runtimes! {
 
     async fn an_error_dropped_during_join_is_reported() {
         let mut tasks = Tasks::<&'static str>::new();
-        let (sent, received) = oneshot::channel();
+        let (sent, received) = Reply::pair();
         let failed = tasks.spawn(async move {
             sent.send(()).unwrap();
             Err::<(), _>("dropped during join")
         });
         tasks.spawn(async move {
-            received.await.unwrap();
+            received.receive().await.unwrap();
             drop(failed);
             Ok(())
         });
@@ -201,14 +202,14 @@ on_both_runtimes! {
         let mut tasks = Tasks::<&str>::new();
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = Dropped(Arc::clone(&dropped));
-        let (sent, received) = oneshot::channel();
+        let (sent, received) = Reply::pair();
         let failed = tasks.spawn(async move {
             sent.send(()).unwrap();
             Err::<(), _>("sibling keeps running")
         });
         tasks.spawn(async move {
             let _guard = guard;
-            received.await.unwrap();
+            received.receive().await.unwrap();
             drop(failed);
             std::future::pending::<()>().await;
             Ok(())
@@ -245,14 +246,14 @@ on_both_runtimes! {
         let mut tasks = Tasks::<&str>::new();
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = DroppedSlowly(Arc::clone(&dropped));
-        let (release, released) = oneshot::channel::<()>();
+        let (release, released) = Reply::<()>::pair();
         tasks.spawn(async move {
             let _guard = guard;
             std::future::pending::<()>().await;
             Ok(())
         });
         let held = tasks.spawn(async move {
-            released.await.unwrap();
+            released.receive().await.unwrap();
             Err::<(), _>("during join")
         });
         let mut join = pin!(timeout(HUNG, tasks.join(Ok(()))));
@@ -272,13 +273,13 @@ on_both_runtimes! {
 
     async fn value_takes_its_own_error_and_leaves_the_rest_for_join() {
         let mut tasks = Tasks::<&str>::new();
-        let (sent, received) = oneshot::channel();
+        let (sent, received) = Reply::pair();
         tasks.spawn(async move {
             sent.send(()).unwrap();
             Err::<(), _>("left for join")
         });
         let asked_for = tasks.spawn(async move {
-            received.await.unwrap();
+            received.receive().await.unwrap();
             Err::<(), _>("asked for")
         });
         assert_eq!(tasks.value(asked_for).await, Err("asked for"));
@@ -287,9 +288,9 @@ on_both_runtimes! {
 
     async fn an_abandoned_wait_for_a_value_leaves_the_error_for_join() {
         let mut tasks = Tasks::<&str>::new();
-        let (release, released) = oneshot::channel::<()>();
+        let (release, released) = Reply::<()>::pair();
         let failed = tasks.spawn(async move {
-            released.await.unwrap();
+            released.receive().await.unwrap();
             Err::<(), _>("nobody waited")
         });
         {
@@ -302,21 +303,21 @@ on_both_runtimes! {
 
     async fn a_body_error_wins_over_a_recorded_task_error() {
         let mut tasks = Tasks::<&str>::new();
-        let (sent, received) = oneshot::channel();
+        let (sent, received) = Reply::pair();
         // Nothing can abort this task once it has signalled: it finishes in
         // the same poll, so its error is recorded before join returns.
         tasks.spawn(async move {
             sent.send(()).unwrap();
             Err::<(), _>("task")
         });
-        received.await.unwrap();
+        received.receive().await.unwrap();
         assert_eq!(tasks.join(Err::<(), _>("body")).await, Err("body"));
     }
 
     #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn a_panic_during_join_wins_over_an_error() {
         let mut tasks = Tasks::<&str>::new();
-        let (sent, received) = oneshot::channel();
+        let (sent, received) = Reply::pair();
         // Nothing can abort this task once it has signalled: it panics in the
         // same poll, so the error below cannot cancel the panic.
         tasks.spawn::<(), _>(async move {
@@ -324,7 +325,7 @@ on_both_runtimes! {
             panic!("kaboom after an error")
         });
         tasks.spawn(async move {
-            received.await.unwrap();
+            received.receive().await.unwrap();
             Err::<(), _>("error")
         });
         #[allow(clippy::disallowed_methods, reason = "the way to catch the resumed panic")]
@@ -338,7 +339,7 @@ on_both_runtimes! {
         let mut tasks = Tasks::<&str>::new();
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = DroppedSlowly(Arc::clone(&dropped));
-        let (started, sibling_started) = oneshot::channel();
+        let (started, sibling_started) = Reply::pair();
         tasks.spawn(async move {
             let _guard = guard;
             started.send(()).unwrap();
@@ -346,7 +347,7 @@ on_both_runtimes! {
             Ok(())
         });
         tasks.spawn::<(), _>(async move {
-            sibling_started.await.unwrap();
+            sibling_started.receive().await.unwrap();
             panic!("kaboom alone")
         });
         #[allow(clippy::disallowed_methods, reason = "the way to catch the resumed panic")]
@@ -484,7 +485,7 @@ on_both_runtimes! {
     // The first item waits for the last, which can only start if the window
     // moves past the first item while it is pending.
     async fn concurrently_rolls_past_a_slow_item_and_keeps_input_order() {
-        let (release, released) = oneshot::channel();
+        let (release, released) = Reply::pair();
         let mut release = Some(release);
         let mut released = Some(released);
         let work = concurrently(0..100, 2, |n| {
@@ -492,7 +493,7 @@ on_both_runtimes! {
             let release = (n == 99).then(|| release.take().unwrap());
             async move {
                 if let Some(wait) = wait {
-                    wait.await.unwrap();
+                    wait.receive().await.unwrap();
                 }
                 if let Some(release) = release {
                     release.send(()).unwrap();
@@ -505,7 +506,7 @@ on_both_runtimes! {
 
     #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn concurrently_aborts_its_items_if_f_panics() {
-        let (held, dropped) = oneshot::channel::<()>();
+        let (held, dropped) = Reply::<()>::pair();
         let mut held = Some(held);
         let work = concurrently(0..2, 2, move |n| {
             assert!(n == 0, "kaboom in f");
@@ -520,7 +521,7 @@ on_both_runtimes! {
         let joined = tokio::spawn(work);
         let payload = timeout(HUNG, joined).await.unwrap().unwrap_err().into_panic();
         assert_eq!(payload.downcast_ref(), Some(&"kaboom in f"));
-        assert!(timeout(HUNG, dropped).await.unwrap().is_err());
+        assert!(timeout(HUNG, dropped.receive()).await.unwrap().is_none());
     }
 
     async fn concurrently_keeps_input_order_when_items_finish_in_reverse() {
@@ -528,12 +529,12 @@ on_both_runtimes! {
         let mut release_previous = None;
         let mut items = Vec::new();
         for n in 0..8 {
-            let (release, released) = oneshot::channel();
+            let (release, released) = Reply::pair();
             items.push((n, released, release_previous.replace(release)));
         }
         release_previous.unwrap().send(()).unwrap();
         let work = concurrently(items, 8, |(n, released, release_earlier)| async move {
-            released.await.unwrap();
+            released.receive().await.unwrap();
             if let Some(release) = release_earlier {
                 release.send(()).unwrap();
             }
@@ -544,7 +545,7 @@ on_both_runtimes! {
     }
 
     async fn dropping_concurrently_cancels_its_items() {
-        let (held, dropped) = oneshot::channel::<()>();
+        let (held, dropped) = Reply::<()>::pair();
         let mut held = Some(held);
         {
             let mut work = pin!(concurrently(0..2, 2, |_| {
@@ -557,7 +558,7 @@ on_both_runtimes! {
             }));
             begin(work.as_mut()).await;
         }
-        assert!(timeout(HUNG, dropped).await.unwrap().is_err());
+        assert!(timeout(HUNG, dropped.receive()).await.unwrap().is_none());
     }
 }
 
@@ -597,12 +598,12 @@ on_both_runtimes! {
         let mut release_previous = None;
         let mut items = Vec::new();
         for n in 0..8 {
-            let (release, released) = oneshot::channel();
+            let (release, released) = Reply::pair();
             items.push((n, released, release_previous.replace(release)));
         }
         release_previous.unwrap().send(()).unwrap();
         let work = first_ok(items, 8, |(n, released, release_earlier)| async move {
-            released.await.unwrap();
+            released.receive().await.unwrap();
             if let Some(release) = release_earlier {
                 release.send(()).unwrap();
             }
@@ -659,7 +660,7 @@ on_both_runtimes! {
 
     #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn first_ok_aborts_its_items_if_f_panics() {
-        let (held, dropped) = oneshot::channel::<()>();
+        let (held, dropped) = Reply::<()>::pair();
         let mut held = Some(held);
         let work = first_ok(0..2, 2, move |n| {
             assert!(n == 0, "kaboom in f");
@@ -674,7 +675,7 @@ on_both_runtimes! {
         let joined = tokio::spawn(work);
         let payload = timeout(HUNG, joined).await.unwrap().unwrap_err().into_panic();
         assert_eq!(payload.downcast_ref(), Some(&"kaboom in f"));
-        assert!(timeout(HUNG, dropped).await.unwrap().is_err());
+        assert!(timeout(HUNG, dropped.receive()).await.unwrap().is_none());
     }
 
     async fn first_ok_keeps_at_most_limit_futures_alive() {
@@ -693,7 +694,7 @@ on_both_runtimes! {
     }
 
     async fn dropping_first_ok_cancels_its_items() {
-        let (held, dropped) = oneshot::channel::<()>();
+        let (held, dropped) = Reply::<()>::pair();
         let mut held = Some(held);
         {
             let mut work = pin!(first_ok(0..2, 2, |_| {
@@ -706,7 +707,7 @@ on_both_runtimes! {
             }));
             begin(work.as_mut()).await;
         }
-        assert!(timeout(HUNG, dropped).await.unwrap().is_err());
+        assert!(timeout(HUNG, dropped.receive()).await.unwrap().is_none());
     }
 }
 
@@ -715,10 +716,10 @@ on_both_runtimes! {
 #[tokio::test]
 async fn the_first_error_recorded_wins_whatever_the_spawn_order() {
     let mut tasks = Tasks::<&str>::new();
-    let (first_failing, second_may_fail) = oneshot::channel();
-    let (second_failing, both_failing) = oneshot::channel();
+    let (first_failing, second_may_fail) = Reply::pair();
+    let (second_failing, both_failing) = Reply::pair();
     tasks.spawn(async move {
-        second_may_fail.await.unwrap();
+        second_may_fail.receive().await.unwrap();
         second_failing.send(()).unwrap();
         Err::<(), _>("failed second")
     });
@@ -726,7 +727,7 @@ async fn the_first_error_recorded_wins_whatever_the_spawn_order() {
         first_failing.send(()).unwrap();
         Err::<(), _>("failed first")
     });
-    both_failing.await.unwrap();
+    both_failing.receive().await.unwrap();
     assert_eq!(tasks.join(Ok(())).await, Err("failed first"));
 }
 
@@ -875,13 +876,13 @@ on_both_runtimes! {
     }
 
     async fn dropping_a_handle_whose_error_arrived_stops_the_body() {
-        let (sent, received) = oneshot::channel();
+        let (sent, received) = Reply::pair();
         let scope = Tasks::<&str>::run(async |t| {
             let failed = t.spawn(async move {
                 sent.send(()).unwrap();
                 Err::<(), _>("arrived first")
             });
-            received.await.unwrap();
+            received.receive().await.unwrap();
             // On one thread the task has delivered its error by now; on
             // several, this drop races the delivery, and either order counts.
             drop(failed);
@@ -892,14 +893,14 @@ on_both_runtimes! {
     }
 
     async fn a_kept_handle_leaves_the_body_running_until_join() {
-        let (sent, received) = oneshot::channel();
+        let (sent, received) = Reply::pair();
         let finished = AtomicBool::new(false);
         let scope = Tasks::<&str>::run(async |t| {
             let kept = t.spawn(async move {
                 sent.send(()).unwrap();
                 Err::<(), _>("kept")
             });
-            received.await.unwrap();
+            received.receive().await.unwrap();
             sleep(Duration::from_millis(20)).await;
             finished.store(true, Ordering::SeqCst);
             // The body returns before its next await, so this drop can't stop it.
@@ -913,18 +914,18 @@ on_both_runtimes! {
 
 on_both_runtimes! {
     async fn a_handled_error_leaves_the_body_and_its_siblings_running() {
-        let (handled, handled_rx) = oneshot::channel();
-        let (release, released) = oneshot::channel::<()>();
+        let (handled, handled_rx) = Reply::pair();
+        let (release, released) = Reply::<()>::pair();
         let scope = Tasks::<&str>::run(async |t| {
             let sibling = t.spawn(async move {
-                released.await.unwrap();
+                released.receive().await.unwrap();
                 Ok("sibling finished")
             });
             // The handled task's error type need not be the scope's.
             t.spawn_handled(async { Err(String::from("connection reset")) }, move |error| {
                 handled.send(error).unwrap();
             });
-            assert_eq!(handled_rx.await.unwrap(), "connection reset");
+            assert_eq!(handled_rx.receive().await.unwrap(), "connection reset");
             // Give a wrongly recorded error time to stop the body.
             sleep(Duration::from_millis(20)).await;
             release.send(()).unwrap();
@@ -1027,13 +1028,13 @@ on_both_runtimes! {
 // body runs again.
 #[tokio::test]
 async fn the_oldest_unclaimed_error_wins_over_the_orphan() {
-    let (sent, received) = oneshot::channel();
+    let (sent, received) = Reply::pair();
     let scope = Tasks::<&str>::run(async |t| {
         let _kept = t.spawn(async move {
             sent.send(()).unwrap();
             Err::<(), _>("older and kept")
         });
-        received.await.unwrap();
+        received.receive().await.unwrap();
         t.spawn(async { Err::<(), _>("newer and orphaned") });
         std::future::pending::<()>().await;
         Ok(())
@@ -1152,7 +1153,7 @@ async fn concurrently_stops_at_the_first_error() {
 // earlier item can run. A multithreaded runtime gives no such order.
 #[tokio::test]
 async fn concurrently_reports_the_first_error_to_happen_not_the_first_input() {
-    let (failing, earlier_may_fail) = oneshot::channel();
+    let (failing, earlier_may_fail) = Reply::pair();
     let mut failing = Some(failing);
     let mut earlier_may_fail = Some(earlier_may_fail);
     let work = concurrently(0..2, 2, |n| {
@@ -1160,7 +1161,7 @@ async fn concurrently_reports_the_first_error_to_happen_not_the_first_input() {
         let earlier_may_fail = (n == 0).then(|| earlier_may_fail.take().unwrap());
         async move {
             if let Some(earlier_may_fail) = earlier_may_fail {
-                earlier_may_fail.await.unwrap();
+                earlier_may_fail.receive().await.unwrap();
                 return Err::<(), _>("earlier input");
             }
             failing.unwrap().send(()).unwrap();
@@ -1209,7 +1210,7 @@ fn concurrently_panics_if_the_runtime_cancels_its_items() {
 fn concurrently_aborts_its_other_items_if_the_runtime_cancels_one() {
     let finished = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&finished);
-    let (held, dropped) = oneshot::channel::<()>();
+    let (held, dropped) = Reply::<()>::pair();
     let mut held = Some(held);
     let mut work = Box::pin(concurrently(0..3, 2, move |n| {
         let flag = Arc::clone(&flag);
@@ -1242,8 +1243,9 @@ fn concurrently_aborts_its_other_items_if_the_runtime_cancels_one() {
         payload.downcast_ref(),
         Some(&"adamantium: a task ended without a result and without a panic"),
     );
-    assert!(
-        dropped.blocking_recv().is_err(),
+    assert_eq!(
+        dropped.try_receive(),
+        Err(adamantium::TryReceiveError::Closed),
         "the third item is still held"
     );
 }
