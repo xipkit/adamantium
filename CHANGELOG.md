@@ -19,6 +19,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   event, so what a feed receives has no gaps. `Feed::resubscribe` starts a
   new feed to recover. Clones of a `Fanout` can all send, and every feed
   receives their sends in one order.
+- `adamantium`: `Tasks::run_with_grace` shuts a scope down gracefully. A
+  cancellation stops the body but lets admitted tasks finish for a grace
+  period before the rest are aborted.
 - `adamantium`: `KeyedLimit` serializes calls for the same key, including
   inside a connection `Limit`, and evicts keys after their last call ends.
 - `adamantium`: deterministic tests can select probabilistic concurrency testing

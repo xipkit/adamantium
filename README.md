@@ -65,7 +65,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `Topic` | Sends each message to every subscriber. It waits for a slow subscriber and drops no message. |
 | `Fanout` | Sends each event to every subscriber without waiting. It disconnects a subscriber that falls behind, which can then resubscribe. |
 | `race` | Waits for the first of several futures and drops the others. Use it in place of `select!`. |
-| `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. |
+| `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. `Tasks::run_with_grace` lets admitted work finish first. |
 | `retry`, `RateLimit`, `Limit`, `KeyedLimit` | Retry with backoff, cap the call rate or concurrency, or serialize calls for the same key. |
 | `blocking` | Runs blocking code on the blocking pool. |
 | `random` | Random draws that the deterministic harness records and replays. |
