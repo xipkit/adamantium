@@ -280,6 +280,10 @@ impl<T: Clone> Watcher<T> {
         deadline: Option<Instant>,
     ) -> Result<T, ReceiveError> {
         crate::runtime::in_world(self.shared.world, async move {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "receive_until checks shutdown before marking a watch value seen"
+            )]
             let reason = tokio::select! {
                 biased;
                 reason = shutdown(cancellation, deadline) => reason,

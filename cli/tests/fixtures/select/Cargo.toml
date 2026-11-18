@@ -1,0 +1,16 @@
+# Each invocation that must be reported ends in a comment naming its lint.
+[workspace]
+
+[package]
+name = "select"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+adamantium = { path = "../../../.." }
+futures = "0.3"
+tokio = { version = "1.44", default-features = false, features = ["macros", "rt", "time"] }
+
+[profile.release]
+overflow-checks = true

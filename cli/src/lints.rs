@@ -229,10 +229,31 @@ async fn example() {
         ),
     ),
     clippy(
-        "disallowed_methods",
-        "panicking index methods, unbounded and broadcast channels, unstructured spawns, drop-to-cancel timeouts, blocking calls, clocks outside adamantium::time, thread-local access, leaks and weak references, listed in clippy.toml",
+        "disallowed_macros",
+        "unstructured selection with futures::select!, listed in clippy.toml",
         example(
-            "Use adamantium::Array::remove/insert and split_at_checked for checked index operations, adamantium::Channel for bounded channels and Topic to broadcast, Tasks::run and Tasks::spawn for scoped tasks, Tasks::run_until with Cancellation and a deadline instead of timeout, receive_until/send_until for channel deadlines, adamantium::blocking for blocking work, and adamantium::time::sleep or sleep_until for timers. Build deadlines with adamantium::time::now and periodic waits with a loop over adamantium::time::sleep_until. Pass values in, or share them through an Actor, instead of keeping them in a thread-local. Drop resources instead of leaking them; use owned values instead of weak references.",
+            "Use adamantium::first_ok for the first success, Tasks::run_until with Cancellation for scoped work, or receive_until/send_until for channel operations.",
+            r#"async fn example() -> Result<u32, &'static str> {
+    use futures::FutureExt;
+
+    let a = std::future::ready(Ok(1)).fuse();
+    let b = std::future::ready(Ok(2)).fuse();
+    futures::pin_mut!(a, b);
+    futures::select! {
+        result = a => result,
+        result = b => result,
+    }
+}"#,
+            r#"async fn example() -> Result<u32, Vec<&'static str>> {
+    adamantium::first_ok([1, 2], 2, |value| async move { Ok(value) }).await
+}"#,
+        ),
+    ),
+    clippy(
+        "disallowed_methods",
+        "panicking index methods, unbounded and broadcast channels, unstructured spawns, Tokio select!, drop-to-cancel timeouts, blocking calls, clocks outside adamantium::time, thread-local access, leaks and weak references, listed in clippy.toml",
+        example(
+            "Use adamantium::Array::remove/insert and split_at_checked for checked index operations, adamantium::Channel for bounded channels and Topic to broadcast, and Tasks::run and Tasks::spawn for scoped tasks. Replace tokio::select! with adamantium::first_ok for the first success. Use Tasks::run_until with Cancellation for scoped work and receive_until/send_until for channel operations with cancellation or deadlines. Use adamantium::blocking for blocking work and adamantium::time::sleep or sleep_until for timers. Build deadlines with adamantium::time::now and periodic waits with a loop over adamantium::time::sleep_until. Pass values in, or share them through an Actor, instead of keeping them in a thread-local. Drop resources instead of leaking them; use owned values instead of weak references.",
             r#"async fn example() -> Result<u32, tokio::task::JoinError> {
     let task = tokio::spawn(async { 42 });
     task.await
