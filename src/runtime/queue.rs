@@ -97,6 +97,43 @@ impl<T> Bounded<T> {
         }
     }
 
+    /// Drops every queued value, oldest first. Each value is taken out of the
+    /// storage before it drops, so its destructor holds no storage lock and
+    /// may use the same queue. If a destructor panics, the rest still drop,
+    /// as they would in a `Vec`. Like `close`, takes no step while unwinding.
+    pub(crate) fn clear(&self) {
+        struct Rest<'a, T> {
+            queue: &'a Bounded<T>,
+            done: bool,
+        }
+
+        impl<T> Drop for Rest<'_, T> {
+            fn drop(&mut self) {
+                if !self.done {
+                    self.queue.clear();
+                }
+            }
+        }
+
+        let mut rest = Rest {
+            queue: self,
+            done: false,
+        };
+        while let Some(value) = self.take() {
+            drop(value);
+        }
+        rest.done = true;
+    }
+
+    fn take(&self) -> Option<T> {
+        self.world.step_unless_panicking();
+        match &self.inner {
+            Storage::Production(queue) => queue.pop().ok(),
+            #[cfg(feature = "deterministic")]
+            Storage::Model { state, .. } => state.lock().values.pop_front(),
+        }
+    }
+
     pub(crate) fn is_closed(&self) -> bool {
         self.world.step();
         match &self.inner {

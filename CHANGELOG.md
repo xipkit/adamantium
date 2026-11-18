@@ -65,6 +65,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- `adamantium`: Dropping a `Channel`'s last receiver drops the values still
+  queued, as Tokio's `mpsc` receivers do. Before, they lived until the last
+  sender dropped too, so a queued `Reply` kept its requester waiting.
 - `adamantium`: `time::sleep` caps waits longer than 30 years at 30 years on
   every supported Tokio version. Tokio before 1.54 kept them, so production
   could wait longer than the deterministic clock.

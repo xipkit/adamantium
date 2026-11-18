@@ -3,7 +3,7 @@ mod support;
 
 #[cfg(feature = "tokio")]
 use adamantium::{Actor, Tasks};
-use adamantium::{Channel, Closed, TryReceiveError, TrySendError};
+use adamantium::{Channel, Closed, Reply, Sender, TryReceiveError, TrySendError};
 use std::{
     future::Future,
     pin::{Pin, pin},
@@ -206,6 +206,151 @@ fn dropping_last_receiver_wakes_all_pending_senders() {
         Poll::Ready(Err(Closed(3)))
     );
     assert_eq!(sender.try_send(4), Err(TrySendError::Closed(4)));
+}
+
+/// What queued [`Witness`] values saw of their channel as they dropped.
+#[derive(Default)]
+struct Seen {
+    dropped: AtomicUsize,
+    open: AtomicUsize,
+    unwoken: AtomicUsize,
+    sent: AtomicUsize,
+}
+
+/// A queued value that, as it drops, records whether its channel was closed,
+/// whether a pending operation had been woken, and whether a send on the
+/// channel still succeeded.
+struct Witness {
+    channel: Option<Sender<Witness>>,
+    pending: Arc<WakeCounter>,
+    seen: Arc<Seen>,
+}
+
+impl Witness {
+    fn new(channel: Option<Sender<Witness>>, pending: &Arc<WakeCounter>, seen: &Arc<Seen>) -> Self {
+        Self {
+            channel,
+            pending: Arc::clone(pending),
+            seen: Arc::clone(seen),
+        }
+    }
+}
+
+impl Drop for Witness {
+    fn drop(&mut self) {
+        self.seen.dropped.fetch_add(1, Ordering::SeqCst);
+        if self.pending.0.load(Ordering::SeqCst) == 0 {
+            self.seen.unwoken.fetch_add(1, Ordering::SeqCst);
+        }
+        if let Some(channel) = &self.channel {
+            if !channel.is_closed() {
+                self.seen.open.fetch_add(1, Ordering::SeqCst);
+            }
+            let inner = Self::new(None, &self.pending, &self.seen);
+            if channel.try_send(inner).is_ok() {
+                self.seen.sent.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+#[test]
+fn dropping_last_receiver_drops_a_queued_reply() {
+    let (requests, mailbox) = Channel::bounded(1).split();
+    let (reply, answer) = Reply::<u8>::pair();
+    requests.try_send(reply).unwrap();
+    let other = mailbox.clone();
+    drop(mailbox);
+    assert!(!answer.is_closed());
+    assert_eq!(answer.try_receive(), Err(TryReceiveError::Empty));
+    drop(other);
+    assert!(answer.is_closed());
+    assert_eq!(answer.try_receive(), Err(TryReceiveError::Closed));
+    assert!(requests.is_closed());
+    assert!(requests.is_empty());
+}
+
+#[test]
+fn dropping_last_receiver_closes_and_wakes_before_dropping_queued_values() {
+    let (sender, receiver) = Channel::bounded(2).split();
+    let pending = Arc::new(WakeCounter::default());
+    let seen = Arc::new(Seen::default());
+    for _ in 0..2 {
+        let witness = Witness::new(Some(sender.clone()), &pending, &seen);
+        assert!(sender.try_send(witness).is_ok());
+    }
+    let mut send = pin!(sender.send(Witness::new(None, &pending, &seen)));
+    assert!(poll_once(send.as_mut(), &pending).is_pending());
+    drop(receiver);
+    assert_eq!(seen.dropped.load(Ordering::SeqCst), 4);
+    assert_eq!(seen.open.load(Ordering::SeqCst), 0);
+    assert_eq!(seen.unwoken.load(Ordering::SeqCst), 0);
+    assert_eq!(seen.sent.load(Ordering::SeqCst), 0);
+    assert!(sender.is_empty());
+    let Poll::Ready(Err(Closed(unsent))) = poll_once(send.as_mut(), &pending) else {
+        panic!("the pending send must hand its value back");
+    };
+    drop(unsent);
+    assert_eq!(seen.dropped.load(Ordering::SeqCst), 5);
+}
+
+#[test]
+fn a_queued_value_can_drop_the_last_sender_as_it_drops() {
+    let (sender, receiver) = Channel::bounded(2).split();
+    let pending = Arc::new(WakeCounter::default());
+    pending.wake_by_ref();
+    let seen = Arc::new(Seen::default());
+    let witness = Witness::new(Some(sender.clone()), &pending, &seen);
+    assert!(sender.try_send(witness).is_ok());
+    assert!(sender.try_send(Witness::new(None, &pending, &seen)).is_ok());
+    drop(sender);
+    drop(receiver);
+    assert_eq!(seen.dropped.load(Ordering::SeqCst), 3);
+    assert_eq!(seen.open.load(Ordering::SeqCst), 0);
+    assert_eq!(seen.sent.load(Ordering::SeqCst), 0);
+    assert_eq!(Arc::strong_count(&seen), 1);
+}
+
+#[test]
+#[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
+fn a_panicking_destructor_does_not_keep_later_values_queued() {
+    struct Bomb(Arc<AtomicUsize>, bool);
+
+    impl Drop for Bomb {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.1, "the bomb went off");
+        }
+    }
+
+    let (sender, receiver) = Channel::bounded(3).split();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    for explodes in [false, true, false] {
+        assert!(
+            sender
+                .try_send(Bomb(Arc::clone(&dropped), explodes))
+                .is_ok()
+        );
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(receiver)));
+    assert!(result.is_err());
+    assert_eq!(dropped.load(Ordering::SeqCst), 3);
+    assert!(sender.is_closed());
+    assert!(sender.is_empty());
+}
+
+#[test]
+fn dropping_last_receiver_drops_values_queued_before_an_explicit_close() {
+    let (sender, receiver) = Channel::bounded(2).split();
+    let pending = Arc::new(WakeCounter::default());
+    let seen = Arc::new(Seen::default());
+    assert!(sender.try_send(Witness::new(None, &pending, &seen)).is_ok());
+    assert!(sender.try_send(Witness::new(None, &pending, &seen)).is_ok());
+    assert!(receiver.close());
+    assert_eq!(seen.dropped.load(Ordering::SeqCst), 0);
+    drop(receiver);
+    assert_eq!(seen.dropped.load(Ordering::SeqCst), 2);
+    assert!(sender.is_empty());
 }
 
 #[test]
