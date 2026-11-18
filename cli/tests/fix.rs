@@ -907,3 +907,150 @@ fn bounded_async_cargo_target_identity_is_required() {
     );
     assert_eq!(execute(dir.path()), b"7 11\n");
 }
+
+/// A binary whose Tokio dependency has the `sync` feature that channels need.
+#[allow(clippy::unwrap_used, reason = "a failed fixture setup fails the test")]
+fn channel_binary(main: &str) -> tempfile::TempDir {
+    let dir = binary(main);
+    let manifest = dir.path().join("Cargo.toml");
+    let text = fs::read_to_string(&manifest).unwrap().replace(
+        r#"features = ["rt", "macros", "time"]"#,
+        r#"features = ["rt", "macros", "sync", "time"]"#,
+    );
+    fs::write(manifest, text).unwrap();
+    dir
+}
+
+#[allow(clippy::unwrap_used, reason = "a missing fixture fails the test")]
+fn channel_fixture(name: &str) -> String {
+    fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/channel-rewrites")
+            .join(name),
+    )
+    .unwrap()
+}
+
+#[test]
+fn channel_rewrites_keep_behavior_pass_check_and_are_idempotent() {
+    for (name, rewritten) in [
+        ("reply", "::adamantium::Reply::pair()"),
+        ("watch", "::adamantium::Watch::new(0u32);"),
+    ] {
+        let source = channel_fixture(&format!("{name}.rs"));
+        let dir = channel_binary(&source);
+        let file = dir.path().join("src/main.rs");
+        let before = execute(dir.path());
+
+        let preview = run(&["fix", "--dry-run"], dir.path());
+        assert_eq!(
+            preview.status.code(),
+            Some(1),
+            "{name}: {}",
+            String::from_utf8_lossy(&preview.stderr)
+        );
+        let diff = String::from_utf8(preview.stdout).unwrap();
+        assert!(diff.contains(rewritten), "{name}: {diff}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), source);
+
+        let fixed = run(&["fix"], dir.path());
+        assert!(
+            fixed.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&fixed.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            channel_fixture(&format!("{name}.fixed.rs")),
+            "{name}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&execute(dir.path())),
+            String::from_utf8_lossy(&before),
+            "{name}"
+        );
+        let checked = run(&["check", "--format", "json"], dir.path());
+        assert!(
+            checked.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&checked.stdout)
+        );
+        let again = run(&["fix", "--dry-run"], dir.path());
+        assert!(again.status.success(), "{name}");
+        assert!(again.stdout.is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn channels_fix_cannot_follow_are_reported_and_left_unchanged() {
+    let source = channel_fixture("review.rs");
+    let dir = channel_binary(&source);
+    let before = execute(dir.path());
+    let output = run(&["fix"], dir.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        source
+    );
+    for (name, channel, section) in [
+        ("(passed_tx, passed_rx)", "oneshot", "a-single-reply"),
+        (
+            "(propagated_tx, propagated_rx)",
+            "oneshot",
+            "a-single-reply",
+        ),
+        ("(printed_tx, printed_rx)", "oneshot", "a-single-reply"),
+        ("oneshot::channel::<u32>(..)", "oneshot", "a-single-reply"),
+        ("(checked_tx, checked_rx)", "watch", "the-latest-value"),
+        (
+            "(subscribed_tx, subscribed_rx)",
+            "watch",
+            "the-latest-value",
+        ),
+        (
+            "(borrowed_tx, mut borrowed_rx)",
+            "watch",
+            "the-latest-value",
+        ),
+        ("(unwatched_tx, unwatched_rx)", "watch", "the-latest-value"),
+        ("(compared_tx, compared_rx)", "watch", "the-latest-value"),
+    ] {
+        let constructor = name.strip_suffix("(..)").map_or_else(
+            || format!("let {name} = "),
+            |callee| format!("keep({callee}())"),
+        );
+        let line = source
+            .lines()
+            .position(|line| line.contains(&constructor))
+            .unwrap()
+            + 1;
+        let report = format!("src/main.rs:{line}: `{name}` stays a Tokio {channel} channel: ");
+        let mut lines = stderr.lines().skip_while(|line| !line.starts_with(&report));
+        assert!(lines.next().is_some(), "{report}\n{stderr}");
+        assert!(
+            lines
+                .next()
+                .is_some_and(|link| link.ends_with(&format!("/docs/migrating.md#{section}"))),
+            "{name}: {stderr}"
+        );
+    }
+    assert_eq!(execute(dir.path()), before);
+}
+
+#[test]
+fn shared_state_and_channel_rewrites_remove_adjacent_imports_together() {
+    let source = "use std::sync::{Arc, Mutex};\nuse tokio::sync::oneshot;\n\nfn count() -> u32 {\n    let hits = Arc::new(Mutex::new(0u32));\n    *hits.lock().unwrap() += 1;\n    let value = *hits.lock().unwrap();\n    value\n}\n\nfn main() {\n    let (tx, mut rx) = oneshot::channel();\n    tx.send(count()).unwrap_or(());\n    let value = rx.try_recv().unwrap_or(0);\n    println!(\"{value}\");\n}\n";
+    let dir = channel_binary(source);
+    let fixed = run(&["fix"], dir.path());
+    assert!(
+        fixed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        "fn count() -> u32 {\n    let hits = ::adamantium::Actor::new(0u32);\n    hits.with(|hits| *hits += 1);\n    let value = hits.read(|hits| *hits);\n    value\n}\n\nfn main() {\n    let (tx, rx) = ::adamantium::Reply::pair();\n    tx.send(count()).unwrap_or(());\n    let value = rx.try_receive().unwrap_or(0);\n    println!(\"{value}\");\n}\n"
+    );
+    assert_eq!(execute(dir.path()), b"1\n");
+}

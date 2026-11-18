@@ -15,14 +15,12 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::Range,
     path::{Path, PathBuf},
-    str::FromStr,
 };
 
-use proc_macro2::{Span, TokenStream, TokenTree};
+use proc_macro2::{TokenStream, TokenTree};
 use syn::{
-    BinOp, Block, Expr, ExprLit, GenericArgument, Item, ItemUse, Lit, Local, Macro, Pat,
-    PathArguments, Stmt, Type, UnOp, UseTree, ext::IdentExt, punctuated::Punctuated,
-    spanned::Spanned, visit::Visit,
+    BinOp, Block, Expr, ExprLit, GenericArgument, Item, Lit, Local, Macro, Pat, PathArguments,
+    Stmt, Type, UnOp, UseTree, punctuated::Punctuated, visit::Visit,
 };
 
 use quote::ToTokens;
@@ -30,6 +28,7 @@ use quote::ToTokens;
 use super::{
     Edit,
     scan::{Crate, Hazard, macro_attribute},
+    source::{Text, bare, coalesce, format_captures, names_in},
 };
 
 mod calls;
@@ -108,7 +107,6 @@ pub(super) struct Outcome {
 /// One file's rewrites before the checks that need the whole package.
 pub(super) struct Draft {
     file: PathBuf,
-    source: String,
     groups: Vec<Group>,
     /// Groups that hold one state, such as a field and a local it is
     /// cloned into, which stand or fall together.
@@ -119,6 +117,16 @@ pub(super) struct Draft {
 }
 
 const ACTOR: &str = "::adamantium::Actor";
+
+/// The imports the rewrite can leave unused: the module and the two types it
+/// replaces.
+pub(super) const IMPORTS: &[&[&str]] = &[
+    &["std", "sync"],
+    &["alloc", "sync"],
+    &["std", "sync", "Arc"],
+    &["alloc", "sync", "Arc"],
+    &["std", "sync", "Mutex"],
+];
 
 /// A node whose text fix couldn't find, which only a parser bug would cause.
 const UNLOCATED: Reason = Reason::Unfollowed("fix couldn't find its source text");
@@ -156,7 +164,6 @@ pub(super) fn plan(
 ) -> Draft {
     let mut draft = Draft {
         file: file.to_path_buf(),
-        source: source.to_owned(),
         groups: Vec::new(),
         links: Vec::new(),
         callees: Vec::new(),
@@ -442,50 +449,9 @@ impl Draft {
                 None => outcome.edits.extend(group.edits),
             }
         }
-        // A module in another file can name its ancestors' private imports, so
-        // fix can't see every use of them.
-        if !outcome.edits.is_empty()
-            && let Ok(tree) = syn::parse_file(&self.source)
-            && !has_out_of_line_module(&tree)
-        {
-            let text = Text::new(&self.source, &tree);
-            let imports = Imports::prune(&text, &self.file, &tree, &outcome.edits);
-            outcome.edits.extend(imports);
-        }
         outcome.edits = coalesce(outcome.edits);
         (self.file, outcome)
     }
-}
-
-/// Whether any module in the file is declared as `mod name;`.
-fn has_out_of_line_module(tree: &syn::File) -> bool {
-    struct Modules(bool);
-    impl<'ast> Visit<'ast> for Modules {
-        fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
-            self.0 |= module.content.is_none();
-            syn::visit::visit_item_mod(self, module);
-        }
-    }
-    let mut modules = Modules(false);
-    modules.visit_file(tree);
-    modules.0
-}
-
-/// Joins edits that touch, such as two adjacent `use` lines removed, since
-/// the fix pipeline treats touching edits as conflicting.
-fn coalesce(mut edits: Vec<Edit>) -> Vec<Edit> {
-    edits.sort();
-    let mut joined: Vec<Edit> = Vec::with_capacity(edits.len());
-    for edit in edits {
-        match joined.last_mut() {
-            Some(last) if last.end == edit.start => {
-                last.end = edit.end;
-                last.replacement.push_str(&edit.replacement);
-            }
-            _ => joined.push(edit),
-        }
-    }
-    joined
 }
 
 /// Rewrites in one file must not touch the same text: a guard inside the
@@ -519,41 +485,6 @@ fn refuse_overlaps(groups: &mut [Group]) {
                 "rewriting it would overlap the rewrite of another binding",
             ));
         }
-    }
-}
-
-struct Text<'a> {
-    source: &'a str,
-    /// The bytes before the text that `syn` parsed: a byte order mark and a
-    /// shebang line.
-    prefix: usize,
-}
-
-impl<'a> Text<'a> {
-    fn new(source: &'a str, tree: &syn::File) -> Self {
-        Self {
-            source,
-            prefix: usize::from(source.starts_with('\u{feff}')) * '\u{feff}'.len_utf8()
-                + tree.shebang.as_ref().map_or(0, String::len),
-        }
-    }
-
-    fn range(&self, span: Span) -> Option<Range<usize>> {
-        let range = span.byte_range();
-        let range = (range.start + self.prefix)..(range.end + self.prefix);
-        self.source.get(range.clone()).map(|_| range)
-    }
-
-    fn of<T: Spanned + ?Sized>(&self, node: &T) -> Option<Range<usize>> {
-        self.range(node.span())
-    }
-
-    fn get(&self, range: Range<usize>) -> Option<&str> {
-        self.source.get(range)
-    }
-
-    fn line(&self, span: Span) -> usize {
-        span.start().line
     }
 }
 
@@ -699,55 +630,6 @@ impl<'ast> Visit<'ast> for Parsed<'_> {
             },
         );
     }
-}
-
-/// The names in an `std::fmt` format string that capture variables, such as
-/// `x` and `width` in `"{x:width$}"`.
-fn format_captures(format: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut chars = format.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '{' {
-            continue;
-        }
-        if chars.peek() == Some(&'{') {
-            chars.next();
-            continue;
-        }
-        let mut spec = String::new();
-        for c in chars.by_ref() {
-            if c == '}' {
-                break;
-            }
-            spec.push(c);
-        }
-        let (argument, options) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
-        if is_identifier(argument.trim()) {
-            names.push(argument.trim().to_owned());
-        }
-        for part in options.split('$').rev().skip(1) {
-            let name: String = part
-                .chars()
-                .rev()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            if is_identifier(&name) {
-                names.push(name);
-            }
-        }
-    }
-    names
-}
-
-fn is_identifier(name: &str) -> bool {
-    name.chars()
-        .next()
-        .is_some_and(|c| c.is_alphabetic() || c == '_')
-        && name.chars().all(|c| c.is_alphanumeric() || c == '_')
-        && name != "_"
 }
 
 /// What a name means in one item scope.
@@ -2363,38 +2245,6 @@ fn callee_name(func: &Expr) -> Option<String> {
     }
 }
 
-/// An identifier's name without `r#`, which Rust resolves as the same name.
-fn bare(ident: &proc_macro2::Ident) -> String {
-    ident.unraw().to_string()
-}
-
-/// How many times `text` names `name`, as an identifier or as a variable
-/// that a string captures, or `None` if it doesn't tokenize.
-fn names_in(text: &str, name: &str) -> Option<usize> {
-    fn count(tokens: TokenStream, name: &str) -> usize {
-        tokens
-            .into_iter()
-            .map(|token| match token {
-                TokenTree::Group(group) => count(group.stream(), name),
-                TokenTree::Ident(ident) => usize::from(bare(&ident) == name),
-                TokenTree::Literal(literal) => {
-                    match syn::parse2::<Lit>(TokenTree::Literal(literal).into()) {
-                        Ok(Lit::Str(string)) => format_captures(&string.value())
-                            .iter()
-                            .filter(|capture| *capture == name)
-                            .count(),
-                        _ => 0,
-                    }
-                }
-                TokenTree::Punct(_) => 0,
-            })
-            .sum()
-    }
-    TokenStream::from_str(text)
-        .ok()
-        .map(|tokens| count(tokens, name))
-}
-
 fn is_unwrap(call: &syn::ExprMethodCall) -> bool {
     call.turbofish.is_none()
         && match call.method.to_string().as_str() {
@@ -2933,291 +2783,10 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
     }
 }
 
-/// Removes `std::sync::Mutex` and `std::sync::Arc` imports that the rewrite
-/// leaves unused.
-struct Imports<'t> {
-    text: &'t Text<'t>,
-    /// Byte offsets of every identifier in the file, by name.
-    idents: HashMap<String, Vec<Range<usize>>>,
-}
-
-impl<'t> Imports<'t> {
-    fn prune(text: &'t Text<'t>, file: &Path, tree: &syn::File, edits: &[Edit]) -> Vec<Edit> {
-        let mut uses = Uses(Vec::new());
-        uses.visit_file(tree);
-        let mut imports = Imports {
-            text,
-            idents: HashMap::new(),
-        };
-        if let Some(body) = text.source.get(text.prefix..)
-            && let Ok(tokens) = TokenStream::from_str(body)
-        {
-            let paths: Vec<Range<usize>> =
-                uses.0.iter().filter_map(|item| text.of(*item)).collect();
-            imports.collect(tokens, &paths);
-        }
-        // A `use` path's first name can refer to another import, as `Arc`
-        // does in `use Arc as Shared;`.
-        for item in &uses.0 {
-            if item.leading_colon.is_none() {
-                imports.roots(&item.tree);
-            }
-        }
-        let mut pruned = Vec::new();
-        let mut lines = Vec::new();
-        for item in uses.0 {
-            if !matches!(item.vis, syn::Visibility::Inherited) {
-                continue;
-            }
-            let mut removed = BTreeSet::new();
-            imports.unused(&item.tree, &mut Vec::new(), edits, &mut removed);
-            if removed.is_empty() {
-                continue;
-            }
-            let edit = match imports.rewrite(&item.tree, &removed) {
-                Some(Some(tree)) => text.of(&item.tree).map(|range| (range, tree)),
-                Some(None) => None,
-                None => imports.line(item).map(|range| (range, String::new())),
-            };
-            match edit {
-                Some((range, replacement)) if replacement.is_empty() => lines.push(range),
-                Some((range, replacement)) => pruned.push((range, replacement)),
-                None => {}
-            }
-        }
-        // Lines removed together leave at most the blank line that separated
-        // them from what follows, and none at the top of the file.
-        lines.sort_by_key(|range| range.start);
-        let mut runs: Vec<Range<usize>> = Vec::new();
-        for range in lines {
-            match runs.last_mut() {
-                Some(run) if run.end == range.start => run.end = range.end,
-                _ => runs.push(range),
-            }
-        }
-        for run in runs {
-            let run = imports.without_blank_line(run);
-            pruned.push((run, String::new()));
-        }
-        pruned
-            .into_iter()
-            .map(|(range, replacement)| Edit {
-                file: file.to_path_buf(),
-                start: range.start,
-                end: range.end,
-                replacement,
-            })
-            .collect()
-    }
-
-    /// Records the identifiers that could name an import: not those in `use`
-    /// items, nor those after `::` in a longer path, except a path through
-    /// `self`, `super` or `crate`, which can reach the import.
-    fn collect(&mut self, tokens: TokenStream, uses: &[Range<usize>]) {
-        let mut colons = 0;
-        let mut module = false;
-        for token in tokens {
-            match token {
-                TokenTree::Group(group) => {
-                    module = false;
-                    self.collect(group.stream(), uses);
-                }
-                TokenTree::Ident(ident) => {
-                    let reachable = colons < 2 || module;
-                    module = ident == "self" || ident == "super" || ident == "crate";
-                    if reachable
-                        && let Some(range) = self.text.range(ident.span())
-                        && !uses
-                            .iter()
-                            .any(|item| item.start <= range.start && range.end <= item.end)
-                    {
-                        self.idents.entry(bare(&ident)).or_default().push(range);
-                    }
-                }
-                TokenTree::Punct(ref punct) if punct.as_char() == ':' => {
-                    colons += 1;
-                    continue;
-                }
-                TokenTree::Punct(_) | TokenTree::Literal(_) => module = false,
-            }
-            colons = 0;
-        }
-    }
-
-    fn roots(&mut self, tree: &UseTree) {
-        let ident = match tree {
-            UseTree::Path(path) => &path.ident,
-            UseTree::Name(name) => &name.ident,
-            UseTree::Rename(rename) => &rename.ident,
-            UseTree::Glob(_) => return,
-            UseTree::Group(group) => {
-                for tree in &group.items {
-                    self.roots(tree);
-                }
-                return;
-            }
-        };
-        if let Some(range) = self.text.range(ident.span()) {
-            self.idents.entry(bare(ident)).or_default().push(range);
-        }
-    }
-
-    /// Collects the starts of leaves importing `Arc` or `Mutex` whose name
-    /// appears nowhere else in the file once `edits` apply.
-    fn unused(
-        &self,
-        tree: &UseTree,
-        prefix: &mut Vec<String>,
-        edits: &[Edit],
-        removed: &mut BTreeSet<usize>,
-    ) {
-        let (ident, name) = match tree {
-            UseTree::Path(path) => {
-                prefix.push(bare(&path.ident));
-                self.unused(&path.tree, prefix, edits, removed);
-                prefix.pop();
-                return;
-            }
-            UseTree::Group(group) => {
-                for tree in &group.items {
-                    self.unused(tree, prefix, edits, removed);
-                }
-                return;
-            }
-            UseTree::Name(name) => (&name.ident, &name.ident),
-            UseTree::Rename(rename) => (&rename.ident, &rename.rename),
-            UseTree::Glob(_) => return,
-        };
-        let mut path = prefix.clone();
-        let name = if ident == "self" {
-            match (tree, prefix.last()) {
-                (UseTree::Name(_), Some(module)) => module.clone(),
-                _ => bare(name),
-            }
-        } else {
-            path.push(bare(ident));
-            bare(name)
-        };
-        // The rewrite can leave unused only the imports of the module and the
-        // two types it replaces.
-        let path: Vec<&str> = path.iter().map(String::as_str).collect();
-        if !matches!(
-            path.as_slice(),
-            ["std" | "alloc", "sync"] | ["std" | "alloc", "sync", "Arc"] | ["std", "sync", "Mutex"]
-        ) {
-            return;
-        }
-        let Some(leaf) = self.text.of(tree) else {
-            return;
-        };
-        // Text an edit replaces is gone, but its replacement can keep a name,
-        // as `Actor::new(Arc::new(1))` keeps `Arc`.
-        let elsewhere = self.idents.get(&name).into_iter().flatten().any(|range| {
-            !(leaf.start <= range.start && range.end <= leaf.end)
-                && !edits
-                    .iter()
-                    .any(|edit| edit.start <= range.start && range.end <= edit.end)
-        }) || edits
-            .iter()
-            .any(|edit| names_in(&edit.replacement, &name) != Some(0));
-        if !elsewhere {
-            removed.insert(leaf.start);
-        }
-    }
-
-    /// The tree without the removed leaves: `None` when nothing is left,
-    /// `Some(None)` when unchanged.
-    fn rewrite(&self, tree: &UseTree, removed: &BTreeSet<usize>) -> Option<Option<String>> {
-        match tree {
-            UseTree::Path(path) => match self.rewrite(&path.tree, removed)? {
-                Some(rest) => Some(Some(format!("{}::{rest}", path.ident))),
-                None => Some(None),
-            },
-            UseTree::Name(_) | UseTree::Rename(_) => {
-                let start = self.text.of(tree)?.start;
-                (!removed.contains(&start)).then_some(None)
-            }
-            UseTree::Glob(_) => Some(None),
-            UseTree::Group(group) => {
-                let mut kept = Vec::new();
-                let mut changed = false;
-                for tree in &group.items {
-                    match self.rewrite(tree, removed) {
-                        None => changed = true,
-                        Some(None) => kept.push(self.text.get(self.text.of(tree)?)?.to_owned()),
-                        Some(Some(text)) => {
-                            changed = true;
-                            kept.push(text);
-                        }
-                    }
-                }
-                match kept.as_slice() {
-                    _ if !changed => Some(None),
-                    [] => None,
-                    [only] if !only.starts_with("self") => Some(Some(only.clone())),
-                    kept => Some(Some(format!("{{{}}}", kept.join(", ")))),
-                }
-            }
-        }
-    }
-
-    /// An item's text with its indentation and line break, when the item
-    /// has its own line.
-    fn line(&self, item: &ItemUse) -> Option<Range<usize>> {
-        let range = self.text.of(item)?;
-        let source = self.text.source;
-        let line_start = source.get(..range.start)?.rfind('\n').map_or(0, |n| n + 1);
-        let start = if source.get(line_start..range.start)?.trim().is_empty() {
-            line_start
-        } else {
-            range.start
-        };
-        if start != line_start {
-            return Some(range);
-        }
-        Some(start..range.end + line_break(source.get(range.end..)?))
-    }
-
-    /// Extends whole lines to remove over the blank line below them when
-    /// they follow a blank line or start the file.
-    fn without_blank_line(&self, lines: Range<usize>) -> Range<usize> {
-        let source = self.text.source;
-        let whole = lines.start == 0
-            || source
-                .get(..lines.start)
-                .is_some_and(|above| above.ends_with('\n'));
-        let above = source.get(..lines.start).unwrap_or_default();
-        let blank_above =
-            above.len() <= self.text.prefix || above.ends_with("\n\n") || above.ends_with("\n\r\n");
-        let blank_below = source.get(lines.end..).map_or(0, line_break);
-        if whole && blank_above && blank_below > 0 {
-            lines.start..lines.end + blank_below
-        } else {
-            lines
-        }
-    }
-}
-
-/// The length of the line break that `text` starts with.
-fn line_break(text: &str) -> usize {
-    if text.starts_with("\r\n") {
-        2
-    } else {
-        usize::from(text.starts_with('\n'))
-    }
-}
-
-struct Uses<'ast>(Vec<&'ast ItemUse>);
-
-impl<'ast> Visit<'ast> for Uses<'ast> {
-    fn visit_item_use(&mut self, item: &'ast ItemUse) {
-        self.0.push(item);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fix::source::prune_imports;
 
     /// Plans `source` as the only file of its package, as Clippy would see
     /// it with every occurrence of each of `mutexes` resolved to
@@ -3236,10 +2805,13 @@ mod tests {
         settled.pop().map(|(_, outcome)| outcome).unwrap()
     }
 
-    /// Plans `source` and applies the edits.
+    /// Plans `source` and applies the edits, with the imports they leave
+    /// unused removed, as `fix` does.
     pub(super) fn fix(source: &str, mutexes: &[&str]) -> (String, Vec<(String, Reason)>) {
         let outcome = outcome(source, mutexes);
         let mut edits = outcome.edits;
+        let imports = prune_imports(Path::new("lib.rs"), source, &edits, IMPORTS);
+        edits.extend(imports);
         edits.sort();
         let mut fixed = source.to_owned();
         for edit in edits.iter().rev() {
@@ -3381,7 +2953,11 @@ mod tests {
     #[test]
     fn adjacent_imports_are_removed_in_one_edit() {
         let source = "use std::sync::Mutex;\nuse std::sync::Arc;\n\nfn f() {\n    let m = Arc::new(Mutex::new(1));\n    drop(m);\n}\n";
-        assert_eq!(outcome(source, &["Mutex"]).edits.len(), 2);
+        let edits = outcome(source, &["Mutex"]).edits;
+        assert_eq!(
+            prune_imports(Path::new("lib.rs"), source, &edits, IMPORTS).len(),
+            1
+        );
         let (fixed, _) = fix(source, &["Mutex"]);
         assert_eq!(
             fixed,

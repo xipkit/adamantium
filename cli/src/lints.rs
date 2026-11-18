@@ -149,6 +149,8 @@ pub const DISALLOWED_METHODS: &[(&str, &[&str])] = &[
         "messages-for-every-receiver",
         &["tokio::sync::broadcast::channel"],
     ),
+    ("a-single-reply", &["tokio::sync::oneshot::channel"]),
+    ("the-latest-value", &["tokio::sync::watch::channel"]),
     (
         "stopping-a-long-lived-task",
         &[
@@ -236,6 +238,17 @@ pub const DISALLOWED_TYPES: &[(&str, &[&str])] = &[
             "tokio::sync::broadcast::Sender",
             "tokio::sync::broadcast::Receiver",
         ],
+    ),
+    (
+        "a-single-reply",
+        &[
+            "tokio::sync::oneshot::Sender",
+            "tokio::sync::oneshot::Receiver",
+        ],
+    ),
+    (
+        "the-latest-value",
+        &["tokio::sync::watch::Sender", "tokio::sync::watch::Receiver"],
     ),
     ("results-as-they-finish", &["tokio::task::JoinSet"]),
     (
