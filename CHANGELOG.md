@@ -17,14 +17,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   inside a connection `Limit`, and evicts keys after their last call ends.
 - `adamantium`: deterministic tests can select probabilistic concurrency testing
   or bounded depth-first search and replay saved failure schedules as a corpus.
+- `adamantium`: `random::u64` and `random::up_to` give application code random
+  draws that the deterministic harness takes from its seed and a `Replay`
+  repeats.
+- `adamantium`: `Backoff::jitter` spreads each retry or restart wait between
+  half of its delay and the whole of it, drawn from `random`. A backoff without
+  it waits and schedules exactly as before.
 
 ### Changed
 
 - `adamantium`: replay records use format 3 to capture the scheduler and its
   bounds. Regenerate saved records from previous formats.
-
-### Changed
-
 - `cargo-adamantium`: Default rules report Tokio `oneshot`, Tokio `watch`,
   and `std::sync::mpsc::sync_channel`. Strict rules also report bounded Tokio
   `mpsc`, `Notify`, and `Semaphore`. Broadcast diagnostics recommend
