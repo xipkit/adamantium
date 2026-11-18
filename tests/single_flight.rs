@@ -127,7 +127,7 @@ fn dropping_the_first_caller_leaves_the_operation_to_the_others() {
     let flights = SingleFlight::new();
     let counts = Counts::default();
     let answers = Channel::bounded(1);
-    let mut second = Box::pin(flights.run("db", || counts.operation(&answers)));
+    let mut second = pin!(flights.run("db", || counts.operation(&answers)));
     {
         let mut first = pin!(flights.run("db", || counts.operation(&answers)));
         assert_eq!(poll_once(first.as_mut()), Poll::Pending);
@@ -147,7 +147,7 @@ fn a_wake_after_the_polling_caller_leaves_reaches_the_others() {
     let answers = Channel::bounded(1);
     let wakes = Arc::new(Wakes::default());
     let waker = Waker::from(Arc::clone(&wakes));
-    let mut second = Box::pin(flights.run("db", || counts.operation(&answers)));
+    let mut second = pin!(flights.run("db", || counts.operation(&answers)));
     {
         // The first caller polls the operation, so the operation's wake
         // is registered by its poll, not by the second caller's.
