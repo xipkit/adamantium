@@ -18,6 +18,7 @@ fixture = Path(__file__).resolve().parent / "fixtures"
 rules = {
     "blocking": "adamantium_blocking_in_async",
     "nested": "adamantium_nested_actor_access",
+    "limit": "adamantium_nested_limit",
     "race": "adamantium_race_with_timer",
 }
 
@@ -66,12 +67,13 @@ with tempfile.TemporaryDirectory(prefix="adamantium-lints-") as temporary:
     baseline.write_text(json.dumps(report))
     known = check(root, expected=0, options=("--baseline", str(baseline)))
     assert not known["findings"] and known["baseline_unmatched"] == 0, known
-    assert known["baselined"][rules["nested"]] == 9, known
+    nested = len([x for x in marked(root) if x[0] == rules["nested"]])
+    assert known["baselined"][rules["nested"]] == nested, known
     assert diagnostics(check(root, options=("--strict",))) == marked(root)
     sarif = subprocess.run([str(cli), "check", str(root), "--format", "sarif", "--dylint-library", str(library), "--", "--locked"], capture_output=True, text=True)
     assert sarif.returncode == 1, sarif.stderr
     results = json.loads(sarif.stdout)["runs"][0]["results"]
-    assert sum(r["ruleId"] == rules["nested"] for r in results) == 9, results
+    assert sum(r["ruleId"] == rules["nested"] for r in results) == nested, results
     assert diagnostics(check(root, "--features", "extra")) == marked(root, extra=True)
     assert diagnostics(check(root, "-plint-consumer", "--lib")) == marked(root, member=False, targets=False)
     member = check(root, "--package=lint-member", "--lib")
@@ -79,12 +81,13 @@ with tempfile.TemporaryDirectory(prefix="adamantium-lints-") as temporary:
     assert diagnostics(check(root, "--package=lint-consumer", "--bin=lint-consumer")) == marked(root, member=False, targets=False), "--bin checked extra targets"
     assert not diagnostics(check(root, lib=None)), "ordinary check loaded experimental lints"
 
-    manifest.write_text(original + '\n[workspace.metadata.adamantium]\nskip = ["member/", "tests/"]\nallow = ["adamantium_blocking_in_async", "adamantium_race_with_timer"]\n[workspace.metadata.adamantium.exceptions]\nadamantium_nested_actor_access = ["src/"]\n')
+    manifest.write_text(original + '\n[workspace.metadata.adamantium]\nskip = ["member/", "tests/"]\nallow = ["adamantium_blocking_in_async", "adamantium_nested_limit", "adamantium_race_with_timer"]\n[workspace.metadata.adamantium.exceptions]\nadamantium_nested_actor_access = ["src/"]\n')
     skipped = check(root)
     assert not diagnostics(skipped), skipped
     assert skipped["skipped"][rules["blocking"]] == len([x for x in marked(root) if x[0] == rules["blocking"]]), skipped
     assert skipped["skipped"][rules["nested"]] == len([x for x in marked(root) if x[0] == rules["nested"]]), skipped
     assert skipped["skipped"][rules["race"]] == len([x for x in marked(root) if x[0] == rules["race"]]), skipped
+    assert skipped["skipped"][rules["limit"]] == len([x for x in marked(root) if x[0] == rules["limit"]]), skipped
     manifest.write_text(original)
 
     missing = check(root, expected=2, lib=root / "missing.dylib")

@@ -47,6 +47,7 @@ pub struct Example {
 pub const EXPERIMENTAL_LINTS: &[&str] = &[
     "adamantium_blocking_in_async",
     "adamantium_nested_actor_access",
+    "adamantium_nested_limit",
     "adamantium_race_with_timer",
 ];
 
