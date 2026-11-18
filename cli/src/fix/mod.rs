@@ -14,6 +14,7 @@ use syn::{spanned::Spanned, visit::Visit};
 use crate::{check, manifest};
 
 mod scan;
+mod source;
 mod state;
 
 const GUIDE: &str = "https://github.com/xipkit/adamantium/blob/main/docs/migrating.md";
