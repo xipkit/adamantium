@@ -50,6 +50,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `subscribe`, when every use of both halves reads the same afterwards. It
   leaves any other channel for review and says why, such as a watch send
   whose result is checked, which fails in Tokio once no receiver is alive.
+- `cargo-adamantium`: `fix --strict` rewrites a local bounded Tokio `mpsc`
+  channel with a positive literal capacity to `Channel::bounded(n).split()`,
+  when its sender isn't cloned and each send is awaited where it is called,
+  so that at most one send waits, as Tokio's admission order needs. Results
+  of sends and of `try_recv` must be discarded or tested, and the guide's
+  new section on bounded queues compares the two.
 - In `adamantium`, `Bytes::slice` checks byte ranges and shares storage.
   Editing a window through `make_mut` copies only the selected bytes.
 - `cargo-adamantium`: `check --format json` and `check --format sarif` include

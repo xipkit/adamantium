@@ -213,7 +213,7 @@ pub const DISALLOWED_METHODS: &[(&str, &[&str])] = &[
             "fastrand::f64_inclusive",
         ],
     ),
-    ("a-detached-worker", &["tokio::sync::mpsc::channel"]),
+    ("a-bounded-queue", &["tokio::sync::mpsc::channel"]),
 ];
 
 /// The guide's section on each disallowed type it covers, by the path as
@@ -252,7 +252,7 @@ pub const DISALLOWED_TYPES: &[(&str, &[&str])] = &[
     ),
     ("results-as-they-finish", &["tokio::task::JoinSet"]),
     (
-        "a-detached-worker",
+        "a-bounded-queue",
         &["tokio::sync::mpsc::Sender", "tokio::sync::mpsc::Receiver"],
     ),
 ];

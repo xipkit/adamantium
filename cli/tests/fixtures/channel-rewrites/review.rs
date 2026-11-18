@@ -1,5 +1,5 @@
 //! Tokio channels that `fix` leaves for review, each for its own reason.
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 fn keep<T>(value: T) -> T {
     value
@@ -79,11 +79,39 @@ fn compared() -> bool {
     same
 }
 
+/// A capacity that isn't a literal, which might be zero.
+async fn sized(size: usize) -> Option<u32> {
+    let (sized_tx, mut sized_rx) = mpsc::channel(size);
+    sized_tx.send(1).await.unwrap_or(());
+    sized_rx.recv().await
+}
+
+/// A cloned sender, whose waiting sends Tokio admits in order.
+async fn cloned() -> Vec<u32> {
+    let (cloned_tx, mut cloned_rx) = mpsc::channel(2);
+    let other = cloned_tx.clone();
+    other.send(1).await.unwrap_or(());
+    cloned_tx.send(2).await.unwrap_or(());
+    drop((other, cloned_tx));
+    let mut seen = Vec::new();
+    while let Some(n) = cloned_rx.recv().await {
+        seen.push(n);
+    }
+    seen
+}
+
+/// A send whose error would print otherwise if it failed.
+async fn unwrapped() -> Option<u32> {
+    let (unwrapped_tx, mut unwrapped_rx) = mpsc::channel(1);
+    unwrapped_tx.send(3).await.expect("the receiver is alive");
+    unwrapped_rx.recv().await
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     printed();
     println!(
-        "{:?} {:?} {} {} {} {:?} {} {}",
+        "{:?} {:?} {} {} {} {:?} {} {} {:?} {:?} {:?}",
         passed().await,
         propagated().await,
         unbound(),
@@ -91,6 +119,9 @@ async fn main() {
         subscribed(),
         borrowed().await,
         unwatched().await,
-        compared()
+        compared(),
+        sized(1).await,
+        cloned().await,
+        unwrapped().await
     );
 }

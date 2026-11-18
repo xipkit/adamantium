@@ -933,16 +933,25 @@ fn channel_fixture(name: &str) -> String {
 
 #[test]
 fn channel_rewrites_keep_behavior_pass_check_and_are_idempotent() {
-    for (name, rewritten) in [
-        ("reply", "::adamantium::Reply::pair()"),
-        ("watch", "::adamantium::Watch::new(0u32);"),
+    // Only the strict rules report a bounded mpsc channel.
+    for (name, rewritten, strict) in [
+        ("reply", "::adamantium::Reply::pair()", None),
+        ("watch", "::adamantium::Watch::new(0u32);", None),
+        (
+            "mpsc",
+            "::adamantium::Channel::bounded(4).split()",
+            Some("--strict"),
+        ),
     ] {
         let source = channel_fixture(&format!("{name}.rs"));
         let dir = channel_binary(&source);
         let file = dir.path().join("src/main.rs");
         let before = execute(dir.path());
+        let args = |args: &[&'static str]| -> Vec<&'static str> {
+            args.iter().copied().chain(strict).collect()
+        };
 
-        let preview = run(&["fix", "--dry-run"], dir.path());
+        let preview = run(&args(&["fix", "--dry-run"]), dir.path());
         assert_eq!(
             preview.status.code(),
             Some(1),
@@ -953,7 +962,7 @@ fn channel_rewrites_keep_behavior_pass_check_and_are_idempotent() {
         assert!(diff.contains(rewritten), "{name}: {diff}");
         assert_eq!(fs::read_to_string(&file).unwrap(), source);
 
-        let fixed = run(&["fix"], dir.path());
+        let fixed = run(&args(&["fix"]), dir.path());
         assert!(
             fixed.status.success(),
             "{name}: {}",
@@ -969,13 +978,13 @@ fn channel_rewrites_keep_behavior_pass_check_and_are_idempotent() {
             String::from_utf8_lossy(&before),
             "{name}"
         );
-        let checked = run(&["check", "--format", "json"], dir.path());
+        let checked = run(&args(&["check", "--format", "json"]), dir.path());
         assert!(
             checked.status.success(),
             "{name}: {}",
             String::from_utf8_lossy(&checked.stdout)
         );
-        let again = run(&["fix", "--dry-run"], dir.path());
+        let again = run(&args(&["fix", "--dry-run"]), dir.path());
         assert!(again.status.success(), "{name}");
         assert!(again.stdout.is_empty(), "{name}");
     }
@@ -986,7 +995,7 @@ fn channels_fix_cannot_follow_are_reported_and_left_unchanged() {
     let source = channel_fixture("review.rs");
     let dir = channel_binary(&source);
     let before = execute(dir.path());
-    let output = run(&["fix"], dir.path());
+    let output = run(&["fix", "--strict"], dir.path());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert_eq!(
@@ -1015,6 +1024,13 @@ fn channels_fix_cannot_follow_are_reported_and_left_unchanged() {
         ),
         ("(unwatched_tx, unwatched_rx)", "watch", "the-latest-value"),
         ("(compared_tx, compared_rx)", "watch", "the-latest-value"),
+        ("(sized_tx, mut sized_rx)", "mpsc", "a-bounded-queue"),
+        ("(cloned_tx, mut cloned_rx)", "mpsc", "a-bounded-queue"),
+        (
+            "(unwrapped_tx, mut unwrapped_rx)",
+            "mpsc",
+            "a-bounded-queue",
+        ),
     ] {
         let constructor = name.strip_suffix("(..)").map_or_else(
             || format!("let {name} = "),

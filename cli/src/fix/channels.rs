@@ -1,5 +1,6 @@
-//! Channel rewrites: a local Tokio oneshot channel becomes a `Reply` pair,
-//! and a local Tokio watch channel becomes a `Watch` and a `Watcher`.
+//! Channel rewrites: a local Tokio oneshot channel becomes a `Reply` pair, a
+//! local Tokio watch channel becomes a `Watch` and a `Watcher`, and a local
+//! bounded Tokio mpsc channel becomes a split `Channel`.
 //!
 //! A channel is rewritten only when its halves are bound by one
 //! `let (sender, receiver) = ...` statement and every use of each half, and
@@ -39,6 +40,21 @@
 //! where the dereference's value is moved out, as into a `let` binding, an
 //! argument or an arithmetic operand, so a dereference read in place, as in
 //! a comparison, is refused.
+//!
+//! Mpsc: `Channel::bounded(n).split()` holds `n` values, closes when the last
+//! sender drops, and, like Tokio's receiver, drops what is queued when its
+//! receiver drops. `recv().await` and `receive().await` both give
+//! `Option<T>` and drain queued values after a close, so a receive's result
+//! may be used anywhere. Tokio panics on a capacity of zero, which `Channel`
+//! rounds up to one, so only a positive integer literal is rewritten. Tokio
+//! admits waiting sends in the order they arrived, and `Channel` lets a send
+//! that arrives while another waits take freed room first. So the sender may
+//! not be cloned, and each send must be awaited where it is called, outside
+//! closures and async blocks that borrow the sender, so at most one send
+//! ever waits. Send errors change type and print differently, so, as for a
+//! oneshot send, a send's or a `try_recv`'s result may only be discarded or
+//! tested. `close` returns `()` in Tokio and `bool` in `Channel`, so only a
+//! statement reads the same.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -64,6 +80,7 @@ use super::{
 pub(super) enum Kind {
     Oneshot,
     Watch,
+    Mpsc,
 }
 
 impl Kind {
@@ -72,6 +89,7 @@ impl Kind {
         match self {
             Self::Oneshot => "a-single-reply",
             Self::Watch => "the-latest-value",
+            Self::Mpsc => "a-bounded-queue",
         }
     }
 
@@ -79,6 +97,7 @@ impl Kind {
         match self {
             Self::Oneshot => "a Tokio oneshot channel",
             Self::Watch => "a Tokio watch channel",
+            Self::Mpsc => "a Tokio mpsc channel",
         }
     }
 }
@@ -99,6 +118,7 @@ pub(super) struct Outcome {
 
 const REPLY: &str = "::adamantium::Reply";
 const WATCH: &str = "::adamantium::Watch";
+const CHANNEL: &str = "::adamantium::Channel";
 
 /// The imports the rewrites can leave unused.
 pub(super) const IMPORTS: &[&[&str]] = &[
@@ -107,6 +127,8 @@ pub(super) const IMPORTS: &[&[&str]] = &[
     &["tokio", "sync", "oneshot", "channel"],
     &["tokio", "sync", "watch"],
     &["tokio", "sync", "watch", "channel"],
+    &["tokio", "sync", "mpsc"],
+    &["tokio", "sync", "mpsc", "channel"],
 ];
 
 const UNBOUND: &str =
@@ -126,6 +148,14 @@ const WATCH_SENDER: &str = "its sender is read, subscribed to or asked about rec
 const HAS_CHANGED: &str = "Tokio's `has_changed` fails once the sender is gone, even with an unseen value, where `Watcher::has_changed` doesn't";
 const BORROW_SEEN: &str = "`borrow` leaves the value unseen, but `Watcher::get` marks it seen, and the receiver also waits for changes";
 const AWAIT_CAPTURED: &str = "it is awaited inside a closure or an async block without `move`, which would borrow the receiver that awaiting Tokio's moves";
+const CAPACITY: &str = "its capacity isn't a positive integer literal, and Tokio panics on zero where `Channel` rounds it up to one";
+const SENDER_CLONED: &str = "its sender is cloned, and Tokio admits waiting sends in the order they arrived, where `Channel` lets a later send take freed room first";
+const SEND_SHARED: &str = "a send isn't awaited where it is called, or runs in a closure or an async block that borrows the sender, so two sends might wait at once, and `Channel` doesn't admit them in order as Tokio does";
+const RECEIVE_UNAWAITED: &str =
+    "a receive isn't awaited where it is called, so fix can't follow its future";
+const CLOSE_VALUE: &str =
+    "the value of `close` is used, which is `()` in Tokio and a `bool` for `Channel`";
+const MPSC_METHOD: &str = "a half calls a method that `Channel` lacks or that means something else there, such as `reserve`, `recv_many`, `blocking_send`, `closed` or `capacity`";
 const READ_IN_PLACE: &str = "`*rx.borrow()` reads the value where it is, as in a comparison, without the copy that `Watcher::get` would make with `Clone`";
 const BORROW_CAPTURED: &str = "`borrow` would become `Watcher::get`, which needs the receiver mutably, inside a closure or async block";
 
@@ -416,7 +446,7 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
     };
     let arguments = match found.kind {
         Kind::Oneshot => 0,
-        Kind::Watch => 1,
+        Kind::Watch | Kind::Mpsc => 1,
     };
     let Some(turbofish) = turbofish(text, &call.func) else {
         group.refusal = Some(UNBOUND);
@@ -424,6 +454,10 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
     };
     if call.args.len() != arguments {
         group.refusal = Some(UNBOUND);
+        return group;
+    }
+    if found.kind == Kind::Mpsc && !call.args.first().is_some_and(positive_capacity) {
+        group.refusal = Some(CAPACITY);
         return group;
     }
     let mut analysis = Analysis {
@@ -474,6 +508,20 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
             .map(|range| vec![analysis.edit(range, format!("{REPLY}{turbofish}::pair"))]),
         Kind::Watch => watch_statement(text, found.local, &analysis, &turbofish, halves)
             .map(|(range, replacement)| vec![analysis.edit(range, replacement)]),
+        Kind::Mpsc => text
+            .of(call)
+            .zip(
+                call.args
+                    .first()
+                    .and_then(|capacity| text.of(capacity))
+                    .and_then(|range| text.get(range)),
+            )
+            .map(|(range, capacity)| {
+                vec![analysis.edit(
+                    range,
+                    format!("{CHANNEL}{turbofish}::bounded({capacity}).split()"),
+                )]
+            }),
     };
     let Some(constructor) = constructor else {
         group.refusal = Some(UNLOCATED);
@@ -487,8 +535,9 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
             continue;
         }
         match (found.kind, var.role, &var.mutable) {
-            // No method of a `Reply` or `ReplyReceiver` takes `&mut self`.
-            (Kind::Oneshot, _, Some(mutable)) => {
+            // No method of a `Reply`, a `ReplyReceiver` or a `Channel`'s
+            // halves takes `&mut self`.
+            (Kind::Oneshot | Kind::Mpsc, _, Some(mutable)) => {
                 edits.push(analysis.edit(mutable.clone(), String::new()));
             }
             (Kind::Watch, Role::Receiver, None) if var.needs_mut => {
@@ -500,6 +549,26 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
     group.edits = edits;
     group
 }
+
+/// Whether `capacity` is a positive `usize` literal that Tokio accepts on
+/// every target.
+fn positive_capacity(capacity: &Expr) -> bool {
+    let Expr::Lit(literal) = capacity else {
+        return false;
+    };
+    let Lit::Int(int) = &literal.lit else {
+        return false;
+    };
+    literal.attrs.is_empty()
+        && matches!(int.suffix(), "" | "usize")
+        && int
+            .base10_parse::<u32>()
+            .is_ok_and(|capacity| (1..=MAX_CAPACITY).contains(&capacity))
+}
+
+/// The largest capacity Tokio accepts where `usize` is 32 bits: it panics
+/// above `usize::MAX >> 3`.
+const MAX_CAPACITY: u32 = u32::MAX >> 3;
 
 /// The `::<T>` of a constructor's callee, if it has generics only there.
 fn turbofish(text: &Text<'_>, func: &Expr) -> Option<String> {
@@ -603,8 +672,9 @@ enum Shape {
     /// A `Result` whose error changes type but prints the same, as
     /// `try_recv`'s does.
     Result,
-    /// A `Result` whose error changes type and prints differently: a oneshot
-    /// send's `T` becomes `Closed<T>`, so a panic that prints it would too.
+    /// A `Result` whose error changes type and prints differently, as a
+    /// oneshot send's `T` becomes `Closed<T>`, so a panic that prints it would
+    /// too.
     Sent,
     /// `Result<T, RecvError>` becomes `Option<T>`.
     Option,
@@ -621,11 +691,13 @@ struct Op<'a> {
 }
 
 enum OpKind<'a> {
-    /// `tx.send(value)`.
+    /// `tx.send(value)`, or an mpsc `tx.try_send(value)`.
     Send(&'a Expr),
+    /// An mpsc `tx.send(value).await`.
+    AwaitedSend(&'a Expr),
     /// A oneshot `rx.await`, with the path to `rx`.
     Await(&'a Expr),
-    /// A oneshot `rx.try_recv()`.
+    /// A oneshot or mpsc `rx.try_recv()`.
     TryRecv(&'a syn::Ident),
     /// A watch `rx.changed().await`, which keeps its text.
     Changed,
@@ -762,27 +834,46 @@ impl<'t> Analysis<'t> {
         self.scopes.pop();
     }
 
+    /// The sender and value of a `sender.name(value)` call.
+    fn sent<'e>(&self, expr: &'e Expr, name: &str) -> Option<(usize, &'e Expr)> {
+        let Expr::MethodCall(call) = expr else {
+            return None;
+        };
+        if call.turbofish.is_some() || !call.attrs.is_empty() || call.method != name {
+            return None;
+        }
+        let var = self.tracked(&call.receiver)?;
+        let value = call.args.first()?;
+        (call.args.len() == 1 && self.role(var) == Some(Role::Sender)).then_some((var, value))
+    }
+
     fn op<'e>(&self, expr: &'e Expr) -> Option<Op<'e>> {
         match expr {
-            Expr::MethodCall(call)
-                if call.turbofish.is_none() && call.attrs.is_empty() && call.method == "send" =>
-            {
-                let var = self.tracked(&call.receiver)?;
-                let value = call.args.first()?;
-                (call.args.len() == 1 && self.role(var) == Some(Role::Sender)).then_some(Op {
-                    var,
-                    shape: match self.kind {
-                        Kind::Oneshot => Shape::Sent,
-                        Kind::Watch => Shape::Discard,
-                    },
-                    kind: OpKind::Send(value),
-                })
-            }
-            Expr::MethodCall(call) if self.kind == Kind::Oneshot && call.attrs.is_empty() => {
+            Expr::MethodCall(call) if call.attrs.is_empty() => {
+                let (send, sent) = match self.kind {
+                    Kind::Oneshot => ("send", Shape::Sent),
+                    Kind::Watch => ("send", Shape::Discard),
+                    // An mpsc send is followed only where it is awaited.
+                    Kind::Mpsc => ("try_send", Shape::Sent),
+                };
+                if let Some((var, value)) = self.sent(expr, send) {
+                    return Some(Op {
+                        var,
+                        shape: sent,
+                        kind: OpKind::Send(value),
+                    });
+                }
+                // Tokio's oneshot `TryRecvError` prints as `TryReceiveError`
+                // does, and its mpsc one doesn't.
+                let received = match self.kind {
+                    Kind::Oneshot => Shape::Result,
+                    Kind::Mpsc => Shape::Sent,
+                    Kind::Watch => return None,
+                };
                 let var = self.method(expr, "try_recv", Role::Receiver)?;
                 Some(Op {
                     var,
-                    shape: Shape::Result,
+                    shape: received,
                     kind: OpKind::TryRecv(&call.method),
                 })
             }
@@ -803,6 +894,14 @@ impl<'t> Analysis<'t> {
                         kind: OpKind::Changed,
                     })
                 }
+                (Kind::Mpsc, base) => {
+                    let (var, value) = self.sent(base, "send")?;
+                    Some(Op {
+                        var,
+                        shape: Shape::Sent,
+                        kind: OpKind::AwaitedSend(value),
+                    })
+                }
                 _ => None,
             },
             _ => None,
@@ -820,6 +919,10 @@ impl<'t> Analysis<'t> {
                 }
                 self.visit_expr(value);
             }
+            // A send in a closure or a borrowing async block might wait
+            // while another does.
+            OpKind::AwaitedSend(_) if self.captured > 0 => self.refuse(SEND_SHARED),
+            OpKind::AwaitedSend(value) => self.visit_expr(value),
             // Awaiting Tokio's receiver moves it into a block that captures
             // it, and `receive` borrows it, which a block that outlives the
             // function can't.
@@ -850,11 +953,11 @@ impl<'t> Analysis<'t> {
         }
         match expr {
             Expr::MethodCall(call) if call.attrs.is_empty() && call.turbofish.is_none() => {
-                if self.kind == Kind::Oneshot
-                    && self.method(expr, "close", Role::Receiver).is_some()
+                if self.kind != Kind::Watch && self.method(expr, "close", Role::Receiver).is_some()
                 {
                     // Tokio's `close` returns nothing, and `ReplyReceiver`'s
-                    // a `bool`, so only a statement reads the same.
+                    // and `Receiver`'s a `bool`, so only a statement reads
+                    // the same.
                     return true;
                 }
                 let Some(op) = self.op(&call.receiver) else {
@@ -1256,6 +1359,16 @@ impl<'t> Visit<'t> for Analysis<'t> {
                 }
             }
             Expr::Await(awaited) => {
+                // An mpsc `recv().await`, whose `Option` reads the same
+                // wherever it goes.
+                if self.kind == Kind::Mpsc
+                    && awaited.attrs.is_empty()
+                    && self.method(&awaited.base, "recv", Role::Receiver).is_some()
+                    && let Expr::MethodCall(call) = &*awaited.base
+                {
+                    self.replace(&call.method, "receive");
+                    return;
+                }
                 // A oneshot sender's `closed().await`.
                 if self.kind == Kind::Oneshot
                     && awaited.attrs.is_empty()
@@ -1461,6 +1574,14 @@ impl<'t> Analysis<'t> {
                 | "send_modify" | "send_if_modified",
             ) => self.refuse(WATCH_SENDER),
             (Kind::Watch, Some(Role::Receiver), "has_changed") => self.refuse(HAS_CHANGED),
+            (Kind::Mpsc, Some(Role::Sender), "is_closed")
+            | (Kind::Mpsc, Some(Role::Receiver), "is_closed" | "is_empty" | "len")
+                if call.args.is_empty() && call.turbofish.is_none() => {}
+            (Kind::Mpsc, Some(Role::Sender), "clone") => self.refuse(SENDER_CLONED),
+            (Kind::Mpsc, Some(Role::Sender), "send") => self.refuse(SEND_SHARED),
+            (Kind::Mpsc, Some(Role::Receiver), "recv") => self.refuse(RECEIVE_UNAWAITED),
+            (Kind::Mpsc, Some(Role::Receiver), "close") => self.refuse(CLOSE_VALUE),
+            (Kind::Mpsc, _, _) => self.refuse(MPSC_METHOD),
             _ => self.refuse(USE),
         }
         true
@@ -1535,14 +1656,15 @@ mod tests {
     use super::*;
     use crate::fix::source::prune_imports;
 
-    /// Plans `source` as Clippy would see it, with every `oneshot::channel`
-    /// and `watch::channel` callee, turbofish included, resolved to Tokio's,
-    /// and applies the edits.
+    /// Plans `source` as Clippy would see it, with every `oneshot::channel`,
+    /// `watch::channel` and `mpsc::channel` callee, turbofish included,
+    /// resolved to Tokio's, and applies the edits.
     fn fix(source: &str) -> (String, Vec<(usize, String, &'static str)>) {
         let mut constructors = BTreeMap::new();
         for (callee, kind) in [
             ("oneshot::channel", Kind::Oneshot),
             ("watch::channel", Kind::Watch),
+            ("mpsc::channel", Kind::Mpsc),
         ] {
             for (start, _) in source.match_indices(callee) {
                 let mut end = start + callee.len();
@@ -1724,6 +1846,84 @@ mod tests {
         rewrites(
             "fn f() -> u8 { let (tx, rx) = watch::channel(1u8); let v = *rx.borrow(); drop(tx); v }\n",
             "fn f() -> u8 { let tx = ::adamantium::Watch::new(1u8); let mut rx = tx.subscribe(); let v = rx.get(); drop(tx); v }\n",
+        );
+    }
+
+    #[test]
+    fn a_bounded_mpsc_channel_becomes_a_split_channel() {
+        rewrites(
+            "use tokio::sync::mpsc;\n\nasync fn f() -> Option<u32> {\n    let (tx, mut rx) = mpsc::channel(4);\n    tx.send(1).await.unwrap_or(());\n    if tx.try_send(2).is_err() {\n        return None;\n    }\n    let open = !tx.is_closed() && !rx.is_closed();\n    rx.close();\n    let first = rx.recv().await;\n    let _ = rx.try_recv().ok();\n    first.filter(|_| open && rx.is_empty() && rx.len() == 0)\n}\n",
+            "async fn f() -> Option<u32> {\n    let (tx, rx) = ::adamantium::Channel::bounded(4).split();\n    tx.send(1).await.unwrap_or(());\n    if tx.try_send(2).is_err() {\n        return None;\n    }\n    let open = !tx.is_closed() && !rx.is_closed();\n    rx.close();\n    let first = rx.receive().await;\n    let _ = rx.try_receive().ok();\n    first.filter(|_| open && rx.is_empty() && rx.len() == 0)\n}\n",
+        );
+        rewrites(
+            "async fn f() {\n    let (tx, rx) = tokio::sync::mpsc::channel::<u8>(536_870_911usize);\n    drop(tx);\n    drop(rx);\n}\n",
+            "async fn f() {\n    let (tx, rx) = ::adamantium::Channel::<u8>::bounded(536_870_911usize).split();\n    drop(tx);\n    drop(rx);\n}\n",
+        );
+    }
+
+    #[test]
+    fn mpsc_results_read_the_same() {
+        for (before, after) in [
+            ("let _ = tx.send(5).await;", "let _ = tx.send(5).await;"),
+            ("tx.send(5).await.ok();", "tx.send(5).await.ok();"),
+            (
+                "if tx.send(5).await.is_err() {}",
+                "if tx.send(5).await.is_err() {}",
+            ),
+            (
+                "if let Err(_) = tx.send(5).await {}",
+                "if let Err(_) = tx.send(5).await {}",
+            ),
+            (
+                "match tx.send(5).await { Ok(()) => {} Err(_) => {} }",
+                "match tx.send(5).await { Ok(()) => {} Err(_) => {} }",
+            ),
+            (
+                "tx.send(5).await.map_err(|_| 0)?;",
+                "tx.send(5).await.map_err(|_| 0)?;",
+            ),
+            ("drop(tx.send(5).await);", "drop(tx.send(5).await);"),
+            (
+                "let _ = tx.try_send(5).unwrap_or_default();",
+                "let _ = tx.try_send(5).unwrap_or_default();",
+            ),
+            (
+                "let v = rx.recv().await.unwrap_or(0); drop(v);",
+                "let v = rx.receive().await.unwrap_or(0); drop(v);",
+            ),
+            (
+                "while let Some(v) = rx.recv().await { drop(v); }",
+                "while let Some(v) = rx.receive().await { drop(v); }",
+            ),
+            (
+                "let Ok(v) = rx.try_recv() else { return Ok(()) }; drop(v);",
+                "let Ok(v) = rx.try_receive() else { return Ok(()) }; drop(v);",
+            ),
+            (
+                "match rx.try_recv() { Ok(_) => {} Err(_) => {} }",
+                "match rx.try_receive() { Ok(_) => {} Err(_) => {} }",
+            ),
+            (
+                "let _ = rx.try_recv().map_err(|_| 1)?;",
+                "let _ = rx.try_receive().map_err(|_| 1)?;",
+            ),
+        ] {
+            rewrites(
+                &format!(
+                    "async fn f() -> Result<(), u8> {{\n    let (tx, mut rx) = mpsc::channel::<u8>(1);\n    {before}\n    drop(tx);\n    Ok(())\n}}\n"
+                ),
+                &format!(
+                    "async fn f() -> Result<(), u8> {{\n    let (tx, rx) = ::adamantium::Channel::<u8>::bounded(1).split();\n    {after}\n    drop(tx);\n    Ok(())\n}}\n"
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn mpsc_halves_moved_into_other_locals_and_tasks_follow() {
+        rewrites(
+            "async fn f() {\n    let (mut tx, mut rx) = mpsc::channel::<u8>(2);\n    let worker = async move {\n        let mut out = tx;\n        for n in [1, 2] {\n            if out.send(n).await.is_err() {\n                break;\n            }\n        }\n    };\n    let reader = async move {\n        let mut inbox = rx;\n        while let Some(n) = inbox.recv().await {\n            drop(n);\n        }\n    };\n    worker.await;\n    reader.await;\n}\n",
+            "async fn f() {\n    let (tx, rx) = ::adamantium::Channel::<u8>::bounded(2).split();\n    let worker = async move {\n        let out = tx;\n        for n in [1, 2] {\n            if out.send(n).await.is_err() {\n                break;\n            }\n        }\n    };\n    let reader = async move {\n        let inbox = rx;\n        while let Some(n) = inbox.receive().await {\n            drop(n);\n        }\n    };\n    worker.await;\n    reader.await;\n}\n",
         );
     }
 
@@ -1923,6 +2123,85 @@ mod tests {
             (
                 "let (tx, rx) = oneshot::channel::<u8>(); drop(tx); let waiter = async { rx.await.ok() }; let _ = waiter.await;",
                 AWAIT_CAPTURED,
+            ),
+            // A capacity Tokio might panic on.
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(0); drop((tx, rx));",
+                CAPACITY,
+            ),
+            (
+                "let n = 4; let (tx, rx) = mpsc::channel::<u8>(n); drop((tx, rx));",
+                CAPACITY,
+            ),
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(536_870_912); drop((tx, rx));",
+                CAPACITY,
+            ),
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(4u8); drop((tx, rx));",
+                CAPACITY,
+            ),
+            // Two sends that might wait at once.
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(1); let other = tx.clone(); drop(other); drop(tx); drop(rx);",
+                SENDER_CLONED,
+            ),
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(1); let sending = tx.send(1); drop(sending); drop(rx);",
+                SEND_SHARED,
+            ),
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(1); let both = async { tx.send(1).await.ok() }; let _ = both.await; drop(rx);",
+                SEND_SHARED,
+            ),
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(1); let send = async |v| tx.send(v).await.is_ok(); let _ = send(1).await; drop(rx);",
+                SEND_SHARED,
+            ),
+            (
+                "let (tx, mut rx) = mpsc::channel::<u8>(1); drop(tx); let next = rx.recv(); let _ = next.await;",
+                RECEIVE_UNAWAITED,
+            ),
+            (
+                "let (tx, mut rx) = mpsc::channel::<u8>(1); drop(tx); let closed = rx.close(); drop(closed);",
+                CLOSE_VALUE,
+            ),
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(1); let _ = tx.reserve().await; drop(rx);",
+                MPSC_METHOD,
+            ),
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(1); let _ = tx.capacity(); drop(rx);",
+                MPSC_METHOD,
+            ),
+            (
+                "let (tx, mut rx) = mpsc::channel::<u8>(1); drop(tx); let _ = rx.blocking_recv();",
+                MPSC_METHOD,
+            ),
+            // A send's or a `try_recv`'s error prints otherwise.
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(1); tx.send(1).await.unwrap(); drop(rx);",
+                RESULT,
+            ),
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(1); tx.send(1).await?; drop(rx);",
+                RESULT,
+            ),
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(1); let sent = tx.send(1).await; drop((sent, rx));",
+                RESULT,
+            ),
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(1); tx.try_send(1).expect(\"room\"); drop(rx);",
+                RESULT,
+            ),
+            (
+                "let (tx, mut rx) = mpsc::channel::<u8>(1); drop(tx); let _ = rx.try_recv().unwrap();",
+                RESULT,
+            ),
+            (
+                "let (tx, rx) = mpsc::channel::<u8>(1); match tx.try_send(1) { Err(TrySendError::Full(_)) => {} _ => {} } drop(rx);",
+                RESULT,
             ),
         ] {
             refused(
