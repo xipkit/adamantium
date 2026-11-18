@@ -322,35 +322,40 @@ impl<T: Clone> Fanout<T> {
     /// receives the event, so a `T::clone` that panics delivers it to none.
     /// Because the lock is held, `T::clone` must not use this fanout:
     /// cloning a `Fanout` handle there, for one, waits for the lock forever.
+    /// The wakers of waiting feeds run after the lock is released, and can
+    /// use it.
     pub fn send(&self, value: T) -> Result<Sent, Closed<T>> {
-        let (sent, cut_off, unsent) = {
-            let mut state = self.shared.lock();
-            if state.closed {
-                return Err(Closed(value));
+        let mut state = self.shared.lock();
+        if state.closed {
+            drop(state);
+            return Err(Closed(value));
+        }
+        let cut_off = state.cut_off_full(self.shared.capacity);
+        // One clone for each feed but the last, which takes `value`. With no
+        // feeds `value` stays here, to drop once the lock is released.
+        let mut events: Vec<T> = state.feeds.iter().skip(1).map(|_| value.clone()).collect();
+        events.push(value);
+        for inbox in &state.feeds {
+            if let Some(event) = events.pop() {
+                inbox.push(event);
             }
-            let cut_off = state.cut_off_full(self.shared.capacity);
-            let feeds = &state.feeds;
-            // One clone for each feed but the last, which takes `value`.
-            let mut events: Vec<T> = feeds.iter().skip(1).map(|_| value.clone()).collect();
-            let mut value = Some(value);
-            for inbox in feeds {
-                if let Some(event) = events.pop().or_else(|| value.take()) {
-                    inbox.push(event);
-                }
-                inbox.arrived.notify_all();
-            }
-            let sent = Sent {
-                delivered: feeds.len(),
-                disconnected: cut_off.len(),
-            };
-            (sent, cut_off, value)
-        };
-        for inbox in &cut_off {
+        }
+        // Wakers are the caller's code too, so they run after the lock is
+        // released.
+        let delivered = state.feeds.clone();
+        drop(state);
+        for inbox in delivered.iter().chain(&cut_off) {
             inbox.arrived.notify_all();
         }
-        // The value's destructor, when no feed took it, is the caller's code,
-        // so it runs after the lock is released.
-        drop(unsent);
+        let sent = Sent {
+            delivered: delivered.len(),
+            disconnected: cut_off.len(),
+        };
+        // A feed dropped since the lock was released leaves its queue to the
+        // last of these handles, which drops it here, outside the lock.
+        drop(delivered);
+        drop(cut_off);
+        drop(events);
         Ok(sent)
     }
 }

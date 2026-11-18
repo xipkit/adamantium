@@ -395,6 +395,38 @@ fn events_are_dropped_outside_the_lock() {
     drop(closed);
 }
 
+/// A waker that reads the fanout its receive waits on.
+struct ReadsOnWake(Fanout<u32>);
+
+impl Wake for ReadsOnWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        // Takes the fanout's lock, so it would deadlock if a send woke the
+        // receive while holding it.
+        let _ = self.0.subscriber_count();
+    }
+}
+
+#[test]
+fn feeds_are_woken_outside_the_lock() {
+    let fanout = Fanout::new(1);
+    let mut feed = fanout.subscribe();
+    let waker = Waker::from(Arc::new(ReadsOnWake(fanout.clone())));
+    let mut waiting = pin!(feed.receive());
+    assert_eq!(
+        waiting.as_mut().poll(&mut Context::from_waker(&waker)),
+        Poll::Pending
+    );
+    assert_eq!(fanout.send(1), sent(1, 0));
+    assert_eq!(
+        waiting.as_mut().poll(&mut Context::from_waker(&waker)),
+        Poll::Ready(Ok(1))
+    );
+}
+
 #[test]
 fn handles_cross_tasks_and_describe_themselves() {
     fn crosses_tasks<T: Send + Sync + 'static>() {}
