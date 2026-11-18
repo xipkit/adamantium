@@ -1,19 +1,19 @@
 //! A limit on how many calls run at the same time.
 
+mod keyed;
+pub use keyed::KeyedLimit;
+
 use std::{
     fmt,
-    future::Future,
-    pin::Pin,
+    future::{Future, poll_fn},
+    pin::pin,
     sync::Arc,
-    task::{Context, Poll},
 };
 
 use crate::runtime::{Lock, wait::WaitQueue};
 
 #[cfg(feature = "tokio")]
 use crate::{Cancellation, ScopeError, race, tasks::shutdown};
-#[cfg(feature = "tokio")]
-use std::pin::pin;
 #[cfg(feature = "tokio")]
 use tokio::time::Instant;
 
@@ -24,7 +24,7 @@ use tokio::time::Instant;
 /// frees the place when the work finishes or is dropped. Waiting calls are
 /// not served in the order they arrived.
 ///
-/// The work of one call can't start another call on any limit: doing so
+/// Work may enter a [`KeyedLimit`]. Starting another [`Limit`] inside the work
 /// panics. A task that holds a place while it waits for a second one can
 /// deadlock with a task that takes them in the other order, and a limit of
 /// one deadlocks with itself. The check sees only a call made by the work
@@ -79,7 +79,7 @@ impl Limit {
     ///
     /// # Panics
     ///
-    /// Panics if it is called by the work of another `run` or `run_until`.
+    /// Panics when polled inside work holding a [`Limit`] or a [`KeyedLimit`].
     #[allow(
         clippy::future_not_send,
         reason = "the future is Send when the work and its future are"
@@ -89,9 +89,7 @@ impl Limit {
         F: FnOnce() -> Fut,
         Fut: Future,
     {
-        refuse_nesting();
-        let _place = self.take().await;
-        Held { work: work() }.await
+        Kind::Ordinary.run(self.take(), work).await
     }
 
     /// Runs like [`run`](Self::run), but waits and works only until
@@ -106,7 +104,7 @@ impl Limit {
     ///
     /// # Panics
     ///
-    /// Panics if it is called by the work of another `run` or `run_until`.
+    /// Panics when polled inside work holding a [`Limit`] or a [`KeyedLimit`].
     #[cfg(feature = "tokio")]
     pub async fn run_until<F, Fut, T, E>(
         &self,
@@ -118,26 +116,9 @@ impl Limit {
         F: FnOnce() -> Fut + Send,
         Fut: Future<Output = Result<T, E>> + Send,
     {
-        refuse_nesting();
-        let mut stop = pin!(shutdown(cancellation, deadline));
-        let place = race((async { Err(stop.as_mut().await) }, async {
-            Ok(self.take().await)
-        }))
-        .await;
-        let _place = match place {
-            Ok(place) => place,
-            Err(reason) => return Err(reason.scope_error()),
-        };
-        // Calling `work` inside the second future means a shutdown that wins
-        // this poll never calls it.
-        let result = race((async { Err(stop.as_mut().await) }, async {
-            Ok(Held { work: work() }.await)
-        }))
-        .await;
-        match result {
-            Ok(result) => result.map_err(ScopeError::Failed),
-            Err(reason) => Err(reason.scope_error()),
-        }
+        Kind::Ordinary
+            .run_until(self.take(), cancellation, deadline, work)
+            .await
     }
 
     /// The number of places that are free now.
@@ -191,81 +172,102 @@ impl fmt::Debug for Limit {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Kind {
+    Ordinary,
+    Keyed,
+}
+
 thread_local! {
-    /// Whether the current thread is polling work that holds a place. The
-    /// flag is set only for the length of one poll, so it stays correct
-    /// when a task moves to another thread between polls.
-    #[allow(clippy::disallowed_types, reason = "a per-thread flag, never shared")]
-    static HOLDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    #[allow(clippy::disallowed_types, reason = "per-poll state, never shared")]
+    static HOLDING: std::cell::Cell<Option<Kind>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(feature = "deterministic")]
 shuttle::thread_local! {
-    #[allow(clippy::disallowed_types, reason = "the flag belongs to a logical task, not its OS thread")]
-    static MODEL_HOLDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    #[allow(clippy::disallowed_types, reason = "per-poll state belongs to the logical task")]
+    static MODEL_HOLDING: std::cell::Cell<Option<Kind>> = const { std::cell::Cell::new(None) };
 }
 
 #[allow(
+    clippy::disallowed_types,
     clippy::disallowed_methods,
-    reason = "the flag is read during the poll that set it"
+    reason = "access is scoped to one poll"
 )]
-fn holding() -> bool {
+fn with_holding<T>(f: impl FnOnce(&std::cell::Cell<Option<Kind>>) -> T) -> T {
     #[cfg(feature = "deterministic")]
     if crate::runtime::execution::current().is_some() {
-        return MODEL_HOLDING.with(|value| value.get());
+        return MODEL_HOLDING.with(f);
     }
-    HOLDING.get()
+    HOLDING.with(f)
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the flag is set and cleared within one poll"
-)]
-fn set_holding(holding: bool) {
-    #[cfg(feature = "deterministic")]
-    if crate::runtime::execution::current().is_some() {
-        MODEL_HOLDING.with(|value| value.set(holding));
-        return;
-    }
-    HOLDING.set(holding);
-}
+struct Restore(Option<Kind>);
 
-const NESTED: &str = "adamantium: Limit::run was called by work that already holds a place under a limit; \
-a call can hold one place at a time, so finish the first call before starting the second";
-
-#[allow(
-    clippy::panic,
-    reason = "a nested call is a bug in the caller, and a panic names it where a deadlock would hang"
-)]
-fn refuse_nesting() {
-    if holding() {
-        std::panic::panic_any(NESTED);
-    }
-}
-
-pin_project_lite::pin_project! {
-    /// Marks the thread as holding a place while it polls `work`.
-    struct Held<Fut> {
-        #[pin]
-        work: Fut,
-    }
-}
-
-/// Clears the mark when the poll ends, including by a panic.
-struct Polling;
-
-impl Drop for Polling {
+impl Drop for Restore {
     fn drop(&mut self) {
-        set_holding(false);
+        with_holding(|holding| holding.set(self.0));
     }
 }
 
-impl<Fut: Future> Future for Held<Fut> {
-    type Output = Fut::Output;
+#[allow(
+    clippy::future_not_send,
+    reason = "Send follows the supplied futures and work"
+)]
+impl Kind {
+    async fn run<P, Fut: Future>(
+        self,
+        take: impl Future<Output = P>,
+        work: impl FnOnce() -> Fut,
+    ) -> Fut::Output {
+        self.checked(async {
+            let _place = take.await;
+            self.poll_work(work).await
+        })
+        .await
+    }
 
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        set_holding(true);
-        let _polling = Polling;
-        self.project().work.poll(context)
+    #[cfg(feature = "tokio")]
+    async fn run_until<P, Fut: Future<Output = Result<T, E>>, T, E>(
+        self,
+        take: impl Future<Output = P>,
+        cancellation: &Cancellation,
+        deadline: Option<Instant>,
+        work: impl FnOnce() -> Fut,
+    ) -> Result<T, ScopeError<E>> {
+        self.checked(async {
+            let mut stop = pin!(shutdown(cancellation, deadline));
+            let _place = race((async { Err(stop.as_mut().await) }, async { Ok(take.await) }))
+                .await
+                .map_err(|reason| reason.scope_error())?;
+            // Check shutdown again after acquisition, before invoking the closure.
+            race((async { Err(stop.await.scope_error()) }, async {
+                self.poll_work(work).await.map_err(ScopeError::Failed)
+            }))
+            .await
+        })
+        .await
+    }
+
+    async fn checked<F: Future>(self, future: F) -> F::Output {
+        let mut future = pin!(future);
+        poll_fn(|cx| {
+            let outer = with_holding(|holding| holding.get());
+            assert!(
+                matches!((outer, self), (None, _) | (Some(Kind::Ordinary), Kind::Keyed)),
+                "adamantium: work already holds a place under a limit; only Limit enclosing KeyedLimit is allowed"
+            );
+            future.as_mut().poll(cx)
+        }).await
+    }
+
+    async fn poll_work<F: Future>(self, work: impl FnOnce() -> F) -> F::Output {
+        // The closure itself can poll a nested call before returning its future.
+        let mut future = pin!(async { work().await });
+        poll_fn(|cx| {
+            let _restore = Restore(with_holding(|holding| holding.replace(Some(self))));
+            future.as_mut().poll(cx)
+        })
+        .await
     }
 }

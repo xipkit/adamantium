@@ -317,11 +317,15 @@ on_both_runtimes! {
             }
         }));
         // A select loser drops next(), but must not cancel or discard its task.
-        tokio::select! {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "exercise dropping next() when it loses a select"
+        )]
+        let () = tokio::select! {
             biased;
             _ = stream.next() => panic!("not ready"),
             () = future::ready(()) => {}
-        }
+        };
         assert_eq!(dropped.load(Ordering::SeqCst), 0);
         gate.add_permits(1);
         assert_eq!(timeout(HUNG, stream.next()).await.unwrap(), Some(Ok(0)));
@@ -583,13 +587,10 @@ async fn exhausted_cooperative_budget_pauses_intake_and_preserves_results() {
     }));
     pending(stream.as_mut()).await;
     tokio::task::yield_now().await;
+    while tokio::task::coop::has_budget_remaining() {
+        tokio::task::coop::consume_budget().await;
+    }
     future::poll_fn(|cx| {
-        while tokio::task::coop::has_budget_remaining() {
-            let Poll::Ready(budget) = tokio::task::coop::poll_proceed(cx) else {
-                panic!("budget was available");
-            };
-            budget.made_progress();
-        }
         // Even ready results wait for a fresh budget. Do not bypass Tokio's
         // cooperative yield by refilling or emitting buffered values here.
         assert!(stream.as_mut().poll_next(cx).is_pending());

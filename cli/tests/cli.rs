@@ -434,7 +434,11 @@ fn check_marked_rules(name: &str, strict: bool) -> TestResult<Vec<serde_json::Va
         .lines()
         .enumerate()
     {
-        for rule in ["disallowed_types", "disallowed_methods"] {
+        for rule in [
+            "disallowed_types",
+            "disallowed_methods",
+            "disallowed_macros",
+        ] {
             if line.ends_with(&format!("// {rule}"))
                 || (strict && line.ends_with(&format!("// strict {rule}")))
             {
@@ -497,6 +501,12 @@ fn check_reports_timeouts_and_allows_structured_deadlines() {
             "{finding}"
         );
     }
+}
+
+#[test]
+fn check_reports_select_at_each_unexcepted_call() {
+    let findings = check_marked_rules("select", false).unwrap();
+    assert_eq!(findings.len(), 8, "{findings:?}");
 }
 
 /// Every access method of a `thread_local!` value is reported, called on the

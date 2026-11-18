@@ -225,7 +225,11 @@ where
                 missing = outstanding != 0;
                 break cancellation.is_cancelled().then_some(ScopeError::Cancelled);
             }
-            tokio::select! {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the stream checks cancellation and joins workers before starting or yielding more work"
+            )]
+            let () = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => break Some(ScopeError::Cancelled),
                 joined = join_next(&tasks.set), if !lock(&tasks.set).is_empty() => {
@@ -268,7 +272,7 @@ where
                         }
                     }
                 }
-            }
+            };
         };
         tasks.abort();
         let terminal = match tasks.join(Ok(())).await {
