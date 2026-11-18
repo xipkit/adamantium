@@ -216,9 +216,9 @@ The parameter, the return value, and every value passed or taken are rewritten t
 - `clone` on a `&Mutex<T>`. That call copies the reference, but the same call on an actor copies the actor.
 - `RwLock`.
 
-### Oneshot and watch channels
+### Channels
 
-`fix` changes a local Tokio channel when one `let (sender, receiver) = ...` statement binds its halves and every use of each half reads the same after the rewrite. `fix` follows a half through moves into tasks and other locals, clones of watch halves, and shadowing. The migration guide compares the two APIs for [replies](migrating.md#a-single-reply) and [latest values](migrating.md#the-latest-value).
+`fix` changes a local Tokio oneshot or watch channel, and with `--strict` a bounded mpsc channel, when one `let (sender, receiver) = ...` statement binds its halves and every use of each half reads the same after the rewrite. `fix` follows a half through moves into tasks and other locals, clones of watch halves, and shadowing. The migration guide compares the APIs for [replies](migrating.md#a-single-reply), [latest values](migrating.md#the-latest-value) and [bounded queues](migrating.md#a-bounded-queue).
 
 | Before | After |
 | --- | --- |
@@ -228,6 +228,9 @@ The parameter, the return value, and every value passed or taken are rewritten t
 | `watch::channel(v)` | `Watch::new(v)` and `subscribe()` |
 | `rx.changed().await` with `ok`, `is_ok`, `is_err`, `unwrap_or`, `map_err(\|_\| e)`, or an `Ok(())` and `Err(_)` pattern | `rx.changed().await`, now `Watcher::changed`, with `ok` removed, `is_some`, `is_none`, `unwrap_or`, `ok_or_else(\|\| e)`, or a `Some(())` and `None` pattern |
 | `*rx.borrow_and_update()` or `rx.borrow_and_update().clone()` | `rx.get()` |
+| `mpsc::channel(n)`, with `n` a positive integer literal | `Channel::bounded(n).split()` |
+| `rx.recv().await` | `rx.receive().await` |
+| mpsc `rx.try_recv()` | `rx.try_receive()` |
 
 `fix` leaves these channels for review, and names the reason:
 
@@ -238,6 +241,10 @@ The parameter, the return value, and every value passed or taken are rewritten t
 - A watch send whose result is used, and a watch sender that is read, subscribed to, or asked about its receivers, for the same reason.
 - A watch receiver read with `borrow` that also waits for changes. `borrow` doesn't mark the value seen, and `get` does.
 - A watch receiver's `has_changed`, which in Tokio fails once the sender is gone.
+- An mpsc capacity that isn't a positive integer literal. Tokio panics on zero, and `Channel` rounds it up to one.
+- An mpsc channel where two sends might wait at once: a cloned sender, or a send that isn't awaited where it is called or that runs in a closure or an async block borrowing the sender. Tokio admits waiting sends in order, and `Channel` doesn't.
+- An mpsc receive that isn't awaited where it is called, and the value of an mpsc receiver's `close`, which is a `bool` for `Channel`.
+- `reserve`, `blocking_send`, `blocking_recv`, `recv_many`, `poll_recv`, `send_timeout`, `capacity`, `max_capacity`, an mpsc sender's `closed`, and `downgrade`.
 
 ## `init`
 

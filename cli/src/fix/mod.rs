@@ -538,6 +538,8 @@ fn channels(
             channels::Kind::Oneshot
         } else if message.contains("`tokio::sync::watch::channel`") {
             channels::Kind::Watch
+        } else if message.contains("`tokio::sync::mpsc::channel`") {
+            channels::Kind::Mpsc
         } else {
             continue;
         };
@@ -1011,7 +1013,11 @@ mod tests {
         ] {
             assert!(anchors.contains(reason.section()), "{}", reason.section());
         }
-        for kind in [channels::Kind::Oneshot, channels::Kind::Watch] {
+        for kind in [
+            channels::Kind::Oneshot,
+            channels::Kind::Watch,
+            channels::Kind::Mpsc,
+        ] {
             assert!(anchors.contains(kind.section()), "{}", kind.section());
         }
     }

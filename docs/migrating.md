@@ -1149,9 +1149,10 @@ async fn main() {
 
 ## Channels
 
-`cargo adamantium fix` rewrites a local oneshot or watch channel whose sender
-and receiver are bound by one `let (sender, receiver) = ...` statement, when
-every use of both halves reads the same after the rewrite. A half can be moved
+`cargo adamantium fix` rewrites a local oneshot or watch channel, and with
+`--strict` a bounded mpsc channel, whose sender and receiver are bound by one
+`let (sender, receiver) = ...` statement, when every use of both halves reads
+the same after the rewrite. A half can be moved
 into a task or another local, or cloned where Tokio allows it. Any other use,
 such as passing a half to a function, storing it in a struct, naming its type,
 or using it in a macro, leaves the channel as it was, and `fix` says why.
@@ -1267,6 +1268,83 @@ async fn main() {
         seen.push(watcher.get());
     }
     assert_eq!(seen, [20]);
+}
+```
+
+### A bounded queue
+
+The strict rules report Tokio's bounded `mpsc::channel(n)`, and
+`cargo adamantium fix --strict` rewrites it to `Channel::bounded(n).split()`.
+Both hold up to `n` values, close when the last sender is dropped, and drop
+what is still queued when the receiver is dropped. `recv().await` becomes
+`receive().await`, which also gives an `Option` and also receives what was
+queued before a close, and `try_recv` becomes `try_receive`. No method of a
+`Channel`'s halves needs `&mut self`, so `fix` drops the `mut` that Tokio's
+receiver needed.
+
+`fix` leaves a channel for review where the two differ:
+
+- Tokio panics on a capacity of zero, and `Channel` rounds it up to one, so
+  `fix` rewrites only a capacity that is a positive integer literal.
+- Tokio admits waiting sends in the order they arrived. In a `Channel`, a
+  send that arrives while another waits can take the freed room first. `fix`
+  rewrites a channel only when at most one send can wait: the sender isn't
+  cloned, and each send is awaited where it is called, outside closures and
+  async blocks that borrow the sender.
+- A send fails with `Closed<T>` rather than `SendError<T>`, and `try_send`
+  and `try_recv` fail with other error types too, so `fix` rewrites them only
+  when their results are discarded, tested, or matched with `Ok(..)` and
+  `Err(_)`. `unwrap` and `expect` would panic with another message, and `?`
+  would return another error.
+- `close` returns a `bool` where Tokio's returned `()`, so `fix` rewrites it
+  only as a statement.
+- `reserve` and its permits, `blocking_send`, `blocking_recv`, `recv_many`,
+  `poll_recv`, `send_timeout`, `capacity`, `max_capacity`, the sender's
+  `closed`, `downgrade` and `WeakSender` have no counterpart that behaves the
+  same.
+
+For a worker that a channel feeds, [a detached worker](#a-detached-worker)
+also moves its task into a scope.
+
+Before:
+
+```rust
+#[tokio::main]
+async fn main() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+    for line in ["a", "b"] {
+        if sender.send(line).await.is_err() {
+            break;
+        }
+    }
+    drop(sender);
+    let mut lines = Vec::new();
+    while let Some(line) = receiver.recv().await {
+        lines.push(line);
+    }
+    assert_eq!(lines, ["a", "b"]);
+}
+```
+
+After:
+
+```rust
+use adamantium::Channel;
+
+#[tokio::main]
+async fn main() {
+    let (sender, receiver) = Channel::bounded(2).split();
+    for line in ["a", "b"] {
+        if sender.send(line).await.is_err() {
+            break;
+        }
+    }
+    drop(sender);
+    let mut lines = Vec::new();
+    while let Some(line) = receiver.receive().await {
+        lines.push(line);
+    }
+    assert_eq!(lines, ["a", "b"]);
 }
 ```
 
