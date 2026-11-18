@@ -426,7 +426,11 @@ impl<T> Sender<T> {
                     space.await;
                 }
             };
-            tokio::select! {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "send_until keeps the unsent value when shutdown wins the wait for room"
+            )]
+            let () = tokio::select! {
                 biased;
                 reason = &mut stop => {
                     return Err(match reason {
@@ -435,7 +439,7 @@ impl<T> Sender<T> {
                     });
                 }
                 () = room => {}
-            }
+            };
             space = Some(self.queue.space.listen());
             value = match self.try_send(value) {
                 Ok(()) => return Ok(()),
@@ -539,6 +543,10 @@ impl<T> Receiver<T> {
         deadline: Option<Instant>,
     ) -> Result<T, ReceiveError> {
         self.queue.world.check();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "receive_until checks shutdown before taking a queued value"
+        )]
         let reason = tokio::select! {
             biased;
             reason = shutdown(cancellation, deadline) => reason,

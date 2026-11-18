@@ -69,6 +69,12 @@ use shuttle::scheduler::{
 
 use crate::runtime::execution::Execution;
 
+mod duplex;
+pub use duplex::{
+    DuplexConfig, DuplexControl, DuplexStream, LinkConfig, TransportFault, duplex,
+    duplex_controlled, duplex_with,
+};
+
 const ENGINE: &str = "shuttle=0.9.10;engine=0.1.8;std=0.1.5;schedulers=0.1.1";
 const FORMAT: u32 = 3;
 

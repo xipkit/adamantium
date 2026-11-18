@@ -14,6 +14,10 @@ allow-dbg-in-tests = true
 # every path with all of the crates' features on, so a misspelled path still
 # fails it.
 
+disallowed-macros = [
+  { path = "futures::select", reason = "use adamantium::first_ok for the first success, Tasks::run_until with Cancellation for scoped work, or receive_until/send_until for channel operations", allow-invalid = true },
+]
+
 disallowed-types = [
   { path = "std::mem::ManuallyDrop", reason = "suppresses automatic cleanup and can leak; let values drop normally" },
   { path = "std::rc::Rc", reason = "shared identity; use a value, or adamantium::Actor for state that tasks share" },
@@ -36,6 +40,9 @@ disallowed-types = [
 
 disallowed-methods = [
   { path = "tokio::time::timeout", reason = "drops the future mid-await on expiry; use adamantium::Tasks::run_until with Cancellation and a deadline, or receive_until/send_until for channel operations", allow-invalid = true },
+  # Tokio 1.44 and later use this in select! expansions with future branches.
+  # Lint the helper until the scoped-allowance fix in rust-clippy#17862 reaches stable.
+  { path = "tokio::macros::support::poll_budget_available", reason = "tokio::select! drops pending futures; use adamantium::first_ok for the first success, Tasks::run_until with Cancellation for scoped work, or receive_until/send_until for channel operations", allow-invalid = true },
   { path = "std::vec::Vec::remove", reason = "panics on a bad index; use adamantium::Array::remove, which returns Option" },
   { path = "std::vec::Vec::insert", reason = "panics on a bad index; use adamantium::Array::insert, which returns Result" },
   { path = "std::vec::Vec::swap_remove", reason = "panics on a bad index; use adamantium::Array::remove, which returns Option and preserves order" },

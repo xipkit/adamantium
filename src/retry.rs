@@ -119,6 +119,10 @@ where
     let mut delay = backoff.first;
     let mut made: u32 = 0;
     loop {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "retry checks shutdown before starting or continuing an attempt"
+        )]
         let result = tokio::select! {
             biased;
             reason = &mut stop => return Err(reason.scope_error()),
@@ -135,11 +139,15 @@ where
             return Err(ScopeError::Failed(error));
         }
         drop(error);
-        tokio::select! {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "shutdown interrupts the backoff before another attempt can start"
+        )]
+        let () = tokio::select! {
             biased;
             reason = &mut stop => return Err(reason.scope_error()),
             () = time::sleep(delay) => {}
-        }
+        };
         delay = backoff.after(delay);
     }
 }

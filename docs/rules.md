@@ -33,7 +33,7 @@ The rules and the library give these properties to code that follows them:
 Tokio's `Semaphore` is allowed. A task can hold a permit across an `await`, because a permit guards no data.
 
 - To limit how many items run at one time, use `concurrently` or the streaming variants.
-- To share one limit between tasks, use `Limit`. Its work cannot take a second place, so it cannot deadlock in that way.
+- To share one limit between tasks, use `Limit`. Its work may enter one `KeyedLimit` for per-key exclusion. All other direct nesting of these limits panics before waiting.
 - Do not acquire a second permit while you hold one. Two tasks that do so in opposite orders deadlock.
 
 ### Tests
@@ -64,11 +64,25 @@ The rules do not allow `tokio::time::timeout`. When the time expires, it drops t
 - For channel operations, use `receive_until` and `send_until`.
 - For a single drop-safe future (such as a receive, `Reply::closed`, `Watcher::wait_for`, or a socket read that loses nothing on drop), use `until` with a `Cancellation` and a deadline. Only race or pass to `until` futures that lose nothing when dropped.
 
+## Selecting between futures
+
+`futures::select!` is reported by `clippy::disallowed_macros`. For Tokio 1.44
+and later, `clippy::disallowed_methods` reports `tokio::select!` through the
+internal `tokio::macros::support::poll_budget_available` helper used by
+invocations with future branches. An `else`-only invocation expands directly to
+its fallback. The helper lets scoped exceptions work while Clippy's
+[scoped macro allowances bug](https://github.com/rust-lang/rust-clippy/pull/17862)
+affects a direct Tokio macro ban. Scope an exception to the `let` statement
+containing the call.
+
+- Use `first_ok` for the first successful task. It aborts and drains the remaining tasks.
+- Use `Tasks::run_until` with `Cancellation` for scoped work that can be stopped.
+- Use `receive_until` and `send_until` for channel operations with cancellation or a deadline.
+
 ## Limits
 
 The rules have limits.
 
-- **`select!` is still allowed.** `tokio::select!` and `futures::select!` are not banned yet, because Clippy ignores scoped allowances for some macro expansions. The ban waits for [the upstream fix](https://github.com/rust-lang/rust-clippy/pull/17862) to reach stable.
 - **A plain `receive` or `send` can wait without a limit** while the channel stays open and empty, or open and full. Use `receive_until` or `send_until` to limit the wait with a `Cancellation` or a deadline.
 - **Dependencies are not checked.** A dependency can still use unsafe code or panic. [`cargo adamantium deps`](cli.md#dependencies) shows which dependencies use `unsafe` or call disallowed paths.
 - **Clippy cannot detect every call that blocks a worker thread.**
