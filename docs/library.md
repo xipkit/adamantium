@@ -451,6 +451,44 @@ The check finds only a call that the work makes itself. It does not find a call 
 
 To limit the items of one collection, use `concurrently`. It needs no shared limit.
 
+## SingleFlight
+
+`SingleFlight<K, T>` lets concurrent calls for the same key share one operation and its output. Clones share the operations in flight.
+
+```rust
+use adamantium::SingleFlight;
+
+let profiles = SingleFlight::new();
+let profile = profiles.run(user, || fetch(user)).await;
+```
+
+- `run(key, operation)` starts `operation` if no operation for `key` is in flight. Otherwise it joins the one that is and drops `operation` without calling it. Every caller gets a copy of the output, so `T` must be `Clone`.
+- Return errors in a `Result`. Every caller that shares the operation gets the error, and the next call starts a new operation. Nothing is kept once an operation ends.
+- No caller owns the operation. Whichever caller is waiting polls it, so the caller that started it can be dropped and the others still finish it.
+- When the last caller is dropped, the operation is dropped, and its entry is removed. The next call starts a new operation.
+- `len()` returns the number of keys with an operation in flight.
+
+If the operation panics, the caller that was polling it panics with the same payload, and every other caller panics too. The operation must not call `run` for its own key, because that call would wait for itself; it panics instead. The check sees only a call that the operation makes itself.
+
+### Sharing or serializing
+
+A caller can join an operation that started before it called. That is right when any output produced after the call began will do, such as a read or a token refresh. It is wrong when a caller needs an operation that starts after its call.
+
+An acknowledgment that a write has reached a remote database is one such case: a push that began before the write does not cover it. Have the operation report what it covered, and call again when that is not enough. The second call joins an operation that started after the first one ended:
+
+```rust
+async fn acknowledge(&self, commit: u64) -> Result<(), SyncError> {
+    loop {
+        let pushed = self.sync.run("control", || self.clone().push()).await?;
+        if pushed >= commit {
+            return Ok(());
+        }
+    }
+}
+```
+
+Operations for one key do not wait for each other to clean up. The last caller to leave drops the operation, and a call that arrives meanwhile starts a new one. Work that the dropped operation left running, such as the tasks of a scope it was running, can still be finishing. When separate operations must not overlap, or each caller needs an operation of its own, serialize them with an `AsyncActor` or a `Limit` of one instead.
+
 ## Retries and rate limits
 
 ### `retry`

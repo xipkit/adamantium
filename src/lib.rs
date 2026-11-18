@@ -8,7 +8,8 @@
 //! each message to every subscriber ([`Topic`]), a one-shot reply
 //! ([`Reply`]), the latest value of shared state ([`Watch`]), [`race`] to wait
 //! for the first of several events, a limit on how many calls run at once
-//! ([`Limit`]), and `blocking` for code that must block a thread. The
+//! ([`Limit`]), calls that share one operation per key ([`SingleFlight`]),
+//! and `blocking` for code that must block a thread. The
 //! `cargo adamantium` subcommand applies the Clippy rules that keep a crate
 //! inside the fragment.
 //!
@@ -21,7 +22,7 @@
 //! `Cancellation` is requested. `Tasks::spawn_supervised` restarts a task
 //! that fails, as often as a [`Restarts`] allows.
 //! Disable default features to use the values, synchronous actors, channels, replies,
-//! and watches without a Tokio dependency.
+//! watches, `Limit` and `SingleFlight` without a Tokio dependency.
 //!
 //! Both configurations build and are tested on `wasm32-wasip1`. WASI has one
 //! thread and aborts on a panic, so `blocking` and `Tasks::spawn_blocking` run

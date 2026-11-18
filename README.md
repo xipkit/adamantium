@@ -66,6 +66,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `race` | Waits for the first of several futures and drops the others. Use it in place of `select!`. |
 | `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. |
 | `retry`, `RateLimit`, `Limit` | Retries with backoff, a limit on calls in a time window, and a limit on calls that run at the same time. |
+| `SingleFlight` | Lets concurrent calls for the same key share one operation and its output. |
 | `blocking` | Runs blocking code on the blocking pool. |
 
 The [library guide](docs/library.md) describes each type, and [`examples/server.rs`](examples/server.rs) puts them together in a TCP server.
@@ -80,7 +81,7 @@ The [library guide](docs/library.md) describes each type, and [`examples/server.
 | `tracing` | No | Named task spans, and a warning that lists unfinished tasks when a deadline expires |
 | `deterministic` | No | A test harness that explores task interleavings from a seed. See [Deterministic tests](docs/testing.md). |
 
-With `default-features = false`, the values, `Actor`, `Channel`, `Topic`, `Reply`, `Watch`, `Limit`, and `race` work without Tokio.
+With `default-features = false`, the values, `Actor`, `Channel`, `Topic`, `Reply`, `Watch`, `Limit`, `SingleFlight`, and `race` work without Tokio.
 
 ### WASI
 
