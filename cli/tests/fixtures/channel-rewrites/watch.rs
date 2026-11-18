@@ -1,5 +1,9 @@
 //! Tokio watch channels that `fix` rewrites to a `Watch` and its watchers.
 //! The program prints the same before and after.
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use tokio::sync::watch;
 
 /// The receiver has seen the initial value, so a wait after the sender is
@@ -73,15 +77,35 @@ async fn propagated() -> Result<u32, &'static str> {
     Ok(value)
 }
 
+/// A value that counts its drops, copies included.
+#[derive(Clone)]
+struct Counted(Arc<AtomicUsize>);
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// A wait copies nothing: only the value a send replaced is dropped.
+async fn waits_copy_nothing() -> usize {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let (tx, mut rx) = watch::channel(Counted(Arc::clone(&drops)));
+    tx.send(Counted(Arc::clone(&drops))).ok();
+    let _ = rx.changed().await;
+    drops.load(Ordering::SeqCst)
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     println!(
-        "{} {:?} {:?} {} {} {:?}",
+        "{} {:?} {:?} {} {} {:?} {}",
         initial_is_seen().await,
         last_value().await,
         senders().await,
         latest(),
         worker().await,
-        propagated().await
+        propagated().await,
+        waits_copy_nothing().await
     );
 }

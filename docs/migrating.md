@@ -1150,8 +1150,10 @@ async fn main() {
 `subscribe`. Both have seen the initial value, a clone of either starts
 where the original is, and when the last sender is dropped a receiver still
 gets a value it hasn't seen before it learns the channel is closed.
-`changed().await` becomes `receive().await`, which also marks the value seen
-and returns a copy of it, so the value must be `Clone`, and
+`Watcher::changed` waits and marks the newest value seen without copying
+it, as Tokio's does, but gives an `Option<()>` where Tokio's gave a
+`Result`, so `fix` rewrites what reads it as it does for a reply. To wait and
+read the value in one call, use `receive`, which returns a copy.
 `*rx.borrow_and_update()` becomes `rx.get()`. As with a reply, `unwrap` and
 `expect` on a wait would panic with another message, so `fix` leaves them.
 
@@ -1199,7 +1201,7 @@ async fn main() {
     limit.send(20).ok();
     drop(limit);
     let mut seen = vec![watcher.get()];
-    while watcher.receive().await.is_some() {
+    while watcher.changed().await.is_some() {
         seen.push(watcher.get());
     }
     assert_eq!(seen, [20]);

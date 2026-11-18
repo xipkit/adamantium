@@ -21,18 +21,21 @@
 //! Watch: a Tokio receiver made by `channel` and a `Watcher` made by
 //! `subscribe` have both seen the initial value, clones of either keep the
 //! seen state of the original, and both wait for an unseen value before
-//! reporting that the last sender is gone. `changed().await` becomes
-//! `receive().await`, which also marks the value seen and returns a copy of
-//! it, so `unwrap` and `expect` on a wait are refused, as they would panic
-//! with another message. Two differences need care. Tokio's `send` fails and drops the value
-//! when no receiver is alive, where `Watch::send` keeps it, which the
-//! value's destructor can show. So a watch that sends is rewritten only
-//! when every send runs in the channel's own block, outside any closure or
-//! async block, and the receiver the constructor made stays in that block
-//! until it ends, so a receiver is alive at every send. Reading or
-//! subscribing to the sender, and testing a send's result, are refused too. And `borrow` reads without marking the
+//! reporting that the last sender is gone. `changed().await` stays as it is:
+//! `Watcher::changed` also marks the newest value seen without copying it,
+//! and gives `Option<()>` where Tokio's gave `Result<(), RecvError>`, so its
+//! result is rewritten as a oneshot receive's is. Two differences need care.
+//! Tokio's `send` fails and drops the value when no receiver is alive, where
+//! `Watch::send` keeps it, which the value's destructor can show. So a watch
+//! that sends is rewritten only when every send runs in the channel's own
+//! block, outside any closure or async block, and the receiver the
+//! constructor made stays in that block until it ends, so a receiver is
+//! alive at every send. Reading or subscribing to the sender, and testing a
+//! send's result, are refused too. And `borrow` reads without marking the
 //! value seen, where `Watcher::get` marks it; that is unseen unless the
-//! receiver also waits for changes, which is refused.
+//! receiver also waits for changes, which is refused. `get` copies the value
+//! with `Clone`, as `borrow_and_update().clone()` does, and for `Copy` values
+//! `Clone` is the copy that `*rx.borrow()` makes.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -601,8 +604,6 @@ enum Shape {
     Sent,
     /// `Result<T, RecvError>` becomes `Option<T>`.
     Option,
-    /// `Result<(), RecvError>` becomes `Option<T>`.
-    Unit,
     /// Tokio's watch `send` fails where `Watch::send` doesn't, so its result
     /// can only be discarded.
     Discard,
@@ -622,8 +623,8 @@ enum OpKind<'a> {
     Await(&'a Expr),
     /// A oneshot `rx.try_recv()`.
     TryRecv(&'a syn::Ident),
-    /// A watch `rx.changed().await`.
-    Changed(&'a syn::Ident),
+    /// A watch `rx.changed().await`, which keeps its text.
+    Changed,
 }
 
 struct Analysis<'t> {
@@ -794,8 +795,8 @@ impl<'t> Analysis<'t> {
                     let var = self.method(&awaited.base, "changed", Role::Receiver)?;
                     Some(Op {
                         var,
-                        shape: Shape::Unit,
-                        kind: OpKind::Changed(&call.method),
+                        shape: Shape::Option,
+                        kind: OpKind::Changed,
                     })
                 }
                 _ => None,
@@ -827,8 +828,7 @@ impl<'t> Analysis<'t> {
                 None => self.refuse(UNLOCATED),
             },
             OpKind::TryRecv(method) => self.replace(method, "try_receive"),
-            OpKind::Changed(method) => {
-                self.replace(method, "receive");
+            OpKind::Changed => {
                 self.waits = true;
                 if let Some(var) = self.vars.get_mut(op.var) {
                     var.needs_mut = true;
@@ -869,25 +869,6 @@ impl<'t> Analysis<'t> {
                 for arg in &call.args {
                     self.visit_expr(arg);
                 }
-                true
-            }
-            // `rx.changed().await.map_err(|_| error)?;`
-            Expr::Try(tried) if tried.attrs.is_empty() => {
-                let Expr::MethodCall(call) = &*tried.expr else {
-                    return false;
-                };
-                let Some(op) = self.op(&call.receiver) else {
-                    return false;
-                };
-                if op.shape != Shape::Unit || call.method != "map_err" || !call.attrs.is_empty() {
-                    return false;
-                }
-                let Some(body) = ignored_error(call) else {
-                    return false;
-                };
-                self.take(&op);
-                self.ok_or_else(call);
-                self.visit_expr(body);
                 true
             }
             _ => false,
@@ -939,11 +920,11 @@ impl<'t> Analysis<'t> {
                     self.visit_expr(arg);
                 }
             }
-            (Shape::Option | Shape::Unit, "is_ok", 0) => {
+            (Shape::Option, "is_ok", 0) => {
                 self.take(&op);
                 self.replace(&call.method, "is_some");
             }
-            (Shape::Option | Shape::Unit, "is_err", 0) => {
+            (Shape::Option, "is_err", 0) => {
                 self.take(&op);
                 self.replace(&call.method, "is_none");
             }
@@ -1014,20 +995,13 @@ impl<'t> Analysis<'t> {
         let name = variant.path.get_ident()?;
         let inner = variant.elems.first()?;
         let wild = matches!(inner, Pat::Wild(wild) if wild.attrs.is_empty());
-        let unit =
-            matches!(inner, Pat::Tuple(tuple) if tuple.elems.is_empty() && tuple.attrs.is_empty());
         let whole = self.text.of(pat)?;
         let path = self.text.of(name)?;
         match (shape, name.to_string().as_str()) {
             (Shape::Result | Shape::Sent, "Ok") => Some(Vec::new()),
             (Shape::Option, "Ok") => Some(vec![self.edit(path, "Some".to_owned())]),
-            (Shape::Unit, "Ok") if wild || unit => {
-                Some(vec![self.edit(whole, "Some(_)".to_owned())])
-            }
             (Shape::Result | Shape::Sent, "Err") if wild => Some(Vec::new()),
-            (Shape::Option | Shape::Unit, "Err") if wild => {
-                Some(vec![self.edit(whole, "None".to_owned())])
-            }
+            (Shape::Option, "Err") if wild => Some(vec![self.edit(whole, "None".to_owned())]),
             _ => None,
         }
     }
@@ -1593,33 +1567,33 @@ mod tests {
     fn a_watch_channel_becomes_a_watch_and_a_watcher() {
         rewrites(
             "use tokio::sync::{oneshot, watch};\n\nasync fn f(stop: oneshot::Sender<()>) -> u32 {\n    let (tx, mut rx) = watch::channel(0u32);\n    let _ = tx.send(1);\n    tx.send(2).ok();\n    while rx.changed().await.is_ok() {\n        if *rx.borrow_and_update() == 2 {\n            break;\n        }\n    }\n    drop(stop);\n    rx.borrow_and_update().clone()\n}\n",
-            "use tokio::sync::oneshot;\n\nasync fn f(stop: oneshot::Sender<()>) -> u32 {\n    let tx = ::adamantium::Watch::new(0u32);\n    let mut rx = tx.subscribe();\n    let _ = tx.send(1);\n    tx.send(2).ok();\n    while rx.receive().await.is_some() {\n        if rx.get() == 2 {\n            break;\n        }\n    }\n    drop(stop);\n    rx.get()\n}\n",
+            "use tokio::sync::oneshot;\n\nasync fn f(stop: oneshot::Sender<()>) -> u32 {\n    let tx = ::adamantium::Watch::new(0u32);\n    let mut rx = tx.subscribe();\n    let _ = tx.send(1);\n    tx.send(2).ok();\n    while rx.changed().await.is_some() {\n        if rx.get() == 2 {\n            break;\n        }\n    }\n    drop(stop);\n    rx.get()\n}\n",
         );
     }
 
     #[test]
     fn watch_waits_read_the_same_as_options() {
         for (before, after) in [
-            ("let _ = rx.changed().await;", "let _ = rx.receive().await;"),
+            ("let _ = rx.changed().await;", "let _ = rx.changed().await;"),
             (
                 "rx.changed().await.map_err(|_| 0)?;",
-                "rx.receive().await.ok_or_else(|| 0)?;",
+                "rx.changed().await.ok_or_else(|| 0)?;",
             ),
             (
                 "if let Ok(()) = rx.changed().await {}",
-                "if let Some(_) = rx.receive().await {}",
+                "if let Some(()) = rx.changed().await {}",
             ),
             (
                 "let Ok(_) = rx.changed().await else { return Ok(()) };",
-                "let Some(_) = rx.receive().await else { return Ok(()) };",
+                "let Some(_) = rx.changed().await else { return Ok(()) };",
             ),
             (
                 "match rx.changed().await { Ok(()) => {} Err(_) => {} }",
-                "match rx.receive().await { Some(_) => {} None => {} }",
+                "match rx.changed().await { Some(()) => {} None => {} }",
             ),
             (
                 "if rx.changed().await.is_err() {}",
-                "if rx.receive().await.is_none() {}",
+                "if rx.changed().await.is_none() {}",
             ),
         ] {
             rewrites(
@@ -1761,10 +1735,6 @@ mod tests {
             (
                 "let (tx, rx) = watch::channel(0u8); let read = || *rx.borrow(); let _ = read(); drop(tx);",
                 BORROW_CAPTURED,
-            ),
-            (
-                "let (tx, mut rx) = watch::channel(0u8); let _ = rx.changed().await.ok(); drop(tx);",
-                RESULT,
             ),
             (
                 "let (tx, mut rx) = watch::channel(0u8); let v = rx.changed().await.unwrap(); drop((tx, v));",

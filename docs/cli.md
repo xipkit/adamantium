@@ -226,7 +226,7 @@ The parameter, the return value, and every value passed or taken are rewritten t
 | `rx.await` with `ok`, `is_ok`, `is_err`, `unwrap_or`, `map_err(\|_\| e)`, or an `Ok(v)` and `Err(_)` pattern | `rx.receive().await` with `ok` removed, `is_some`, `is_none`, `unwrap_or`, `ok_or_else(\|\| e)`, or a `Some(v)` and `None` pattern |
 | `rx.try_recv()` | `rx.try_receive()` |
 | `watch::channel(v)` | `Watch::new(v)` and `subscribe()` |
-| `rx.changed().await` with `is_ok`, `is_err`, `map_err(\|_\| e)?`, or an `Ok(())` and `Err(_)` pattern | `rx.receive().await` with `is_some`, `is_none`, `ok_or_else(\|\| e)?`, or a `Some(_)` and `None` pattern |
+| `rx.changed().await` with `ok`, `is_ok`, `is_err`, `unwrap_or`, `map_err(\|_\| e)`, or an `Ok(())` and `Err(_)` pattern | `rx.changed().await`, now `Watcher::changed`, with `ok` removed, `is_some`, `is_none`, `unwrap_or`, `ok_or_else(\|\| e)`, or a `Some(())` and `None` pattern |
 | `*rx.borrow_and_update()` or `rx.borrow_and_update().clone()` | `rx.get()` |
 
 `fix` leaves these channels for review, and names the reason:
