@@ -45,6 +45,14 @@ impl WaitQueue {
         self.world.step_unless_panicking();
         self.event.notify(usize::MAX);
     }
+
+    /// Notifies like [`notify_all`](Self::notify_all), but without a
+    /// scheduling step, for use inside a waker. A waker can run inside
+    /// another primitive's critical section, where the harness must not
+    /// switch tasks.
+    pub(crate) fn notify_all_from_waker(&self) {
+        self.event.notify(usize::MAX);
+    }
 }
 
 pub(crate) struct Waiter {
