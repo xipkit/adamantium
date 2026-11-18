@@ -1,0 +1,17 @@
+[workspace]
+
+[package]
+name = "random"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+adamantium = { path = "../../../..", default-features = false }
+fastrand = "2"
+rand_08 = { package = "rand", version = "0.8" }
+rand_09 = { package = "rand", version = "0.9" }
+rand = "0.10"
+
+[profile.release]
+overflow-checks = true
