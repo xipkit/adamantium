@@ -13,10 +13,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `adamantium`: `Tasks::spawner()` returns a cloneable `Spawner` so children
   can add siblings to their scope, with the same joining and error rules.
   Spawning after the scope closes returns `SpawnError` without starting work.
+- `adamantium`: `Tasks::run_with_grace` shuts a scope down gracefully. A
+  cancellation stops the body but lets admitted tasks finish for a grace
+  period before the rest are aborted.
 - `adamantium`: `KeyedLimit` serializes calls for the same key, including
   inside a connection `Limit`, and evicts keys after their last call ends.
 - `adamantium`: deterministic tests can select probabilistic concurrency testing
   or bounded depth-first search and replay saved failure schedules as a corpus.
+- `adamantium`: `random::u64` and `random::up_to` give application code random
+  draws that the deterministic harness takes from its seed and a `Replay`
+  repeats.
+- `adamantium`: `Backoff::jitter` spreads each retry or restart wait between
+  half of its delay and the whole of it, drawn from `random`. A backoff without
+  it waits and schedules exactly as before.
 - `adamantium`: `SingleFlight` lets concurrent calls for the same key share
   one operation and its output. Dropping the call that started the operation
   leaves it to the others, and dropping the last call drops it. It works
@@ -26,9 +35,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - `adamantium`: replay records use format 3 to capture the scheduler and its
   bounds. Regenerate saved records from previous formats.
-
-### Changed
-
 - `cargo-adamantium`: Default rules report Tokio `oneshot`, Tokio `watch`,
   and `std::sync::mpsc::sync_channel`. Strict rules also report bounded Tokio
   `mpsc`, `Notify`, and `Semaphore`. Broadcast diagnostics recommend

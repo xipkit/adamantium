@@ -9,7 +9,8 @@
 //! ([`Reply`]), the latest value of shared state ([`Watch`]), [`race`] to wait
 //! for the first of several events, a limit on how many calls run at once
 //! ([`Limit`]), calls that share one operation per key ([`SingleFlight`]),
-//! and `blocking` for code that must block a thread. The
+//! random draws that tests can replay ([`random`]), and `blocking` for code
+//! that must block a thread. The
 //! `cargo adamantium` subcommand applies the Clippy rules that keep a crate
 //! inside the fragment.
 //!
@@ -45,6 +46,7 @@ mod deque;
 mod limit;
 mod map;
 mod race;
+pub mod random;
 #[cfg(feature = "tokio")]
 mod rate_limit;
 mod reply;

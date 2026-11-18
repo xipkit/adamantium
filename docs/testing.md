@@ -93,11 +93,15 @@ Time:
 - The clock origin is opaque and shared within a process. A replay in another process keeps the elapsed virtual durations.
 - An `Instant` carries no execution identity. Build deadlines inside each execution of the factory.
 
+Randomness:
+
+- `adamantium::random` draws from the scheduler. The seed decides the draws, and a `Replay` records each one and repeats it.
+
 ## Rules for tests
 
 - Use `#[test]`, not `#[tokio::test]`.
 - Create primitives inside the execution that uses them.
-- Replace I/O, real time, uncontrolled randomness, and foreign executors with deterministic fixtures.
+- Draw random numbers from `adamantium::random`. Replace I/O, real time, other randomness, and foreign executors with deterministic fixtures.
 
 ## Limits
 
