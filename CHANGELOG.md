@@ -20,6 +20,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   new feed to recover. Clones of a `Fanout` can all send, and every feed
   receives their sends in one order.
 
+### Changed
+
+- `cargo-adamantium`: The messages for Tokio's `broadcast` channel suggest
+  `Fanout` alongside `Topic`.
+
 ## [0.3.0] - 2026-11-17
 
 ### Fixed
