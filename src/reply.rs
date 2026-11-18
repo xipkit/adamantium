@@ -169,6 +169,10 @@ impl<T> ReplyReceiver<T> {
         deadline: Option<Instant>,
     ) -> Result<T, ReceiveError> {
         crate::runtime::in_world(self.world, async move {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "receive_until checks shutdown before consuming the reply"
+            )]
             let reason = tokio::select! {
                 biased;
                 reason = shutdown(cancellation, deadline) => reason,

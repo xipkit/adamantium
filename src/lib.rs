@@ -22,7 +22,7 @@
 //! `Cancellation` is requested. `Tasks::spawn_supervised` restarts a task
 //! that fails, as often as a [`Restarts`] allows.
 //! Disable default features to use the values, synchronous actors, channels, replies,
-//! watches, `Limit` and `SingleFlight` without a Tokio dependency.
+//! watches, `Limit`, `KeyedLimit` and `SingleFlight` without a Tokio dependency.
 //!
 //! Both configurations build and are tested on `wasm32-wasip1`. WASI has one
 //! thread and aborts on a panic, so `blocking` and `Tasks::spawn_blocking` run
@@ -74,7 +74,7 @@ pub use channel::{Channel, Closed, Receiver, Sender, TryReceiveError, TrySendErr
 #[cfg(feature = "tokio")]
 pub use channel::{ReceiveError, SendError};
 pub use deque::Deque;
-pub use limit::Limit;
+pub use limit::{KeyedLimit, Limit};
 pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
 pub use race::{Race, race};
 #[cfg(feature = "tokio")]
@@ -91,8 +91,9 @@ pub use single_flight::SingleFlight;
 pub use string::Str;
 #[cfg(feature = "tokio")]
 pub use tasks::{
-    Cancellation, ScopeError, Task, Tasks, blocking, concurrently, concurrently_ordered,
-    concurrently_ordered_until, concurrently_unordered, concurrently_unordered_until, first_ok,
+    Cancellation, ScopeError, SpawnError, Spawner, Task, Tasks, blocking, concurrently,
+    concurrently_ordered, concurrently_ordered_until, concurrently_unordered,
+    concurrently_unordered_until, first_ok,
 };
 pub use topic::{Subscriptions, Topic};
 pub use watch::{Watch, Watcher};

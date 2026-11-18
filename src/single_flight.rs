@@ -60,8 +60,8 @@ use crate::runtime::{
 /// and anything it left to finish in the background, such as the tasks of a
 /// scope it was running, may still be finishing when the next call starts a
 /// new operation. When separate operations must not overlap, or every
-/// caller needs an operation of its own, serialize them instead, with an
-/// `AsyncActor` or a [`Limit`](crate::Limit) of one.
+/// caller needs an operation of its own, serialize them per key with a
+/// [`KeyedLimit`](crate::KeyedLimit) instead.
 ///
 /// # Panics
 ///

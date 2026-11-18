@@ -1,7 +1,6 @@
 #![cfg(feature = "deterministic")]
 #![allow(
     clippy::disallowed_types,
-    clippy::disallowed_methods,
     reason = "schedule observations and deliberate execution-boundary misuse"
 )]
 
@@ -220,11 +219,15 @@ fn select_cancellation_races_ready_message_without_losing_it() {
             let outcome = taken.clone();
             let workers: Vec<Worker> = vec![
                 Box::pin(async move {
-                    tokio::select! {
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "exercise dropping a pending receive when it loses a select"
+                    )]
+                    let () = tokio::select! {
                         biased;
                         _ = signal.receive() => {},
                         value = reader.receive() => outcome.with(|out| *out = value),
-                    }
+                    };
                 }),
                 Box::pin(async move {
                     stop.send(()).await.unwrap();

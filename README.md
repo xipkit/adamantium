@@ -65,7 +65,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `Topic` | Sends each message to every subscriber. It waits for a slow subscriber and drops no message. |
 | `race` | Waits for the first of several futures and drops the others. Use it in place of `select!`. |
 | `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. |
-| `retry`, `RateLimit`, `Limit` | Retries with backoff, a limit on calls in a time window, and a limit on calls that run at the same time. |
+| `retry`, `RateLimit`, `Limit`, `KeyedLimit` | Retry with backoff, cap the call rate or concurrency, or serialize calls for the same key. |
 | `SingleFlight` | Lets concurrent calls for the same key share one operation and its output. |
 | `blocking` | Runs blocking code on the blocking pool. |
 
@@ -81,7 +81,7 @@ The [library guide](docs/library.md) describes each type, and [`examples/server.
 | `tracing` | No | Named task spans, and a warning that lists unfinished tasks when a deadline expires |
 | `deterministic` | No | A test harness that explores task interleavings from a seed. See [Deterministic tests](docs/testing.md). |
 
-With `default-features = false`, the values, `Actor`, `Channel`, `Topic`, `Reply`, `Watch`, `Limit`, `SingleFlight`, and `race` work without Tokio.
+With `default-features = false`, the values, `Actor`, `Channel`, `Topic`, `Reply`, `Watch`, `Limit`, `KeyedLimit`, `SingleFlight`, and `race` work without Tokio.
 
 ### WASI
 
@@ -145,6 +145,7 @@ Code that follows the rules has these properties:
 | No channel drops messages | Tokio's `broadcast` channel is not allowed. Use `Topic`. |
 | No worker thread is blocked | `std::thread::sleep`, `block_in_place`, and `spawn_blocking` are not allowed. Use `blocking`. |
 | No timeout drops a future in the middle of its work | `tokio::time::timeout` is not allowed. Use `Tasks::run_until` or the `_until` methods. |
+| Unstructured selection restricted | The rules report `futures::select!` and, on Tokio 1.44 or later, `tokio::select!` invocations with future branches. Use `first_ok`, `Tasks::run_until` with `Cancellation`, or `receive_until` and `send_until` for channel operations. |
 | No result or future is discarded by accident | A discard must be an explicit `drop`. |
 | No panic from indexing, `unwrap`, or `panic!` | These are not allowed outside tests. |
 | No silent integer truncation or overflow | Lossy casts are not allowed. Release builds check for overflow. |

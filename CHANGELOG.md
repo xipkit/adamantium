@@ -10,6 +10,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `adamantium`: `Tasks::spawner()` returns a cloneable `Spawner` so children
+  can add siblings to their scope, with the same joining and error rules.
+  Spawning after the scope closes returns `SpawnError` without starting work.
+- `adamantium`: `KeyedLimit` serializes calls for the same key, including
+  inside a connection `Limit`, and evicts keys after their last call ends.
 - `adamantium`: `SingleFlight` lets concurrent calls for the same key share
   one operation and its output. Dropping the call that started the operation
   leaves it to the others, and dropping the last call drops it. It works

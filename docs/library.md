@@ -37,6 +37,7 @@ The buffer of Serde reports that it is human-readable, so `Bytes` requests a seq
 `Tasks<E>` manages a scope of tasks.
 
 - `spawn` starts a task. `value` waits for its result.
+- `spawner` gives children a cloneable handle to add siblings to the same scope.
 - `spawn_handled` starts a task whose error goes to a handler instead of the scope. See [Handled tasks](#handled-tasks).
 - `join` and `Tasks::run` wait for the remaining tasks.
 - `join` returns the task errors that nothing observed.
@@ -45,6 +46,30 @@ The buffer of Serde reports that it is human-readable, so `Bytes` requests a seq
 - A task panic resumes in the scope. In `Tasks::run` and `Tasks::run_until`, a task panic also stops the body at its next `await`. The scope then aborts and drains the other tasks and resumes the panic.
 - Finished task entries are reaped without waiting when new async or blocking work is spawned. In `Tasks::run` and `Tasks::run_until`, they are also reaped as soon as the task finishes, even if the body spawns nothing more. `len()` counts unfinished tasks and `is_empty()` reports whether all work has finished; neither waits for joining.
 - When the error type cannot be inferred, specify it with `Tasks::<E>::run`. This occurs when all errors pass through `?`.
+
+### Discovering more work
+
+Use `tasks.spawner()` when a task discovers work that should join the same
+scope, such as a crawler finding links. `Spawner::spawn` takes `&self` and
+returns `Result<Task<T, E>, SpawnError>`. Its task handles and errors follow
+the same rules as `Tasks::spawn`; only the scope owner can call `value` or join.
+
+A successful body return begins joining. Registered children may continue
+adding siblings until the last registered task is drained. Keeping an idle
+spawner does not keep the scope alive. Registration and closure are atomic:
+each racing spawn either registers work that the scope joins, or returns
+`SpawnError` and drops the future without polling it.
+
+Failure shutdown, cancellation, deadlines and owner drop close shared admission
+before aborting. Surviving handles stay closed. Rejected futures are destroyed
+outside the admission lock, including cleanup that tries to spawn again.
+As with other scope work, dropping the owner cannot wait for cleanup or stop
+already running blocking closures.
+
+The handle does not bound concurrency or deduplicate work. Keep spawning in
+the body and send discoveries through a channel when a central coordinator
+is useful for those policies. See `cargo run --example discovery` for a
+self-contained graph traversal using a shared spawner.
 
 ### Handled tasks
 
@@ -445,11 +470,23 @@ let rows = connections.run(|| query(7)).await;
 - `run_until(&cancellation, deadline, work)` stops the wait or the work on a `Cancellation` or at a deadline. It returns `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExceeded`. It needs the `tokio` feature.
 - `available()` returns the number of free places.
 
-The work of one call must not start a second call on any limit. That call panics. A task that holds one place and waits for a second place can deadlock.
-
-The check finds only a call that the work makes itself. It does not find a call in a task that the work spawns. Do not let such a task use a limit that the work holds.
+A call to `Limit` inside another `Limit` panics before waiting. This covers taking the same limit twice and taking two different limits in either order.
 
 To limit the items of one collection, use `concurrently`. It needs no shared limit.
+
+### Per-key exclusion
+
+`KeyedLimit::new()` lets one call run per key. Clones share the table. A server can use a connection limit around a per-session refresh. Re-read the session inside the keyed work so a waiting request sees the token its predecessor rotated.
+
+```rust
+let connections = Limit::new(3);
+let sessions = KeyedLimit::new();
+connections.run(|| sessions.run(id, || refresh_if_stale(id))).await;
+```
+
+`run(key, work)` releases the key on completion or drop. Dropping a waiter gives up its wait. The table evicts each key when its final holder or waiter leaves. With Tokio, `run_until(key, &cancellation, deadline, work)` applies the same cancellation rules as `Limit::run_until`.
+
+Keyed work may run on its own or under a `Limit`. While holding a key, entering any `Limit` or `KeyedLimit` panics, even for a different key or table. The check covers directly polled work. A holder must also avoid awaiting a spawned task that needs a resource it holds.
 
 ## SingleFlight
 
@@ -487,7 +524,7 @@ async fn acknowledge(&self, commit: u64) -> Result<(), SyncError> {
 }
 ```
 
-Operations for one key do not wait for each other to clean up. The last caller to leave drops the operation, and a call that arrives meanwhile starts a new one. Work that the dropped operation left running, such as the tasks of a scope it was running, can still be finishing. When separate operations must not overlap, or each caller needs an operation of its own, serialize them with an `AsyncActor` or a `Limit` of one instead.
+Operations for one key do not wait for each other to clean up. The last caller to leave drops the operation, and a call that arrives meanwhile starts a new one. Work that the dropped operation left running, such as the tasks of a scope it was running, can still be finishing. When separate operations must not overlap, or each caller needs an operation of its own, serialize them per key with [`KeyedLimit`](#per-key-exclusion) instead.
 
 ## Retries and rate limits
 
