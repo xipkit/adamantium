@@ -106,32 +106,37 @@ fn oversized_sleeps_and_retry_backoffs_finish_and_replay() {
 #[cfg(not(target_os = "wasi"))]
 #[test]
 fn modeled_relative_sleep_delays_match_tokio() {
+    // Whole milliseconds: Tokio's timer wheel rounds shorter waits up.
+    const DURATIONS: [Duration; 5] = [
+        Duration::ZERO,
+        Duration::from_millis(1),
+        TICK,
+        TICK.checked_mul(365 * 31).unwrap(),
+        Duration::MAX,
+    ];
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .start_paused(true)
         .build()
         .unwrap();
-    let expected = {
-        let _entered = runtime.enter();
-        [
-            Duration::ZERO,
-            Duration::from_nanos(1),
-            TICK,
-            TICK * 365 * 31,
-            Duration::MAX,
-        ]
-        .map(|duration| {
-            let start = time::now();
-            let delay = tokio::time::sleep(duration).deadline() - start;
-            (duration, delay)
-        })
-    };
-    drop(runtime);
-    check(move || async move {
-        for (duration, delay) in expected {
+    let expected = runtime.block_on(async {
+        let mut expected = Vec::new();
+        for duration in DURATIONS {
             let start = time::now();
             time::sleep(duration).await;
-            assert_eq!(time::now() - start, delay);
+            expected.push((duration, time::now() - start));
+        }
+        expected
+    });
+    drop(runtime);
+    check(move || {
+        let expected = expected.clone();
+        async move {
+            for (duration, delay) in expected {
+                let start = time::now();
+                time::sleep(duration).await;
+                assert_eq!(time::now() - start, delay, "sleep({duration:?})");
+            }
         }
     });
 }

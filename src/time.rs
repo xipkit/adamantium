@@ -50,7 +50,8 @@ pub fn now() -> Instant {
 /// Starts on the first poll. Uses virtual time in the deterministic harness;
 /// otherwise requires Tokio's time driver, with millisecond timer granularity.
 /// Dropping the future cancels the wait.
-/// Very large relative waits use a finite far-future deadline, like Tokio.
+/// Waits longer than 30 years are capped at 30 years, on every supported Tokio
+/// version and in the deterministic harness.
 pub async fn sleep(duration: Duration) {
     wait(Delay::For(duration)).await;
 }
@@ -63,6 +64,11 @@ pub async fn sleep(duration: Duration) {
 pub async fn sleep_until(deadline: Instant) {
     wait(Delay::Until(deadline)).await;
 }
+
+/// The longest relative wait, matching the far-future delay newer Tokio
+/// versions use. Older versions keep any representable delay, so capping here
+/// gives every supported version and the modeled clock the same contract.
+const MAX_DELAY: Duration = Duration::from_secs(86400 * 365 * 30);
 
 enum Delay {
     For(Duration),
@@ -84,6 +90,10 @@ impl Drop for Owner {
     reason = "the clock boundary selects the production time driver"
 )]
 async fn wait(delay: Delay) {
+    let delay = match delay {
+        Delay::For(duration) => Delay::For(duration.min(MAX_DELAY)),
+        Delay::Until(deadline) => Delay::Until(deadline),
+    };
     let owner = Owner(crate::runtime::World::current());
     crate::runtime::in_world(owner.0, async {
         #[cfg(feature = "deterministic")]

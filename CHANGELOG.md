@@ -16,6 +16,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `adamantium`: `KeyedLimit` serializes calls for the same key, including
   inside a connection `Limit`, and evicts keys after their last call ends.
 
+### Fixed
+
+- `adamantium`: `time::sleep` caps waits longer than 30 years at 30 years on
+  every supported Tokio version. Tokio before 1.54 kept them, so production
+  could wait longer than the deterministic clock.
+
 ## [0.3.0] - 2026-11-17
 
 ### Fixed
