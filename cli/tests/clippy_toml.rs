@@ -16,7 +16,11 @@ use serde::Deserialize;
 use toml_edit::{Document, DocumentMut, InlineTable, Item, Value};
 
 /// The arrays of `clippy.toml` whose entries name paths.
-const LISTS: [&str; 2] = ["disallowed-types", "disallowed-methods"];
+const LISTS: [&str; 3] = [
+    "disallowed-types",
+    "disallowed-methods",
+    "disallowed-macros",
+];
 
 /// Every feature that defines an item `clippy.toml` names. `tokio::task::Builder`
 /// also needs `--cfg tokio_unstable`.

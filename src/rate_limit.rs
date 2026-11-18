@@ -81,23 +81,32 @@ impl RateLimit {
                     Some(None) => std::future::pending().await,
                 }
             };
-            tokio::select! {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "stop waiting for admission before charging the rate limit on shutdown"
+            )]
+            let () = tokio::select! {
                 biased;
                 reason = &mut stop => return Err(reason.scope_error()),
                 () = room => {}
-            }
+            };
             match self.take() {
                 Ok(()) => break,
                 Err(leaves) => wake = Some(leaves),
             }
         }
-        tokio::select! {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "run_until checks shutdown before polling the admitted work"
+        )]
+        let result = tokio::select! {
             biased;
             reason = &mut stop => Err(reason.scope_error()),
             // Calling `work` inside the branch means a shutdown that wins this
             // poll never calls it.
             result = async { work().await } => result.map_err(ScopeError::Failed),
-        }
+        };
+        result
     }
 
     /// Records a start now if the window has room. Otherwise returns

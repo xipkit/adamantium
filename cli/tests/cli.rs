@@ -408,9 +408,8 @@ fn check_reports_disallowed_methods() {
 }
 
 /// Checks the fixture `name` and asserts that it produces a finding on exactly
-/// the lines of `src/lib.rs` that end in `// disallowed_types` or
-/// `// disallowed_methods`, for that rule, and no other finding. Returns the
-/// findings.
+/// the lines of `src/lib.rs` marked with a disallowed lint, for that rule, and
+/// no other finding. Returns the findings.
 fn check_marked_rules(name: &str) -> TestResult<Vec<serde_json::Value>> {
     let root = fixture(name);
     let mut marked = Vec::new();
@@ -418,7 +417,11 @@ fn check_marked_rules(name: &str) -> TestResult<Vec<serde_json::Value>> {
         .lines()
         .enumerate()
     {
-        for rule in ["disallowed_types", "disallowed_methods"] {
+        for rule in [
+            "disallowed_types",
+            "disallowed_methods",
+            "disallowed_macros",
+        ] {
             if line.ends_with(&format!("// {rule}")) {
                 marked.push((format!("clippy::{rule}"), u64::try_from(index + 1)?));
             }
@@ -483,6 +486,12 @@ fn check_reports_timeouts_and_allows_structured_deadlines() {
             "{finding}"
         );
     }
+}
+
+#[test]
+fn check_reports_select_at_each_unexcepted_call() {
+    let findings = check_marked_rules("select").unwrap();
+    assert_eq!(findings.len(), 8, "{findings:?}");
 }
 
 /// Every access method of a `thread_local!` value is reported, called on the

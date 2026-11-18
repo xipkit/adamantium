@@ -98,17 +98,25 @@ impl Cancellation {
 
             let mut interrupt = signal(SignalKind::interrupt())?;
             let mut terminate = signal(SignalKind::terminate())?;
-            tokio::select! {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "either Unix signal must trigger scope cancellation"
+            )]
+            let () = tokio::select! {
                 biased;
                 _ = interrupt.recv() => {},
                 _ = terminate.recv() => {},
-            }
+            };
             Ok::<(), std::io::Error>(())
         };
         #[cfg(windows)]
         let received = tokio::signal::ctrl_c();
 
-        tokio::select! {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "scope cancellation ends the signal wait and releases its listeners"
+        )]
+        let result = tokio::select! {
             biased;
             () = self.cancelled() => Ok(()),
             result = received => {
@@ -116,7 +124,8 @@ impl Cancellation {
                 self.cancel();
                 Ok(())
             }
-        }
+        };
+        result
     }
 }
 
@@ -387,11 +396,15 @@ async fn stopped<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
             listener.await;
         }
     };
-    tokio::select! {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the scope stops reaping completed children when a failure is recorded"
+    )]
+    let () = tokio::select! {
         biased;
         () = must_stop => {},
         () = reap(set, errors) => {},
-    }
+    };
 }
 
 /// Sends a task's result to its handle. An error the handle is no longer
@@ -534,11 +547,15 @@ impl<E: Send + 'static> Tasks<E> {
             let mut tasks = Self::new();
             let set = Arc::clone(&tasks.set);
             let errors = Arc::clone(&tasks.errors);
-            tokio::select! {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the task scope observes child failure while its body is pending"
+            )]
+            let () = tokio::select! {
                 biased;
                 () = stopped(&set, &errors) => {},
                 result = body(&mut tasks) => return tasks.join(result).await,
-            }
+            };
             tasks.fail().await
         })
         .await
@@ -609,6 +626,10 @@ impl<E: Send + 'static> Tasks<E> {
             tasks.cancellation = Some(cancellation.clone());
             let set = Arc::clone(&tasks.set);
             let errors = Arc::clone(&tasks.errors);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "run_until observes shutdown and child failure while its body is pending"
+            )]
             let reason = tokio::select! {
                 biased;
                 reason = shutdown(&cancellation, deadline) => reason,
@@ -850,6 +871,10 @@ impl<E: Send + 'static> Tasks<E> {
         self.world.check();
         self.cancellation = Some(cancellation.clone());
         crate::runtime::in_world(World::current(), async move {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "shutdown interrupts normal settling so the scope can abort and drain"
+            )]
             let reason = tokio::select! {
                 biased;
                 reason = shutdown(&cancellation, deadline) => Some(reason),
