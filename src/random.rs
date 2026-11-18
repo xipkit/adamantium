@@ -8,8 +8,8 @@
 //! Outside `adamantium::testing` (with the `deterministic` feature), each draw
 //! comes from the standard library's per-process random hashing keys. Inside an
 //! execution, each draw comes from the scheduler instead: a seed gives the same
-//! draws in the same order, an `adamantium::testing::Replay` repeats them
-//! exactly, and a replay whose code draws a different number of times fails as
+//! draws in the same order, and an `adamantium::testing::Replay` records each
+//! draw and repeats it. Replaying code that draws at different points fails as
 //! a mismatch.
 //!
 //! ```

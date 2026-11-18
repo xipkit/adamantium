@@ -7,7 +7,7 @@
 
 use adamantium::{
     Backoff, Cancellation, Restarts, ScopeError, Tasks, random,
-    testing::{self, Config, FailureKind, Replay},
+    testing::{self, Config, FailureKind, Replay, SchedulerMode},
     time,
 };
 use std::{
@@ -178,22 +178,33 @@ fn jittered_retry_waits_stay_between_half_and_all_of_each_delay() {
 
 #[test]
 fn a_saved_record_replays_the_whole_jittered_delay_sequence() {
-    let observed = log();
-    let factory = logging(&observed, || retry_waits(jittered()));
-    let record = testing::check(config(), factory).unwrap();
-    assert_eq!(random_steps(&record), DELAYS.len());
-    let path = std::env::temp_dir().join(format!(
-        "adamantium-jitter-replay-{}.json",
-        std::process::id()
-    ));
-    record.save(&path).unwrap();
-    let loaded = Replay::load(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
-    assert_eq!(loaded, record);
-    let replayed = log();
-    let factory = logging(&replayed, || retry_waits(jittered()));
-    assert_eq!(testing::replay(&loaded, factory).unwrap(), record);
-    assert_eq!(entries(&replayed), [last(&observed)]);
+    let modes = [
+        SchedulerMode::Random,
+        SchedulerMode::Pct { depth: 2 },
+        SchedulerMode::Dfs,
+    ];
+    for (index, mode) in modes.into_iter().enumerate() {
+        let observed = log();
+        let factory = logging(&observed, || retry_waits(jittered()));
+        let record = testing::check(config().with_scheduler(mode), factory).unwrap();
+        assert_eq!(random_steps(&record), DELAYS.len(), "{mode:?}");
+        let path = std::env::temp_dir().join(format!(
+            "adamantium-jitter-replay-{}-{index}.json",
+            std::process::id()
+        ));
+        record.save(&path).unwrap();
+        let loaded = Replay::load(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded, record, "{mode:?}");
+        let replayed = log();
+        let factory = logging(&replayed, || retry_waits(jittered()));
+        assert_eq!(
+            testing::replay(&loaded, factory).unwrap(),
+            record,
+            "{mode:?}"
+        );
+        assert_eq!(entries(&replayed), [last(&observed)], "{mode:?}");
+    }
 }
 
 #[test]
