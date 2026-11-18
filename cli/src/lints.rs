@@ -47,6 +47,7 @@ pub struct Example {
 pub const EXPERIMENTAL_LINTS: &[&str] = &[
     "adamantium_blocking_in_async",
     "adamantium_nested_actor_access",
+    "adamantium_nested_limit",
     "adamantium_race_with_timer",
 ];
 
@@ -79,6 +80,7 @@ impl<'a> Hint<'a> {
             "clippy::disallowed_types" => disallowed(message, DISALLOWED_TYPES),
             "adamantium_blocking_in_async" => Some("blocking-work"),
             "adamantium_nested_actor_access" => Some("two-locks-at-once"),
+            "adamantium_nested_limit" => Some("two-limits-at-once"),
             "adamantium_race_with_timer" => Some("the-first-event"),
             _ => None,
         };
@@ -297,6 +299,9 @@ fn rule_replacement(rule: &str) -> Option<&'static str> {
         "adamantium_nested_actor_access" => {
             Some("Access the second actor after the outer callback returns.")
         }
+        "adamantium_nested_limit" => Some(
+            "Enter only a KeyedLimit inside Limit work, and other limits after the work finishes.",
+        ),
         "adamantium_race_with_timer" => Some(
             "Use adamantium::until or a *_until method, or race only documented drop-safe operations.",
         ),
