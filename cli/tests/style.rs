@@ -70,6 +70,75 @@ fn provider_can_be_named_and_unknown_providers_are_rejected() {
 }
 
 #[test]
+fn the_concurrency_pack_is_opt_in_and_recorded_in_the_report() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
+    let dry_run = |args: &[&str]| {
+        let output = cargo_adamantium_no_key()
+            .args(["style", "check", "--dry-run"])
+            .args(args)
+            .arg(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let google = dry_run(&[]);
+    assert_eq!(google["pack"], "google");
+    assert_eq!(google["selected_rules"].as_array().unwrap().len(), 51);
+    let concurrency = dry_run(&["--pack", "concurrency"]);
+    assert_eq!(concurrency["pack"], "concurrency");
+    assert_eq!(
+        concurrency["selected_rules"],
+        serde_json::json!([
+            "stale_read_across_await",
+            "split_actor_invariant",
+            "unbounded_collection_growth"
+        ])
+    );
+    assert_ne!(concurrency["rules_sha256"], google["rules_sha256"]);
+
+    let output = cargo_adamantium_no_key()
+        .args(["style", "check", "--dry-run", "--pack", "concurrency"])
+        .args(["--rule", "glob_import_context"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown rule"));
+
+    let output = cargo_adamantium_no_key()
+        .args([
+            "style",
+            "rules",
+            "--pack",
+            "concurrency",
+            "--format",
+            "text",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let names: Vec<_> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| line.split_once(':').unwrap().0.to_owned())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "stale_read_across_await",
+            "split_actor_invariant",
+            "unbounded_collection_growth"
+        ]
+    );
+}
+
+#[test]
 fn unknown_rule_is_an_error_without_an_api_call() {
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-adamantium"))
         .args(["style", "check", "--dry-run", "--rule", "not_a_rule"])

@@ -1,7 +1,30 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, Result, bail};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+
+/// A set of rules evaluated together, embedded in the binary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Pack {
+    /// The judgment-based parts of the Google Rust style guide.
+    #[default]
+    Google,
+    /// Concurrency bugs that Clippy and the Dylint lints can't see: stale
+    /// reads across an await, invariants split across Actors, and collections
+    /// that grow without bound.
+    Concurrency,
+}
+
+impl Pack {
+    fn definitions(self) -> &'static str {
+        match self {
+            Self::Google => include_str!("google-rust-decisions.json"),
+            Self::Concurrency => include_str!("concurrency-decisions.json"),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct RuleSet {
@@ -25,9 +48,10 @@ pub(crate) struct Choice {
 }
 
 impl RuleSet {
-    pub fn load() -> Result<Self> {
-        let rules: Self = serde_json::from_str(include_str!("google-rust-decisions.json"))
-            .context("invalid embedded rule set")?;
+    /// Reads and validates the rules of `pack`.
+    pub fn load(pack: Pack) -> Result<Self> {
+        let rules: Self =
+            serde_json::from_str(pack.definitions()).context("invalid embedded rule set")?;
         if rules.model.is_empty() || rules.questions.is_empty() || rules.questions.len() > 400 {
             bail!("the rule set must contain a model and between 1 and 400 questions");
         }
@@ -73,7 +97,7 @@ mod tests {
 
     #[test]
     fn embedded_rules_are_valid_and_can_be_selected() {
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         assert_eq!(rules.model, "gpt-6-luna");
         assert_eq!(rules.questions.len(), 51);
         let selected = rules
@@ -82,5 +106,50 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].name, "glob_import_context");
         assert!(rules.select(&["not_a_rule".into()]).is_err());
+    }
+
+    #[test]
+    fn the_concurrency_pack_ships_the_rules_adam_207_scored_without_false_positives() {
+        let rules = RuleSet::load(Pack::Concurrency).unwrap();
+        assert_eq!(rules.model, "gpt-6-luna");
+        let names: Vec<_> = rules.questions.iter().map(|q| q.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "stale_read_across_await",
+                "split_actor_invariant",
+                "unbounded_collection_growth"
+            ]
+        );
+    }
+
+    /// The evaluation's precision and recall hold only for the wording it
+    /// sent, so each shipped rule must match its evaluated definition byte
+    /// for byte.
+    #[test]
+    fn shipped_concurrency_rules_match_the_evaluated_definitions() {
+        let evaluated_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../style/rules/concurrency-decisions.json");
+        let evaluated: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(evaluated_path).unwrap()).unwrap();
+        let shipped: serde_json::Value =
+            serde_json::from_str(Pack::Concurrency.definitions()).unwrap();
+        assert_eq!(shipped["model"], evaluated["model"]);
+        let shipped = shipped["questions"].as_array().unwrap();
+        assert_eq!(shipped.len(), 3);
+        for question in shipped {
+            let name = &question["name"];
+            let original = evaluated["questions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| candidate["name"] == *name)
+                .unwrap();
+            assert_eq!(
+                serde_json::to_string(question).unwrap(),
+                serde_json::to_string(original).unwrap(),
+                "{name} differs from its evaluated wording"
+            );
+        }
     }
 }

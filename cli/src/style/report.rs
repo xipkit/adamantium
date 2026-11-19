@@ -9,7 +9,7 @@ use crate::style::{
         Answer, Evaluation, FileReview, LineRange, Locations, Provider, ProviderKind, ReviewError,
         Verdict,
     },
-    rules::Question,
+    rules::{Pack, Question},
     scan::Scan,
 };
 
@@ -32,6 +32,9 @@ pub(crate) struct Report {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct ReviewKey {
     pub provider: ProviderKind,
+    /// Reports written before packs were selectable used the Google pack.
+    #[serde(default)]
+    pub pack: Pack,
     pub model: String,
     /// SHA-256 of the selected rules' full definitions, as sent.
     pub rules_sha256: String,
@@ -110,12 +113,14 @@ pub(crate) enum UnresolvedReason {
 impl ReviewKey {
     pub fn new(
         provider: ProviderKind,
+        pack: Pack,
         model: &str,
         questions: &[Question],
         context: Option<&str>,
     ) -> Result<Self> {
         Ok(Self {
             provider,
+            pack,
             model: model.to_owned(),
             rules_sha256: sha256_hex(&serde_json::to_vec(questions)?),
             context_sha256: context.map(|context| sha256_hex(context.as_bytes())),
@@ -524,6 +529,7 @@ mod tests {
         let scan = Scan::discover(dir).unwrap();
         let key = ReviewKey::new(
             ProviderKind::Decisions,
+            Pack::Google,
             "test-model",
             questions,
             Some("library"),
@@ -538,7 +544,7 @@ mod tests {
     fn reports_file_scoped_findings_and_uncertainty() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let questions = &rules.questions[..2];
         let fake = FakeProvider::answering(&[Verdict::Violation, Verdict::InsufficientContext]);
         let report = check(dir.path(), questions, &fake);
@@ -573,7 +579,7 @@ mod tests {
     fn records_the_hash_of_the_source_it_sent() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let fake = FakeProvider::answering(&[Verdict::NoViolation]);
         let report = check(dir.path(), &rules.questions[..1], &fake);
         assert_eq!(
@@ -586,10 +592,17 @@ mod tests {
 
     #[test]
     fn the_review_key_covers_rule_definitions_and_context() {
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let questions = &rules.questions[..2];
         let key = |questions: &[Question], context| {
-            ReviewKey::new(ProviderKind::Decisions, "test-model", questions, context).unwrap()
+            ReviewKey::new(
+                ProviderKind::Decisions,
+                Pack::Google,
+                "test-model",
+                questions,
+                context,
+            )
+            .unwrap()
         };
         let base = key(questions, Some("library"));
         assert_eq!(base, key(questions, Some("library")));
@@ -609,8 +622,14 @@ mod tests {
         redescribed[0].choices[0].description.push('.');
         assert_ne!(base, key(&redescribed, Some("library")));
 
-        let other_model =
-            ReviewKey::new(ProviderKind::Decisions, "other", questions, Some("library")).unwrap();
+        let other_model = ReviewKey::new(
+            ProviderKind::Decisions,
+            Pack::Google,
+            "other",
+            questions,
+            Some("library"),
+        )
+        .unwrap();
         assert_ne!(base, other_model);
     }
 
@@ -618,7 +637,7 @@ mod tests {
     fn a_written_report_reads_back_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let fake = FakeProvider::answering(&[Verdict::Violation, Verdict::InsufficientContext]);
         let report = check(dir.path(), &rules.questions[..2], &fake);
         let written = serde_json::to_value(&report).unwrap();
@@ -634,7 +653,7 @@ mod tests {
 
     #[test]
     fn refusals_are_unresolved() {
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let mut file = FileReport::new("lib.rs".into());
         file.record(
             &rules.questions[..1],
@@ -654,7 +673,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
         fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let fake = FakeProvider::unavailable();
         let report = check(dir.path(), &rules.questions[..1], &fake);
         assert_eq!(report.exit_code(), 2);
@@ -672,7 +691,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
         fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let fake = FakeProvider::answering(&[Verdict::NoViolation]);
         let report = check(dir.path(), &rules.questions[..2], &fake);
         assert_eq!(report.files[0].status, FileStatus::Error);
@@ -690,7 +709,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
         fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let fake = FakeProvider {
             refuse_input: true,
             ..FakeProvider::answering(&[Verdict::NoViolation])
@@ -706,7 +725,7 @@ mod tests {
 
     #[test]
     fn complete_findings_and_clean_results_have_distinct_exit_codes() {
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let questions = &rules.questions[..1];
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
@@ -723,7 +742,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("large.rs"), vec![b'x'; 65]).unwrap();
         fs::write(dir.path().join("small.rs"), vec![b'x'; 64]).unwrap();
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let fake = FakeProvider::answering(&[Verdict::NoViolation]);
         let report = check(dir.path(), &rules.questions[..1], &fake);
         assert_eq!(report.status, ReportStatus::Incomplete);
@@ -743,7 +762,7 @@ mod tests {
     fn locates_only_the_rules_a_file_breaks() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let questions = &rules.questions[..3];
         let lines = LineRange {
             start_line: 4,
@@ -784,7 +803,7 @@ mod tests {
     fn a_file_without_findings_is_not_located() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let fake = FakeProvider::answering(&[Verdict::NoViolation, Verdict::InsufficientContext]);
         let report = check(dir.path(), &rules.questions[..2], &fake);
         assert_eq!(fake.locates.with(|locates| locates.len()), 0);
@@ -796,7 +815,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
         fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let fake = FakeProvider {
             locations: FakeLocations::Unavailable,
             ..FakeProvider::answering(&[Verdict::Violation])
@@ -815,7 +834,7 @@ mod tests {
     fn the_wrong_number_of_locations_fails_the_file() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let fake = FakeProvider {
             locations: FakeLocations::Fixed(Vec::new()),
             ..FakeProvider::answering(&[Verdict::Violation])

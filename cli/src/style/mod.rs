@@ -21,7 +21,7 @@ use self::{
     provider::ProviderKind,
     report::{Report, ReviewKey},
     resume::Cache,
-    rules::RuleSet,
+    rules::{Pack, RuleSet},
     scan::Scan,
 };
 
@@ -31,8 +31,11 @@ pub enum Command {
     /// to the provider, which needs credentials: for the default Decisions
     /// API, OPENAI_API_KEY or, on macOS, an `openai-api-key` Keychain item.
     Check(CheckArgs),
-    /// List the style rules.
+    /// List the rules of a pack.
     Rules {
+        /// The rules to list.
+        #[arg(long, value_enum, default_value_t = Pack::Google)]
+        pack: Pack,
         #[arg(long, value_enum, default_value_t = Format::Json)]
         format: Format,
     },
@@ -43,7 +46,10 @@ pub struct CheckArgs {
     /// Rust source file or directory to review.
     #[arg(default_value = ".")]
     path: PathBuf,
-    /// Evaluate only this rule; may be repeated.
+    /// The rules to review against.
+    #[arg(long, value_enum, default_value_t = Pack::Google)]
+    pack: Pack,
+    /// Evaluate only this rule of the pack; may be repeated.
     #[arg(long = "rule")]
     rules: Vec<String>,
     /// The service that answers the rules for each file.
@@ -67,7 +73,7 @@ pub struct CheckArgs {
     )]
     changed: Option<String>,
     /// Reuse results from a previous JSON report for files whose source,
-    /// provider, model, rules and context are unchanged.
+    /// provider, pack, model, rules and context are unchanged.
     #[arg(long, value_name = "REPORT")]
     cache_from: Option<PathBuf>,
     /// Retry files that failed or were not checked in a previous JSON report.
@@ -86,9 +92,9 @@ pub enum Format {
 /// Runs a `style` subcommand. Exit status is 0 for a clean or planned
 /// review, 1 for findings and 2 for an incomplete review.
 pub fn run(command: Command) -> Result<ExitCode> {
-    let rules = RuleSet::load()?;
     match command {
-        Command::Rules { format } => {
+        Command::Rules { pack, format } => {
+            let rules = RuleSet::load(pack)?;
             let stdout = std::io::stdout();
             let mut output = stdout.lock();
             match format {
@@ -105,9 +111,11 @@ pub fn run(command: Command) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Check(args) => {
+            let rules = RuleSet::load(args.pack)?;
             let questions = rules.select(&args.rules)?;
             let key = ReviewKey::new(
                 args.provider,
+                args.pack,
                 &rules.model,
                 &questions,
                 args.context.as_deref(),
@@ -117,13 +125,7 @@ pub fn run(command: Command) -> Result<ExitCode> {
                 changed::retain_changed(&mut scan, base)?;
             }
             if let Some(previous) = &args.retry_from {
-                resume::select_pending(
-                    &mut scan,
-                    previous,
-                    args.provider,
-                    &rules.model,
-                    &questions,
-                )?;
+                resume::select_pending(&mut scan, previous, &key, &questions)?;
             }
             let mut report = Report::planned(&scan, key, &questions);
             if let Some(previous) = &args.cache_from {
@@ -201,8 +203,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("lib.rs"), "fn example() {}\n").unwrap();
         let scan = Scan::discover(dir.path()).unwrap();
-        let rules = RuleSet::load().unwrap();
-        let key = ReviewKey::new(ProviderKind::Decisions, &rules.model, &[], None).unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
+        let key = ReviewKey::new(
+            ProviderKind::Decisions,
+            Pack::Google,
+            &rules.model,
+            &[],
+            None,
+        )
+        .unwrap();
         let mut report = Report::planned(&scan, key, &[]);
         let finding = |rule: &str, lines| Finding {
             rule: rule.to_owned(),
