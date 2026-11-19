@@ -262,8 +262,9 @@ mod tests {
             ..FakeProvider::answering(&[Verdict::Violation, Verdict::NoViolation])
         };
         let (json, text, exit) = review(dir.path(), &["--pack", "concurrency"], provider).unwrap();
-        let explanation = "Coupled state with a joint invariant is split across separate \
-                           Actors, locks, or atomics and accessed in separate critical sections.";
+        let explanation = "Coupled mutable state with a joint invariant is split across two or \
+                           more separate Actors, locks, or atomics and accessed in separate \
+                           critical sections.";
         assert_eq!(exit, 1);
         assert_eq!(json["status"], "complete");
         assert_eq!(json["pack"], "concurrency");

@@ -168,6 +168,30 @@ Verification of the shipped 2-rule binary (`split_actor_invariant` + `unbounded_
 2. **`stale_read_across_await` — Held out of `--pack concurrency`.** Despite reaching 100% precision and 100% recall on `dev`, on the untouched whole-file held-out split it flagged 2 safe files (`wf_ho_stale_primary_epoch_safe` at P=0.810 despite explicit post-await epoch/role recheck, and `wf_ho_stale_cursor_advance_safe` at P=0.520 despite atomic `fetch_add` before await) plus 1 `insufficient_context` file (`wf_ho_stale_insuff_external_ledger` at P=0.500), and left `wf_ho_stale_flag_patch_safe` unresolved.
 3. **`split_actor_invariant` — Untouched per ADAM-222; follow-up filed as ADAM-223.**
 
+## Single-primitive `split_actor_invariant` revision (ADAM-223)
+
+### Corpus and tuning discipline
+
+- **Fresh whole-file held-out split.** Before editing any rule wording, all 44 ADAM-222 whole-file cases were moved to `split: "dev"` (bringing `dev` to 148 cases) and 40 fresh synthetic Rust 2024 whole-file cases were written and committed as `split: "held_out"` (36–213 lines, median 76 lines, 7 files >= 150 lines; all validated with `rustfmt --edition 2024`). Every held-out case is labeled for all three pack candidate rules and covers all four slices (`semantic_only`, `lint_overlap`, `lint_decoy`, `insufficient_context`), including 14 async single-primitive files combining one `Actor`, `AtomicU64`, `Arc<std::sync::Mutex<_>>`, `Arc<std::sync::RwLock<_>>`, or `Arc<tokio::sync::Mutex<_>>` with an immutable config struct.
+- **Dev tuning (`split_actor_invariant` only).** `split_actor_invariant` was revised in [`concurrency-decisions.json`](concurrency-decisions.json) (and kept byte-identical in [`../../cli/src/style/concurrency-decisions.json`](../../cli/src/style/concurrency-decisions.json)) to clarify that a single `Actor`, `Atomic`, `Mutex`, `RwLock`, or `RefCell` alongside immutable fields or config is never a split invariant—even across multiple methods, closures, lock acquisitions, or `.await` points—and to exclude unrelated single-primitive bugs such as stale reads or dropped mutex guards across `.await`. `unbounded_collection_growth` was not touched.
+  - Dev round 1 (`--split dev --rule split_actor_invariant`, 75 cases, `110,497` input tokens): 100.0% precision (16/16), 94.1% recall (16/17), 44/44 exact on the ADAM-222 whole files (0 FP across all 4 prior false positives).
+  - Dev round 2 (tightened wording, `--split dev --rule split_actor_invariant`, 75 cases, `107,473` input tokens): 100.0% precision (16/16), 94.1% recall (16/17), 14/14 pairs, 44/44 exact on the ADAM-222 whole files.
+  - Full 2-rule check on the 44 ADAM-222 dev whole files (`125,104` input tokens): **88/88 exact (100.0%)**, 100.0% precision (13/13), 100.0% recall (13/13), 11/11 pairs, 0 false positives.
+
+### Frozen held-out results through the CLI (40 fresh whole files, 80 rule evaluations)
+
+Single frozen 2-rule held-out run (`105,380` input tokens):
+
+| Rule | Precision | Recall | F1 | Exact 3-class | Pairs (`bug`+`safe`) | Unresolved | Located true findings | Safe/decoy FP |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `split_actor_invariant` | **100.0% (7/7)** | **100.0% (7/7)** | **100.0%** | **40/40 (100.0%)** | **6/6** | 1 (1 true `insufficient_context`) | 1/7 | **0** |
+| `unbounded_collection_growth` | **100.0% (5/5)** | **100.0% (5/5)** | **100.0%** | **40/40 (100.0%)** | **4/4** | 1 (1 true `insufficient_context`) | 5/5 | **0** |
+| **Overall (2-rule)** | **100.0% (12/12)** | **100.0% (12/12)** | **100.0%** | **80/80 (100.0%)** | **10/10** | **2** | **6/12** | **0** |
+
+- `split_actor_invariant` flagged all 7 split-invariant bugs (`P(violation)` from `0.950` to `1.000`), produced **0/14 false positives** across the fresh single-primitive async + immutable-config files and **0/11** on the `unbounded_collection_growth` files, and returned `insufficient_context` only on `wf2_ho_split_insuff_external_stores`. (Six of seven true findings reported file scope rather than a line range because split invariants span struct fields and multiple methods.)
+- `unbounded_collection_growth` remained untouched and scored 40/40 exact (5/5 TP, 5/5 located, 0 FP, 1/1 true `insufficient_context`).
+- On Adamantium's own `src/` (36 files), `cargo-adamantium style check src --pack concurrency` exited `0` with **0 findings** and **0 unresolved**.
+
 Reproduction through the built CLI:
 
 ```sh
