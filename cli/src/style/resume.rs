@@ -10,7 +10,7 @@ use std::{
 use crate::style::{
     provider::ProviderKind,
     report::{FileReport, FileStatus, Report, ReviewKey, SCHEMA_VERSION, sha256_hex},
-    rules::Question,
+    rules::{Pack, Question},
     scan::Scan,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -23,6 +23,9 @@ struct PreviousReport {
     /// Reports written before providers were selectable came from Decisions.
     #[serde(default)]
     provider: ProviderKind,
+    /// Reports written before packs were selectable used the Google pack.
+    #[serde(default)]
+    pack: Pack,
     model: String,
     root: String,
     selected_rules: Vec<String>,
@@ -42,13 +45,12 @@ struct PreviousFile {
 }
 
 /// Keeps only the files that `previous_path` failed to review or never sent.
-/// The previous report must have the same scan root, provider, model and
-/// rule names.
+/// The previous report must have the same scan root, provider, pack, model
+/// and rule names as `key` and `questions`.
 pub(crate) fn select_pending(
     scan: &mut Scan,
     previous_path: &Path,
-    provider: ProviderKind,
-    model: &str,
+    key: &ReviewKey,
     questions: &[Question],
 ) -> Result<()> {
     let previous_file = File::open(previous_path)
@@ -71,11 +73,15 @@ pub(crate) fn select_pending(
         "previous report has a different scan root"
     );
     ensure!(
-        previous.provider == provider,
+        previous.provider == key.provider,
         "previous report used a different provider"
     );
     ensure!(
-        previous.model == model,
+        previous.pack == key.pack,
+        "previous report used a different rule pack; pass the same --pack"
+    );
+    ensure!(
+        previous.model == key.model,
         "previous report used a different model"
     );
     ensure!(
@@ -206,6 +212,19 @@ mod tests {
     use super::*;
     use crate::style::rules::RuleSet;
 
+    /// The key of a review of `questions` from the Google pack.
+    fn google_key(questions: &[Question]) -> ReviewKey {
+        let rules = RuleSet::load(Pack::Google).unwrap();
+        ReviewKey::new(
+            ProviderKind::Decisions,
+            Pack::Google,
+            &rules.model,
+            questions,
+            None,
+        )
+        .unwrap()
+    }
+
     fn previous_report(root: &Path, model: &str, question: &Question) -> Value {
         json!({
             "schema_version": 1,
@@ -230,19 +249,12 @@ mod tests {
             fs::write(dir.path().join(name), "fn example() {}\n").unwrap();
         }
         let mut scan = Scan::discover(dir.path()).unwrap();
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let questions = &rules.questions[..1];
         let report = previous_report(&scan.root, &rules.model, &questions[0]);
         let report_path = dir.path().join("report.json");
         fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
-        select_pending(
-            &mut scan,
-            &report_path,
-            ProviderKind::Decisions,
-            &rules.model,
-            questions,
-        )
-        .unwrap();
+        select_pending(&mut scan, &report_path, &google_key(questions), questions).unwrap();
         assert_eq!(
             scan.files
                 .iter()
@@ -258,7 +270,7 @@ mod tests {
         for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
             fs::write(dir.path().join(name), "").unwrap();
         }
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let questions = &rules.questions[..1];
         let scan = Scan::discover(dir.path()).unwrap();
         let valid = previous_report(&scan.root, &rules.model, &questions[0]);
@@ -266,13 +278,7 @@ mod tests {
         let check = |report: &Value| {
             fs::write(&report_path, serde_json::to_vec(report).unwrap()).unwrap();
             let mut scan = Scan::discover(dir.path()).unwrap();
-            select_pending(
-                &mut scan,
-                &report_path,
-                ProviderKind::Decisions,
-                &rules.model,
-                questions,
-            )
+            select_pending(&mut scan, &report_path, &google_key(questions), questions)
         };
 
         let mut wrong = valid.clone();
@@ -280,6 +286,22 @@ mod tests {
         assert!(check(&wrong).unwrap_err().to_string().contains("scan root"));
         wrong = valid.clone();
         wrong["provider"] = json!("claude");
+        assert!(
+            check(&wrong)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid previous JSON report")
+        );
+        wrong = valid.clone();
+        wrong["pack"] = json!("concurrency");
+        assert!(
+            check(&wrong)
+                .unwrap_err()
+                .to_string()
+                .contains("different rule pack")
+        );
+        wrong = valid.clone();
+        wrong["pack"] = json!("not_a_pack");
         assert!(
             check(&wrong)
                 .unwrap_err()
@@ -323,26 +345,30 @@ mod tests {
     }
 
     #[test]
-    fn reports_without_a_provider_came_from_decisions() {
+    fn reports_without_a_provider_or_pack_came_from_decisions_and_the_google_pack() {
         let dir = tempfile::tempdir().unwrap();
         for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
             fs::write(dir.path().join(name), "").unwrap();
         }
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let questions = &rules.questions[..1];
         let mut scan = Scan::discover(dir.path()).unwrap();
         let mut report = previous_report(&scan.root, &rules.model, &questions[0]);
         report.as_object_mut().unwrap().remove("provider");
+        assert!(report.get("pack").is_none());
         let report_path = dir.path().join("report.json");
         fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
-        select_pending(
-            &mut scan,
-            &report_path,
-            ProviderKind::Decisions,
-            &rules.model,
-            questions,
-        )
-        .unwrap();
+        let concurrency = ReviewKey {
+            pack: Pack::Concurrency,
+            ..google_key(questions)
+        };
+        assert!(
+            select_pending(&mut scan, &report_path, &concurrency, questions)
+                .unwrap_err()
+                .to_string()
+                .contains("different rule pack")
+        );
+        select_pending(&mut scan, &report_path, &google_key(questions), questions).unwrap();
         assert_eq!(scan.files.len(), 2);
     }
 
@@ -361,10 +387,16 @@ mod tests {
                 fs::write(dir.path().join(name), format!("// {name}\n")).unwrap();
             }
             let scan = Scan::discover(dir.path()).unwrap();
-            let rules = RuleSet::load().unwrap();
+            let rules = RuleSet::load(Pack::Google).unwrap();
             let questions = rules.questions[..1].to_vec();
-            let key =
-                ReviewKey::new(ProviderKind::Decisions, &rules.model, &questions, None).unwrap();
+            let key = ReviewKey::new(
+                ProviderKind::Decisions,
+                Pack::Google,
+                &rules.model,
+                &questions,
+                None,
+            )
+            .unwrap();
             (dir, scan, questions, key)
         }
 
@@ -391,7 +423,7 @@ mod tests {
                     start_line: 1,
                     end_line: 1,
                 }),
-                guidance: questions[0].instructions.clone(),
+                guidance: questions[0].violation().unwrap().to_owned(),
                 confidence: 0.9,
                 probabilities: BTreeMap::from([("violation".to_owned(), 0.9)]),
             });
@@ -475,19 +507,38 @@ mod tests {
         fn a_different_key_reuses_nothing() {
             let (dir, scan, questions, key) = setup();
             let path = write(dir.path(), &previous(&scan, &questions, &key));
-            let rules = RuleSet::load().unwrap();
+            let rules = RuleSet::load(Pack::Google).unwrap();
             let mut reworded = questions.clone();
             reworded[0].instructions.push_str(" Reworded.");
             let other_keys = [
-                ReviewKey::new(ProviderKind::Decisions, "other", &questions, None).unwrap(),
-                ReviewKey::new(ProviderKind::Decisions, &rules.model, &reworded, None).unwrap(),
                 ReviewKey::new(
                     ProviderKind::Decisions,
+                    Pack::Google,
+                    "other",
+                    &questions,
+                    None,
+                )
+                .unwrap(),
+                ReviewKey::new(
+                    ProviderKind::Decisions,
+                    Pack::Google,
+                    &rules.model,
+                    &reworded,
+                    None,
+                )
+                .unwrap(),
+                ReviewKey::new(
+                    ProviderKind::Decisions,
+                    Pack::Google,
                     &rules.model,
                     &questions,
                     Some("library"),
                 )
                 .unwrap(),
+                ReviewKey {
+                    pack: Pack::Concurrency,
+                    ..key.clone()
+                },
             ];
             for other in other_keys {
                 let mut report = Report::planned(&scan, other.clone(), &questions);
@@ -518,7 +569,7 @@ mod tests {
                 load(&old)
                     .unwrap_err()
                     .to_string()
-                    .contains("schema version 3")
+                    .contains("schema version 4")
             );
             let mut wrong = valid.clone();
             wrong["root"] = json!("/different/root");

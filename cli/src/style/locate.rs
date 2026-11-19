@@ -304,7 +304,7 @@ fn selected(answer: &Value) -> Result<Option<(&str, f64)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::style::rules::RuleSet;
+    use crate::style::rules::{Pack, RuleSet};
 
     fn lines(count: usize) -> String {
         (1..=count)
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn asks_for_windows_over_numbered_lines() {
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let questions = &rules.questions[..2];
         let source = lines(25);
         let locator = Locator::new(&review(questions, &source), usize::MAX)
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn windows_widen_so_a_long_file_fits_in_one_question() {
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let source = lines(5000);
         let locator = Locator::new(&review(&rules.questions[..1], &source), usize::MAX)
             .unwrap()
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn some_files_cannot_be_located() {
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let questions = &rules.questions[..1];
         assert!(
             Locator::new(&review(questions, ""), usize::MAX)
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn keeps_only_confident_windows_and_pads_them() {
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let questions = &rules.questions[..5];
         let name = |index: usize| questions[index].name.as_str();
         let source = lines(25);
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_window_answers() {
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let questions = &rules.questions[..1];
         let name = questions[0].name.as_str();
         let source = lines(25);
@@ -455,7 +455,7 @@ mod tests {
 
     #[test]
     fn asks_for_edges_only_where_more_than_one_line_remains() {
-        let rules = RuleSet::load().unwrap();
+        let rules = RuleSet::load(Pack::Google).unwrap();
         let questions = &rules.questions[..3];
         let source = lines(25);
         let locator = Locator::new(&review(questions, &source), usize::MAX)

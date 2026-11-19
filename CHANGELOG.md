@@ -10,6 +10,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `cargo-adamantium`: `style check --pack concurrency` reviews files for
+  state with a joint invariant split across separate Actors, locks or
+  atomics, and `style rules --pack concurrency` lists the rule. It is not a
+  blocking check yet.
 - `cargo-adamantium`: the experimental lints follow local helper functions,
   including recursive ones, and report blocking, nested actor access and the
   new `adamantium_nested_limit` where async code or a callback calls the
@@ -65,6 +69,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- `cargo-adamantium`: a style finding's `guidance` says what goes wrong
+  instead of repeating the question asked of the model. Reports record their
+  rule pack and use schema version 4, so `--cache-from` needs a report from
+  this version.
 - `adamantium`: replay records use format 3 to capture the scheduler and its
   bounds. Regenerate saved records from previous formats.
 - `cargo-adamantium`: Default rules report Tokio `oneshot`, Tokio `watch`,
