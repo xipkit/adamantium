@@ -18,13 +18,21 @@ use super::World;
 pub(crate) struct WaitQueue {
     event: Event,
     world: World,
+    #[cfg(feature = "deterministic")]
+    operation: &'static str,
+    #[cfg(feature = "deterministic")]
+    wait_id: u64,
 }
 
 impl WaitQueue {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn named(_operation: &'static str) -> Self {
         Self {
             event: Event::new(),
             world: World::current(),
+            #[cfg(feature = "deterministic")]
+            operation: _operation,
+            #[cfg(feature = "deterministic")]
+            wait_id: super::trace::alloc_wait_id(),
         }
     }
 
@@ -33,16 +41,26 @@ impl WaitQueue {
         Waiter {
             listener: Some(self.event.listen()),
             world: self.world,
+            #[cfg(feature = "deterministic")]
+            operation: self.operation,
+            #[cfg(feature = "deterministic")]
+            wait_id: self.wait_id,
+            #[cfg(feature = "deterministic")]
+            trace_token: None,
         }
     }
 
     pub(crate) fn notify_one(&self) {
         self.world.step_unless_panicking();
+        #[cfg(feature = "deterministic")]
+        super::trace::record_wakeup(self.operation, self.wait_id, false);
         self.event.notify_additional(1);
     }
 
     pub(crate) fn notify_all(&self) {
         self.world.step_unless_panicking();
+        #[cfg(feature = "deterministic")]
+        super::trace::record_wakeup(self.operation, self.wait_id, true);
         self.event.notify(usize::MAX);
     }
 
@@ -51,6 +69,8 @@ impl WaitQueue {
     /// another primitive's critical section, where the harness must not
     /// switch tasks.
     pub(crate) fn notify_all_from_waker(&self) {
+        #[cfg(feature = "deterministic")]
+        super::trace::record_wakeup(self.operation, self.wait_id, true);
         self.event.notify(usize::MAX);
     }
 }
@@ -58,6 +78,12 @@ impl WaitQueue {
 pub(crate) struct Waiter {
     listener: Option<EventListener>,
     world: World,
+    #[cfg(feature = "deterministic")]
+    operation: &'static str,
+    #[cfg(feature = "deterministic")]
+    wait_id: u64,
+    #[cfg(feature = "deterministic")]
+    trace_token: Option<u64>,
 }
 
 impl Future for Waiter {
@@ -65,10 +91,24 @@ impl Future for Waiter {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         self.world.step_unless_panicking();
-        match &mut self.listener {
+        let poll = match &mut self.listener {
             Some(listener) => Pin::new(listener).poll(cx),
             None => Poll::Ready(()),
+        };
+        #[cfg(feature = "deterministic")]
+        match poll {
+            Poll::Pending => {
+                if self.trace_token.is_none() {
+                    self.trace_token = super::trace::begin_wait(self.operation, self.wait_id);
+                }
+            }
+            Poll::Ready(()) => {
+                if let Some(token) = self.trace_token.take() {
+                    super::trace::end_wait(token, false);
+                }
+            }
         }
+        poll
     }
 }
 
@@ -86,6 +126,12 @@ impl Drop for Waiter {
             return;
         }
         self.world.step_unless_panicking();
+        #[cfg(feature = "deterministic")]
+        if !super::trace::is_teardown()
+            && let Some(token) = self.trace_token.take()
+        {
+            super::trace::end_wait(token, true);
+        }
         // EventListener passes an unconsumed notification to the next waiter.
     }
 }
@@ -112,7 +158,7 @@ mod tests {
             move || {
                 let out = out.clone();
                 async move {
-                    let queue = WaitQueue::new();
+                    let queue = WaitQueue::named("wait");
                     let mut first = queue.listen();
                     let mut second = queue.listen();
                     poll_fn(|cx| {

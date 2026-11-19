@@ -7,7 +7,11 @@
 
 use adamantium::{
     Actor, Cancellation, Channel, Reply, Tasks, TryReceiveError, Watch,
-    testing::{self, Config, CorpusError, DfsStatus, FailureKind, Replay, SchedulerMode},
+    testing::{
+        self, Config, CorpusError, DfsStatus, FailureKind, Replay, SchedulerMode,
+        TimelineEventKind,
+    },
+    time,
 };
 use std::{
     future::pending,
@@ -16,6 +20,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 const MODES: [SchedulerMode; 3] = [
@@ -818,4 +823,159 @@ fn prepolled_watch_future_is_rejected_before_receiving() {
     assert_eq!(failure.kind(), FailureKind::Panic);
     assert_eq!(watcher.try_receive(), Ok(42));
     assert_eq!(watcher.try_receive(), Err(TryReceiveError::Empty));
+}
+
+#[test]
+fn explain_reconstructs_named_task_timeline_without_payloads_or_perturbation() {
+    async fn deadlocking_pipeline() {
+        let (tx, rx) = Channel::<String>::bounded(1).split();
+        let watch = Watch::new(String::from("initial-watch-payload"));
+        let mut watcher = watch.subscribe();
+        let mut tasks = Tasks::<()>::new();
+
+        let sender_tx = tx.clone();
+        let sender_watch = watch.clone();
+        tasks.spawn_named("notifier", async move {
+            time::sleep(Duration::from_millis(15)).await;
+            sender_tx
+                .send(String::from("secret-channel-payload"))
+                .await
+                .unwrap();
+            sender_watch
+                .send(String::from("secret-watch-payload"))
+                .unwrap();
+            Ok(())
+        });
+
+        tasks.spawn_named("channel-reader", async move {
+            let first = rx.receive().await;
+            assert!(first.is_some());
+            // Second receive blocks forever because `tx` stays open in `root`.
+            let _second = rx.receive().await;
+            Ok(())
+        });
+
+        tasks.spawn_named("watch-waiter", async move {
+            let first = watcher.receive().await;
+            assert!(first.is_some());
+            // Second receive blocks forever because `watch` stays open in `root`.
+            let _second = watcher.receive().await;
+            Ok(())
+        });
+
+        tasks.join(Ok(())).await.unwrap();
+    }
+
+    for mode in MODES {
+        let exploration = Config {
+            iterations: 20,
+            ..config()
+        }
+        .with_scheduler(mode);
+
+        let failure = testing::check(exploration, deadlocking_pipeline).unwrap_err();
+        assert_eq!(failure.kind(), FailureKind::Deadlock);
+
+        let untraced = testing::replay(failure.replay(), deadlocking_pipeline).unwrap_err();
+        assert_eq!(untraced.kind(), FailureKind::Deadlock);
+        assert_eq!(untraced.replay(), failure.replay());
+
+        let timeline = testing::explain(failure.replay(), deadlocking_pipeline);
+        assert_eq!(timeline.failure(), Some(FailureKind::Deadlock));
+        assert_eq!(timeline.replay(), failure.replay());
+
+        // Named tasks are reconstructed.
+        let task_names: Vec<&str> = timeline
+            .tasks()
+            .iter()
+            .filter_map(|task| task.name())
+            .collect();
+        assert!(task_names.contains(&"notifier"), "{task_names:?}");
+        assert!(task_names.contains(&"channel-reader"), "{task_names:?}");
+        assert!(task_names.contains(&"watch-waiter"), "{task_names:?}");
+
+        // Virtual timestamps advance to 15ms and wakeups are recorded.
+        let saw_timer_wakeup = timeline.events().iter().any(|event| {
+            event.timestamp() == Duration::from_millis(15)
+                && matches!(
+                    event.kind(),
+                    TimelineEventKind::Wakeup {
+                        operation: "time.sleep",
+                        target_task_names,
+                        ..
+                    } if target_task_names.iter().any(|name| name.as_deref() == Some("notifier"))
+                )
+        });
+        assert!(saw_timer_wakeup, "{timeline}");
+
+        let saw_channel_wakeup = timeline.events().iter().any(|event| {
+            matches!(
+                event.kind(),
+                TimelineEventKind::Wakeup {
+                    by_task_name: Some(by),
+                    operation: "channel.receive",
+                    target_task_names,
+                    ..
+                } if by == "notifier"
+                    && target_task_names.iter().any(|name| name.as_deref() == Some("channel-reader"))
+            )
+        });
+        assert!(saw_channel_wakeup, "{timeline}");
+
+        // Waiting tasks at deadlock identify which task is waiting on which operation.
+        let reader_waiting = timeline.waiting().iter().any(|entry| {
+            entry.task_name() == Some("channel-reader") && entry.operation() == "channel.receive"
+        });
+        let waiter_waiting = timeline.waiting().iter().any(|entry| {
+            entry.task_name() == Some("watch-waiter") && entry.operation() == "watch.receive"
+        });
+        assert!(reader_waiting, "{timeline}");
+        assert!(waiter_waiting, "{timeline}");
+
+        let report = timeline.to_string();
+        assert!(report.contains("Waiting tasks:"), "{report}");
+        assert!(report.contains("\"channel-reader\" waiting on channel.receive"), "{report}");
+        assert!(report.contains("\"watch-waiter\" waiting on watch.receive"), "{report}");
+        assert!(report.contains("15ms"), "{report}");
+
+        // Payloads are excluded from both Display and Debug output.
+        assert!(!report.contains("secret-channel-payload"), "{report}");
+        assert!(!report.contains("secret-watch-payload"), "{report}");
+        assert!(!report.contains("initial-watch-payload"), "{report}");
+        let debug_report = format!("{timeline:?}");
+        assert!(!debug_report.contains("secret-channel-payload"), "{debug_report}");
+        assert!(!debug_report.contains("secret-watch-payload"), "{debug_report}");
+        assert!(!debug_report.contains("initial-watch-payload"), "{debug_report}");
+    }
+}
+
+#[test]
+fn explain_preserves_panic_schedule_and_omits_panic_payload() {
+    async fn panicking_worker() {
+        Tasks::<()>::run(async |tasks| {
+            tasks.spawn_named::<(), _>("secret-panicker", async {
+                time::sleep(Duration::from_millis(5)).await;
+                panic!("sensitive-panic-payload");
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    let failure = testing::check(config(), panicking_worker).unwrap_err();
+    assert_eq!(failure.kind(), FailureKind::Panic);
+
+    let untraced = testing::replay(failure.replay(), panicking_worker).unwrap_err();
+    let timeline = testing::explain(failure.replay(), panicking_worker);
+
+    assert_eq!(timeline.failure(), Some(FailureKind::Panic));
+    assert_eq!(timeline.replay(), failure.replay());
+    assert_eq!(timeline.replay(), untraced.replay());
+
+    let report = timeline.to_string();
+    assert!(report.contains("\"secret-panicker\""), "{report}");
+    assert!(report.contains("5ms"), "{report}");
+    assert!(report.contains("failed (Panic)"), "{report}");
+    assert!(!report.contains("sensitive-panic-payload"), "{report}");
 }

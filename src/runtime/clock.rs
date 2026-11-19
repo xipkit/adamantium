@@ -23,16 +23,17 @@ use shuttle::scheduler::{Task, TaskId};
 use shuttle_engine::runtime::execution::ExecutionState;
 use tokio::time::Instant;
 
-use super::World;
+use super::{World, trace};
 
 thread_local! {
     static CLOCK: RefCell<Option<Clock>> = const { RefCell::new(None) };
 }
 
 struct Clock {
+    origin: Instant,
     now: Instant,
     next_id: u64,
-    timers: BTreeMap<(Instant, u64), Waker>,
+    timers: BTreeMap<(Instant, u64), (Waker, u64)>,
     driver: Option<(TaskId, Waker)>,
 }
 
@@ -52,6 +53,7 @@ pub(crate) fn reset() {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     let origin = *ORIGIN.get_or_init(|| Instant::from_std(std::time::Instant::now()));
     CLOCK.set(Some(Clock {
+        origin,
         now: origin,
         next_id: 0,
         timers: BTreeMap::new(),
@@ -65,6 +67,14 @@ pub(crate) fn clear() {
 
 pub(crate) fn now() -> Instant {
     with(|clock| clock.now)
+}
+
+pub(crate) fn elapsed() -> Duration {
+    CLOCK.with_borrow(|clock| {
+        clock.as_ref().map_or(Duration::ZERO, |clock| {
+            clock.now.saturating_duration_since(clock.origin)
+        })
+    })
 }
 
 pub(crate) fn deadline_after(duration: Duration) -> Instant {
@@ -134,14 +144,15 @@ impl Future for Driver {
                 .first_key_value()
                 .is_some_and(|(&(at, _), _)| at <= deadline)
             {
-                if let Some((_, waker)) = clock.timers.pop_first() {
-                    due.push(waker);
+                if let Some((_, entry)) = clock.timers.pop_first() {
+                    due.push(entry);
                 }
             }
             due
         });
         if !due.is_empty() {
-            for waker in due {
+            for (waker, wait_id) in due {
+                trace::record_wakeup("time.sleep", wait_id, true);
                 waker.wake();
             }
             cx.waker().wake_by_ref();
@@ -154,6 +165,8 @@ impl Future for Driver {
 pub(crate) struct Sleep {
     deadline: Instant,
     key: Option<(Instant, u64)>,
+    wait_id: u64,
+    trace_token: Option<u64>,
     world: World,
 }
 
@@ -162,6 +175,8 @@ impl Sleep {
         Self {
             deadline,
             key: None,
+            wait_id: 0,
+            trace_token: None,
             world: World::current(),
         }
     }
@@ -172,12 +187,12 @@ impl Future for Sleep {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         self.world.step();
-        with(|clock| {
+        let ready = with(|clock| {
             if self.deadline <= clock.now {
                 if let Some(key) = self.key.take() {
                     clock.timers.remove(&key);
                 }
-                return Poll::Ready(());
+                return true;
             }
             let deadline = self.deadline;
             let key = *self.key.get_or_insert_with(|| {
@@ -190,12 +205,25 @@ impl Future for Sleep {
                 clock.next_id = next_id;
                 (deadline, id)
             });
-            clock.timers.insert(key, cx.waker().clone());
+            if self.wait_id == 0 {
+                self.wait_id = trace::alloc_wait_id();
+            }
+            clock.timers.insert(key, (cx.waker().clone(), self.wait_id));
             if let Some((_, driver)) = &clock.driver {
                 driver.wake_by_ref();
             }
-            Poll::Pending
-        })
+            false
+        });
+        if ready {
+            if let Some(token) = self.trace_token.take() {
+                trace::end_wait(token, false);
+            }
+            return Poll::Ready(());
+        }
+        if self.trace_token.is_none() {
+            self.trace_token = trace::begin_wait("time.sleep", self.wait_id);
+        }
+        Poll::Pending
     }
 }
 
@@ -208,6 +236,11 @@ impl Drop for Sleep {
             return;
         }
         self.world.step_unless_panicking();
+        if !trace::is_teardown()
+            && let Some(token) = self.trace_token.take()
+        {
+            trace::end_wait(token, true);
+        }
         if let Some(key) = self.key.take() {
             with(|clock| {
                 clock.timers.remove(&key);

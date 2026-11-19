@@ -116,7 +116,7 @@ impl JoinSet {
                 world,
                 inner: Set::Model {
                     tasks: Vec::new(),
-                    changed: std::sync::Arc::new(super::wait::WaitQueue::new()),
+                    changed: std::sync::Arc::new(super::wait::WaitQueue::named("task.join")),
                     waiter: None,
                 },
                 idle: None,
@@ -360,7 +360,7 @@ pub(crate) fn spawn_blocking<T: Send + 'static>(
                 shuttle::future::yield_now().await;
                 f()
             },
-            std::sync::Arc::new(super::wait::WaitQueue::new()),
+            std::sync::Arc::new(super::wait::WaitQueue::named("blocking.join")),
         ));
     }
     // WASI has one thread, so the closure runs inside a task of its own.

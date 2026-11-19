@@ -701,7 +701,7 @@ impl<E: Send + 'static> Tasks<E> {
                     orphaned: false,
                     reaped_cancelled: false,
                 }),
-                on_stop: WaitQueue::new(),
+                on_stop: WaitQueue::named("tasks.stop"),
             }),
             cancellation: None,
             #[cfg(feature = "tracing")]
@@ -1007,11 +1007,20 @@ impl<E: Send + 'static> Tasks<E> {
     {
         self.world.check();
         #[cfg(feature = "tracing")]
+        let name = name.into();
+        #[cfg(all(feature = "tracing", feature = "deterministic"))]
+        let future = crate::runtime::trace::named_str(self.world, name.clone(), future);
+        #[cfg(feature = "tracing")]
         {
-            let future = self.instrument(name.into(), future);
+            let future = self.instrument(name, future);
             self.spawn(future)
         }
-        #[cfg(not(feature = "tracing"))]
+        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
+        {
+            let future = crate::runtime::trace::named(self.world, name, future);
+            self.spawn(future)
+        }
+        #[cfg(all(not(feature = "tracing"), not(feature = "deterministic")))]
         {
             let _ = name;
             self.spawn(future)
@@ -1083,12 +1092,21 @@ impl<E: Send + 'static> Tasks<E> {
     {
         self.world.check();
         #[cfg(feature = "tracing")]
+        let name = name.into();
+        #[cfg(all(feature = "tracing", feature = "deterministic"))]
+        let future = crate::runtime::trace::named_str(self.world, name.clone(), future);
+        #[cfg(feature = "tracing")]
         {
             self.reap();
-            let task = self.instrument(name.into(), handled(future, on_error));
+            let task = self.instrument(name, handled(future, on_error));
             spawn(&self.set, &self.errors, task);
         }
-        #[cfg(not(feature = "tracing"))]
+        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
+        {
+            let future = crate::runtime::trace::named(self.world, name, future);
+            self.spawn_handled(future, on_error);
+        }
+        #[cfg(all(not(feature = "tracing"), not(feature = "deterministic")))]
         {
             let _ = name;
             self.spawn_handled(future, on_error);
@@ -1136,10 +1154,28 @@ impl<E: Send + 'static> Tasks<E> {
     {
         self.world.check();
         #[cfg(feature = "tracing")]
+        let name = name.into();
+        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
+        let name = if self.world.is_model() && crate::runtime::trace::is_active() {
+            Some(name.into())
+        } else {
+            None
+        };
+        #[cfg(feature = "tracing")]
         {
-            let (running, span) = self.track(name.into());
+            #[cfg(feature = "deterministic")]
+            let trace_name = if self.world.is_model() && crate::runtime::trace::is_active() {
+                Some(name.clone())
+            } else {
+                None
+            };
+            let (running, span) = self.track(name);
             let dispatch = tracing::dispatcher::get_default(Clone::clone);
             self.spawn_blocking(move || {
+                #[cfg(feature = "deterministic")]
+                if let Some(trace_name) = trace_name {
+                    crate::runtime::trace::record_current_task_name(&trace_name);
+                }
                 tracing::dispatcher::with_default(&dispatch, move || {
                     span.in_scope(move || {
                         let _running = running;
@@ -1148,7 +1184,16 @@ impl<E: Send + 'static> Tasks<E> {
                 })
             })
         }
-        #[cfg(not(feature = "tracing"))]
+        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
+        {
+            self.spawn_blocking(move || {
+                if let Some(name) = name {
+                    crate::runtime::trace::record_current_task_name(&name);
+                }
+                f()
+            })
+        }
+        #[cfg(all(not(feature = "tracing"), not(feature = "deterministic")))]
         {
             let _ = name;
             self.spawn_blocking(f)

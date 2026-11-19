@@ -250,7 +250,7 @@ impl<T> Flight<T> {
     fn new(world: World) -> Self {
         let signal = Arc::new(Signal {
             woken: AtomicBool::new(false),
-            changed: WaitQueue::new(),
+            changed: WaitQueue::named("single_flight.wait"),
         });
         Self {
             state: Lock::new(State {

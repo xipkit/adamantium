@@ -180,10 +180,10 @@ impl<T> Channel<T> {
             }),
             values: Bounded::new(capacity.max(1)),
             capacity: capacity.max(1),
-            items: WaitQueue::new(),
+            items: WaitQueue::named("channel.receive"),
             #[cfg(feature = "tokio")]
-            streams: WaitQueue::new(),
-            space: WaitQueue::new(),
+            streams: WaitQueue::named("channel.stream"),
+            space: WaitQueue::named("channel.send"),
             world: World::current(),
         });
         Self {

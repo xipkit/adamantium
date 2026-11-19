@@ -499,8 +499,8 @@ impl Direction {
                 read_closed: false,
                 fault: None,
             }),
-            readable: WaitQueue::new(),
-            writable: WaitQueue::new(),
+            readable: WaitQueue::named("duplex.read"),
+            writable: WaitQueue::named("duplex.write"),
             world,
             config,
         }
