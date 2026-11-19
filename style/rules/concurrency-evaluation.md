@@ -128,3 +128,50 @@ Both mismatches had `P(violation)=0.000` and would never emit a false finding:
 2. **`stale_read_across_await` — Ship.** 100% precision, 90% recall, 7/8 pairs, 0 false positives. Reliably catches check-then-act, snapshot-overwrite, Watch writeback, atomic read-modify-write, and term-check races while recognizing `KeyedLimit`, `AsyncActor`, epoch/version checks, and locks held across await. Document that cache-miss write-through clobber races are a known blind spot.
 3. **`unbounded_collection_growth` — Ship.** 100% precision, 80% recall, 7/8 pairs, 0 false positives. Cleanly catches unbounded caches, dedup sets, dead-letter deques, rate tables, and raw-path metrics without flagging bounded ring buffers, fixed-enum maps, `Drop`-guarded registries, or channels. Document two recall gaps: happy-path-only `remove` leaks on cancellation/timeout, and unbounded local `Vec`s inside long-lived task loops.
 4. **`partial_mutation_on_cancellation` — Ship with a probability threshold (`P(violation) >= 0.60`), or defer until ADAM-208 adds threshold gating.** At raw argmax it had the only false positives in the evaluation (83.3% precision, 6/8 pairs), both at `P(violation) <= 0.55` (`confidence <= 0.33`). Adding a `P(violation) >= 0.60` gate (reporting sub-threshold `violation` choices as `unresolved` or clean) raises precision to 100% (9/9) at 90% recall (9/10) across this rule and 100% precision (36/36) / 90% recall (36/40) across the full four-rule pack.
+
+## Whole-file CLI evaluation (ADAM-222)
+
+When ADAM-208 replayed the original 88 snippets through `cargo adamantium style check --pack concurrency` (developer message + `input_json`, all rules together, no per-case `--context`), `stale_read_across_await` and `unbounded_collection_growth` flagged correct code (`stale_ho_quota_check_safe`, `stale_ho_leader_term_safe`, `cancel_ho_pop_before_send_safe`, `split_ho_cache_and_lru_safe`, `split_ho_lease_active_and_owner_safe`). Only `split_actor_invariant` shipped in ADAM-208.
+
+### Scorer and corpus changes
+
+- **CLI-only scoring.** [`../scripts/evaluate-decisions.mjs`](../scripts/evaluate-decisions.mjs) no longer builds its own Decisions API requests or calls OpenAI directly. It writes each case to a temporary `.rs` file, runs the built `cargo adamantium style check --pack <pack> --format json`, and scores the CLI's JSON report (including line ranges and unresolved answers). Cases pass `--context` only when their label depends on it and record why in `context_reason`.
+- **Fresh whole-file held-out split.** All 104 original snippets were moved to `split: "dev"` (with unnecessary per-case `context` removed). Before any wording was edited, 44 new synthetic Rust 2024 whole-file cases were written and committed as `split: "held_out"` (57–178 lines, median 96 lines, 10 files >= 150 lines; all validated with `rustfmt --edition 2024`). Every held-out case is labeled for all three rules evaluated together (`split_actor_invariant`, `stale_read_across_await`, `unbounded_collection_growth`), with pairs covering every confusion and known miss from ADAM-207/ADAM-208:
+  - check-and-charge in one `Actor::with` before `.await` (`wf_stale_budget_charge`),
+  - post-await epoch/role recheck (`wf_stale_primary_epoch`),
+  - cache-miss write-through on a bounded cache (`wf_stale_catalog_cache`),
+  - capped map with companion `VecDeque` eviction (`wf_unbounded_dns_cache` and cross-rule in `wf_split_asset_cache` / `wf_stale_catalog_cache`),
+  - synchronous map with paired `remove` (`wf_unbounded_lock_table` and cross-rule in `wf_split_worker_leases`),
+  - happy-path-only `remove` on an async RPC map vs capped + `Drop` guard (`wf_unbounded_rpc_inflight`).
+- **Wording discipline.** `split_actor_invariant` was not touched. `stale_read_across_await` and `unbounded_collection_growth` were revised against `dev` only, rebuilding `cargo-adamantium` for each edit, then frozen before running `held_out` once.
+
+### Held-out results through the CLI (44 whole files, 132 rule evaluations)
+
+Single frozen 3-rule held-out run (`193,157` input tokens):
+
+| Rule | Precision | Recall | F1 | Exact 3-class | Pairs (`bug`+`safe`) | Unresolved | Located true findings | Safe/decoy FP |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `unbounded_collection_growth` | **100.0% (7/7)** | **100.0% (7/7)** | **100.0%** | **44/44 (100.0%)** | **6/6** | 1 (1 true `insufficient_context`) | 5/7 | **0** |
+| `stale_read_across_await` | 70.0% (7/10) | 100.0% (7/7) | 82.4% | 40/44 (90.9%) | 3/6 | 1 (`wf_ho_stale_flag_patch_safe`) | 7/7 | **2** (+1 `insufficient_context` FP) |
+| `split_actor_invariant` (untouched) | 60.0% (6/10) | 100.0% (6/6) | 75.0% | 40/44 (90.9%) | 5/5 | 1 (1 true `insufficient_context`) | 5/6 | **4** (all cross-rule on `stale_*`) |
+| **Overall (3-rule)** | **74.1% (20/27)** | **100.0% (20/20)** | **85.1%** | **124/132 (93.9%)** | **14/17** | **3** | **17/20** | **6** |
+
+Verification of the shipped 2-rule binary (`split_actor_invariant` + `unbounded_collection_growth`, `134,211` input tokens on the same 44 held-out files) produced identical verdicts and probabilities to three decimal places:
+
+- `unbounded_collection_growth`: **100.0% precision (7/7)**, **100.0% recall (7/7)**, **44/44 exact**, **0 false positives**, **1 unresolved** (`wf_ho_unbounded_insuff_external_store`), **5/7 located** (`wf_ho_unbounded_lock_table_bug` and `wf_ho_unbounded_rpc_inflight_bug` returned file scope without a line range).
+- `split_actor_invariant`: **6/6 recall**, **0 false positives** on its own 13 cases and all 15 `unbounded_collection_growth` cases, **1 unresolved** (`wf_ho_split_insuff_external_actors`), **5/6 located** (`wf_ho_split_asset_cache_bug` had no line range), and the same **4 cross-rule false positives** on single-Actor / single-Atomic / single-Mutex async files (`wf_ho_stale_budget_charge_bug` at 0.750, `wf_ho_stale_cursor_advance_bug` at 0.900, `wf_ho_stale_cursor_advance_safe` at 0.750, `wf_ho_stale_lint_dropped_mutex_bug` at 0.670). Running `--rule split_actor_invariant` alone on `wf_ho_stale_cursor_advance_safe` reproduced the false positive (confidence 0.630), confirming it is pre-existing in `split_actor_invariant` on whole files and independent of `unbounded_collection_growth` (filed as ADAM-223).
+- On Adamantium's own `src/` (36 files, `151,544` input tokens), the shipped 2-rule binary exited `0` with **0 findings** and **0 unresolved**.
+
+### Ship decisions (ADAM-222)
+
+1. **`unbounded_collection_growth` — Added to `--pack concurrency`.** Passed the whole-file CLI gate cleanly (7/7 TP, 0 FP across all 37 negative/cross-rule/insufficient cases, 6/6 pairs, 0 findings on `adamantium/src/`), including both prior recall misses (happy-path-only `remove` on async RPC maps and local `Vec`s in long-running receive loops).
+2. **`stale_read_across_await` — Held out of `--pack concurrency`.** Despite reaching 100% precision and 100% recall on `dev`, on the untouched whole-file held-out split it flagged 2 safe files (`wf_ho_stale_primary_epoch_safe` at P=0.810 despite explicit post-await epoch/role recheck, and `wf_ho_stale_cursor_advance_safe` at P=0.520 despite atomic `fetch_add` before await) plus 1 `insufficient_context` file (`wf_ho_stale_insuff_external_ledger` at P=0.500), and left `wf_ho_stale_flag_patch_safe` unresolved.
+3. **`split_actor_invariant` — Untouched per ADAM-222; follow-up filed as ADAM-223.**
+
+Reproduction through the built CLI:
+
+```sh
+cargo build --locked -p cargo-adamantium
+node style/scripts/evaluate-decisions.mjs --dry-run --pack concurrency --split held_out
+node style/scripts/evaluate-decisions.mjs --pack concurrency --cli target/debug/cargo-adamantium --split held_out --metrics
+```

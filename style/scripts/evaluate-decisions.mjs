@@ -1,90 +1,326 @@
-import { execFileSync } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const labels = ["violation", "no_violation", "insufficient_context"];
+const validPacks = new Set(["google", "concurrency"]);
 
-/** Validate the rule set and its labeled examples before making API requests. */
-export function validateInputs(rules, cases) {
-  if (typeof rules.model !== "string" || !rules.model || !Array.isArray(rules.questions)) {
-    throw new Error("The rule set must contain a model and a questions array.");
+/** Validate a relative `.rs` path so a case cannot write outside its temp dir. */
+export function validateCasePath(relPath, caseName) {
+  if (typeof relPath !== "string" || !relPath || path.isAbsolute(relPath) || relPath.includes("\\")) {
+    throw new Error(`Invalid case path on ${caseName}: ${relPath}`);
   }
-  if (rules.questions.length < 1 || rules.questions.length > 400) {
-    throw new Error("The rule set must contain between 1 and 400 questions.");
+  const normalized = path.posix.normalize(relPath);
+  if (normalized === "." || normalized.startsWith("../") || normalized === ".." || !normalized.endsWith(".rs")) {
+    throw new Error(`Invalid case path on ${caseName}: ${relPath}`);
   }
+  return normalized;
+}
 
-  const questions = new Map();
-  for (const question of rules.questions) {
-    if (question.type !== "choice" || typeof question.name !== "string" || !question.name ||
-        typeof question.instructions !== "string" || !question.instructions ||
-        !Array.isArray(question.choices)) {
-      throw new Error("Every rule must be a named choice question with instructions.");
+/** Return a Map of rule -> expected label for either a single-rule or multi-rule case. */
+export function getCaseLabels(example) {
+  const result = new Map();
+  if (example.labels !== undefined) {
+    for (const [rule, expected] of Object.entries(example.labels)) {
+      result.set(rule, expected);
     }
-    const values = question.choices.map((choice) => choice.value);
-    if (values.length !== labels.length || labels.some((label) => !values.includes(label))) {
-      throw new Error(`Rule ${question.name} must contain exactly the three review choices.`);
-    }
-    if (questions.has(question.name)) throw new Error(`Duplicate rule: ${question.name}`);
-    questions.set(question.name, question);
+    return result;
+  }
+  result.set(example.rule, example.expected);
+  return result;
+}
+
+/** Validate labeled cases before invoking the CLI. */
+export function validateCases(cases, options = {}) {
+  const { requireContextReason = false, requiredRules = null } = options;
+  if (!Array.isArray(cases) || cases.length === 0) {
+    throw new Error("No examples were supplied.");
   }
 
-  if (!Array.isArray(cases) || cases.length === 0) throw new Error("No examples were supplied.");
   const caseNames = new Set();
+  const ruleOutcomes = new Map();
+
   for (const example of cases) {
-    if (typeof example.name !== "string" || !example.name || caseNames.has(example.name) ||
-        !questions.has(example.rule) || !labels.includes(example.expected) ||
-        typeof example.source !== "string" || !example.source.trim() ||
-        (example.context !== undefined && typeof example.context !== "string")) {
-      throw new Error(`Invalid example: ${example.name ?? "unnamed"}`);
+    if (!example || typeof example !== "object") {
+      throw new Error("Every example must be an object.");
+    }
+    if (typeof example.name !== "string" || !example.name.trim() || caseNames.has(example.name)) {
+      throw new Error(`Invalid or duplicate example name: ${example.name ?? "unnamed"}`);
     }
     caseNames.add(example.name);
+
+    if (typeof example.source !== "string" || !example.source.trim()) {
+      throw new Error(`Missing source on ${example.name}`);
+    }
+    if (example.path !== undefined && example.path !== null) {
+      validateCasePath(example.path, example.name);
+    }
+
+    const hasContext = example.context !== undefined && example.context !== null;
+    const hasContextReason = example.context_reason !== undefined && example.context_reason !== null;
+    if (hasContext && (typeof example.context !== "string" || !example.context.trim())) {
+      throw new Error(`Invalid context on ${example.name}`);
+    }
+    if (hasContextReason && (typeof example.context_reason !== "string" || !example.context_reason.trim())) {
+      throw new Error(`Invalid context_reason on ${example.name}`);
+    }
+    if (hasContextReason && !hasContext) {
+      throw new Error(`context_reason set without context on ${example.name}`);
+    }
+
+    const isMultiRule = example.labels !== undefined;
+    if (hasContext && (requireContextReason || isMultiRule) && !hasContextReason) {
+      throw new Error(
+        `Case ${example.name} supplies context without context_reason; pass --context only when the label depends on it and say why.`,
+      );
+    }
+
+    if (isMultiRule) {
+      if (!example.labels || typeof example.labels !== "object" || Array.isArray(example.labels)) {
+        throw new Error(`Invalid labels object on ${example.name}`);
+      }
+      const entries = Object.entries(example.labels);
+      if (entries.length === 0) {
+        throw new Error(`Empty labels object on ${example.name}`);
+      }
+      for (const [rule, expected] of entries) {
+        if (!rule || !labels.includes(expected)) {
+          throw new Error(`Invalid label for rule ${rule} on ${example.name}`);
+        }
+        if (!ruleOutcomes.has(rule)) ruleOutcomes.set(rule, new Set());
+        ruleOutcomes.get(rule).add(expected);
+      }
+      if (example.rule !== undefined && example.rule !== null) {
+        if (typeof example.rule !== "string" || !Object.hasOwn(example.labels, example.rule)) {
+          throw new Error(`Primary rule ${example.rule} is missing from labels on ${example.name}`);
+        }
+        if (example.expected !== undefined && example.expected !== example.labels[example.rule]) {
+          throw new Error(`Primary expected label disagrees with labels[${example.rule}] on ${example.name}`);
+        }
+      }
+      if (requiredRules) {
+        for (const required of requiredRules) {
+          if (!Object.hasOwn(example.labels, required)) {
+            throw new Error(`Case ${example.name} is missing required rule label ${required}`);
+          }
+        }
+      }
+    } else {
+      if (typeof example.rule !== "string" || !example.rule || !labels.includes(example.expected)) {
+        throw new Error(`Invalid single-rule example: ${example.name}`);
+      }
+      if (requiredRules) {
+        throw new Error(`Case ${example.name} must provide a labels map for all required rules.`);
+      }
+      if (!ruleOutcomes.has(example.rule)) ruleOutcomes.set(example.rule, new Set());
+      ruleOutcomes.get(example.rule).add(example.expected);
+    }
   }
-  for (const name of questions.keys()) {
-    const outcomes = new Set(cases.filter((example) => example.rule === name).map((example) => example.expected));
+
+  for (const [rule, outcomes] of ruleOutcomes.entries()) {
     if (!outcomes.has("violation") || !outcomes.has("no_violation")) {
-      throw new Error(`Rule ${name} needs both a positive and a negative example.`);
+      throw new Error(`Rule ${rule} needs both a positive and a negative example.`);
     }
   }
-  return questions;
+
+  return new Set(ruleOutcomes.keys());
 }
 
-/** Construct a Decisions request for one labeled candidate. */
-export function buildRequest(model, question, source, context = "") {
-  const input = context ? `Project context:\n${context}\n\nRust candidate:\n${source}` : source;
-  return { model, input, questions: [question] };
+/** Build the exact `cargo adamantium style check` arguments for one case. */
+export function buildCliArgs(targetPath, config, example) {
+  const args = ["style", "check", targetPath, "--pack", config.pack, "--format", "json"];
+  if (config.ruleName) {
+    args.push("--rule", config.ruleName);
+  }
+  if (typeof example.context === "string" && example.context.trim().length > 0) {
+    args.push("--context", example.context);
+  }
+  if (config.dryRun) {
+    args.push("--dry-run");
+  }
+  return args;
 }
 
-/** Validate and extract a choice or refusal from the API response. */
-export function parseAnswer(response, name) {
-  if (!Array.isArray(response.answers) || response.answers.length !== 1) {
-    throw new Error("The API did not return exactly one answer.");
+/** Validate and parse a `cargo adamantium style check --format json` report for a single file. */
+export function parseCliReport(report) {
+  if (!report || typeof report !== "object") {
+    throw new Error("CLI report must be a JSON object.");
   }
-  const answer = response.answers[0];
-  if (answer.name !== name) throw new Error("The API returned an answer for the wrong rule.");
-  if (answer.type === "refusal") return { type: "refusal" };
-  const probabilityIsValid = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
-  if (answer.type !== "choice" || !labels.includes(answer.choice) ||
-      !probabilityIsValid(answer.confidence) || !Array.isArray(answer.probabilities)) {
-    throw new Error("The API returned an invalid choice answer.");
+  if (report.schema_version !== 4) {
+    throw new Error(`Unsupported CLI report schema version: ${report.schema_version}`);
   }
-  const probabilities = new Map();
-  for (const entry of answer.probabilities) {
-    if (!labels.includes(entry.value) || probabilities.has(entry.value) || !probabilityIsValid(entry.probability)) {
-      throw new Error("The API returned an invalid probability distribution.");
+  if (!Array.isArray(report.selected_rules) || report.selected_rules.length === 0) {
+    throw new Error("CLI report is missing selected_rules.");
+  }
+  if (!Array.isArray(report.files) || report.files.length !== 1) {
+    throw new Error(`Expected exactly 1 file in CLI report, got ${report.files?.length ?? 0}.`);
+  }
+
+  const file = report.files[0];
+  if (file.status === "error" || file.status === "not_checked") {
+    throw new Error(`CLI review failed for ${file.path}: ${file.error ?? file.status}`);
+  }
+
+  const selected = new Set(report.selected_rules);
+  const verdicts = new Map();
+
+  if (file.status !== "planned") {
+    for (const finding of file.findings ?? []) {
+      if (!selected.has(finding.rule) || verdicts.has(finding.rule)) {
+        throw new Error(`Unexpected or duplicate finding rule in CLI report: ${finding.rule}`);
+      }
+      const lines = finding.lines
+        ? { start_line: finding.lines.start_line, end_line: finding.lines.end_line }
+        : null;
+      if (
+        lines &&
+        (!Number.isInteger(lines.start_line) ||
+          !Number.isInteger(lines.end_line) ||
+          lines.start_line < 1 ||
+          lines.end_line < lines.start_line)
+      ) {
+        throw new Error(`Invalid line range for ${finding.rule}: ${JSON.stringify(lines)}`);
+      }
+      const pViolation = finding.probabilities?.violation;
+      verdicts.set(finding.rule, {
+        predicted: "violation",
+        confidence: typeof finding.confidence === "number" ? finding.confidence : null,
+        pViolation: typeof pViolation === "number" ? pViolation : null,
+        probabilities: finding.probabilities ?? null,
+        lines,
+      });
     }
-    probabilities.set(entry.value, entry.probability);
+
+    for (const item of file.unresolved ?? []) {
+      if (!selected.has(item.rule) || verdicts.has(item.rule)) {
+        throw new Error(`Unexpected or duplicate unresolved rule in CLI report: ${item.rule}`);
+      }
+      let predicted;
+      if (item.reason === "insufficient_context") {
+        predicted = "insufficient_context";
+      } else if (item.reason === "refusal") {
+        predicted = "refusal";
+      } else {
+        throw new Error(`Unknown unresolved reason for ${item.rule}: ${item.reason}`);
+      }
+      const pViolation = item.probabilities?.violation;
+      verdicts.set(item.rule, {
+        predicted,
+        confidence: typeof item.confidence === "number" ? item.confidence : null,
+        pViolation: typeof pViolation === "number" ? pViolation : null,
+        probabilities: item.probabilities ?? null,
+        lines: null,
+      });
+    }
+
+    let cleanCount = 0;
+    for (const rule of report.selected_rules) {
+      if (!verdicts.has(rule)) {
+        cleanCount += 1;
+        verdicts.set(rule, {
+          predicted: "no_violation",
+          confidence: null,
+          pViolation: null,
+          probabilities: null,
+          lines: null,
+        });
+      }
+    }
+
+    if (cleanCount !== file.no_violation_count) {
+      throw new Error(
+        `CLI report no_violation_count (${file.no_violation_count}) disagrees with clean rules (${cleanCount}).`,
+      );
+    }
   }
-  if (probabilities.size !== labels.length) throw new Error("The API omitted a choice probability.");
-  return { type: "choice", choice: answer.choice, confidence: answer.confidence, probabilities };
+
+  return {
+    pack: report.pack,
+    model: report.model,
+    rulesSha256: report.rules_sha256,
+    selectedRules: report.selected_rules,
+    fileStatus: file.status,
+    inputTokens: typeof file.input_tokens === "number" ? file.input_tokens : 0,
+    verdicts,
+  };
 }
 
-/** Compute precision, recall, exact accuracy, pair discrimination, and slice metrics. */
+/** Invoke the built CLI binary (or `cargo adamantium`) and return stdout, stderr, and exit code. */
+export function runCliCommand(cliPath, args) {
+  const command = cliPath || "cargo";
+  const fullArgs = cliPath ? args : ["adamantium", ...args];
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, fullArgs, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => reject(error));
+    child.on("close", (code, signal) => {
+      if (signal) {
+        reject(new Error(`CLI terminated by signal ${signal}: ${stderr.trim()}`));
+        return;
+      }
+      resolve({ code: code ?? 2, stdout, stderr });
+    });
+  });
+}
+
+/** Write one case to a fresh temp directory, run the CLI on it, and parse the report. */
+export async function evaluateCaseWithCli(example, config, runner = runCliCommand) {
+  const relPath = example.path ? validateCasePath(example.path, example.name) : "lib.rs";
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "adamantium-eval-"));
+  try {
+    const filePath = path.join(tempDir, ...relPath.split("/"));
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, example.source, "utf8");
+
+    const args = buildCliArgs(tempDir, config, example);
+    const { code, stdout, stderr } = await runner(config.cliPath, args);
+    if (code !== 0 && code !== 1 && code !== 2) {
+      throw new Error(`CLI exited with unexpected status ${code}: ${stderr.trim()}`);
+    }
+
+    let rawReport;
+    try {
+      rawReport = JSON.parse(stdout);
+    } catch {
+      throw new Error(
+        `CLI exited ${code} without a JSON report for ${example.name}: ${stderr.trim() || stdout.trim()}`,
+      );
+    }
+
+    const parsed = parseCliReport(rawReport);
+    if (parsed.pack !== config.pack) {
+      throw new Error(`CLI report pack (${parsed.pack}) does not match requested pack (${config.pack}).`);
+    }
+    return parsed;
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+/** Compute precision, recall, unresolved counts, line-range coverage, pair discrimination, and slice metrics. */
 export function summarizeResults(records) {
   const computeBucket = (items) => {
     let exactMatches = 0;
+    let unresolved = 0;
+    let predictedInsufficient = 0;
     let refusals = 0;
+    let findings = 0;
+    let locatedFindings = 0;
+    let locatedTrueFindings = 0;
     let tp = 0;
     let fp = 0;
     let fpOnSafe = 0;
@@ -101,15 +337,28 @@ export function summarizeResults(records) {
 
     for (const item of items) {
       if (item.predicted === item.expected) exactMatches += 1;
-      if (item.predicted === "refusal") refusals += 1;
+      if (item.predicted === "refusal") {
+        refusals += 1;
+        unresolved += 1;
+      } else if (item.predicted === "insufficient_context") {
+        predictedInsufficient += 1;
+        unresolved += 1;
+      }
 
       if (!confusion[item.expected]) confusion[item.expected] = {};
       confusion[item.expected][item.predicted] = (confusion[item.expected][item.predicted] ?? 0) + 1;
 
       const expectedPositive = item.expected === "violation";
       const predictedPositive = item.predicted === "violation";
+      const hasLines = Boolean(item.lines && Number.isInteger(item.lines.start_line));
+      if (predictedPositive) {
+        findings += 1;
+        if (hasLines) locatedFindings += 1;
+      }
+
       if (expectedPositive && predictedPositive) {
         tp += 1;
+        if (hasLines) locatedTrueFindings += 1;
       } else if (!expectedPositive && predictedPositive) {
         fp += 1;
         if (item.expected === "no_violation") fpOnSafe += 1;
@@ -125,12 +374,13 @@ export function summarizeResults(records) {
 
       const sliceName = item.slice ?? "unspecified";
       if (!slices[sliceName]) {
-        slices[sliceName] = { total: 0, exactMatches: 0, predictedViolation: 0, tp: 0, fp: 0, fn: 0 };
+        slices[sliceName] = { total: 0, exactMatches: 0, predictedViolation: 0, unresolved: 0, tp: 0, fp: 0, fn: 0 };
       }
       const sliceStats = slices[sliceName];
       sliceStats.total += 1;
       if (item.predicted === item.expected) sliceStats.exactMatches += 1;
       if (predictedPositive) sliceStats.predictedViolation += 1;
+      if (item.predicted === "insufficient_context" || item.predicted === "refusal") sliceStats.unresolved += 1;
       if (expectedPositive && predictedPositive) sliceStats.tp += 1;
       else if (!expectedPositive && predictedPositive) sliceStats.fp += 1;
       else if (expectedPositive && !predictedPositive) sliceStats.fn += 1;
@@ -154,6 +404,7 @@ export function summarizeResults(records) {
           existing_lint: item.existing_lint ?? null,
           pViolation: item.pViolation ?? null,
           confidence: item.confidence ?? null,
+          lines: item.lines ?? null,
         });
       }
     }
@@ -179,7 +430,12 @@ export function summarizeResults(records) {
       total: items.length,
       exactMatches,
       exactAccuracy: items.length > 0 ? exactMatches / items.length : null,
+      unresolved,
+      predictedInsufficient,
       refusals,
+      findings,
+      locatedFindings,
+      locatedTrueFindings,
       tp,
       fp,
       fpOnSafe,
@@ -215,48 +471,23 @@ export function summarizeResults(records) {
   return { overall: computeBucket(records), perRule };
 }
 
-function readApiKey() {
-  if (process.env.OPENAI_API_KEY?.trim()) return process.env.OPENAI_API_KEY.trim();
-  try {
-    const key = execFileSync("security", ["find-generic-password", "-s", "openai-api-key", "-w"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 10000,
-    }).trim();
-    if (key) return key;
-  } catch {
-    throw new Error("Could not read the openai-api-key item from Keychain.");
-  }
-  throw new Error("The openai-api-key Keychain item is empty.");
-}
-
-/** Send a request directly to the Decisions endpoint without logging the key. */
-export async function requestDecision(apiKey, request) {
-  const response = await fetch("https://api.openai.com/v1/decisions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-    redirect: "error",
-    signal: AbortSignal.timeout(30000),
-  });
-  if (!response.ok) throw new Error(`Decisions API returned HTTP ${response.status}.`);
-  return response.json();
-}
-
 function formatMetric(value) {
   return value === null ? "n/a" : `${(value * 100).toFixed(1)}%`;
 }
 
-function parseCliArgs(options) {
+export function parseCliArgs(options) {
   const config = {
+    pack: "google",
+    cliPath: process.env.CARGO_ADAMANTIUM?.trim() || undefined,
     dryRun: false,
     metrics: false,
     ruleName: undefined,
-    rulesPath: undefined,
     casesPath: undefined,
     splitName: undefined,
     outputPath: undefined,
   };
+  let packSet = false;
+  let cliSet = false;
   const takeValue = (index, flag) => {
     const value = options[index + 1];
     if (!value || value.startsWith("--")) {
@@ -270,11 +501,20 @@ function parseCliArgs(options) {
       config.dryRun = true;
     } else if (option === "--metrics" && !config.metrics) {
       config.metrics = true;
+    } else if (option === "--pack" && !packSet) {
+      const value = takeValue(index, option);
+      if (!validPacks.has(value)) {
+        throw new Error(`Invalid pack: ${value} (expected google or concurrency)`);
+      }
+      config.pack = value;
+      packSet = true;
+      index += 1;
+    } else if (option === "--cli" && !cliSet) {
+      config.cliPath = path.resolve(takeValue(index, option));
+      cliSet = true;
+      index += 1;
     } else if (option === "--rule" && config.ruleName === undefined) {
       config.ruleName = takeValue(index, option);
-      index += 1;
-    } else if (option === "--rules" && config.rulesPath === undefined) {
-      config.rulesPath = takeValue(index, option);
       index += 1;
     } else if (option === "--cases" && config.casesPath === undefined) {
       config.casesPath = takeValue(index, option);
@@ -287,8 +527,8 @@ function parseCliArgs(options) {
       index += 1;
     } else {
       throw new Error(
-        "Usage: node scripts/evaluate-decisions.mjs [--dry-run] [--metrics] [--rule NAME] " +
-          "[--rules PATH] [--cases PATH] [--split NAME] [--output PATH]",
+        "Usage: node style/scripts/evaluate-decisions.mjs [--pack google|concurrency] [--cli PATH] " +
+          "[--cases PATH] [--split NAME] [--rule NAME] [--dry-run] [--metrics] [--output PATH]",
       );
     }
   }
@@ -297,80 +537,122 @@ function parseCliArgs(options) {
 
 async function main() {
   const config = parseCliArgs(process.argv.slice(2));
-  const rulesFile = config.rulesPath
-    ? path.resolve(config.rulesPath)
-    : path.join(root, "../cli/src/style/google-rust-decisions.json");
-  const casesFile = config.casesPath
-    ? path.resolve(config.casesPath)
-    : path.join(root, "fixtures/google-rust-cases.json");
-  const rules = JSON.parse(await readFile(rulesFile, "utf8"));
+  const defaultCases =
+    config.pack === "concurrency" ? "fixtures/concurrency-cases.json" : "fixtures/google-rust-cases.json";
+  const casesFile = config.casesPath ? path.resolve(config.casesPath) : path.join(root, defaultCases);
   const cases = JSON.parse(await readFile(casesFile, "utf8"));
-  const questions = validateInputs(rules, cases);
-  if (config.ruleName && !questions.has(config.ruleName)) throw new Error(`Unknown rule: ${config.ruleName}`);
-  let selected = config.ruleName ? cases.filter((example) => example.rule === config.ruleName) : cases;
+  const labeledRules = validateCases(cases, {
+    requireContextReason: config.pack === "concurrency",
+  });
+
+  if (config.ruleName && !labeledRules.has(config.ruleName)) {
+    throw new Error(`Unknown rule in cases: ${config.ruleName}`);
+  }
+
+  let selected = cases;
+  if (config.ruleName) {
+    selected = selected.filter((example) => getCaseLabels(example).has(config.ruleName));
+  }
   if (config.splitName !== undefined) {
     selected = selected.filter((example) => example.split === config.splitName);
     if (selected.length === 0) throw new Error(`No examples matched split: ${config.splitName}`);
   }
+
   if (config.dryRun) {
+    let labelCount = 0;
+    let contextCount = 0;
     for (const example of selected) {
-      JSON.stringify(buildRequest(rules.model, questions.get(example.rule), example.source, example.context));
+      const caseLabels = getCaseLabels(example);
+      labelCount += config.ruleName ? 1 : caseLabels.size;
+      if (typeof example.context === "string" && example.context.trim()) contextCount += 1;
+      buildCliArgs("lib.rs", config, example);
     }
-    console.log(`Validated ${questions.size} rules and ${cases.length} labeled examples; ` +
-      `${selected.length} selected without making API requests.`);
+    console.log(
+      `Validated ${labeledRules.size} labeled rules across ${cases.length} cases; ` +
+        `${selected.length} selected (${labelCount} rule labels, ${contextCount} with --context) without making API requests.`,
+    );
     return;
   }
 
-  const apiKey = readApiKey();
   let matches = 0;
+  let totalScored = 0;
   let inputTokens = 0;
-  let requestsSent = 0;
+  let filesChecked = 0;
+  let model = null;
+  let rulesSha256 = null;
+  let selectedPackRules = null;
   const records = [];
+  const unlabeledAlerts = [];
+
   for (const example of selected) {
-    const request = buildRequest(rules.model, questions.get(example.rule), example.source, example.context);
-    requestsSent += 1;
-    const response = await requestDecision(apiKey, request);
-    const answer = parseAnswer(response, example.rule);
-    const tokens = response.usage?.input_tokens ?? 0;
-    inputTokens += tokens;
-    if (answer.type === "refusal") {
-      console.log(`${example.name}: refusal (expected ${example.expected})`);
+    const report = await evaluateCaseWithCli(example, config);
+    filesChecked += 1;
+    inputTokens += report.inputTokens;
+    model = report.model;
+    rulesSha256 = report.rulesSha256;
+    selectedPackRules = report.selectedRules;
+
+    const caseLabels = getCaseLabels(example);
+    const lineParts = [];
+
+    for (const ruleName of report.selectedRules) {
+      const verdict = report.verdicts.get(ruleName);
+      if (!caseLabels.has(ruleName)) {
+        if (verdict.predicted !== "no_violation") {
+          unlabeledAlerts.push({
+            name: example.name,
+            rule: ruleName,
+            predicted: verdict.predicted,
+            pViolation: verdict.pViolation,
+            confidence: verdict.confidence,
+            lines: verdict.lines,
+          });
+          lineParts.push(`${ruleName}=${verdict.predicted}(unlabeled!)`);
+        }
+        continue;
+      }
+
+      const expected = caseLabels.get(ruleName);
+      const isPrimary = example.rule === ruleName;
+      totalScored += 1;
+      if (verdict.predicted === expected) matches += 1;
+
       records.push({
         name: example.name,
-        rule: example.rule,
+        rule: ruleName,
+        primaryRule: example.rule ?? null,
         split: example.split ?? null,
-        slice: example.slice ?? null,
-        pair: example.pair ?? null,
-        existing_lint: example.existing_lint ?? null,
-        expected: example.expected,
-        predicted: "refusal",
-        pViolation: null,
-        confidence: null,
-        probabilities: null,
-        inputTokens: tokens,
+        slice: isPrimary ? (example.slice ?? null) : "cross_rule",
+        pair: isPrimary ? (example.pair ?? null) : null,
+        existing_lint: isPrimary ? (example.existing_lint ?? null) : null,
+        usedContext: Boolean(example.context),
+        expected,
+        predicted: verdict.predicted,
+        pViolation: verdict.pViolation,
+        confidence: verdict.confidence,
+        probabilities: verdict.probabilities,
+        lines: verdict.lines,
+        inputTokens: report.inputTokens,
       });
-      continue;
+
+      const lineSuffix = verdict.lines ? ` L${verdict.lines.start_line}-${verdict.lines.end_line}` : "";
+      const probSuffix = verdict.pViolation !== null ? ` P=${verdict.pViolation.toFixed(3)}` : "";
+      if (verdict.predicted !== expected || verdict.predicted !== "no_violation") {
+        lineParts.push(`${ruleName}=${verdict.predicted}(exp ${expected}${probSuffix}${lineSuffix})`);
+      }
     }
-    if (answer.choice === example.expected) matches += 1;
-    const pViolation = answer.probabilities.get("violation");
-    records.push({
-      name: example.name,
-      rule: example.rule,
-      split: example.split ?? null,
-      slice: example.slice ?? null,
-      pair: example.pair ?? null,
-      existing_lint: example.existing_lint ?? null,
-      expected: example.expected,
-      predicted: answer.choice,
-      pViolation,
-      confidence: answer.confidence,
-      probabilities: Object.fromEntries(answer.probabilities),
-      inputTokens: tokens,
-    });
-    console.log(`${example.name}: ${answer.choice} (expected ${example.expected}; ` +
-      `P(violation)=${pViolation.toFixed(3)}, confidence=${answer.confidence.toFixed(3)})`);
+
+    const detail = lineParts.length > 0 ? lineParts.join(", ") : "all clean";
+    console.log(`${example.name}: ${detail} [${report.inputTokens} tok]`);
   }
-  console.log(`Matched ${matches}/${selected.length} labeled examples; ${requestsSent} requests; ${inputTokens} input tokens.`);
+
+  console.log(
+    `Matched ${matches}/${totalScored} rule labels across ${filesChecked} files; ${inputTokens} input tokens.`,
+  );
+  if (unlabeledAlerts.length > 0) {
+    console.log(`Warning: ${unlabeledAlerts.length} non-clean verdict(s) on unlabeled rule/case pairs.`);
+  }
+
   const summary = summarizeResults(records);
   if (config.metrics) {
     console.log("\nPer-rule metrics (violation = positive):");
@@ -378,7 +660,9 @@ async function main() {
       console.log(
         `  ${rule}: precision=${formatMetric(stats.precision)} (${stats.tp}/${stats.tp + stats.fp}), ` +
           `recall=${formatMetric(stats.recall)} (${stats.tp}/${stats.tp + stats.fn}), ` +
-          `F1=${formatMetric(stats.f1)}, exact=${stats.exactMatches}/${stats.total}, ` +
+          `F1=${formatMetric(stats.f1)}, unresolved=${stats.unresolved}, ` +
+          `located_tp=${stats.locatedTrueFindings}/${stats.tp}, ` +
+          `fp_safe=${stats.fpOnSafe}, exact=${stats.exactMatches}/${stats.total}, ` +
           `pairs=${stats.pairs.bothCorrect}/${stats.pairs.total}`,
       );
     }
@@ -386,26 +670,35 @@ async function main() {
     console.log(
       `  OVERALL: precision=${formatMetric(overall.precision)} (${overall.tp}/${overall.tp + overall.fp}), ` +
         `recall=${formatMetric(overall.recall)} (${overall.tp}/${overall.tp + overall.fn}), ` +
-        `F1=${formatMetric(overall.f1)}, exact=${overall.exactMatches}/${overall.total}, ` +
+        `F1=${formatMetric(overall.f1)}, unresolved=${overall.unresolved}, ` +
+        `located_tp=${overall.locatedTrueFindings}/${overall.tp}, ` +
+        `fp_safe=${overall.fpOnSafe}, exact=${overall.exactMatches}/${overall.total}, ` +
         `pairs=${overall.pairs.bothCorrect}/${overall.pairs.total}`,
     );
   }
+
   if (config.outputPath) {
     const payload = {
       timestamp: new Date().toISOString(),
-      model: rules.model,
-      rulesPath: path.relative(process.cwd(), rulesFile),
+      pack: config.pack,
+      model,
+      rulesSha256,
+      selectedRules: selectedPackRules,
       casesPath: path.relative(process.cwd(), casesFile),
       split: config.splitName ?? null,
       ruleFilter: config.ruleName ?? null,
-      requestsSent,
+      filesChecked,
       inputTokens,
+      unlabeledAlerts,
       summary,
       results: records,
     };
     await writeFile(path.resolve(config.outputPath), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   }
-  if (!config.metrics && matches !== selected.length) process.exitCode = 1;
+
+  if (!config.metrics && (matches !== totalScored || unlabeledAlerts.length > 0)) {
+    process.exitCode = 1;
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

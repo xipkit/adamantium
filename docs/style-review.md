@@ -100,14 +100,22 @@ Two options limit a run to the files that need a review.
 - Their coverage of the guide is in [`style/rules/coverage.md`](../style/rules/coverage.md).
 - The labeled examples are in [`style/fixtures/google-rust-cases.json`](../style/fixtures/google-rust-cases.json).
 
-To evaluate the examples against the API, run `node style/scripts/evaluate-decisions.mjs`. It also accepts `--dry-run` and `--rule`. The full run makes 114 billable requests.
+To evaluate the examples through the built CLI, run `node style/scripts/evaluate-decisions.mjs --pack google` (or `--pack concurrency --split held_out --metrics`). It also accepts `--cli`, `--dry-run`, `--split`, and `--rule`. The full Google run checks 114 files.
 
 ## The concurrency pack
 
-`--pack concurrency` asks about concurrency bugs that Clippy and the Adamantium lints can't see. It currently has one rule, `split_actor_invariant`. The rule finds state that must satisfy a joint invariant but is kept in separate Actors, locks, or atomics and updated in separate critical sections. An example is a balance and its ledger.
+`--pack concurrency` asks about concurrency bugs that Clippy and the Adamantium lints can't see. It currently ships two rules:
 
-- The rule is in [`cli/src/style/concurrency-decisions.json`](../cli/src/style/concurrency-decisions.json). A test keeps it identical to the evaluated wording in [`style/rules/concurrency-decisions.json`](../style/rules/concurrency-decisions.json).
-- The evaluation is in [`style/rules/concurrency-evaluation.md`](../style/rules/concurrency-evaluation.md). That file also covers three more rules, which the pack leaves out. Run through this command on whole files without per-case context, `stale_read_across_await` and `unbounded_collection_growth` flagged correct code. `partial_mutation_on_cancellation` had false positives even in the evaluation. These rules return to the pack only after they pass an evaluation that runs through this command.
-- On the 88 held-out cases, the shipped rule found 9 of 10 bugs and flagged no correct code.
+- `split_actor_invariant`: state that must satisfy a joint invariant is kept in separate Actors, locks, or atomics and updated in separate critical sections (for example, a balance and its ledger).
+- `unbounded_collection_growth`: a long-lived in-memory collection accumulates entries without a capacity bound, eviction policy, or reliable removal (including pending-request maps that only remove on the happy path and append-only vectors inside long-running async loops).
 
-The pack is not a blocking check yet. The rule answers `insufficient_context` when a file has two shared states but doesn't show how they relate. It did so for 4 of the 88 cases. Any unresolved answer makes the run exit 2, even when the run has findings. Read the findings and the unresolved rules, and don't fail a build on the exit status.
+The shipped rules live in [`cli/src/style/concurrency-decisions.json`](../cli/src/style/concurrency-decisions.json). A test keeps each shipped rule byte-identical to its evaluated definition in [`style/rules/concurrency-decisions.json`](../style/rules/concurrency-decisions.json).
+
+The evaluation is in [`style/rules/concurrency-evaluation.md`](../style/rules/concurrency-evaluation.md). Two more candidate rules stay out of the pack:
+
+- `stale_read_across_await` still flagged correct whole files (2 safe cases and 1 insufficient-context case out of 44) after whole-file revision.
+- `partial_mutation_on_cancellation` had false positives in ADAM-207 and is evaluated separately in ADAM-221.
+
+On the 44 whole-file held-out cases run through `cargo adamantium style check --pack concurrency`, `unbounded_collection_growth` scored 100% precision (7/7), 100% recall (7/7), 44/44 exact 3-class accuracy, and 0 findings / 0 unresolved on Adamantium's own 36 `src/` files. `split_actor_invariant` found all 6 of its whole-file bugs and flagged none of its own or `unbounded_collection_growth`'s safe cases, though it did produce 4 false positives on whole-file async structs with a single Actor, atomic, or Mutex (tracked in ADAM-223).
+
+The pack is not a blocking check yet. Both rules can answer `insufficient_context` when a file delegates state or storage to external types whose invariants or bounds are not shown. Any unresolved answer makes the run exit 2, even when the run has findings. Read the findings and the unresolved rules, and don't fail a build on the exit status.

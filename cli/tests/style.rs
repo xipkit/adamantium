@@ -94,7 +94,7 @@ fn the_concurrency_pack_is_opt_in_and_recorded_in_the_report() {
     assert_eq!(concurrency["pack"], "concurrency");
     assert_eq!(
         concurrency["selected_rules"],
-        serde_json::json!(["split_actor_invariant"])
+        serde_json::json!(["split_actor_invariant", "unbounded_collection_growth"])
     );
     assert_ne!(concurrency["rules_sha256"], google["rules_sha256"]);
 
@@ -124,7 +124,10 @@ fn the_concurrency_pack_is_opt_in_and_recorded_in_the_report() {
         .lines()
         .map(|line| line.split_once(':').unwrap().0.to_owned())
         .collect();
-    assert_eq!(names, ["split_actor_invariant"]);
+    assert_eq!(
+        names,
+        ["split_actor_invariant", "unbounded_collection_growth"]
+    );
 }
 
 #[test]

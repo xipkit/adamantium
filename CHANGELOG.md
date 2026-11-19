@@ -12,8 +12,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - `cargo-adamantium`: `style check --pack concurrency` reviews files for
   state with a joint invariant split across separate Actors, locks or
-  atomics, and `style rules --pack concurrency` lists the rule. It is not a
-  blocking check yet.
+  atomics (`split_actor_invariant`) and unbounded in-memory collection growth
+  (`unbounded_collection_growth`), and `style rules --pack concurrency` lists
+  the pack's rules. It is not a blocking check yet.
 - `cargo-adamantium`: the experimental lints follow local helper functions,
   including recursive ones, and report blocking, nested actor access and the
   new `adamantium_nested_limit` where async code or a callback calls the
