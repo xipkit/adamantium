@@ -202,7 +202,7 @@ ADAM-221 tested whether `partial_mutation_on_cancellation` can join the shipped 
 
 ### Frozen held-out results through the CLI (66 whole files, 198 rule evaluations)
 
-Single frozen 3-rule `held_out` run (`291,358` input tokens across all 66 files; `105,809` input tokens across the 22 new `wf_ho_cancel_*` files):
+Single frozen 3-rule `held_out` run (`291,358` input tokens across all 66 files; `105,809` input tokens across the 22 new `wf_ho_cancel_*` files; a subsequent 4-case fixture-fix rerun of `wf_dev_cancel_job_guard_{bug,safe}` and `wf_ho_cancel_deploy_status_{bug,safe}` after bounding their companion eviction queues spent `25,589` tokens and kept every verdict unchanged):
 
 | Slice / Rule | Precision | Recall | F1 | Exact 3-class | Pairs (`bug`+`safe`) | `insufficient_context` | Located TP | Safe FP |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
