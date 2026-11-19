@@ -515,7 +515,7 @@ cargo adamantium check --dylint-library /absolute/path/to/the/built/library
 
 ## GitHub Action
 
-The GitHub Action installs the command from a pinned commit and caches the binary. Check out your project and install Rust with Clippy first:
+The GitHub Action installs `cargo-adamantium` from a pinned crates.io release or git commit, caches the binary, and runs `cargo adamantium check`. Check out your project and install Rust with Clippy first:
 
 ```yaml
 steps:
@@ -525,10 +525,16 @@ steps:
       components: clippy
   - uses: xipkit/adamantium@main # Pin the action to a commit in production.
     with:
-      rev: bfa0f78916cebb6c65cfaeefce45ed34339d324f # CLI commit
+      version: 0.2.0 # Exact crates.io release, or use `rev` for a full commit SHA
       # working-directory: path/to/project
+      # baseline: adamantium-baseline.json
+      # strict: true
+      # cargo-args: --all-targets --locked
 ```
 
-- `rev` must be a full commit SHA. Change it to upgrade the command.
-- The cache is separate for each commit, runner platform, and Rust compiler.
+- Set either `version` (an exact crates.io semantic version such as `0.2.0`) or `rev` (a full 40-character git commit SHA). They are mutually exclusive.
+- `baseline` passes `--baseline` to `cargo adamantium check` (resolved relative to `working-directory`, or as an absolute path).
+- `strict` (`true` or `false`, default `false`) passes `--strict` to `cargo adamantium check`.
+- `cargo-args` forwards extra arguments to Cargo after `--`. Arguments are split on whitespace with POSIX-style single quotes, double quotes, and backslash escapes so argument boundaries are preserved without shell expansion.
+- The cache is separate for each install source (`crates-io` version or `git` commit), runner platform, and Rust compiler.
 - The action requires Git, Cargo, and Clippy on the runner.

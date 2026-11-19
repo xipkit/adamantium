@@ -10,6 +10,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- GitHub Action: support pinning an exact crates.io release via `version`
+  alongside existing full commit SHA `rev` pins with source-specific cache keys,
+  and forward `baseline`, `strict`, and `cargo-args` with preserved argument
+  boundaries.
 - `cargo-adamantium`: the experimental lints follow local helper functions,
   including recursive ones, and report blocking, nested actor access and the
   new `adamantium_nested_limit` where async code or a callback calls the

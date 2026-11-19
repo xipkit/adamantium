@@ -14,6 +14,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 .github/scripts/test-action.py
+
   cold:
     runs-on: ubuntu-latest
     steps:
@@ -21,10 +27,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: ./
+      - name: Existing rev-only usage (cold)
+        uses: ./
         with:
           rev: bfa0f78916cebb6c65cfaeefce45ed34339d324f
           working-directory: cli/tests/fixtures/clean
+      - name: Released crates.io version with all-targets locked check (cold)
+        uses: ./
+        with:
+          version: 0.2.0
+          cargo-args: --all-targets --locked
 
   cached:
     needs: cold
@@ -34,7 +46,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: ./
+      - name: Existing rev-only usage (cached)
+        uses: ./
         with:
           rev: bfa0f78916cebb6c65cfaeefce45ed34339d324f
           working-directory: cli/tests/fixtures/clean
@@ -47,4 +60,59 @@ jobs:
           working-directory: cli/tests/fixtures/violations
       - name: Assert violations failed
         if: steps.violations.outcome != 'failure'
+        run: exit 1
+      - name: Released crates.io version with all-targets locked check (cached)
+        uses: ./
+        with:
+          version: 0.2.0
+          cargo-args: --all-targets --locked
+      - name: Strict fixture passes without strict mode
+        uses: ./
+        with:
+          version: 0.2.0
+          working-directory: cli/tests/fixtures/strict
+      - name: Strict fixture fails in strict mode
+        id: strict
+        continue-on-error: true
+        uses: ./
+        with:
+          version: 0.2.0
+          working-directory: cli/tests/fixtures/strict
+          strict: true
+      - name: Assert strict mode failed
+        if: steps.strict.outcome != 'failure'
+        run: exit 1
+      - name: Generate strict baseline with spaces in path
+        working-directory: cli/tests/fixtures/strict
+        run: |
+          bin=$(find "$RUNNER_TEMP/adamantium" -path '*-crates-io-0.2.0/bin/cargo-adamantium' | head -n 1)
+          test -x "$bin"
+          set +e
+          "$bin" check --strict --format json > "$RUNNER_TEMP/strict baseline.json"
+          status=$?
+          set -e
+          test "$status" -eq 1
+      - name: Strict fixture passes with baseline
+        uses: ./
+        with:
+          version: 0.2.0
+          working-directory: cli/tests/fixtures/strict
+          strict: true
+          baseline: ${{ runner.temp }}/strict baseline.json
+      - name: Reject mutually exclusive version and rev
+        id: both-sources
+        continue-on-error: true
+        uses: ./
+        with:
+          version: 0.2.0
+          rev: bfa0f78916cebb6c65cfaeefce45ed34339d324f
+      - name: Assert mutually exclusive inputs failed
+        if: steps.both-sources.outcome != 'failure'
+        run: exit 1
+      - name: Reject missing version and rev
+        id: no-source
+        continue-on-error: true
+        uses: ./
+      - name: Assert missing source failed
+        if: steps.no-source.outcome != 'failure'
         run: exit 1

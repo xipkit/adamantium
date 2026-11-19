@@ -1,13 +1,26 @@
 name: Adamantium check
 description: Install cargo-adamantium and check a Rust project
 inputs:
+  version:
+    description: Exact crates.io version of cargo-adamantium to install
+    required: false
   rev:
-    description: Immutable adamantium git commit to install
-    required: true
+    description: Immutable adamantium git commit SHA to install
+    required: false
   working-directory:
     description: Directory containing the project's Cargo.toml
     required: false
     default: .
+  baseline:
+    description: Path to an earlier JSON check report to use as a baseline
+    required: false
+  strict:
+    description: Enable the strict rule tier
+    required: false
+    default: 'false'
+  cargo-args:
+    description: Extra arguments forwarded to Cargo after --
+    required: false
 runs:
   using: composite
   steps:
@@ -15,29 +28,190 @@ runs:
       id: cache-key
       shell: bash
       env:
+        ADAMANTIUM_VERSION: ${{ inputs.version }}
         ADAMANTIUM_REV: ${{ inputs.rev }}
+        ADAMANTIUM_STRICT: ${{ inputs.strict }}
       run: |
-        if [[ ! "$ADAMANTIUM_REV" =~ ^[0-9a-fA-F]{40}$ ]]; then
-          echo 'rev must be a full, immutable git commit SHA' >&2
+        if [[ -n "$ADAMANTIUM_VERSION" && -n "$ADAMANTIUM_REV" ]]; then
+          echo 'version and rev are mutually exclusive; specify only one' >&2
           exit 1
         fi
+        if [[ -z "$ADAMANTIUM_VERSION" && -z "$ADAMANTIUM_REV" ]]; then
+          echo 'specify either version (exact crates.io release) or rev (full git commit SHA)' >&2
+          exit 1
+        fi
+        if [[ -n "$ADAMANTIUM_STRICT" && "$ADAMANTIUM_STRICT" != "true" && "$ADAMANTIUM_STRICT" != "false" ]]; then
+          echo 'strict must be true or false' >&2
+          exit 1
+        fi
+        if [[ -n "$ADAMANTIUM_VERSION" ]]; then
+          semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
+          if [[ ! "$ADAMANTIUM_VERSION" =~ $semver_re ]]; then
+            echo 'version must be an exact crates.io semantic version (for example, 0.2.0)' >&2
+            exit 1
+          fi
+          source_key="crates-io-${ADAMANTIUM_VERSION}"
+        else
+          if [[ ! "$ADAMANTIUM_REV" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo 'rev must be a full, immutable git commit SHA' >&2
+            exit 1
+          fi
+          rev_lower=$(printf '%s' "$ADAMANTIUM_REV" | tr '[:upper:]' '[:lower:]')
+          source_key="git-${rev_lower}"
+        fi
         compiler=$(rustc -vV | git hash-object --stdin)
-        echo "key=adamantium-v1-${RUNNER_OS}-${RUNNER_ARCH}-${compiler}-${ADAMANTIUM_REV}" >> "$GITHUB_OUTPUT"
+        echo "key=adamantium-v1-${RUNNER_OS}-${RUNNER_ARCH}-${compiler}-${source_key}" >> "$GITHUB_OUTPUT"
     - name: Restore cargo-adamantium
       id: cache
       uses: actions/cache@v4
       with:
-        path: ${{ runner.temp }}/adamantium/bin
+        path: ${{ runner.temp }}/adamantium/${{ steps.cache-key.outputs.key }}/bin
         key: ${{ steps.cache-key.outputs.key }}
     - name: Install cargo-adamantium
       if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       env:
+        ADAMANTIUM_VERSION: ${{ inputs.version }}
         ADAMANTIUM_REV: ${{ inputs.rev }}
-      run: cargo install --locked --git https://github.com/xipkit/adamantium --rev "$ADAMANTIUM_REV" --root "$RUNNER_TEMP/adamantium" cargo-adamantium
+        ADAMANTIUM_CACHE_KEY: ${{ steps.cache-key.outputs.key }}
+      run: |
+        root="$RUNNER_TEMP/adamantium/$ADAMANTIUM_CACHE_KEY"
+        if [[ -x "$root/bin/cargo-adamantium" || -x "$root/bin/cargo-adamantium.exe" ]]; then
+          exit 0
+        fi
+        if [[ -n "$ADAMANTIUM_VERSION" ]]; then
+          cargo install --locked --registry crates-io --version "=$ADAMANTIUM_VERSION" --root "$root" cargo-adamantium
+        else
+          rev_lower=$(printf '%s' "$ADAMANTIUM_REV" | tr '[:upper:]' '[:lower:]')
+          cargo install --locked --git https://github.com/xipkit/adamantium --rev "$rev_lower" --root "$root" cargo-adamantium
+        fi
     - name: Run adamantium check
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        ADAMANTIUM_BASELINE: ${{ inputs.baseline }}
+        ADAMANTIUM_STRICT: ${{ inputs.strict }}
+        ADAMANTIUM_CARGO_ARGS: ${{ inputs.cargo-args }}
+        ADAMANTIUM_CACHE_KEY: ${{ steps.cache-key.outputs.key }}
       run: |
-        export PATH="$RUNNER_TEMP/adamantium/bin:$PATH"
-        cargo adamantium check
+        export PATH="$RUNNER_TEMP/adamantium/$ADAMANTIUM_CACHE_KEY/bin:$PATH"
+        args=(adamantium check)
+
+        if [[ "$ADAMANTIUM_STRICT" == "true" ]]; then
+          args+=(--strict)
+        elif [[ -n "$ADAMANTIUM_STRICT" && "$ADAMANTIUM_STRICT" != "false" ]]; then
+          echo 'strict must be true or false' >&2
+          exit 1
+        fi
+
+        if [[ -n "$ADAMANTIUM_BASELINE" ]]; then
+          args+=("--baseline=$ADAMANTIUM_BASELINE")
+        fi
+
+        if [[ -n "$ADAMANTIUM_CARGO_ARGS" ]]; then
+          cargo_args=()
+          i=0
+          len=${#ADAMANTIUM_CARGO_ARGS}
+          state=space
+          token=''
+          has_token=0
+          while (( i < len )); do
+            ch=${ADAMANTIUM_CARGO_ARGS:i:1}
+            case "$state" in
+              space)
+                case "$ch" in
+                  ' '|$'\t'|$'\n'|$'\r') ;;
+                  "'") has_token=1; state=single ;;
+                  '"') has_token=1; state=double ;;
+                  '\') state=escape ;;
+                  *) has_token=1; token+=$ch; state=word ;;
+                esac
+                ;;
+              word)
+                case "$ch" in
+                  ' '|$'\t'|$'\n'|$'\r')
+                    cargo_args+=("$token")
+                    token=''
+                    has_token=0
+                    state=space
+                    ;;
+                  "'") state=single ;;
+                  '"') state=double ;;
+                  '\') state=escape ;;
+                  *) token+=$ch ;;
+                esac
+                ;;
+              escape)
+                if [[ "$ch" == $'\n' ]]; then
+                  if (( has_token )); then
+                    state=word
+                  else
+                    state=space
+                  fi
+                elif [[ "$ch" == $'\r' && $((i + 1)) -lt len && "${ADAMANTIUM_CARGO_ARGS:i+1:1}" == $'\n' ]]; then
+                  i=$((i + 1))
+                  if (( has_token )); then
+                    state=word
+                  else
+                    state=space
+                  fi
+                else
+                  has_token=1
+                  token+=$ch
+                  state=word
+                fi
+                ;;
+              single)
+                if [[ "$ch" == "'" ]]; then
+                  state=word
+                else
+                  token+=$ch
+                fi
+                ;;
+              double)
+                case "$ch" in
+                  '"') state=word ;;
+                  '\') state=double_escape ;;
+                  *) token+=$ch ;;
+                esac
+                ;;
+              double_escape)
+                case "$ch" in
+                  '"'|'\'|'$'|'`')
+                    token+=$ch
+                    state=double
+                    ;;
+                  $'\n')
+                    state=double
+                    ;;
+                  $'\r')
+                    if (( i + 1 < len )) && [[ "${ADAMANTIUM_CARGO_ARGS:i+1:1}" == $'\n' ]]; then
+                      i=$((i + 1))
+                      state=double
+                    else
+                      token+="\\$ch"
+                      state=double
+                    fi
+                    ;;
+                  *)
+                    token+="\\$ch"
+                    state=double
+                    ;;
+                esac
+                ;;
+            esac
+            i=$((i + 1))
+          done
+          if [[ "$state" != "space" && "$state" != "word" ]]; then
+            echo 'cargo-args has an unterminated quote or escape' >&2
+            exit 1
+          fi
+          if (( has_token )); then
+            cargo_args+=("$token")
+          fi
+          if (( ${#cargo_args[@]} > 0 )); then
+            args+=(-- "${cargo_args[@]}")
+          fi
+        fi
+
+        cargo "${args[@]}"
