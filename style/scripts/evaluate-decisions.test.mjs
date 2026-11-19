@@ -182,4 +182,19 @@ test("summarizeResults computes precision, recall, pair discrimination, and slic
   assert.equal(r1.slices.lint_overlap.tp, 1);
   assert.equal(r1.slices.lint_decoy.fp, 0);
   assert.equal(r1.mistakes.length, 4);
+
+  const zeroTp = summarizeResults([
+    { name: "miss", rule: "r2", expected: "violation", predicted: "no_violation", slice: "semantic_only", pair: "p1", existing_lint: null, pViolation: 0.1, confidence: 0.9 },
+    { name: "false_alarm", rule: "r2", expected: "no_violation", predicted: "violation", slice: "semantic_only", pair: "p1", existing_lint: null, pViolation: 0.8, confidence: 0.8 },
+  ]);
+  assert.equal(zeroTp.perRule.r2.precision, 0);
+  assert.equal(zeroTp.perRule.r2.recall, 0);
+  assert.equal(zeroTp.perRule.r2.f1, 0);
+
+  const emptyPositives = summarizeResults([
+    { name: "clean", rule: "r3", expected: "no_violation", predicted: "no_violation", slice: "semantic_only", pair: null, existing_lint: null, pViolation: 0.0, confidence: 1.0 },
+  ]);
+  assert.equal(emptyPositives.perRule.r3.precision, null);
+  assert.equal(emptyPositives.perRule.r3.recall, null);
+  assert.equal(emptyPositives.perRule.r3.f1, null);
 });

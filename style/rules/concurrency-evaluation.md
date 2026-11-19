@@ -31,7 +31,8 @@ Evaluated on 2026-11-19 via [`../scripts/evaluate-decisions.mjs`](../scripts/eva
 | Dev round 1 (`--split dev`) | 4 rules x 4 | 16 | 8,513 | 0 |
 | Dev round 2 (`--split dev --rule unbounded_collection_growth`) | 1 rule x 4 | 4 | 2,404 | 0 |
 | Held-out run (`--split held_out`, frozen rules) | 4 rules x 22 | 88 | 50,391 | 0 |
-| **Total** | | **108** | **61,308** | **0** |
+| Held-out fixture-fix rerun (4 revised cases, same frozen rules) | 4 revised cases | 4 | 2,427 | 0 |
+| **Total** | | **112** | **63,735** | **0** |
 
 Dry-run reproduction without API calls:
 
@@ -80,12 +81,13 @@ Key observations on existing-lint overlap:
 
 ### Probability threshold check (no extra requests)
 
-Both false positives in the entire held-out run were low-confidence `partial_mutation_on_cancellation` predictions (`P(violation)` = 0.53 and 0.55; `confidence` = 0.30 and 0.33). Gating emitted findings on `P(violation) >= 0.60` (which remains unchanged through `0.70`) eliminates all false positives while dropping one low-confidence true positive (`cancel_ho_pop_before_send_bug`, `P(violation)` = 0.42):
+Both false positives in the entire held-out run were low-confidence `partial_mutation_on_cancellation` predictions (`P(violation)` = 0.53 and 0.55; `confidence` = 0.30 and 0.33). Gating emitted findings on `P(violation) >= 0.60` eliminates all false positives while dropping one low-confidence true positive (`cancel_ho_pop_before_send_bug`, `P(violation)` = 0.42):
 
 | Threshold (`P(violation) >= t`) | `split_actor_invariant` | `stale_read_across_await` | `partial_mutation_on_cancellation` | `unbounded_collection_growth` | Overall |
 | --- | --- | --- | --- | --- | --- |
 | Argmax (CLI default) | P 100%, R 100% | P 100%, R 90% | P 83.3%, R 100% | P 100%, R 80% | P 94.9%, R 92.5% |
-| `t = 0.60` .. `0.70` | P 100%, R 100% | P 100%, R 90% | P 100.0%, R 90% | P 100%, R 80% | P 100.0%, R 90.0% |
+| `t = 0.60` | P 100%, R 100% | P 100%, R 90% | P 100.0%, R 90% | P 100%, R 80% | P 100.0%, R 90.0% |
+| `t = 0.70` | P 100%, R 100% | P 100%, R 80% | P 100.0%, R 90% | P 100%, R 80% | P 100.0%, R 87.5% |
 | `t = 0.80` | P 100%, R 90% | P 100%, R 80% | P 100.0%, R 90% | P 100%, R 70% | P 100.0%, R 82.5% |
 
 ## Representative mistakes per rule

@@ -172,9 +172,8 @@ export function summarizeResults(records) {
 
     const precision = tp + fp > 0 ? tp / (tp + fp) : null;
     const recall = tp + fn > 0 ? tp / (tp + fn) : null;
-    const f1 = precision !== null && recall !== null && precision + recall > 0
-      ? (2 * precision * recall) / (precision + recall)
-      : null;
+    const f1Denominator = 2 * tp + fp + fn;
+    const f1 = f1Denominator > 0 ? (2 * tp) / f1Denominator : null;
 
     return {
       total: items.length,
