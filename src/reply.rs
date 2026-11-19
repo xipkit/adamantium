@@ -74,7 +74,7 @@ impl<T> Reply<T> {
     /// A reply and the receiver that waits for it.
     pub fn pair() -> (Self, ReplyReceiver<T>) {
         let (sender, receiver) = Channel::bounded(1).split();
-        let closed = Arc::new(WaitQueue::new());
+        let closed = Arc::new(WaitQueue::named("reply.closed"));
         (
             Self {
                 inner: sender,

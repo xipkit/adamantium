@@ -246,7 +246,7 @@ impl<T> Inbox<T> {
                 events: VecDeque::new(),
                 end,
             }),
-            arrived: WaitQueue::new(),
+            arrived: WaitQueue::named("fanout.receive"),
         }
     }
 

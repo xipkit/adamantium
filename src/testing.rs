@@ -56,12 +56,14 @@
 
 use std::{
     any::Any,
+    collections::BTreeMap,
     fmt,
     future::Future,
     io,
     panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -420,6 +422,494 @@ where
     play(record, ReplayPolicy::Exact, factory)
 }
 
+/// A task observed during [`explain`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskInfo {
+    id: usize,
+    name: Option<String>,
+}
+
+impl TaskInfo {
+    /// The logical task identifier in the execution.
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    /// The task's name, if it was spawned with a name or provided by the runtime.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}
+
+/// A task still waiting on an operation when the execution ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaitingTask {
+    task_id: usize,
+    task_name: Option<String>,
+    operation: &'static str,
+    wait_id: u64,
+    since: Duration,
+}
+
+impl WaitingTask {
+    /// The waiting task's identifier.
+    pub fn task_id(&self) -> usize {
+        self.task_id
+    }
+
+    /// The waiting task's name, if known.
+    pub fn task_name(&self) -> Option<&str> {
+        self.task_name.as_deref()
+    }
+
+    /// The operation the task is waiting on (for example `channel.receive` or `time.sleep`).
+    pub fn operation(&self) -> &'static str {
+        self.operation
+    }
+
+    /// The wait instance identifier within the execution.
+    pub fn wait_id(&self) -> u64 {
+        self.wait_id
+    }
+
+    /// The virtual timestamp when the task entered this wait.
+    pub fn since(&self) -> Duration {
+        self.since
+    }
+}
+
+/// An event in a reconstructed execution [`Timeline`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TimelineEventKind {
+    /// The scheduler switched to this task.
+    Scheduled {
+        /// The scheduled task's identifier.
+        task_id: usize,
+        /// The scheduled task's name, if known.
+        task_name: Option<String>,
+    },
+    /// A task blocked waiting on an operation.
+    Wait {
+        /// The waiting task's identifier.
+        task_id: usize,
+        /// The waiting task's name, if known.
+        task_name: Option<String>,
+        /// The operation the task is waiting on.
+        operation: &'static str,
+        /// The wait instance identifier within the execution.
+        wait_id: u64,
+    },
+    /// A task or the virtual clock woke one or more waiting tasks.
+    Wakeup {
+        /// The task that triggered the wakeup, if known.
+        by_task_id: Option<usize>,
+        /// The waking task's name, if known.
+        by_task_name: Option<String>,
+        /// The waiting task identifiers targeted by the wakeup.
+        target_task_ids: Vec<usize>,
+        /// The waiting task names corresponding to `target_task_ids`.
+        target_task_names: Vec<Option<String>>,
+        /// The operation associated with the wakeup.
+        operation: &'static str,
+        /// The wait instance identifier within the execution.
+        wait_id: u64,
+    },
+    /// A task's wait completed and became ready.
+    WaitCompleted {
+        /// The task's identifier.
+        task_id: usize,
+        /// The task's name, if known.
+        task_name: Option<String>,
+        /// The operation that completed.
+        operation: &'static str,
+        /// The wait instance identifier within the execution.
+        wait_id: u64,
+    },
+    /// A task cancelled or dropped an unfinished wait.
+    WaitCancelled {
+        /// The task's identifier.
+        task_id: usize,
+        /// The task's name, if known.
+        task_name: Option<String>,
+        /// The operation that was cancelled.
+        operation: &'static str,
+        /// The wait instance identifier within the execution.
+        wait_id: u64,
+    },
+    /// The execution ended with a failure.
+    Failed {
+        /// The failure category.
+        kind: FailureKind,
+        /// The last scheduled task before the failure, if known.
+        task_id: Option<usize>,
+        /// The last scheduled task's name, if known.
+        task_name: Option<String>,
+    },
+}
+
+/// A timestamped entry in a reconstructed [`Timeline`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimelineEvent {
+    timestamp: Duration,
+    kind: TimelineEventKind,
+}
+
+impl TimelineEvent {
+    /// The virtual timestamp elapsed since the start of the execution.
+    pub fn timestamp(&self) -> Duration {
+        self.timestamp
+    }
+
+    /// The event details.
+    pub fn kind(&self) -> &TimelineEventKind {
+        &self.kind
+    }
+}
+
+/// Payload-free named task timeline reconstructed from a [`Replay`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct Timeline {
+    failure: Option<FailureKind>,
+    replay: Replay,
+    tasks: Vec<TaskInfo>,
+    waiting: Vec<WaitingTask>,
+    events: Vec<TimelineEvent>,
+}
+
+impl Timeline {
+    /// The failure category, or `None` if the replayed execution passed.
+    pub fn failure(&self) -> Option<FailureKind> {
+        self.failure
+    }
+
+    /// The observed execution record from the traced replay.
+    pub fn replay(&self) -> &Replay {
+        &self.replay
+    }
+
+    /// Tasks observed during the execution, ordered by task ID.
+    pub fn tasks(&self) -> &[TaskInfo] {
+        &self.tasks
+    }
+
+    /// Tasks still waiting on an operation when the execution ended.
+    pub fn waiting(&self) -> &[WaitingTask] {
+        &self.waiting
+    }
+
+    /// Reconstructed timeline events in execution order.
+    pub fn events(&self) -> &[TimelineEvent] {
+        &self.events
+    }
+}
+
+fn format_task_label(f: &mut fmt::Formatter<'_>, id: usize, name: Option<&str>) -> fmt::Result {
+    match name {
+        Some(name) => write!(f, "task#{id} {name:?}"),
+        None => write!(f, "task#{id}"),
+    }
+}
+
+impl fmt::Debug for Timeline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl fmt::Display for Timeline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.failure {
+            Some(kind) => writeln!(
+                f,
+                "adamantium::testing {kind:?} (scheduler={:?}, seed={}, iteration={}, max_steps={}):",
+                self.replay.scheduler,
+                self.replay.seed,
+                self.replay.iteration,
+                self.replay.max_steps
+            )?,
+            None => writeln!(
+                f,
+                "adamantium::testing Passed (scheduler={:?}, seed={}, iteration={}, max_steps={}):",
+                self.replay.scheduler,
+                self.replay.seed,
+                self.replay.iteration,
+                self.replay.max_steps
+            )?,
+        }
+        if !self.waiting.is_empty() {
+            writeln!(f, "Waiting tasks:")?;
+            for entry in &self.waiting {
+                write!(f, "  - ")?;
+                format_task_label(f, entry.task_id, entry.task_name.as_deref())?;
+                writeln!(
+                    f,
+                    " waiting on {} (#{}) since {:?}",
+                    entry.operation, entry.wait_id, entry.since
+                )?;
+            }
+        }
+        writeln!(f, "Timeline:")?;
+        for event in &self.events {
+            write!(f, "  {:?} ", event.timestamp)?;
+            match &event.kind {
+                TimelineEventKind::Scheduled { task_id, task_name } => {
+                    format_task_label(f, *task_id, task_name.as_deref())?;
+                    writeln!(f, " scheduled")?;
+                }
+                TimelineEventKind::Wait {
+                    task_id,
+                    task_name,
+                    operation,
+                    wait_id,
+                } => {
+                    format_task_label(f, *task_id, task_name.as_deref())?;
+                    writeln!(f, " waiting on {operation} (#{wait_id})")?;
+                }
+                TimelineEventKind::Wakeup {
+                    by_task_id,
+                    by_task_name,
+                    target_task_ids,
+                    target_task_names,
+                    operation,
+                    wait_id,
+                } => {
+                    if let Some(by_id) = by_task_id {
+                        format_task_label(f, *by_id, by_task_name.as_deref())?;
+                        write!(f, " ")?;
+                    }
+                    write!(f, "woke ")?;
+                    for (index, target_id) in target_task_ids.iter().enumerate() {
+                        if index > 0 {
+                            write!(f, ", ")?;
+                        }
+                        let target_name = target_task_names
+                            .get(index)
+                            .and_then(|name| name.as_deref());
+                        format_task_label(f, *target_id, target_name)?;
+                    }
+                    writeln!(f, " from {operation} (#{wait_id})")?;
+                }
+                TimelineEventKind::WaitCompleted {
+                    task_id,
+                    task_name,
+                    operation,
+                    wait_id,
+                } => {
+                    format_task_label(f, *task_id, task_name.as_deref())?;
+                    writeln!(f, " resumed from {operation} (#{wait_id})")?;
+                }
+                TimelineEventKind::WaitCancelled {
+                    task_id,
+                    task_name,
+                    operation,
+                    wait_id,
+                } => {
+                    format_task_label(f, *task_id, task_name.as_deref())?;
+                    writeln!(f, " cancelled wait on {operation} (#{wait_id})")?;
+                }
+                TimelineEventKind::Failed {
+                    kind,
+                    task_id,
+                    task_name,
+                } => {
+                    write!(f, "failed ({kind:?})")?;
+                    if let Some(id) = task_id {
+                        write!(f, " at ")?;
+                        format_task_label(f, *id, task_name.as_deref())?;
+                    }
+                    writeln!(f)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Replays `record` with timeline tracing enabled to reconstruct task names,
+/// virtual timestamps, wait operations and wakeups without altering the schedule.
+///
+/// The returned [`Timeline`] excludes all user payloads and panic messages.
+pub fn explain<F, Fut>(record: &Replay, factory: F) -> Timeline
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()>,
+{
+    use crate::runtime::trace::{Guard, RawEvent};
+
+    let validation = record.validate();
+    assert!(validation.is_ok(), "{validation:?}");
+
+    let guard = Guard::enter();
+    let result = play(record, ReplayPolicy::Exact, factory);
+    let collector = guard.finish();
+
+    let (failure, observed_replay) = match result {
+        Ok(replay) => (None, replay),
+        Err(failure) => (Some(failure.kind()), failure.replay().clone()),
+    };
+
+    let Some(collector) = collector else {
+        return Timeline {
+            failure,
+            replay: observed_replay,
+            tasks: Vec::new(),
+            waiting: Vec::new(),
+            events: Vec::new(),
+        };
+    };
+
+    let names: BTreeMap<usize, String> = collector.names;
+    let name_of = |id: usize| names.get(&id).cloned();
+
+    let mut task_ids: BTreeMap<usize, Option<String>> = names
+        .iter()
+        .map(|(id, name)| (*id, Some(name.clone())))
+        .collect();
+
+    let mut events = Vec::with_capacity(collector.events.len() + usize::from(failure.is_some()));
+    let mut last_timestamp = Duration::ZERO;
+    for raw in collector.events {
+        let (timestamp, kind) = match raw {
+            RawEvent::Scheduled { timestamp, task_id } => {
+                task_ids.entry(task_id).or_insert_with(|| name_of(task_id));
+                (
+                    timestamp,
+                    TimelineEventKind::Scheduled {
+                        task_id,
+                        task_name: name_of(task_id),
+                    },
+                )
+            }
+            RawEvent::Wait {
+                timestamp,
+                task_id,
+                operation,
+                wait_id,
+            } => {
+                task_ids.entry(task_id).or_insert_with(|| name_of(task_id));
+                (
+                    timestamp,
+                    TimelineEventKind::Wait {
+                        task_id,
+                        task_name: name_of(task_id),
+                        operation,
+                        wait_id,
+                    },
+                )
+            }
+            RawEvent::Wakeup {
+                timestamp,
+                by_task_id,
+                target_task_ids,
+                operation,
+                wait_id,
+            } => {
+                if let Some(id) = by_task_id {
+                    task_ids.entry(id).or_insert_with(|| name_of(id));
+                }
+                for id in &target_task_ids {
+                    task_ids.entry(*id).or_insert_with(|| name_of(*id));
+                }
+                let target_task_names = target_task_ids.iter().map(|id| name_of(*id)).collect();
+                (
+                    timestamp,
+                    TimelineEventKind::Wakeup {
+                        by_task_id,
+                        by_task_name: by_task_id.and_then(name_of),
+                        target_task_ids,
+                        target_task_names,
+                        operation,
+                        wait_id,
+                    },
+                )
+            }
+            RawEvent::WaitCompleted {
+                timestamp,
+                task_id,
+                operation,
+                wait_id,
+            } => {
+                task_ids.entry(task_id).or_insert_with(|| name_of(task_id));
+                (
+                    timestamp,
+                    TimelineEventKind::WaitCompleted {
+                        task_id,
+                        task_name: name_of(task_id),
+                        operation,
+                        wait_id,
+                    },
+                )
+            }
+            RawEvent::WaitCancelled {
+                timestamp,
+                task_id,
+                operation,
+                wait_id,
+            } => {
+                task_ids.entry(task_id).or_insert_with(|| name_of(task_id));
+                (
+                    timestamp,
+                    TimelineEventKind::WaitCancelled {
+                        task_id,
+                        task_name: name_of(task_id),
+                        operation,
+                        wait_id,
+                    },
+                )
+            }
+        };
+        last_timestamp = timestamp;
+        events.push(TimelineEvent { timestamp, kind });
+    }
+
+    if let Some(kind) = failure {
+        let task_id = collector.last_scheduled;
+        if let Some(id) = task_id {
+            task_ids.entry(id).or_insert_with(|| name_of(id));
+        }
+        events.push(TimelineEvent {
+            timestamp: last_timestamp,
+            kind: TimelineEventKind::Failed {
+                kind,
+                task_id,
+                task_name: task_id.and_then(name_of),
+            },
+        });
+    }
+
+    let tasks = task_ids
+        .into_iter()
+        .map(|(id, name)| TaskInfo { id, name })
+        .collect();
+
+    let waiting_entries = if failure.is_some() {
+        collector
+            .teardown_snapshot
+            .unwrap_or_else(|| collector.active_waits.into_values().collect())
+    } else {
+        collector.active_waits.into_values().collect()
+    };
+
+    let waiting = waiting_entries
+        .into_iter()
+        .map(|entry| WaitingTask {
+            task_id: entry.task_id,
+            task_name: name_of(entry.task_id),
+            operation: entry.operation,
+            wait_id: entry.wait_id,
+            since: entry.since,
+        })
+        .collect();
+
+    Timeline {
+        failure,
+        replay: observed_replay,
+        tasks,
+        waiting,
+        events,
+    }
+}
+
 /// Why replaying a saved corpus stopped. Each variant identifies the failing file.
 #[derive(Debug)]
 pub enum CorpusError {
@@ -651,6 +1141,13 @@ impl<S: Scheduler> Scheduler for Recording<S> {
         self.saw_choice |= runnable.len() > 1;
         let task = self.scheduler.next_task(&runnable, current, yielding)?;
         lock(&self.trace).steps.push(Some(usize::from(task)));
+        if crate::runtime::trace::is_active() {
+            let shuttle_name = runnable
+                .iter()
+                .find(|candidate| candidate.id() == task)
+                .and_then(|candidate| candidate.name());
+            crate::runtime::trace::record_scheduled(usize::from(task), shuttle_name);
+        }
         Some(task)
     }
 

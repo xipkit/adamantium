@@ -67,7 +67,7 @@ impl Limit {
             places: Arc::new(Places {
                 limit: places.max(1),
                 taken: Lock::new(0),
-                freed: WaitQueue::new(),
+                freed: WaitQueue::named("limit.acquire"),
             }),
         }
     }

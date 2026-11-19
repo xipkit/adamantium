@@ -124,7 +124,7 @@ impl<T> Watch<T> {
                     closed: false,
                     watches: 1,
                 }),
-                changed: WaitQueue::new(),
+                changed: WaitQueue::named("watch.receive"),
             }),
         }
     }
