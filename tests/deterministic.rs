@@ -8,8 +8,7 @@
 use adamantium::{
     Actor, Cancellation, Channel, Reply, Tasks, TryReceiveError, Watch,
     testing::{
-        self, Config, CorpusError, DfsStatus, FailureKind, Replay, SchedulerMode,
-        TimelineEventKind,
+        self, Config, CorpusError, DfsStatus, FailureKind, Replay, SchedulerMode, TimelineEventKind,
     },
     time,
 };
@@ -934,8 +933,14 @@ fn explain_reconstructs_named_task_timeline_without_payloads_or_perturbation() {
 
         let report = timeline.to_string();
         assert!(report.contains("Waiting tasks:"), "{report}");
-        assert!(report.contains("\"channel-reader\" waiting on channel.receive"), "{report}");
-        assert!(report.contains("\"watch-waiter\" waiting on watch.receive"), "{report}");
+        assert!(
+            report.contains("\"channel-reader\" waiting on channel.receive"),
+            "{report}"
+        );
+        assert!(
+            report.contains("\"watch-waiter\" waiting on watch.receive"),
+            "{report}"
+        );
         assert!(report.contains("15ms"), "{report}");
 
         // Payloads are excluded from both Display and Debug output.
@@ -943,9 +948,18 @@ fn explain_reconstructs_named_task_timeline_without_payloads_or_perturbation() {
         assert!(!report.contains("secret-watch-payload"), "{report}");
         assert!(!report.contains("initial-watch-payload"), "{report}");
         let debug_report = format!("{timeline:?}");
-        assert!(!debug_report.contains("secret-channel-payload"), "{debug_report}");
-        assert!(!debug_report.contains("secret-watch-payload"), "{debug_report}");
-        assert!(!debug_report.contains("initial-watch-payload"), "{debug_report}");
+        assert!(
+            !debug_report.contains("secret-channel-payload"),
+            "{debug_report}"
+        );
+        assert!(
+            !debug_report.contains("secret-watch-payload"),
+            "{debug_report}"
+        );
+        assert!(
+            !debug_report.contains("initial-watch-payload"),
+            "{debug_report}"
+        );
     }
 }
 
@@ -988,7 +1002,7 @@ fn explain_tracks_successive_wakeups_and_caught_panic_waiter_drops() {
         // 1. Drop a pending sleep during a caught panic; execution continues cleanly.
         assert!(
             catch_unwind(AssertUnwindSafe(|| {
-                let mut sleep = Box::pin(time::sleep(Duration::from_millis(50)));
+                let mut sleep = std::pin::pin!(time::sleep(Duration::from_millis(50)));
                 let waker = futures_util::task::noop_waker();
                 let mut cx = std::task::Context::from_waker(&waker);
                 assert!(sleep.as_mut().poll_unpin(&mut cx).is_pending());
