@@ -482,10 +482,10 @@ mod model {
             result: Lock::new(None),
             changed,
         });
-        let handle = shuttle::future::spawn(Transport {
+        let handle = shuttle::future::spawn(crate::runtime::coop::model::task(Transport {
             future: Some(Box::pin(future)),
             completion: completion.clone(),
-        });
+        }));
         let abort = handle.abort_handle();
         // Shuttle's JoinHandle destructor accesses the current execution by
         // task ID. Keep it inside this execution; the owned abort permission

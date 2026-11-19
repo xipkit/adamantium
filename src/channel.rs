@@ -5,7 +5,7 @@ use crate::runtime::wait::Waiter;
 use crate::runtime::{Guard, Lock, World, queue::Bounded, wait::WaitQueue};
 #[cfg(feature = "tokio")]
 use std::{
-    pin::{Pin, pin},
+    pin::Pin,
     task::{Context, Poll},
 };
 
@@ -333,22 +333,29 @@ impl<T> Sender<T> {
     /// in [`Closed`] if the channel is closed, including when all receivers
     /// have been dropped.
     pub async fn send(&self, value: T) -> Result<(), Closed<T>> {
-        let mut value = value;
-        loop {
-            value = match self.try_send(value) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Closed(value)) => return Err(Closed(value)),
-                Err(TrySendError::Full(value)) => value,
-            };
-            let waiter = self.queue.space.listen();
-            // Registration precedes the recheck, so a receive cannot be lost.
-            value = match self.try_send(value) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Closed(value)) => return Err(Closed(value)),
-                Err(TrySendError::Full(value)) => value,
-            };
-            waiter.await;
-        }
+        self.send_value(&mut Some(value)).await
+    }
+
+    // A cancelled send_until can recover the value while it is waiting for room.
+    #[allow(
+        clippy::expect_used,
+        reason = "a full queue always returns the pending value"
+    )]
+    async fn send_value(&self, value: &mut Option<T>) -> Result<(), Closed<T>> {
+        self.queue
+            .space
+            .wait_for(|| {
+                let pending = value.take().expect("send still owns its value");
+                match self.try_send(pending) {
+                    Ok(()) => Some(Ok(())),
+                    Err(TrySendError::Closed(unsent)) => Some(Err(Closed(unsent))),
+                    Err(TrySendError::Full(unsent)) => {
+                        *value = Some(unsent);
+                        None
+                    }
+                }
+            })
+            .await
     }
 
     /// Waits until the channel has room for a message or is closed. The room
@@ -418,35 +425,17 @@ impl<T> Sender<T> {
         value: T,
     ) -> Result<(), SendError<T>> {
         self.queue.world.check();
-        let mut stop = pin!(shutdown(cancellation, deadline));
-        let mut value = value;
-        let mut space: Option<Waiter> = None;
-        loop {
-            let room = async {
-                if let Some(space) = space.take() {
-                    space.await;
-                }
-            };
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "send_until keeps the unsent value when shutdown wins the wait for room"
-            )]
-            let () = tokio::select! {
-                biased;
-                reason = &mut stop => {
-                    return Err(match reason {
-                        Shutdown::Cancelled => SendError::Cancelled(value),
-                        Shutdown::DeadlineExceeded => SendError::DeadlineExceeded(value),
-                    });
-                }
-                () = room => {}
-            };
-            space = Some(self.queue.space.listen());
-            value = match self.try_send(value) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Closed(value)) => return Err(SendError::Closed(value)),
-                Err(TrySendError::Full(value)) => value,
-            };
+        let mut value = Some(value);
+        match crate::until(cancellation, deadline, self.send_value(&mut value)).await {
+            Ok(sent) => sent.map_err(|Closed(value)| SendError::Closed(value)),
+            Err(reason) => {
+                #[allow(clippy::expect_used, reason = "only a completed send takes the value")]
+                let value = value.expect("shutdown won before send completed");
+                Err(match reason {
+                    crate::UntilError::Cancelled => SendError::Cancelled(value),
+                    crate::UntilError::DeadlineExceeded => SendError::DeadlineExceeded(value),
+                })
+            }
         }
     }
 
@@ -484,20 +473,14 @@ impl<T> Receiver<T> {
     /// `None` once the channel is closed and drained, including after all
     /// senders have been dropped.
     pub async fn receive(&self) -> Option<T> {
-        loop {
-            match self.try_receive() {
-                Ok(value) => return Some(value),
-                Err(TryReceiveError::Closed) => return None,
-                Err(TryReceiveError::Empty) => {}
-            }
-            let waiter = self.queue.items.listen();
-            match self.try_receive() {
-                Ok(value) => return Some(value),
-                Err(TryReceiveError::Closed) => return None,
-                Err(TryReceiveError::Empty) => {}
-            }
-            waiter.await;
-        }
+        self.queue
+            .items
+            .wait_for(|| match self.try_receive() {
+                Ok(value) => Some(Some(value)),
+                Err(TryReceiveError::Closed) => Some(None),
+                Err(TryReceiveError::Empty) => None,
+            })
+            .await
     }
 
     /// Receives without waiting. Returns [`TryReceiveError::Empty`] while
@@ -603,29 +586,31 @@ impl<T> Stream for Receiver<T> {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         use std::future::Future;
-        loop {
-            match self.try_receive() {
-                Ok(value) => {
-                    self.as_mut().get_mut().waiter = None;
-                    return Poll::Ready(Some(value));
+        self.queue.world.poll_cooperative(cx, |cx| {
+            loop {
+                match self.try_receive() {
+                    Ok(value) => {
+                        self.as_mut().get_mut().waiter = None;
+                        return Poll::Ready(Some(value));
+                    }
+                    Err(TryReceiveError::Closed) => {
+                        self.as_mut().get_mut().waiter = None;
+                        return Poll::Ready(None);
+                    }
+                    Err(TryReceiveError::Empty) => {}
                 }
-                Err(TryReceiveError::Closed) => {
-                    self.as_mut().get_mut().waiter = None;
-                    return Poll::Ready(None);
+                let this = self.as_mut().get_mut();
+                if let Some(waiter) = &mut this.waiter {
+                    if Pin::new(waiter).poll(cx).is_pending() {
+                        return Poll::Pending;
+                    }
+                    this.waiter = None;
+                } else {
+                    this.waiter = Some(this.queue.streams.listen());
                 }
-                Err(TryReceiveError::Empty) => {}
+                // Recheck after registration or a consumed notification.
             }
-            let this = self.as_mut().get_mut();
-            if let Some(waiter) = &mut this.waiter {
-                if Pin::new(waiter).poll(cx).is_pending() {
-                    return Poll::Pending;
-                }
-                this.waiter = None;
-            } else {
-                this.waiter = Some(this.queue.streams.listen());
-            }
-            // Recheck after registration or a consumed notification.
-        }
+        })
     }
 }
 

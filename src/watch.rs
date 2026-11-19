@@ -197,21 +197,25 @@ impl<T> Watcher<T> {
     ///
     /// Dropping the returned future loses nothing: the value stays unseen.
     pub async fn changed(&mut self) -> Option<()> {
-        crate::runtime::in_world(self.shared.world, async move {
-            loop {
-                if let Some(changed) = self.mark() {
-                    return changed;
-                }
-                // Listen before checking again, so a send between the two
-                // checks still wakes this wait.
-                let listener = self.shared.changed.listen();
-                if let Some(changed) = self.mark() {
-                    return changed;
-                }
-                listener.await;
+        self.shared
+            .world
+            .cooperative(self.changed_unbudgeted())
+            .await
+    }
+
+    pub(crate) async fn changed_unbudgeted(&mut self) -> Option<()> {
+        loop {
+            if let Some(changed) = self.mark() {
+                return changed;
             }
-        })
-        .await
+            // Listen before checking again, so a send between the two
+            // checks still wakes this wait.
+            let listener = self.shared.changed.listen();
+            if let Some(changed) = self.mark() {
+                return changed;
+            }
+            listener.await;
+        }
     }
 
     /// `Some(Some(()))` for an unseen value, which it marks seen,
@@ -245,21 +249,20 @@ impl<T: Clone> Watcher<T> {
     ///
     /// Dropping the returned future loses nothing: the value stays unseen.
     pub async fn receive(&mut self) -> Option<T> {
-        crate::runtime::in_world(self.shared.world, async move {
-            loop {
-                if let Some(received) = self.check() {
-                    return received;
-                }
-                // Listen before checking again, so a send between the two
-                // checks still wakes this wait.
-                let listener = self.shared.changed.listen();
-                if let Some(received) = self.check() {
-                    return received;
-                }
-                listener.await;
+        self.shared.world.cooperative(self.receive_inner()).await
+    }
+
+    async fn receive_inner(&mut self) -> Option<T> {
+        loop {
+            if let Some(received) = self.check() {
+                return received;
             }
-        })
-        .await
+            let listener = self.shared.changed.listen();
+            if let Some(received) = self.check() {
+                return received;
+            }
+            listener.await;
+        }
     }
 
     /// Receives without waiting. Returns [`TryReceiveError::Empty`] while
@@ -293,13 +296,18 @@ impl<T: Clone> Watcher<T> {
     /// # fn main() {}
     /// ```
     pub async fn wait_for(&mut self, mut condition: impl FnMut(&T) -> bool) -> Option<T> {
-        let mut value = self.get();
-        loop {
-            if condition(&value) {
-                return Some(value);
-            }
-            value = self.receive().await?;
-        }
+        self.shared
+            .world
+            .cooperative(async {
+                let mut value = self.get();
+                loop {
+                    if condition(&value) {
+                        return Some(value);
+                    }
+                    value = self.receive_inner().await?;
+                }
+            })
+            .await
     }
 
     /// Waits for a value this watcher hasn't seen, as in
