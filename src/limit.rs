@@ -127,18 +127,7 @@ impl Limit {
     }
 
     async fn take(&self) -> Place {
-        loop {
-            if let Some(place) = self.try_take() {
-                return place;
-            }
-            let freed = self.places.freed.listen();
-            // Registration precedes the recheck, so a freed place cannot be
-            // missed.
-            if let Some(place) = self.try_take() {
-                return place;
-            }
-            freed.await;
-        }
+        self.places.freed.wait_for(|| self.try_take()).await
     }
 
     fn try_take(&self) -> Option<Place> {

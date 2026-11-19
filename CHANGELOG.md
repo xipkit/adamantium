@@ -79,6 +79,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- `adamantium`: Repeated uncontended calls to `Limit` or `KeyedLimit` now
+  give other runnable tasks a turn when the cooperative budget runs out.
 - `adamantium`: Dropping a `Channel`'s last receiver drops the values still
   queued, as Tokio's `mpsc` receivers do. Before, they lived until the last
   sender dropped too, so a queued `Reply` kept its requester waiting.

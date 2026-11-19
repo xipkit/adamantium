@@ -1,4 +1,4 @@
-//! Charge one unit when an asynchronous channel operation completes.
+//! Charge one unit when a wrapped operation completes.
 use super::World;
 use std::{
     future::{Future, poll_fn},
