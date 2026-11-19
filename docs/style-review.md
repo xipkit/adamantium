@@ -114,7 +114,7 @@ The shipped rules live in [`cli/src/style/concurrency-decisions.json`](../cli/sr
 The evaluation is in [`style/rules/concurrency-evaluation.md`](../style/rules/concurrency-evaluation.md). Two more candidate rules stay out of the pack:
 
 - `stale_read_across_await` still flagged correct whole files (2 safe cases and 1 insufficient-context case out of 44) after whole-file revision.
-- `partial_mutation_on_cancellation` had false positives in ADAM-207 and is evaluated separately in ADAM-221.
+- `partial_mutation_on_cancellation` still flagged safe peek-then-send-then-pop `AsyncActor` channel relays (and read-only-before-await stale-read files) at high probability (`P=0.760–0.980`) in whole-file CLI evaluation (ADAM-221).
 
 On the 40 fresh whole-file held-out cases run through `cargo adamantium style check --pack concurrency` (ADAM-223), both shipped rules scored 100% precision, 100% recall, and 40/40 exact 3-class accuracy (`split_actor_invariant`: 7/7 TP, 0 FP including 0/14 on single-primitive async structs with immutable config, 6/6 pairs, 1 true `insufficient_context`; `unbounded_collection_growth`: 5/5 TP, 0 FP, 4/4 pairs, 1 true `insufficient_context`), and exited `0` with 0 findings and 0 unresolved on Adamantium's own 36 `src/` files.
 
