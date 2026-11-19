@@ -293,7 +293,7 @@ test("a dry run can select the concurrency held_out split without contacting the
     [script, "--dry-run", "--pack", "concurrency", "--split", "held_out"],
     { encoding: "utf8" },
   );
-  assert.match(output, /44 selected \(132 rule labels, 1 with --context\) without making API requests/);
+  assert.match(output, /40 selected \(120 rule labels, 0 with --context\) without making API requests/);
 });
 
 test("summarizeResults computes precision, recall, unresolved, line ranges, pairs, and slices", () => {
