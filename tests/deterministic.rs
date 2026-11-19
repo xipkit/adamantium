@@ -979,3 +979,81 @@ fn explain_preserves_panic_schedule_and_omits_panic_payload() {
     assert!(report.contains("failed (Panic)"), "{report}");
     assert!(!report.contains("sensitive-panic-payload"), "{report}");
 }
+
+#[test]
+fn explain_tracks_successive_wakeups_and_caught_panic_waiter_drops() {
+    use futures_util::FutureExt;
+
+    async fn two_receivers_and_caught_panic() {
+        // 1. Drop a pending sleep during a caught panic; execution continues cleanly.
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let mut sleep = Box::pin(time::sleep(Duration::from_millis(50)));
+                let waker = futures_util::task::noop_waker();
+                let mut cx = std::task::Context::from_waker(&waker);
+                assert!(sleep.as_mut().poll_unpin(&mut cx).is_pending());
+                panic!("caught-unwind");
+            }))
+            .is_err()
+        );
+
+        // 2. Two receivers block on one channel, then a sender sends twice before
+        // either receiver runs again.
+        let (tx, rx) = Channel::<u32>::bounded(2).split();
+        let mut tasks = Tasks::<()>::new();
+
+        let rx1 = rx.clone();
+        tasks.spawn_named("receiver-1", async move {
+            assert_eq!(rx1.receive().await, Some(1));
+            Ok(())
+        });
+        // Yield until receiver-1 has polled and blocked on the channel.
+        time::sleep(Duration::from_millis(1)).await;
+
+        let rx2 = rx.clone();
+        tasks.spawn_named("receiver-2", async move {
+            assert_eq!(rx2.receive().await, Some(2));
+            Ok(())
+        });
+        // Yield until receiver-2 has also polled and blocked on the channel.
+        time::sleep(Duration::from_millis(1)).await;
+
+        tx.send(1).await.unwrap();
+        tx.send(2).await.unwrap();
+        tasks.join(Ok(())).await.unwrap();
+    }
+
+    let record = testing::check(
+        Config {
+            iterations: 1,
+            ..config()
+        },
+        two_receivers_and_caught_panic,
+    )
+    .unwrap();
+    let timeline = testing::explain(&record, two_receivers_and_caught_panic);
+
+    assert_eq!(timeline.failure(), None);
+    assert!(timeline.waiting().is_empty(), "{timeline}");
+
+    let channel_wakeups: Vec<Vec<Option<String>>> = timeline
+        .events()
+        .iter()
+        .filter_map(|event| match event.kind() {
+            TimelineEventKind::Wakeup {
+                operation: "channel.receive",
+                target_task_names,
+                ..
+            } => Some(target_task_names.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        channel_wakeups,
+        vec![
+            vec![Some("receiver-1".to_owned())],
+            vec![Some("receiver-2".to_owned())],
+        ],
+        "{timeline}"
+    );
+}

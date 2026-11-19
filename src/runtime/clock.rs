@@ -236,9 +236,7 @@ impl Drop for Sleep {
             return;
         }
         self.world.step_unless_panicking();
-        if !trace::is_teardown()
-            && let Some(token) = self.trace_token.take()
-        {
+        if let Some(token) = self.trace_token.take() {
             trace::end_wait(token, true);
         }
         if let Some(key) = self.key.take() {

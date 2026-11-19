@@ -882,9 +882,16 @@ where
         .map(|(id, name)| TaskInfo { id, name })
         .collect();
 
-    let waiting = collector
-        .active_waits
-        .into_values()
+    let waiting_entries = if failure.is_some() {
+        collector
+            .teardown_snapshot
+            .unwrap_or_else(|| collector.active_waits.into_values().collect())
+    } else {
+        collector.active_waits.into_values().collect()
+    };
+
+    let waiting = waiting_entries
+        .into_iter()
         .map(|entry| WaitingTask {
             task_id: entry.task_id,
             task_name: name_of(entry.task_id),

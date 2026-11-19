@@ -36,11 +36,18 @@ pub(crate) fn is_teardown() -> bool {
         || ExecutionState::try_with(|state| state.in_cleanup()).unwrap_or(false)
 }
 
+#[derive(Clone)]
 pub(crate) struct WaitEntry {
     pub(crate) task_id: usize,
     pub(crate) operation: &'static str,
     pub(crate) wait_id: u64,
     pub(crate) since: Duration,
+}
+
+struct QueueWaiter {
+    token: u64,
+    task_id: usize,
+    notified: bool,
 }
 
 pub(crate) enum RawEvent {
@@ -79,7 +86,8 @@ pub(crate) struct Collector {
     next_id: u64,
     pub(crate) names: BTreeMap<usize, String>,
     pub(crate) active_waits: BTreeMap<u64, WaitEntry>,
-    queue_waiters: BTreeMap<u64, Vec<(u64, usize)>>,
+    pub(crate) teardown_snapshot: Option<Vec<WaitEntry>>,
+    queue_waiters: BTreeMap<u64, Vec<QueueWaiter>>,
     pub(crate) events: Vec<RawEvent>,
     pub(crate) last_scheduled: Option<usize>,
 }
@@ -92,6 +100,7 @@ impl Collector {
             next_id: 1,
             names,
             active_waits: BTreeMap::new(),
+            teardown_snapshot: None,
             queue_waiters: BTreeMap::new(),
             events: Vec::new(),
             last_scheduled: None,
@@ -165,6 +174,9 @@ pub(crate) fn record_current_task_name(name: &str) {
 
 pub(crate) fn record_scheduled(task_id: usize, shuttle_name: Option<String>) {
     with_collector(|collector| {
+        if !is_teardown() {
+            collector.teardown_snapshot = None;
+        }
         if let Some(name) = shuttle_name {
             collector.names.entry(task_id).or_insert(name);
         }
@@ -184,6 +196,9 @@ pub(crate) fn begin_wait(operation: &'static str, wait_id: u64) -> Option<u64> {
     }
     let task_id = current_task_id()?;
     with_collector(|collector| {
+        if !is_teardown() {
+            collector.teardown_snapshot = None;
+        }
         let token = collector.alloc_id();
         let timestamp = clock::elapsed();
         collector.active_waits.insert(
@@ -199,7 +214,11 @@ pub(crate) fn begin_wait(operation: &'static str, wait_id: u64) -> Option<u64> {
             .queue_waiters
             .entry(wait_id)
             .or_default()
-            .push((token, task_id));
+            .push(QueueWaiter {
+                token,
+                task_id,
+                notified: false,
+            });
         collector.events.push(RawEvent::Wait {
             timestamp,
             task_id,
@@ -211,12 +230,35 @@ pub(crate) fn begin_wait(operation: &'static str, wait_id: u64) -> Option<u64> {
 }
 
 pub(crate) fn end_wait(token: u64, cancelled: bool) {
+    let teardown = cancelled && is_teardown();
     with_collector(|collector| {
+        if teardown {
+            if collector.teardown_snapshot.is_none() {
+                collector.teardown_snapshot =
+                    Some(collector.active_waits.values().cloned().collect());
+            }
+        } else {
+            collector.teardown_snapshot = None;
+        }
         let Some(entry) = collector.active_waits.remove(&token) else {
             return;
         };
         if let Some(waiters) = collector.queue_waiters.get_mut(&entry.wait_id) {
-            waiters.retain(|(t, _)| *t != token);
+            let mut was_notified = false;
+            waiters.retain(|waiter| {
+                if waiter.token == token {
+                    was_notified = waiter.notified;
+                    false
+                } else {
+                    true
+                }
+            });
+            if cancelled
+                && was_notified
+                && let Some(next) = waiters.iter_mut().find(|waiter| !waiter.notified)
+            {
+                next.notified = true;
+            }
             if waiters.is_empty() {
                 collector.queue_waiters.remove(&entry.wait_id);
             }
@@ -247,17 +289,24 @@ pub(crate) fn record_wakeup(operation: &'static str, wait_id: u64, all: bool) {
     }
     let by_task_id = current_task_id();
     with_collector(|collector| {
-        let Some(waiters) = collector.queue_waiters.get(&wait_id) else {
+        if !is_teardown() {
+            collector.teardown_snapshot = None;
+        }
+        let Some(waiters) = collector.queue_waiters.get_mut(&wait_id) else {
             return;
         };
-        let target_task_ids: Vec<usize> = if all {
-            waiters.iter().map(|(_, task_id)| *task_id).collect()
-        } else {
-            waiters
-                .first()
-                .map(|(_, task_id)| vec![*task_id])
-                .unwrap_or_default()
-        };
+        let mut target_task_ids = Vec::new();
+        if all {
+            for waiter in waiters.iter_mut() {
+                if !waiter.notified {
+                    waiter.notified = true;
+                    target_task_ids.push(waiter.task_id);
+                }
+            }
+        } else if let Some(waiter) = waiters.iter_mut().find(|waiter| !waiter.notified) {
+            waiter.notified = true;
+            target_task_ids.push(waiter.task_id);
+        }
         if target_task_ids.is_empty() {
             return;
         }

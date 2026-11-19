@@ -127,9 +127,7 @@ impl Drop for Waiter {
         }
         self.world.step_unless_panicking();
         #[cfg(feature = "deterministic")]
-        if !super::trace::is_teardown()
-            && let Some(token) = self.trace_token.take()
-        {
+        if let Some(token) = self.trace_token.take() {
             super::trace::end_wait(token, true);
         }
         // EventListener passes an unconsumed notification to the next waiter.
