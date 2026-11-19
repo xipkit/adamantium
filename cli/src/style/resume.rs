@@ -423,7 +423,7 @@ mod tests {
                     start_line: 1,
                     end_line: 1,
                 }),
-                guidance: questions[0].instructions.clone(),
+                guidance: questions[0].violation().unwrap().to_owned(),
                 confidence: 0.9,
                 probabilities: BTreeMap::from([("violation".to_owned(), 0.9)]),
             });
@@ -504,20 +504,6 @@ mod tests {
         }
 
         #[test]
-        fn a_report_without_a_pack_used_the_google_pack() {
-            let (dir, scan, questions, key) = setup();
-            let mut previous = serde_json::to_value(previous(&scan, &questions, &key)).unwrap();
-            assert_eq!(previous["pack"], "google");
-            previous.as_object_mut().unwrap().remove("pack");
-            let path = write(dir.path(), &previous);
-            let mut report = Report::planned(&scan, key.clone(), &questions);
-            Cache::load(&path, &scan, &key)
-                .unwrap()
-                .apply(&mut report, &scan);
-            assert_eq!(statuses(&report)[0], (FileStatus::Checked, true));
-        }
-
-        #[test]
         fn a_different_key_reuses_nothing() {
             let (dir, scan, questions, key) = setup();
             let path = write(dir.path(), &previous(&scan, &questions, &key));
@@ -583,7 +569,7 @@ mod tests {
                 load(&old)
                     .unwrap_err()
                     .to_string()
-                    .contains("schema version 3")
+                    .contains("schema version 4")
             );
             let mut wrong = valid.clone();
             wrong["root"] = json!("/different/root");

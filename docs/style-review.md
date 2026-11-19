@@ -85,7 +85,7 @@ Two options limit a run to the files that need a review.
 - A reused file keeps its findings. It is marked `"cached": true` and has no `input_tokens`.
 - A report lists reused files together with reviewed files. It can thus be the cache for the next run.
 - Files that failed, or that were never sent, are reviewed again.
-- The cached report must have schema version 3 and the same scan root.
+- The cached report must have schema version 4 and the same scan root.
 
 `--retry-from` cannot be combined with `--changed` or `--cache-from`.
 

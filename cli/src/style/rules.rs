@@ -48,6 +48,17 @@ pub(crate) struct Choice {
     pub description: String,
 }
 
+impl Question {
+    /// The description of the `violation` choice: what is wrong with code
+    /// that breaks the rule.
+    pub fn violation(&self) -> Option<&str> {
+        self.choices
+            .iter()
+            .find(|choice| choice.value == "violation")
+            .map(|choice| choice.description.as_str())
+    }
+}
+
 impl RuleSet {
     /// Reads and validates the rules of `pack`.
     pub fn load(pack: Pack) -> Result<Self> {

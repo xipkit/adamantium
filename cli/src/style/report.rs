@@ -14,7 +14,7 @@ use crate::style::{
 };
 
 /// The version of the JSON report this build writes.
-pub(crate) const SCHEMA_VERSION: u8 = 3;
+pub(crate) const SCHEMA_VERSION: u8 = 4;
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct Report {
@@ -32,8 +32,6 @@ pub(crate) struct Report {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct ReviewKey {
     pub provider: ProviderKind,
-    /// Reports written before packs were selectable used the Google pack.
-    #[serde(default)]
     pub pack: Pack,
     pub model: String,
     /// SHA-256 of the selected rules' full definitions, as sent.
@@ -90,6 +88,7 @@ pub(crate) struct Finding {
     /// whole file or the provider gave no confident range.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines: Option<LineRange>,
+    /// What goes wrong: the rule's description of its `violation` choice.
     pub guidance: String,
     pub confidence: f64,
     pub probabilities: BTreeMap<String, f64>,
@@ -351,13 +350,19 @@ impl FileReport {
                     verdict: Verdict::Violation,
                     confidence,
                     probabilities,
-                } => self.findings.push(Finding {
-                    rule,
-                    lines: None,
-                    guidance: question.instructions.clone(),
-                    confidence,
-                    probabilities,
-                }),
+                } => {
+                    let guidance = question
+                        .violation()
+                        .with_context(|| format!("rule {rule} has no violation choice"))?
+                        .to_owned();
+                    self.findings.push(Finding {
+                        rule,
+                        lines: None,
+                        guidance,
+                        confidence,
+                        probabilities,
+                    });
+                }
                 Answer::Choice {
                     verdict: Verdict::NoViolation,
                     ..
@@ -556,6 +561,10 @@ mod tests {
         assert_eq!(report.files[0].findings[0].rule, questions[0].name);
         assert_eq!(
             report.files[0].findings[0].guidance,
+            questions[0].violation().unwrap()
+        );
+        assert_ne!(
+            report.files[0].findings[0].guidance,
             questions[0].instructions
         );
         assert_eq!(report.files[0].unresolved[0].rule, questions[1].name);
@@ -666,6 +675,30 @@ mod tests {
         assert_eq!(file.status, FileStatus::Incomplete);
         assert_eq!(file.unresolved[0].reason, UnresolvedReason::Refusal);
         assert_eq!(file.unresolved[0].confidence, None);
+    }
+
+    #[test]
+    fn a_violated_rule_without_a_violation_choice_is_an_error() {
+        let rules = RuleSet::load(Pack::Google).unwrap();
+        let mut question = rules.questions[0].clone();
+        question
+            .choices
+            .retain(|choice| choice.value != "violation");
+        let mut file = FileReport::new("lib.rs".into());
+        let error = file
+            .record(
+                &[question],
+                Evaluation {
+                    answers: vec![Answer::Choice {
+                        verdict: Verdict::Violation,
+                        confidence: 0.9,
+                        probabilities: BTreeMap::new(),
+                    }],
+                    input_tokens: None,
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("has no violation choice"));
     }
 
     #[test]
