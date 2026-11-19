@@ -259,7 +259,7 @@ mod tests {
                 start_line: 1,
                 end_line: 4,
             })]),
-            ..FakeProvider::answering(&[Verdict::Violation])
+            ..FakeProvider::answering(&[Verdict::Violation, Verdict::NoViolation])
         };
         let (json, text, exit) = review(dir.path(), &["--pack", "concurrency"], provider).unwrap();
         let explanation = "Coupled state with a joint invariant is split across separate \
@@ -289,13 +289,13 @@ mod tests {
     fn a_clean_concurrency_review_has_no_findings() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("lib.rs"), SPLIT_STATE).unwrap();
-        let provider = FakeProvider::answering(&[Verdict::NoViolation]);
+        let provider = FakeProvider::answering(&[Verdict::NoViolation, Verdict::NoViolation]);
         let (json, text, exit) = review(dir.path(), &["--pack", "concurrency"], provider).unwrap();
         assert_eq!(exit, 0);
         assert_eq!(json["status"], "complete");
         assert_eq!(json["files"][0]["status"], "checked");
         assert_eq!(json["files"][0]["findings"], serde_json::json!([]));
-        assert_eq!(json["files"][0]["no_violation_count"], 1);
+        assert_eq!(json["files"][0]["no_violation_count"], 2);
         assert_eq!(text, "lib.rs: checked\n");
     }
 
