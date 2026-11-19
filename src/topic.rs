@@ -4,17 +4,11 @@ use std::{fmt, sync::Arc};
 
 use crate::{
     channel::{Channel, Receiver, Sender, TrySendError},
-    runtime::Lock,
+    runtime::{Lock, World},
 };
 
 #[cfg(feature = "tokio")]
-use crate::{
-    channel::SendError,
-    race,
-    tasks::{Cancellation, Shutdown, shutdown},
-};
-#[cfg(feature = "tokio")]
-use std::pin::pin;
+use crate::{UntilError, channel::SendError, tasks::Cancellation, until};
 #[cfg(feature = "tokio")]
 use tokio::time::Instant;
 
@@ -50,6 +44,7 @@ use tokio::time::Instant;
 /// ```
 pub struct Topic<T> {
     subscriptions: Subscriptions<T>,
+    world: World,
 }
 
 /// Adds subscribers to a [`Topic`] from other tasks. Get one from
@@ -69,6 +64,7 @@ impl<T> Topic<T> {
     /// capacity of zero is treated as one.
     pub fn new(capacity: usize) -> Self {
         Self {
+            world: World::current(),
             subscriptions: Subscriptions {
                 subscribers: Arc::new(Lock::new(Subscribers {
                     senders: Vec::new(),
@@ -102,11 +98,19 @@ impl<T: Clone> Topic<T> {
     /// while it waits, no subscriber receives the value. With no
     /// subscribers the value is dropped and the result is zero.
     pub async fn send(&mut self, value: T) -> usize {
-        let senders = self.subscriptions.current();
-        for sender in &senders {
-            sender.room().await;
-        }
-        deliver(&senders, value)
+        deliver(&self.ready_subscribers().await, value)
+    }
+
+    async fn ready_subscribers(&self) -> Vec<Sender<T>> {
+        self.world
+            .cooperative(async {
+                let senders = self.subscriptions.current();
+                for sender in &senders {
+                    sender.room().await;
+                }
+                senders
+            })
+            .await
     }
 
     /// Sends like [`send`](Self::send), but waits only until `cancellation`
@@ -122,28 +126,12 @@ impl<T: Clone> Topic<T> {
         deadline: Option<Instant>,
         value: T,
     ) -> Result<usize, SendError<T>> {
-        let senders = self.subscriptions.current();
-        let mut stop = pin!(shutdown(cancellation, deadline));
-        // The first wait is for nothing, so a request already present is seen
-        // even with no subscribers.
-        let waits = std::iter::once(None).chain(senders.iter().map(Some));
-        for sender in waits {
-            let stopped = race((async { Some(stop.as_mut().await) }, async {
-                if let Some(sender) = sender {
-                    sender.room().await;
-                }
-                None
-            }))
-            .await;
-            match stopped {
-                Some(Shutdown::Cancelled) => return Err(SendError::Cancelled(value)),
-                Some(Shutdown::DeadlineExceeded) => {
-                    return Err(SendError::DeadlineExceeded(value));
-                }
-                None => {}
-            }
+        self.world.check();
+        match until(cancellation, deadline, self.ready_subscribers()).await {
+            Ok(senders) => Ok(deliver(&senders, value)),
+            Err(UntilError::Cancelled) => Err(SendError::Cancelled(value)),
+            Err(UntilError::DeadlineExceeded) => Err(SendError::DeadlineExceeded(value)),
         }
-        Ok(deliver(&senders, value))
     }
 }
 

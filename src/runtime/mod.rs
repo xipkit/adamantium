@@ -16,6 +16,7 @@ pub(crate) mod clock;
 #[cfg(feature = "deterministic")]
 pub(crate) mod execution;
 
+pub(crate) mod coop;
 pub(crate) mod queue;
 #[cfg(feature = "tokio")]
 pub(crate) mod task;
@@ -221,6 +222,7 @@ impl<T> DerefMut for Guard<'_, T> {
 }
 
 /// Checks the execution before every poll, including a resumed future.
+#[cfg(feature = "tokio")]
 #[allow(clippy::future_not_send, reason = "Send follows the wrapped future")]
 pub(crate) async fn in_world<F: std::future::Future>(world: World, future: F) -> F::Output {
     let mut future = std::pin::pin!(future);

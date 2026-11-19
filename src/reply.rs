@@ -107,16 +107,9 @@ impl<T> Reply<T> {
     /// Waits until the receiver is dropped or closed, so work whose answer
     /// nobody wants can stop early.
     pub async fn closed(&self) {
-        loop {
-            if self.is_closed() {
-                return;
-            }
-            let listener = self.closed.listen();
-            if self.is_closed() {
-                return;
-            }
-            listener.await;
-        }
+        self.closed
+            .wait_for(|| self.is_closed().then_some(()))
+            .await
     }
 }
 

@@ -1149,6 +1149,10 @@ async fn main() {
 
 ## Channels
 
+With the `tokio` feature, Adamantium requires Tokio 1.47 or later. Async channel
+operations share the task’s cooperative budget, so even a ready send or receive
+can yield. The deterministic harness models and replays these yields as well.
+
 `cargo adamantium fix` rewrites a local oneshot or watch channel, and with
 `--strict` a bounded mpsc channel, whose sender and receiver are bound by one
 `let (sender, receiver) = ...` statement, when every use of both halves reads

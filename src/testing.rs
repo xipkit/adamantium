@@ -583,6 +583,7 @@ where
     );
     let handles = workers
         .into_iter()
+        .map(crate::runtime::coop::model::task)
         .map(shuttle::future::spawn)
         .collect::<Vec<_>>();
     let mut values = Vec::with_capacity(handles.len());
@@ -692,7 +693,7 @@ where
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         shuttle::Runner::new(scheduler, engine).run(move || {
             crate::runtime::clock::start();
-            shuttle::future::block_on(factory());
+            shuttle::future::block_on(crate::runtime::coop::model::task(factory()));
         });
     }));
     let record = lock(&trace).clone();

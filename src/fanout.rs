@@ -397,21 +397,7 @@ impl<T> Feed<T> {
     /// Dropping the returned future loses nothing: an event stays queued
     /// until it is returned.
     pub async fn receive(&mut self) -> Result<T, Ended> {
-        crate::runtime::in_world(self.shared.world, async move {
-            loop {
-                if let Some(received) = self.next() {
-                    return received;
-                }
-                // Listen before checking again, so an event sent between
-                // the two checks still wakes this wait.
-                let listener = self.inbox.arrived.listen();
-                if let Some(received) = self.next() {
-                    return received;
-                }
-                listener.await;
-            }
-        })
-        .await
+        self.inbox.arrived.wait_for(|| self.next()).await
     }
 
     /// Receives without waiting. Returns `Ok(None)` while the queue is
@@ -455,7 +441,7 @@ impl<T> Feed<T> {
 
     /// `Some(Ok(event))` for a queued event, `Some(Err(end))` once ended
     /// with nothing queued, and `None` to wait.
-    fn next(&mut self) -> Option<Result<T, Ended>> {
+    fn next(&self) -> Option<Result<T, Ended>> {
         let mut queue = self.queue();
         match queue.events.pop_front() {
             Some(event) => Some(Ok(event)),

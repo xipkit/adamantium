@@ -71,8 +71,11 @@ impl Cancellation {
     pub async fn cancelled(&self) {
         crate::runtime::in_world(self.world, async move {
             let mut requested = self.requested.subscribe();
-            // Borrowing self keeps a handle alive, so the watch cannot close.
-            requested.wait_for(|requested| *requested).await;
+            // Shutdown checks must see a request even at the end of a task's
+            // budget. This watch only ever changes from false to true.
+            if !requested.get() {
+                requested.changed_unbudgeted().await;
+            }
         })
         .await
     }

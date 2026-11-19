@@ -28,6 +28,24 @@ impl WaitQueue {
         }
     }
 
+    /// Checks once on the fast path and again after registration to avoid a lost wake.
+    pub(crate) async fn wait_for<T>(&self, mut check: impl FnMut() -> Option<T>) -> T {
+        self.world
+            .cooperative(async {
+                loop {
+                    if let Some(value) = check() {
+                        return value;
+                    }
+                    let waiter = self.listen();
+                    if let Some(value) = check() {
+                        return value;
+                    }
+                    waiter.await;
+                }
+            })
+            .await
+    }
+
     pub(crate) fn listen(&self) -> Waiter {
         self.world.step_unless_panicking();
         Waiter {
