@@ -1,13 +1,26 @@
 name: Adamantium check
 description: Install cargo-adamantium and check a Rust project
 inputs:
+  version:
+    description: Exact cargo-adamantium release from crates.io (specify either version or rev)
+    required: false
   rev:
-    description: Immutable adamantium git commit to install
-    required: true
+    description: Full adamantium git commit SHA (specify either rev or version)
+    required: false
   working-directory:
     description: Directory containing the project's Cargo.toml
     required: false
     default: .
+  baseline:
+    description: Path to a baseline JSON report, relative to the project's working directory
+    required: false
+  strict:
+    description: Enable strict checks (true or false)
+    required: false
+    default: 'false'
+  cargo-args:
+    description: Use a YAML literal block with one Cargo argument per line. Blank lines are ignored.
+    required: false
 runs:
   using: composite
   steps:
@@ -15,14 +28,28 @@ runs:
       id: cache-key
       shell: bash
       env:
+        ADAMANTIUM_VERSION: ${{ inputs.version }}
         ADAMANTIUM_REV: ${{ inputs.rev }}
       run: |
-        if [[ ! "$ADAMANTIUM_REV" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        if [[ -n "$ADAMANTIUM_VERSION" && -n "$ADAMANTIUM_REV" ]] ||
+           [[ -z "$ADAMANTIUM_VERSION" && -z "$ADAMANTIUM_REV" ]]; then
+          echo 'Specify exactly one of version or rev' >&2
+          exit 1
+        fi
+        if [[ -n "$ADAMANTIUM_VERSION" ]]; then
+          if [[ ! "$ADAMANTIUM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo 'version must be an exact crates.io release, such as 0.3.0' >&2
+            exit 1
+          fi
+          source_key="crates-io-${ADAMANTIUM_VERSION}"
+        elif [[ "$ADAMANTIUM_REV" =~ ^[0-9a-fA-F]{40}$ ]]; then
+          source_key="$ADAMANTIUM_REV"
+        else
           echo 'rev must be a full, immutable git commit SHA' >&2
           exit 1
         fi
         compiler=$(rustc -vV | git hash-object --stdin)
-        echo "key=adamantium-v1-${RUNNER_OS}-${RUNNER_ARCH}-${compiler}-${ADAMANTIUM_REV}" >> "$GITHUB_OUTPUT"
+        echo "key=adamantium-v1-${RUNNER_OS}-${RUNNER_ARCH}-${compiler}-${source_key}" >> "$GITHUB_OUTPUT"
     - name: Restore cargo-adamantium
       id: cache
       uses: actions/cache@v4
@@ -33,11 +60,41 @@ runs:
       if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       env:
+        ADAMANTIUM_VERSION: ${{ inputs.version }}
         ADAMANTIUM_REV: ${{ inputs.rev }}
-      run: cargo install --locked --git https://github.com/xipkit/adamantium --rev "$ADAMANTIUM_REV" --root "$RUNNER_TEMP/adamantium" cargo-adamantium
+      run: |
+        if [[ -n "$ADAMANTIUM_VERSION" ]]; then
+          source_args=(--registry crates-io --version "=${ADAMANTIUM_VERSION}")
+        else
+          source_args=(--git https://github.com/xipkit/adamantium --rev "$ADAMANTIUM_REV")
+        fi
+        cargo install --locked "${source_args[@]}" --root "$RUNNER_TEMP/adamantium" cargo-adamantium
     - name: Run adamantium check
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        ADAMANTIUM_BASELINE: ${{ inputs.baseline }}
+        ADAMANTIUM_STRICT: ${{ inputs.strict }}
+        ADAMANTIUM_CARGO_ARGS: ${{ inputs.cargo-args }}
       run: |
         export PATH="$RUNNER_TEMP/adamantium/bin:$PATH"
-        cargo adamantium check
+        args=(adamantium check)
+        if [[ -n "$ADAMANTIUM_BASELINE" ]]; then
+          args+=(--baseline "$ADAMANTIUM_BASELINE")
+        fi
+        case "$ADAMANTIUM_STRICT" in
+          true) args+=(--strict) ;;
+          false|'') ;;
+          *) echo 'strict must be true or false' >&2; exit 1 ;;
+        esac
+        cargo_args=()
+        while IFS= read -r arg; do
+          arg=${arg%$'\r'}
+          if [[ -n "$arg" ]]; then
+            cargo_args+=("$arg")
+          fi
+        done <<< "$ADAMANTIUM_CARGO_ARGS"
+        if [[ ${#cargo_args[@]} -gt 0 ]]; then
+          args+=(-- "${cargo_args[@]}")
+        fi
+        cargo "${args[@]}"
