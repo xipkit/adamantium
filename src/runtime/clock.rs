@@ -216,7 +216,7 @@ impl Future for Sleep {
         });
         if ready {
             if let Some(token) = self.trace_token.take() {
-                trace::end_wait(token, false);
+                trace::end_wait(token, self.wait_id, false);
             }
             return Poll::Ready(());
         }
@@ -237,7 +237,7 @@ impl Drop for Sleep {
         }
         self.world.step_unless_panicking();
         if let Some(token) = self.trace_token.take() {
-            trace::end_wait(token, true);
+            trace::end_wait(token, self.wait_id, true);
         }
         if let Some(key) = self.key.take() {
             with(|clock| {

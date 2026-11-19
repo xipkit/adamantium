@@ -190,7 +190,7 @@ pub(crate) fn record_scheduled(task_id: usize, shuttle_name: Option<String>) {
     });
 }
 
-pub(crate) fn begin_wait(operation: &'static str, wait_id: u64) -> Option<u64> {
+pub(crate) fn register_listener(wait_id: u64) -> Option<u64> {
     if !is_active() || wait_id == 0 {
         return None;
     }
@@ -200,6 +200,33 @@ pub(crate) fn begin_wait(operation: &'static str, wait_id: u64) -> Option<u64> {
             collector.teardown_snapshot = None;
         }
         let token = collector.alloc_id();
+        collector
+            .queue_waiters
+            .entry(wait_id)
+            .or_default()
+            .push(QueueWaiter {
+                token,
+                task_id,
+                notified: false,
+            });
+        token
+    })
+}
+
+pub(crate) fn begin_registered_wait(token: u64, operation: &'static str, wait_id: u64) {
+    if !is_active() || wait_id == 0 {
+        return;
+    }
+    let Some(task_id) = current_task_id() else {
+        return;
+    };
+    with_collector(|collector| {
+        if !is_teardown() {
+            collector.teardown_snapshot = None;
+        }
+        if collector.active_waits.contains_key(&token) {
+            return;
+        }
         let timestamp = clock::elapsed();
         collector.active_waits.insert(
             token,
@@ -210,26 +237,22 @@ pub(crate) fn begin_wait(operation: &'static str, wait_id: u64) -> Option<u64> {
                 since: timestamp,
             },
         );
-        collector
-            .queue_waiters
-            .entry(wait_id)
-            .or_default()
-            .push(QueueWaiter {
-                token,
-                task_id,
-                notified: false,
-            });
         collector.events.push(RawEvent::Wait {
             timestamp,
             task_id,
             operation,
             wait_id,
         });
-        token
-    })
+    });
 }
 
-pub(crate) fn end_wait(token: u64, cancelled: bool) {
+pub(crate) fn begin_wait(operation: &'static str, wait_id: u64) -> Option<u64> {
+    let token = register_listener(wait_id)?;
+    begin_registered_wait(token, operation, wait_id);
+    Some(token)
+}
+
+pub(crate) fn end_wait(token: u64, wait_id: u64, cancelled: bool) {
     let teardown = cancelled && is_teardown();
     with_collector(|collector| {
         if teardown {
@@ -240,10 +263,9 @@ pub(crate) fn end_wait(token: u64, cancelled: bool) {
         } else {
             collector.teardown_snapshot = None;
         }
-        let Some(entry) = collector.active_waits.remove(&token) else {
-            return;
-        };
-        if let Some(waiters) = collector.queue_waiters.get_mut(&entry.wait_id) {
+        let entry = collector.active_waits.remove(&token);
+        let queue_id = entry.as_ref().map_or(wait_id, |entry| entry.wait_id);
+        if let Some(waiters) = collector.queue_waiters.get_mut(&queue_id) {
             let mut was_notified = false;
             waiters.retain(|waiter| {
                 if waiter.token == token {
@@ -260,9 +282,12 @@ pub(crate) fn end_wait(token: u64, cancelled: bool) {
                 next.notified = true;
             }
             if waiters.is_empty() {
-                collector.queue_waiters.remove(&entry.wait_id);
+                collector.queue_waiters.remove(&queue_id);
             }
         }
+        let Some(entry) = entry else {
+            return;
+        };
         let timestamp = clock::elapsed();
         let event = if cancelled {
             RawEvent::WaitCancelled {

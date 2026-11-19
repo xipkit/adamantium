@@ -46,7 +46,7 @@ impl WaitQueue {
             #[cfg(feature = "deterministic")]
             wait_id: self.wait_id,
             #[cfg(feature = "deterministic")]
-            trace_token: None,
+            trace_token: super::trace::register_listener(self.wait_id),
         }
     }
 
@@ -98,13 +98,15 @@ impl Future for Waiter {
         #[cfg(feature = "deterministic")]
         match poll {
             Poll::Pending => {
-                if self.trace_token.is_none() {
+                if let Some(token) = self.trace_token {
+                    super::trace::begin_registered_wait(token, self.operation, self.wait_id);
+                } else {
                     self.trace_token = super::trace::begin_wait(self.operation, self.wait_id);
                 }
             }
             Poll::Ready(()) => {
                 if let Some(token) = self.trace_token.take() {
-                    super::trace::end_wait(token, false);
+                    super::trace::end_wait(token, self.wait_id, false);
                 }
             }
         }
@@ -128,7 +130,7 @@ impl Drop for Waiter {
         self.world.step_unless_panicking();
         #[cfg(feature = "deterministic")]
         if let Some(token) = self.trace_token.take() {
-            super::trace::end_wait(token, true);
+            super::trace::end_wait(token, self.wait_id, true);
         }
         // EventListener passes an unconsumed notification to the next waiter.
     }
