@@ -24,6 +24,7 @@ const packCandidateRules = [
   "split_actor_invariant",
   "stale_read_across_await",
   "unbounded_collection_growth",
+  "partial_mutation_on_cancellation",
 ];
 
 test("google corpus covers every embedded google rule with positive and negative cases", () => {
@@ -97,7 +98,11 @@ test("parseCliReport extracts findings, line ranges, unresolved reasons, and cle
     rules_sha256: "abc",
     context_sha256: null,
     root: "/tmp/example",
-    selected_rules: packCandidateRules,
+    selected_rules: [
+      "split_actor_invariant",
+      "stale_read_across_await",
+      "unbounded_collection_growth",
+    ],
     files: [
       {
         path: "lib.rs",
@@ -293,7 +298,7 @@ test("a dry run can select the concurrency held_out split without contacting the
     [script, "--dry-run", "--pack", "concurrency", "--split", "held_out"],
     { encoding: "utf8" },
   );
-  assert.match(output, /44 selected \(132 rule labels, 1 with --context\) without making API requests/);
+  assert.match(output, /66 selected \(264 rule labels, 1 with --context\) without making API requests/);
 });
 
 test("summarizeResults computes precision, recall, unresolved, line ranges, pairs, and slices", () => {
