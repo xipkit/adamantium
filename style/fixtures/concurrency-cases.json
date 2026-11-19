@@ -1100,7 +1100,7 @@
   {
     "name": "wf_ho_stale_budget_charge_bug",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_stale_budget_charge",
     "existing_lint": null,
@@ -1114,7 +1114,7 @@
   {
     "name": "wf_ho_stale_budget_charge_safe",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_stale_budget_charge",
     "existing_lint": null,
@@ -1128,7 +1128,7 @@
   {
     "name": "wf_ho_stale_primary_epoch_bug",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_stale_primary_epoch",
     "existing_lint": null,
@@ -1142,7 +1142,7 @@
   {
     "name": "wf_ho_stale_primary_epoch_safe",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_stale_primary_epoch",
     "existing_lint": null,
@@ -1156,7 +1156,7 @@
   {
     "name": "wf_ho_stale_catalog_cache_bug",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_stale_catalog_cache",
     "existing_lint": null,
@@ -1170,7 +1170,7 @@
   {
     "name": "wf_ho_stale_catalog_cache_safe",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_stale_catalog_cache",
     "existing_lint": null,
@@ -1184,7 +1184,7 @@
   {
     "name": "wf_ho_stale_flag_patch_bug",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_stale_flag_patch",
     "existing_lint": null,
@@ -1198,7 +1198,7 @@
   {
     "name": "wf_ho_stale_flag_patch_safe",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_stale_flag_patch",
     "existing_lint": null,
@@ -1212,7 +1212,7 @@
   {
     "name": "wf_ho_stale_cursor_advance_bug",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_stale_cursor_advance",
     "existing_lint": null,
@@ -1226,7 +1226,7 @@
   {
     "name": "wf_ho_stale_cursor_advance_safe",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_stale_cursor_advance",
     "existing_lint": null,
@@ -1240,7 +1240,7 @@
   {
     "name": "wf_ho_stale_outbox_relay_bug",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_stale_outbox_relay",
     "existing_lint": null,
@@ -1254,7 +1254,7 @@
   {
     "name": "wf_ho_stale_outbox_relay_safe",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_stale_outbox_relay",
     "existing_lint": null,
@@ -1268,7 +1268,7 @@
   {
     "name": "wf_ho_stale_sole_consumer_context_safe",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": null,
     "existing_lint": null,
@@ -1284,7 +1284,7 @@
   {
     "name": "wf_ho_stale_lint_dropped_mutex_bug",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "lint_overlap",
     "pair": null,
     "existing_lint": "clippy::disallowed_types (std::sync::Mutex)",
@@ -1298,7 +1298,7 @@
   {
     "name": "wf_ho_stale_decoy_held_tokio_mutex_safe",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "lint_decoy",
     "pair": null,
     "existing_lint": "clippy::disallowed_types (tokio::sync::Mutex)",
@@ -1312,7 +1312,7 @@
   {
     "name": "wf_ho_stale_insuff_external_ledger",
     "rule": "stale_read_across_await",
-    "split": "held_out",
+    "split": "dev",
     "slice": "insufficient_context",
     "pair": null,
     "existing_lint": null,
@@ -1326,7 +1326,7 @@
   {
     "name": "wf_ho_unbounded_dns_cache_bug",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_unbounded_dns_cache",
     "existing_lint": null,
@@ -1340,7 +1340,7 @@
   {
     "name": "wf_ho_unbounded_dns_cache_safe",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_unbounded_dns_cache",
     "existing_lint": null,
@@ -1354,7 +1354,7 @@
   {
     "name": "wf_ho_unbounded_lock_table_bug",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_unbounded_lock_table",
     "existing_lint": null,
@@ -1368,7 +1368,7 @@
   {
     "name": "wf_ho_unbounded_lock_table_safe",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_unbounded_lock_table",
     "existing_lint": null,
@@ -1382,7 +1382,7 @@
   {
     "name": "wf_ho_unbounded_rpc_inflight_bug",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_unbounded_rpc_inflight",
     "existing_lint": null,
@@ -1396,7 +1396,7 @@
   {
     "name": "wf_ho_unbounded_rpc_inflight_safe",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_unbounded_rpc_inflight",
     "existing_lint": null,
@@ -1410,7 +1410,7 @@
   {
     "name": "wf_ho_unbounded_webhook_history_bug",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_unbounded_webhook_history",
     "existing_lint": null,
@@ -1424,7 +1424,7 @@
   {
     "name": "wf_ho_unbounded_webhook_history_safe",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_unbounded_webhook_history",
     "existing_lint": null,
@@ -1438,7 +1438,7 @@
   {
     "name": "wf_ho_unbounded_route_metrics_bug",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_unbounded_route_metrics",
     "existing_lint": null,
@@ -1452,7 +1452,7 @@
   {
     "name": "wf_ho_unbounded_route_metrics_safe",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_unbounded_route_metrics",
     "existing_lint": null,
@@ -1466,7 +1466,7 @@
   {
     "name": "wf_ho_unbounded_ingest_buffer_bug",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_unbounded_ingest_buffer",
     "existing_lint": null,
@@ -1480,7 +1480,7 @@
   {
     "name": "wf_ho_unbounded_ingest_buffer_safe",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_unbounded_ingest_buffer",
     "existing_lint": null,
@@ -1494,7 +1494,7 @@
   {
     "name": "wf_ho_unbounded_lint_std_mutex_peers_bug",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "lint_overlap",
     "pair": null,
     "existing_lint": "clippy::disallowed_types (std::sync::Mutex)",
@@ -1508,7 +1508,7 @@
   {
     "name": "wf_ho_unbounded_decoy_bounded_ring_mutex_safe",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "lint_decoy",
     "pair": null,
     "existing_lint": "clippy::disallowed_types (std::sync::Mutex, tokio::sync::broadcast)",
@@ -1522,7 +1522,7 @@
   {
     "name": "wf_ho_unbounded_insuff_external_store",
     "rule": "unbounded_collection_growth",
-    "split": "held_out",
+    "split": "dev",
     "slice": "insufficient_context",
     "pair": null,
     "existing_lint": null,
@@ -1536,7 +1536,7 @@
   {
     "name": "wf_ho_split_asset_cache_bug",
     "rule": "split_actor_invariant",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_split_asset_cache",
     "existing_lint": null,
@@ -1550,7 +1550,7 @@
   {
     "name": "wf_ho_split_asset_cache_safe",
     "rule": "split_actor_invariant",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_split_asset_cache",
     "existing_lint": null,
@@ -1564,7 +1564,7 @@
   {
     "name": "wf_ho_split_venue_seats_bug",
     "rule": "split_actor_invariant",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_split_venue_seats",
     "existing_lint": null,
@@ -1578,7 +1578,7 @@
   {
     "name": "wf_ho_split_venue_seats_safe",
     "rule": "split_actor_invariant",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_split_venue_seats",
     "existing_lint": null,
@@ -1592,7 +1592,7 @@
   {
     "name": "wf_ho_split_policy_epoch_bug",
     "rule": "split_actor_invariant",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_split_policy_epoch",
     "existing_lint": null,
@@ -1606,7 +1606,7 @@
   {
     "name": "wf_ho_split_policy_epoch_safe",
     "rule": "split_actor_invariant",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_split_policy_epoch",
     "existing_lint": null,
@@ -1620,7 +1620,7 @@
   {
     "name": "wf_ho_split_worker_leases_bug",
     "rule": "split_actor_invariant",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_split_worker_leases",
     "existing_lint": null,
@@ -1634,7 +1634,7 @@
   {
     "name": "wf_ho_split_worker_leases_safe",
     "rule": "split_actor_invariant",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_split_worker_leases",
     "existing_lint": null,
@@ -1648,7 +1648,7 @@
   {
     "name": "wf_ho_split_window_bounds_bug",
     "rule": "split_actor_invariant",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_split_window_bounds",
     "existing_lint": null,
@@ -1662,7 +1662,7 @@
   {
     "name": "wf_ho_split_window_bounds_safe",
     "rule": "split_actor_invariant",
-    "split": "held_out",
+    "split": "dev",
     "slice": "semantic_only",
     "pair": "wf_split_window_bounds",
     "existing_lint": null,
@@ -1676,7 +1676,7 @@
   {
     "name": "wf_ho_split_lint_two_mutexes_bug",
     "rule": "split_actor_invariant",
-    "split": "held_out",
+    "split": "dev",
     "slice": "lint_overlap",
     "pair": null,
     "existing_lint": "clippy::disallowed_types (std::sync::Mutex)",
@@ -1690,7 +1690,7 @@
   {
     "name": "wf_ho_split_decoy_single_refcell_safe",
     "rule": "split_actor_invariant",
-    "split": "held_out",
+    "split": "dev",
     "slice": "lint_decoy",
     "pair": null,
     "existing_lint": "clippy::disallowed_types (std::rc::Rc, std::cell::RefCell)",
@@ -1704,7 +1704,7 @@
   {
     "name": "wf_ho_split_insuff_external_actors",
     "rule": "split_actor_invariant",
-    "split": "held_out",
+    "split": "dev",
     "slice": "insufficient_context",
     "pair": null,
     "existing_lint": null,
@@ -1714,5 +1714,565 @@
       "unbounded_collection_growth": "no_violation"
     },
     "source": "use crate::shards::{PrimaryShard, SecondaryShard, ShardError};\nuse adamantium::{Actor, Str};\n\n#[derive(Clone, Debug)]\npub struct SyncConfig {\n    pub cluster: Str,\n    pub dry_run: bool,\n}\n\n#[derive(Clone, Copy, Debug)]\npub struct SyncReport {\n    pub primary_applied: bool,\n    pub secondary_applied: bool,\n}\n\npub struct ShardBridge {\n    config: SyncConfig,\n    primary: Actor<PrimaryShard>,\n    secondary: Actor<SecondaryShard>,\n}\n\nimpl ShardBridge {\n    pub fn new(\n        config: SyncConfig,\n        primary: Actor<PrimaryShard>,\n        secondary: Actor<SecondaryShard>,\n    ) -> Self {\n        Self {\n            config,\n            primary,\n            secondary,\n        }\n    }\n\n    pub fn cluster(&self) -> &Str {\n        &self.config.cluster\n    }\n\n    pub fn apply_event(&self, event_id: u64) -> Result<SyncReport, ShardError> {\n        if self.config.dry_run {\n            return Ok(SyncReport {\n                primary_applied: false,\n                secondary_applied: false,\n            });\n        }\n        let primary_applied = self.primary.with(|p| p.record_event(event_id))?;\n        let secondary_applied = self.secondary.with(|s| s.record_event(event_id))?;\n        Ok(SyncReport {\n            primary_applied,\n            secondary_applied,\n        })\n    }\n\n    pub fn is_healthy(&self) -> bool {\n        let p_ok = self.primary.read(PrimaryShard::is_ready);\n        let s_ok = self.secondary.read(SecondaryShard::is_ready);\n        p_ok && s_ok\n    }\n}"
+  },
+  {
+    "name": "wf2_ho_split_escrow_vault_bug",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_split_escrow_vault",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::{HashMap, VecDeque};\n\n#[derive(Clone, Debug)]\npub struct EscrowConfig {\n    pub currency_code: Str,\n    pub max_accounts: usize,\n    pub max_audit_rows: usize,\n    pub min_hold_cents: u64,\n}\n\nimpl EscrowConfig {\n    pub fn validate_hold(&self, cents: u64) -> Result<(), EscrowError> {\n        if cents < self.min_hold_cents {\n            return Err(EscrowError::BelowMinimum {\n                requested: cents,\n                minimum: self.min_hold_cents,\n            });\n        }\n        Ok(())\n    }\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum EscrowError {\n    AccountLimitReached,\n    AccountNotFound(u64),\n    BelowMinimum { requested: u64, minimum: u64 },\n    InsufficientAvailable { available: u64, requested: u64 },\n    InsufficientEscrowed { escrowed: u64, requested: u64 },\n}\n\n#[derive(Clone, Debug)]\npub struct EscrowAuditRow {\n    pub account_id: u64,\n    pub delta_cents: u64,\n    pub kind: &'static str,\n}\n\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct VaultTotals {\n    pub account_count: usize,\n    pub total_available: u64,\n    pub total_escrowed: u64,\n}\n\nimpl VaultTotals {\n    pub fn combined_liability(self) -> u64 {\n        self.total_available.saturating_add(self.total_escrowed)\n    }\n}\n\nstruct BalanceBook {\n    balances: HashMap<u64, u64>,\n    audit: VecDeque<EscrowAuditRow>,\n}\n\nimpl BalanceBook {\n    fn new(max_audit: usize) -> Self {\n        Self {\n            balances: HashMap::new(),\n            audit: VecDeque::with_capacity(max_audit.min(128)),\n        }\n    }\n\n    fn record(&mut self, row: EscrowAuditRow, cap: usize) {\n        if cap == 0 {\n            return;\n        }\n        while self.audit.len() >= cap {\n            self.audit.pop_front();\n        }\n        self.audit.push_back(row);\n    }\n}\n\npub struct EscrowVault {\n    config: EscrowConfig,\n    available: Actor<BalanceBook>,\n    escrowed: Actor<BalanceBook>,\n}\n\nimpl EscrowVault {\n    pub fn new(config: EscrowConfig) -> Self {\n        let cap = config.max_audit_rows;\n        Self {\n            config,\n            available: Actor::new(BalanceBook::new(cap)),\n            escrowed: Actor::new(BalanceBook::new(cap)),\n        }\n    }\n\n    pub fn currency_code(&self) -> &Str {\n        &self.config.currency_code\n    }\n\n    pub fn open_account(&self, account_id: u64, initial_cents: u64) -> Result<(), EscrowError> {\n        let max_accounts = self.config.max_accounts;\n        self.available.with(|book| {\n            if !book.balances.contains_key(&account_id) && book.balances.len() >= max_accounts {\n                return Err(EscrowError::AccountLimitReached);\n            }\n            book.balances.entry(account_id).or_insert(initial_cents);\n            Ok(())\n        })?;\n        self.escrowed.with(|book| {\n            book.balances.entry(account_id).or_insert(0);\n        });\n        Ok(())\n    }\n\n    pub fn close_account(&self, account_id: u64) -> Result<u64, EscrowError> {\n        let avail = self\n            .available\n            .with(|book| book.balances.remove(&account_id))\n            .ok_or(EscrowError::AccountNotFound(account_id))?;\n        let held = self\n            .escrowed\n            .with(|book| book.balances.remove(&account_id))\n            .unwrap_or(0);\n        Ok(avail.saturating_add(held))\n    }\n\n    pub fn place_hold(&self, account_id: u64, cents: u64) -> Result<(), EscrowError> {\n        self.config.validate_hold(cents)?;\n        let cap = self.config.max_audit_rows;\n        self.available.with(|book| {\n            let entry = book\n                .balances\n                .get_mut(&account_id)\n                .ok_or(EscrowError::AccountNotFound(account_id))?;\n            if *entry < cents {\n                return Err(EscrowError::InsufficientAvailable {\n                    available: *entry,\n                    requested: cents,\n                });\n            }\n            *entry -= cents;\n            book.record(\n                EscrowAuditRow {\n                    account_id,\n                    delta_cents: cents,\n                    kind: \"hold_debit\",\n                },\n                cap,\n            );\n            Ok(())\n        })?;\n        self.escrowed.with(|book| {\n            let entry = book.balances.entry(account_id).or_insert(0);\n            *entry = entry.saturating_add(cents);\n            book.record(\n                EscrowAuditRow {\n                    account_id,\n                    delta_cents: cents,\n                    kind: \"hold_credit\",\n                },\n                cap,\n            );\n        });\n        Ok(())\n    }\n\n    pub fn release_hold(&self, account_id: u64, cents: u64) -> Result<(), EscrowError> {\n        let cap = self.config.max_audit_rows;\n        self.escrowed.with(|book| {\n            let entry = book\n                .balances\n                .get_mut(&account_id)\n                .ok_or(EscrowError::AccountNotFound(account_id))?;\n            if *entry < cents {\n                return Err(EscrowError::InsufficientEscrowed {\n                    escrowed: *entry,\n                    requested: cents,\n                });\n            }\n            *entry -= cents;\n            book.record(\n                EscrowAuditRow {\n                    account_id,\n                    delta_cents: cents,\n                    kind: \"release_debit\",\n                },\n                cap,\n            );\n            Ok(())\n        })?;\n        self.available.with(|book| {\n            if let Some(entry) = book.balances.get_mut(&account_id) {\n                *entry = entry.saturating_add(cents);\n            }\n        });\n        Ok(())\n    }\n\n    pub fn totals(&self) -> VaultTotals {\n        let (account_count, total_available) = self.available.read(|book| {\n            (\n                book.balances.len(),\n                book.balances.values().copied().sum::<u64>(),\n            )\n        });\n        let total_escrowed = self\n            .escrowed\n            .read(|book| book.balances.values().copied().sum::<u64>());\n        VaultTotals {\n            account_count,\n            total_available,\n            total_escrowed,\n        }\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_escrow_vault_safe",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_split_escrow_vault",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::{HashMap, VecDeque};\n\n#[derive(Clone, Debug)]\npub struct EscrowConfig {\n    pub currency_code: Str,\n    pub max_accounts: usize,\n    pub max_audit_rows: usize,\n    pub min_hold_cents: u64,\n}\n\nimpl EscrowConfig {\n    pub fn validate_hold(&self, cents: u64) -> Result<(), EscrowError> {\n        if cents < self.min_hold_cents {\n            return Err(EscrowError::BelowMinimum {\n                requested: cents,\n                minimum: self.min_hold_cents,\n            });\n        }\n        Ok(())\n    }\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum EscrowError {\n    AccountLimitReached,\n    AccountNotFound(u64),\n    BelowMinimum { requested: u64, minimum: u64 },\n    InsufficientAvailable { available: u64, requested: u64 },\n    InsufficientEscrowed { escrowed: u64, requested: u64 },\n}\n\n#[derive(Clone, Debug)]\npub struct EscrowAuditRow {\n    pub account_id: u64,\n    pub delta_cents: u64,\n    pub kind: &'static str,\n}\n\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct VaultTotals {\n    pub account_count: usize,\n    pub total_available: u64,\n    pub total_escrowed: u64,\n}\n\nimpl VaultTotals {\n    pub fn combined_liability(self) -> u64 {\n        self.total_available.saturating_add(self.total_escrowed)\n    }\n}\n\n#[derive(Clone, Copy, Debug, Default)]\nstruct AccountPair {\n    available: u64,\n    escrowed: u64,\n}\n\nstruct EscrowState {\n    accounts: HashMap<u64, AccountPair>,\n    audit: VecDeque<EscrowAuditRow>,\n}\n\nimpl EscrowState {\n    fn new(max_audit: usize) -> Self {\n        Self {\n            accounts: HashMap::new(),\n            audit: VecDeque::with_capacity(max_audit.min(128)),\n        }\n    }\n\n    fn record(&mut self, row: EscrowAuditRow, cap: usize) {\n        if cap == 0 {\n            return;\n        }\n        while self.audit.len() >= cap {\n            self.audit.pop_front();\n        }\n        self.audit.push_back(row);\n    }\n}\n\npub struct EscrowVault {\n    config: EscrowConfig,\n    state: Actor<EscrowState>,\n}\n\nimpl EscrowVault {\n    pub fn new(config: EscrowConfig) -> Self {\n        let cap = config.max_audit_rows;\n        Self {\n            config,\n            state: Actor::new(EscrowState::new(cap)),\n        }\n    }\n\n    pub fn currency_code(&self) -> &Str {\n        &self.config.currency_code\n    }\n\n    pub fn open_account(&self, account_id: u64, initial_cents: u64) -> Result<(), EscrowError> {\n        let max_accounts = self.config.max_accounts;\n        self.state.with(|s| {\n            if !s.accounts.contains_key(&account_id) && s.accounts.len() >= max_accounts {\n                return Err(EscrowError::AccountLimitReached);\n            }\n            s.accounts.entry(account_id).or_insert(AccountPair {\n                available: initial_cents,\n                escrowed: 0,\n            });\n            Ok(())\n        })\n    }\n\n    pub fn close_account(&self, account_id: u64) -> Result<u64, EscrowError> {\n        self.state.with(|s| {\n            let pair = s\n                .accounts\n                .remove(&account_id)\n                .ok_or(EscrowError::AccountNotFound(account_id))?;\n            Ok(pair.available.saturating_add(pair.escrowed))\n        })\n    }\n\n    pub fn place_hold(&self, account_id: u64, cents: u64) -> Result<(), EscrowError> {\n        self.config.validate_hold(cents)?;\n        let cap = self.config.max_audit_rows;\n        self.state.with(|s| {\n            let pair = s\n                .accounts\n                .get_mut(&account_id)\n                .ok_or(EscrowError::AccountNotFound(account_id))?;\n            if pair.available < cents {\n                return Err(EscrowError::InsufficientAvailable {\n                    available: pair.available,\n                    requested: cents,\n                });\n            }\n            pair.available -= cents;\n            pair.escrowed = pair.escrowed.saturating_add(cents);\n            s.record(\n                EscrowAuditRow {\n                    account_id,\n                    delta_cents: cents,\n                    kind: \"hold\",\n                },\n                cap,\n            );\n            Ok(())\n        })\n    }\n\n    pub fn release_hold(&self, account_id: u64, cents: u64) -> Result<(), EscrowError> {\n        let cap = self.config.max_audit_rows;\n        self.state.with(|s| {\n            let pair = s\n                .accounts\n                .get_mut(&account_id)\n                .ok_or(EscrowError::AccountNotFound(account_id))?;\n            if pair.escrowed < cents {\n                return Err(EscrowError::InsufficientEscrowed {\n                    escrowed: pair.escrowed,\n                    requested: cents,\n                });\n            }\n            pair.escrowed -= cents;\n            pair.available = pair.available.saturating_add(cents);\n            s.record(\n                EscrowAuditRow {\n                    account_id,\n                    delta_cents: cents,\n                    kind: \"release\",\n                },\n                cap,\n            );\n            Ok(())\n        })\n    }\n\n    pub fn totals(&self) -> VaultTotals {\n        self.state.read(|s| {\n            let mut total_available = 0u64;\n            let mut total_escrowed = 0u64;\n            for pair in s.accounts.values() {\n                total_available = total_available.saturating_add(pair.available);\n                total_escrowed = total_escrowed.saturating_add(pair.escrowed);\n            }\n            VaultTotals {\n                account_count: s.accounts.len(),\n                total_available,\n                total_escrowed,\n            }\n        })\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_dispatch_depth_bug",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_split_dispatch_depth",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::VecDeque;\nuse std::sync::atomic::{AtomicUsize, Ordering};\n\n#[derive(Clone, Debug)]\npub struct DispatchConfig {\n    pub queue_name: Str,\n    pub max_depth: usize,\n}\n\n#[derive(Clone, Debug)]\npub struct JobPacket {\n    pub job_id: u64,\n    pub priority: u8,\n    pub label: Str,\n}\n\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum QueueError {\n    Full { capacity: usize },\n}\n\npub struct JobDispatcher {\n    config: DispatchConfig,\n    queue: Actor<VecDeque<JobPacket>>,\n    depth: AtomicUsize,\n}\n\nimpl JobDispatcher {\n    pub fn new(config: DispatchConfig) -> Self {\n        let cap = config.max_depth;\n        Self {\n            config,\n            queue: Actor::new(VecDeque::with_capacity(cap.min(256))),\n            depth: AtomicUsize::new(0),\n        }\n    }\n\n    pub fn queue_name(&self) -> &Str {\n        &self.config.queue_name\n    }\n\n    pub fn pending_depth(&self) -> usize {\n        self.depth.load(Ordering::Acquire)\n    }\n\n    pub fn enqueue(&self, job: JobPacket) -> Result<usize, QueueError> {\n        if self.depth.load(Ordering::Acquire) >= self.config.max_depth {\n            return Err(QueueError::Full {\n                capacity: self.config.max_depth,\n            });\n        }\n        self.queue.with(|q| q.push_back(job));\n        let prev = self.depth.fetch_add(1, Ordering::AcqRel);\n        Ok(prev + 1)\n    }\n\n    pub fn dequeue(&self) -> Option<JobPacket> {\n        let item = self.queue.with(VecDeque::pop_front);\n        if item.is_some() {\n            self.depth.fetch_sub(1, Ordering::AcqRel);\n        }\n        item\n    }\n\n    pub fn clear(&self) -> usize {\n        let removed = self.queue.with(|q| {\n            let n = q.len();\n            q.clear();\n            n\n        });\n        self.depth.store(0, Ordering::Release);\n        removed\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_dispatch_depth_safe",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_split_dispatch_depth",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::VecDeque;\n\n#[derive(Clone, Debug)]\npub struct DispatchConfig {\n    pub queue_name: Str,\n    pub max_depth: usize,\n}\n\n#[derive(Clone, Debug)]\npub struct JobPacket {\n    pub job_id: u64,\n    pub priority: u8,\n    pub label: Str,\n}\n\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum QueueError {\n    Full { capacity: usize },\n}\n\npub struct JobDispatcher {\n    config: DispatchConfig,\n    queue: Actor<VecDeque<JobPacket>>,\n}\n\nimpl JobDispatcher {\n    pub fn new(config: DispatchConfig) -> Self {\n        let cap = config.max_depth;\n        Self {\n            config,\n            queue: Actor::new(VecDeque::with_capacity(cap.min(256))),\n        }\n    }\n\n    pub fn queue_name(&self) -> &Str {\n        &self.config.queue_name\n    }\n\n    pub fn pending_depth(&self) -> usize {\n        self.queue.read(VecDeque::len)\n    }\n\n    pub fn enqueue(&self, job: JobPacket) -> Result<usize, QueueError> {\n        let cap = self.config.max_depth;\n        self.queue.with(|q| {\n            if q.len() >= cap {\n                return Err(QueueError::Full { capacity: cap });\n            }\n            q.push_back(job);\n            Ok(q.len())\n        })\n    }\n\n    pub fn dequeue(&self) -> Option<JobPacket> {\n        self.queue.with(VecDeque::pop_front)\n    }\n\n    pub fn clear(&self) -> usize {\n        self.queue.with(|q| {\n            let n = q.len();\n            q.clear();\n            n\n        })\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_circuit_breaker_bug",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_split_circuit_breaker",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::VecDeque;\nuse std::sync::atomic::{AtomicBool, Ordering};\n\n#[derive(Clone, Debug)]\npub struct BreakerConfig {\n    pub upstream: Str,\n    pub failure_threshold: usize,\n    pub window_size: usize,\n    pub cooldown_ms: u64,\n}\n\nstruct FailureWindow {\n    recent_ms: VecDeque<u64>,\n    opened_at_ms: Option<u64>,\n}\n\nimpl FailureWindow {\n    fn new(window_size: usize) -> Self {\n        Self {\n            recent_ms: VecDeque::with_capacity(window_size.min(64)),\n            opened_at_ms: None,\n        }\n    }\n}\n\npub struct CircuitBreaker {\n    config: BreakerConfig,\n    tripped: AtomicBool,\n    window: Actor<FailureWindow>,\n}\n\nimpl CircuitBreaker {\n    pub fn new(config: BreakerConfig) -> Self {\n        let size = config.window_size;\n        Self {\n            config,\n            tripped: AtomicBool::new(false),\n            window: Actor::new(FailureWindow::new(size)),\n        }\n    }\n\n    pub fn upstream(&self) -> &Str {\n        &self.config.upstream\n    }\n\n    pub fn allow_call(&self, now_ms: u64) -> bool {\n        if !self.tripped.load(Ordering::Acquire) {\n            return true;\n        }\n        let cooldown = self.config.cooldown_ms;\n        let expired = self.window.read(|w| {\n            w.opened_at_ms\n                .is_some_and(|ts| now_ms.saturating_sub(ts) >= cooldown)\n        });\n        if expired {\n            self.tripped.store(false, Ordering::Release);\n            self.window.with(|w| {\n                w.opened_at_ms = None;\n                w.recent_ms.clear();\n            });\n            return true;\n        }\n        false\n    }\n\n    pub fn record_failure(&self, now_ms: u64) -> bool {\n        let threshold = self.config.failure_threshold;\n        let max_window = self.config.window_size;\n        let should_trip = self.window.with(|w| {\n            while w.recent_ms.len() >= max_window {\n                w.recent_ms.pop_front();\n            }\n            w.recent_ms.push_back(now_ms);\n            if w.recent_ms.len() >= threshold {\n                w.opened_at_ms = Some(now_ms);\n                true\n            } else {\n                false\n            }\n        });\n        if should_trip {\n            self.tripped.store(true, Ordering::Release);\n        }\n        should_trip\n    }\n\n    pub fn record_success(&self) {\n        self.tripped.store(false, Ordering::Release);\n        self.window.with(|w| {\n            w.opened_at_ms = None;\n            w.recent_ms.clear();\n        });\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_circuit_breaker_safe",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_split_circuit_breaker",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::VecDeque;\n\n#[derive(Clone, Debug)]\npub struct BreakerConfig {\n    pub upstream: Str,\n    pub failure_threshold: usize,\n    pub window_size: usize,\n    pub cooldown_ms: u64,\n}\n\nstruct BreakerState {\n    tripped: bool,\n    recent_ms: VecDeque<u64>,\n    opened_at_ms: Option<u64>,\n}\n\nimpl BreakerState {\n    fn new(window_size: usize) -> Self {\n        Self {\n            tripped: false,\n            recent_ms: VecDeque::with_capacity(window_size.min(64)),\n            opened_at_ms: None,\n        }\n    }\n}\n\npub struct CircuitBreaker {\n    config: BreakerConfig,\n    state: Actor<BreakerState>,\n}\n\nimpl CircuitBreaker {\n    pub fn new(config: BreakerConfig) -> Self {\n        let size = config.window_size;\n        Self {\n            config,\n            state: Actor::new(BreakerState::new(size)),\n        }\n    }\n\n    pub fn upstream(&self) -> &Str {\n        &self.config.upstream\n    }\n\n    pub fn allow_call(&self, now_ms: u64) -> bool {\n        let cooldown = self.config.cooldown_ms;\n        self.state.with(|s| {\n            if !s.tripped {\n                return true;\n            }\n            let expired = s\n                .opened_at_ms\n                .is_some_and(|ts| now_ms.saturating_sub(ts) >= cooldown);\n            if expired {\n                s.tripped = false;\n                s.opened_at_ms = None;\n                s.recent_ms.clear();\n                return true;\n            }\n            false\n        })\n    }\n\n    pub fn record_failure(&self, now_ms: u64) -> bool {\n        let threshold = self.config.failure_threshold;\n        let max_window = self.config.window_size;\n        self.state.with(|s| {\n            while s.recent_ms.len() >= max_window {\n                s.recent_ms.pop_front();\n            }\n            s.recent_ms.push_back(now_ms);\n            if s.recent_ms.len() >= threshold {\n                s.tripped = true;\n                s.opened_at_ms = Some(now_ms);\n                true\n            } else {\n                false\n            }\n        })\n    }\n\n    pub fn record_success(&self) {\n        self.state.with(|s| {\n            s.tripped = false;\n            s.opened_at_ms = None;\n            s.recent_ms.clear();\n        });\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_tag_directory_bug",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_split_tag_directory",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::{HashMap, VecDeque};\n\n#[derive(Clone, Debug)]\npub struct DirectoryConfig {\n    pub namespace: Str,\n    pub max_docs: usize,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum DirectoryError {\n    EmptyTag,\n    NotFound(u64),\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub struct DirectoryStats {\n    pub indexed_docs: usize,\n    pub distinct_tags: usize,\n    pub summed_tag_counts: usize,\n}\n\nimpl DirectoryStats {\n    pub fn is_balanced(&self) -> bool {\n        self.indexed_docs == self.summed_tag_counts\n    }\n}\n\nstruct PrimaryIndex {\n    doc_to_tag: HashMap<u64, Str>,\n    insertion_order: VecDeque<u64>,\n}\n\nimpl PrimaryIndex {\n    fn new(cap: usize) -> Self {\n        Self {\n            doc_to_tag: HashMap::with_capacity(cap.min(256)),\n            insertion_order: VecDeque::with_capacity(cap.min(256)),\n        }\n    }\n}\n\npub struct TagDirectory {\n    config: DirectoryConfig,\n    primary: Actor<PrimaryIndex>,\n    tag_counts: Actor<HashMap<Str, usize>>,\n}\n\nimpl TagDirectory {\n    pub fn new(config: DirectoryConfig) -> Self {\n        let cap = config.max_docs;\n        Self {\n            config,\n            primary: Actor::new(PrimaryIndex::new(cap)),\n            tag_counts: Actor::new(HashMap::new()),\n        }\n    }\n\n    pub fn namespace(&self) -> &Str {\n        &self.config.namespace\n    }\n\n    pub fn tag_of(&self, doc_id: u64) -> Option<Str> {\n        self.primary.read(|p| p.doc_to_tag.get(&doc_id).cloned())\n    }\n\n    pub fn count_for_tag(&self, tag: &str) -> usize {\n        self.tag_counts\n            .read(|counts| counts.get(tag).copied().unwrap_or(0))\n    }\n\n    pub fn assign_tag(&self, doc_id: u64, tag: Str) -> Result<Option<Str>, DirectoryError> {\n        if tag.is_empty() {\n            return Err(DirectoryError::EmptyTag);\n        }\n        let max_docs = self.config.max_docs;\n        let (previous_tag, evicted_tag) = self.primary.with(|p| {\n            let mut evicted = None;\n            if !p.doc_to_tag.contains_key(&doc_id) {\n                while p.doc_to_tag.len() >= max_docs {\n                    if let Some(old_id) = p.insertion_order.pop_front() {\n                        if let Some(old_tag) = p.doc_to_tag.remove(&old_id) {\n                            evicted = Some(old_tag);\n                            break;\n                        }\n                    } else {\n                        break;\n                    }\n                }\n                p.insertion_order.push_back(doc_id);\n            }\n            let prev = p.doc_to_tag.insert(doc_id, tag.clone());\n            (prev, evicted)\n        });\n\n        self.tag_counts.with(|counts| {\n            if let Some(old_tag) = evicted_tag {\n                decrement_tag(counts, &old_tag);\n            }\n            if let Some(ref prev_tag) = previous_tag {\n                decrement_tag(counts, prev_tag);\n            }\n            *counts.entry(tag).or_insert(0) += 1;\n        });\n\n        Ok(previous_tag)\n    }\n\n    pub fn remove_doc(&self, doc_id: u64) -> Result<Str, DirectoryError> {\n        let removed = self\n            .primary\n            .with(|p| {\n                p.insertion_order.retain(|&id| id != doc_id);\n                p.doc_to_tag.remove(&doc_id)\n            })\n            .ok_or(DirectoryError::NotFound(doc_id))?;\n\n        self.tag_counts.with(|counts| {\n            decrement_tag(counts, &removed);\n        });\n        Ok(removed)\n    }\n\n    pub fn stats(&self) -> DirectoryStats {\n        let indexed_docs = self.primary.read(|p| p.doc_to_tag.len());\n        let (distinct_tags, summed_tag_counts) = self\n            .tag_counts\n            .read(|counts| (counts.len(), counts.values().copied().sum::<usize>()));\n        DirectoryStats {\n            indexed_docs,\n            distinct_tags,\n            summed_tag_counts,\n        }\n    }\n\n    pub fn clear(&self) {\n        self.primary.with(|p| {\n            p.doc_to_tag.clear();\n            p.insertion_order.clear();\n        });\n        self.tag_counts.with(HashMap::clear);\n    }\n}\n\nfn decrement_tag(counts: &mut HashMap<Str, usize>, tag: &str) {\n    if let Some(entry) = counts.get_mut(tag) {\n        if *entry <= 1 {\n            counts.remove(tag);\n        } else {\n            *entry -= 1;\n        }\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_tag_directory_safe",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_split_tag_directory",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::{HashMap, VecDeque};\n\n#[derive(Clone, Debug)]\npub struct DirectoryConfig {\n    pub namespace: Str,\n    pub max_docs: usize,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum DirectoryError {\n    EmptyTag,\n    NotFound(u64),\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub struct DirectoryStats {\n    pub indexed_docs: usize,\n    pub distinct_tags: usize,\n    pub summed_tag_counts: usize,\n}\n\nimpl DirectoryStats {\n    pub fn is_balanced(&self) -> bool {\n        self.indexed_docs == self.summed_tag_counts\n    }\n}\n\nstruct DirectoryState {\n    doc_to_tag: HashMap<u64, Str>,\n    insertion_order: VecDeque<u64>,\n    tag_counts: HashMap<Str, usize>,\n}\n\nimpl DirectoryState {\n    fn new(cap: usize) -> Self {\n        Self {\n            doc_to_tag: HashMap::with_capacity(cap.min(256)),\n            insertion_order: VecDeque::with_capacity(cap.min(256)),\n            tag_counts: HashMap::new(),\n        }\n    }\n}\n\npub struct TagDirectory {\n    config: DirectoryConfig,\n    state: Actor<DirectoryState>,\n}\n\nimpl TagDirectory {\n    pub fn new(config: DirectoryConfig) -> Self {\n        let cap = config.max_docs;\n        Self {\n            config,\n            state: Actor::new(DirectoryState::new(cap)),\n        }\n    }\n\n    pub fn namespace(&self) -> &Str {\n        &self.config.namespace\n    }\n\n    pub fn tag_of(&self, doc_id: u64) -> Option<Str> {\n        self.state.read(|s| s.doc_to_tag.get(&doc_id).cloned())\n    }\n\n    pub fn count_for_tag(&self, tag: &str) -> usize {\n        self.state\n            .read(|s| s.tag_counts.get(tag).copied().unwrap_or(0))\n    }\n\n    pub fn assign_tag(&self, doc_id: u64, tag: Str) -> Result<Option<Str>, DirectoryError> {\n        if tag.is_empty() {\n            return Err(DirectoryError::EmptyTag);\n        }\n        let max_docs = self.config.max_docs;\n        let previous = self.state.with(|s| {\n            if !s.doc_to_tag.contains_key(&doc_id) {\n                while s.doc_to_tag.len() >= max_docs {\n                    if let Some(old_id) = s.insertion_order.pop_front() {\n                        if let Some(old_tag) = s.doc_to_tag.remove(&old_id) {\n                            decrement_tag(&mut s.tag_counts, &old_tag);\n                            break;\n                        }\n                    } else {\n                        break;\n                    }\n                }\n                s.insertion_order.push_back(doc_id);\n            }\n            let prev = s.doc_to_tag.insert(doc_id, tag.clone());\n            if let Some(ref prev_tag) = prev {\n                decrement_tag(&mut s.tag_counts, prev_tag);\n            }\n            *s.tag_counts.entry(tag).or_insert(0) += 1;\n            prev\n        });\n        Ok(previous)\n    }\n\n    pub fn remove_doc(&self, doc_id: u64) -> Result<Str, DirectoryError> {\n        self.state.with(|s| {\n            s.insertion_order.retain(|&id| id != doc_id);\n            let removed = s\n                .doc_to_tag\n                .remove(&doc_id)\n                .ok_or(DirectoryError::NotFound(doc_id))?;\n            decrement_tag(&mut s.tag_counts, &removed);\n            Ok(removed)\n        })\n    }\n\n    pub fn stats(&self) -> DirectoryStats {\n        self.state.read(|s| DirectoryStats {\n            indexed_docs: s.doc_to_tag.len(),\n            distinct_tags: s.tag_counts.len(),\n            summed_tag_counts: s.tag_counts.values().copied().sum::<usize>(),\n        })\n    }\n\n    pub fn clear(&self) {\n        self.state.with(|s| {\n            s.doc_to_tag.clear();\n            s.insertion_order.clear();\n            s.tag_counts.clear();\n        });\n    }\n}\n\nfn decrement_tag(counts: &mut HashMap<Str, usize>, tag: &str) {\n    if let Some(entry) = counts.get_mut(tag) {\n        if *entry <= 1 {\n            counts.remove(tag);\n        } else {\n            *entry -= 1;\n        }\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_bandwidth_caps_bug",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_split_bandwidth_caps",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::Str;\nuse std::sync::atomic::{AtomicU64, Ordering};\n\n#[derive(Clone, Debug)]\npub struct LinkConfig {\n    pub link_id: Str,\n    pub total_kbps: u64,\n}\n\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum AllocError {\n    ZeroRequest,\n    OverCapacity { available: u64, requested: u64 },\n}\n\npub struct BandwidthPool {\n    config: LinkConfig,\n    guaranteed_kbps: AtomicU64,\n    burst_kbps: AtomicU64,\n}\n\nimpl BandwidthPool {\n    pub fn new(config: LinkConfig) -> Self {\n        Self {\n            config,\n            guaranteed_kbps: AtomicU64::new(0),\n            burst_kbps: AtomicU64::new(0),\n        }\n    }\n\n    pub fn link_id(&self) -> &Str {\n        &self.config.link_id\n    }\n\n    pub fn used_kbps(&self) -> u64 {\n        self.guaranteed_kbps\n            .load(Ordering::Acquire)\n            .saturating_add(self.burst_kbps.load(Ordering::Acquire))\n    }\n\n    pub fn reserve_guaranteed(&self, kbps: u64) -> Result<(), AllocError> {\n        if kbps == 0 {\n            return Err(AllocError::ZeroRequest);\n        }\n        let used = self.used_kbps();\n        let available = self.config.total_kbps.saturating_sub(used);\n        if kbps > available {\n            return Err(AllocError::OverCapacity {\n                available,\n                requested: kbps,\n            });\n        }\n        self.guaranteed_kbps.fetch_add(kbps, Ordering::AcqRel);\n        Ok(())\n    }\n\n    pub fn reserve_burst(&self, kbps: u64) -> Result<(), AllocError> {\n        if kbps == 0 {\n            return Err(AllocError::ZeroRequest);\n        }\n        let used = self.used_kbps();\n        let available = self.config.total_kbps.saturating_sub(used);\n        if kbps > available {\n            return Err(AllocError::OverCapacity {\n                available,\n                requested: kbps,\n            });\n        }\n        self.burst_kbps.fetch_add(kbps, Ordering::AcqRel);\n        Ok(())\n    }\n\n    pub fn release_guaranteed(&self, kbps: u64) {\n        self.guaranteed_kbps.fetch_sub(kbps, Ordering::AcqRel);\n    }\n\n    pub fn release_burst(&self, kbps: u64) {\n        self.burst_kbps.fetch_sub(kbps, Ordering::AcqRel);\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_bandwidth_caps_safe",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_split_bandwidth_caps",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\n\n#[derive(Clone, Debug)]\npub struct LinkConfig {\n    pub link_id: Str,\n    pub total_kbps: u64,\n}\n\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum AllocError {\n    ZeroRequest,\n    OverCapacity { available: u64, requested: u64 },\n}\n\n#[derive(Default)]\nstruct BandwidthState {\n    guaranteed_kbps: u64,\n    burst_kbps: u64,\n}\n\nimpl BandwidthState {\n    fn used(&self) -> u64 {\n        self.guaranteed_kbps.saturating_add(self.burst_kbps)\n    }\n}\n\npub struct BandwidthPool {\n    config: LinkConfig,\n    state: Actor<BandwidthState>,\n}\n\nimpl BandwidthPool {\n    pub fn new(config: LinkConfig) -> Self {\n        Self {\n            config,\n            state: Actor::new(BandwidthState::default()),\n        }\n    }\n\n    pub fn link_id(&self) -> &Str {\n        &self.config.link_id\n    }\n\n    pub fn used_kbps(&self) -> u64 {\n        self.state.read(BandwidthState::used)\n    }\n\n    pub fn reserve_guaranteed(&self, kbps: u64) -> Result<(), AllocError> {\n        if kbps == 0 {\n            return Err(AllocError::ZeroRequest);\n        }\n        let total = self.config.total_kbps;\n        self.state.with(|s| {\n            let available = total.saturating_sub(s.used());\n            if kbps > available {\n                return Err(AllocError::OverCapacity {\n                    available,\n                    requested: kbps,\n                });\n            }\n            s.guaranteed_kbps = s.guaranteed_kbps.saturating_add(kbps);\n            Ok(())\n        })\n    }\n\n    pub fn reserve_burst(&self, kbps: u64) -> Result<(), AllocError> {\n        if kbps == 0 {\n            return Err(AllocError::ZeroRequest);\n        }\n        let total = self.config.total_kbps;\n        self.state.with(|s| {\n            let available = total.saturating_sub(s.used());\n            if kbps > available {\n                return Err(AllocError::OverCapacity {\n                    available,\n                    requested: kbps,\n                });\n            }\n            s.burst_kbps = s.burst_kbps.saturating_add(kbps);\n            Ok(())\n        })\n    }\n\n    pub fn release_guaranteed(&self, kbps: u64) {\n        self.state.with(|s| {\n            s.guaranteed_kbps = s.guaranteed_kbps.saturating_sub(kbps);\n        });\n    }\n\n    pub fn release_burst(&self, kbps: u64) {\n        self.state.with(|s| {\n            s.burst_kbps = s.burst_kbps.saturating_sub(kbps);\n        });\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_routing_bundle_bug",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_split_routing_bundle",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::sync::atomic::{AtomicU64, Ordering};\n\n#[derive(Clone, Debug)]\npub struct RouterConfig {\n    pub region: Str,\n    pub max_routes: usize,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub struct RouteRule {\n    pub prefix: Str,\n    pub backend: Str,\n}\n\n#[derive(Clone, Debug)]\npub struct ResolvedRoute {\n    pub version: u64,\n    pub backend: Str,\n}\n\npub struct RouteBundle {\n    config: RouterConfig,\n    version: AtomicU64,\n    rules: Actor<Vec<RouteRule>>,\n}\n\nimpl RouteBundle {\n    pub fn new(config: RouterConfig) -> Self {\n        Self {\n            config,\n            version: AtomicU64::new(0),\n            rules: Actor::new(Vec::new()),\n        }\n    }\n\n    pub fn region(&self) -> &Str {\n        &self.config.region\n    }\n\n    pub fn publish_rules(&self, mut next_rules: Vec<RouteRule>) -> u64 {\n        next_rules.truncate(self.config.max_routes);\n        self.rules.with(|r| *r = next_rules);\n        self.version.fetch_add(1, Ordering::AcqRel) + 1\n    }\n\n    pub fn resolve(&self, path: &str) -> Option<ResolvedRoute> {\n        let version = self.version.load(Ordering::Acquire);\n        let backend = self.rules.read(|r| {\n            r.iter()\n                .find(|rule| path.starts_with(rule.prefix.as_str()))\n                .map(|rule| rule.backend.clone())\n        })?;\n        Some(ResolvedRoute { version, backend })\n    }\n\n    pub fn current_version(&self) -> u64 {\n        self.version.load(Ordering::Acquire)\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_routing_bundle_safe",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_split_routing_bundle",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\n\n#[derive(Clone, Debug)]\npub struct RouterConfig {\n    pub region: Str,\n    pub max_routes: usize,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub struct RouteRule {\n    pub prefix: Str,\n    pub backend: Str,\n}\n\n#[derive(Clone, Debug)]\npub struct ResolvedRoute {\n    pub version: u64,\n    pub backend: Str,\n}\n\n#[derive(Default)]\nstruct VersionedRules {\n    version: u64,\n    rules: Vec<RouteRule>,\n}\n\npub struct RouteBundle {\n    config: RouterConfig,\n    state: Actor<VersionedRules>,\n}\n\nimpl RouteBundle {\n    pub fn new(config: RouterConfig) -> Self {\n        Self {\n            config,\n            state: Actor::new(VersionedRules::default()),\n        }\n    }\n\n    pub fn region(&self) -> &Str {\n        &self.config.region\n    }\n\n    pub fn publish_rules(&self, mut next_rules: Vec<RouteRule>) -> u64 {\n        next_rules.truncate(self.config.max_routes);\n        self.state.with(|s| {\n            s.rules = next_rules;\n            s.version += 1;\n            s.version\n        })\n    }\n\n    pub fn resolve(&self, path: &str) -> Option<ResolvedRoute> {\n        self.state.read(|s| {\n            let backend = s\n                .rules\n                .iter()\n                .find(|rule| path.starts_with(rule.prefix.as_str()))\n                .map(|rule| rule.backend.clone())?;\n            Some(ResolvedRoute {\n                version: s.version,\n                backend,\n            })\n        })\n    }\n\n    pub fn current_version(&self) -> u64 {\n        self.state.read(|s| s.version)\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_lint_two_rwlocks_bug",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "lint_overlap",
+    "pair": null,
+    "existing_lint": "clippy::disallowed_types",
+    "labels": {
+      "split_actor_invariant": "violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::Str;\nuse std::sync::{Arc, RwLock};\n\n#[derive(Clone, Debug)]\npub struct BatchLedgerConfig {\n    pub merchant: Str,\n    pub max_invoices: usize,\n}\n\n#[derive(Clone, Debug)]\npub struct InvoiceItem {\n    pub invoice_id: u64,\n    pub amount_cents: u64,\n}\n\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum BatchError {\n    BatchFull,\n}\n\npub struct InvoiceBatch {\n    config: BatchLedgerConfig,\n    items: Arc<RwLock<Vec<InvoiceItem>>>,\n    total_cents: Arc<RwLock<u64>>,\n}\n\nimpl InvoiceBatch {\n    pub fn new(config: BatchLedgerConfig) -> Self {\n        Self {\n            config,\n            items: Arc::new(RwLock::new(Vec::new())),\n            total_cents: Arc::new(RwLock::new(0)),\n        }\n    }\n\n    pub fn merchant(&self) -> &Str {\n        &self.config.merchant\n    }\n\n    pub fn add_invoice(&self, item: InvoiceItem) -> Result<(), BatchError> {\n        let amount = item.amount_cents;\n        {\n            let mut items = self.items.write().unwrap();\n            if items.len() >= self.config.max_invoices {\n                return Err(BatchError::BatchFull);\n            }\n            items.push(item);\n        }\n        let mut total = self.total_cents.write().unwrap();\n        *total = total.saturating_add(amount);\n        Ok(())\n    }\n\n    pub fn drain_all(&self) -> (Vec<InvoiceItem>, u64) {\n        let drained = {\n            let mut items = self.items.write().unwrap();\n            std::mem::take(&mut *items)\n        };\n        let total = {\n            let mut total = self.total_cents.write().unwrap();\n            let prev = *total;\n            *total = 0;\n            prev\n        };\n        (drained, total)\n    }\n\n    pub fn summary(&self) -> (usize, u64) {\n        let count = self.items.read().unwrap().len();\n        let total = *self.total_cents.read().unwrap();\n        (count, total)\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_decoy_nested_actor_safe",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "lint_decoy",
+    "pair": null,
+    "existing_lint": "adamantium_nested_actor",
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\n\n#[derive(Clone, Debug)]\npub struct WarehouseConfig {\n    pub site_code: Str,\n    pub max_stock: u64,\n}\n\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum StockError {\n    OverCapacity,\n    Insufficient,\n}\n\n#[derive(Default)]\nstruct StockState {\n    on_hand: u64,\n    shipped: u64,\n}\n\npub struct WarehouseCounter {\n    config: WarehouseConfig,\n    state: Actor<StockState>,\n}\n\nimpl WarehouseCounter {\n    pub fn new(config: WarehouseConfig) -> Self {\n        Self {\n            config,\n            state: Actor::new(StockState::default()),\n        }\n    }\n\n    pub fn site_code(&self) -> &Str {\n        &self.config.site_code\n    }\n\n    pub fn on_hand(&self) -> u64 {\n        self.state.read(|s| s.on_hand)\n    }\n\n    pub fn receive_units(&self, count: u64) -> Result<u64, StockError> {\n        let max_stock = self.config.max_stock;\n        self.state.with(|s| {\n            let current = self.on_hand();\n            let next = current.saturating_add(count);\n            if next > max_stock {\n                return Err(StockError::OverCapacity);\n            }\n            s.on_hand = next;\n            Ok(s.on_hand)\n        })\n    }\n\n    pub fn ship_units(&self, count: u64) -> Result<u64, StockError> {\n        self.state.with(|s| {\n            if s.on_hand < count {\n                return Err(StockError::Insufficient);\n            }\n            s.on_hand -= count;\n            s.shipped = s.shipped.saturating_add(count);\n            Ok(s.on_hand)\n        })\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_split_insuff_external_stores",
+    "rule": "split_actor_invariant",
+    "split": "held_out",
+    "slice": "insufficient_context",
+    "pair": null,
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "insufficient_context",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use crate::pipeline::{EgressGate, GateError, IngressGate};\nuse adamantium::{Actor, Str};\n\n#[derive(Clone, Debug)]\npub struct BridgeConfig {\n    pub lane_name: Str,\n    pub dry_run: bool,\n}\n\n#[derive(Clone, Copy, Debug)]\npub struct StepStatus {\n    pub ingress_seq: u64,\n    pub egress_seq: u64,\n}\n\npub struct GateCoordinator {\n    config: BridgeConfig,\n    ingress: Actor<IngressGate>,\n    egress: Actor<EgressGate>,\n}\n\nimpl GateCoordinator {\n    pub fn new(\n        config: BridgeConfig,\n        ingress: Actor<IngressGate>,\n        egress: Actor<EgressGate>,\n    ) -> Self {\n        Self {\n            config,\n            ingress,\n            egress,\n        }\n    }\n\n    pub fn lane_name(&self) -> &Str {\n        &self.config.lane_name\n    }\n\n    pub fn advance_lane(&self, token: u64) -> Result<StepStatus, GateError> {\n        if self.config.dry_run {\n            return Ok(StepStatus {\n                ingress_seq: 0,\n                egress_seq: 0,\n            });\n        }\n        let ingress_seq = self.ingress.with(|g| g.advance(token))?;\n        let egress_seq = self.egress.with(|g| g.advance(token))?;\n        Ok(StepStatus {\n            ingress_seq,\n            egress_seq,\n        })\n    }\n\n    pub fn ready(&self) -> bool {\n        let in_ready = self.ingress.read(IngressGate::is_open);\n        let out_ready = self.egress.read(EgressGate::is_open);\n        in_ready && out_ready\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_quota_wallet_bug",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_stale_quota_wallet",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::VecDeque;\n\n#[derive(Clone, Debug)]\npub struct WalletConfig {\n    pub org_slug: Str,\n    pub monthly_limit: u64,\n    pub alert_percent: u8,\n    pub max_receipts: usize,\n}\n\nimpl WalletConfig {\n    pub fn alert_threshold(&self) -> u64 {\n        self.monthly_limit\n            .saturating_mul(u64::from(self.alert_percent))\n            / 100\n    }\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum WalletError {\n    InvalidCharge,\n    LimitExceeded { requested: u64, remaining: u64 },\n    BillingBackend(Str),\n}\n\n#[derive(Clone, Debug)]\npub struct UsageEvent {\n    pub event_id: u64,\n    pub sku: Str,\n    pub units: u64,\n    pub unit_price: u64,\n}\n\nimpl UsageEvent {\n    pub fn total_cost(&self) -> Result<u64, WalletError> {\n        let cost = self.units.saturating_mul(self.unit_price);\n        if cost == 0 {\n            return Err(WalletError::InvalidCharge);\n        }\n        Ok(cost)\n    }\n}\n\n#[derive(Clone, Debug)]\npub struct ChargeReceipt {\n    pub event_id: u64,\n    pub charged: u64,\n    pub remaining: u64,\n}\n\n#[derive(Clone, Debug)]\npub struct WalletSummary {\n    pub spent: u64,\n    pub remaining: u64,\n    pub accepted_events: u64,\n    pub denied_events: u64,\n    pub alert_triggered: bool,\n}\n\nstruct WalletState {\n    spent: u64,\n    accepted_events: u64,\n    denied_events: u64,\n    receipts: VecDeque<ChargeReceipt>,\n}\n\nimpl WalletState {\n    fn new(max_receipts: usize) -> Self {\n        Self {\n            spent: 0,\n            accepted_events: 0,\n            denied_events: 0,\n            receipts: VecDeque::with_capacity(max_receipts.min(128)),\n        }\n    }\n\n    fn push_receipt(&mut self, receipt: ChargeReceipt, cap: usize) {\n        if cap == 0 {\n            return;\n        }\n        while self.receipts.len() >= cap {\n            self.receipts.pop_front();\n        }\n        self.receipts.push_back(receipt);\n    }\n}\n\npub struct OrgUsageWallet {\n    config: WalletConfig,\n    state: Actor<WalletState>,\n}\n\nimpl OrgUsageWallet {\n    pub fn new(config: WalletConfig) -> Self {\n        let cap = config.max_receipts;\n        Self {\n            config,\n            state: Actor::new(WalletState::new(cap)),\n        }\n    }\n\n    pub fn org_slug(&self) -> &Str {\n        &self.config.org_slug\n    }\n\n    pub fn summary(&self) -> WalletSummary {\n        let limit = self.config.monthly_limit;\n        let alert_at = self.config.alert_threshold();\n        self.state.read(|s| WalletSummary {\n            spent: s.spent,\n            remaining: limit.saturating_sub(s.spent),\n            accepted_events: s.accepted_events,\n            denied_events: s.denied_events,\n            alert_triggered: s.spent >= alert_at,\n        })\n    }\n\n    pub fn recent_receipts(&self, count: usize) -> Vec<ChargeReceipt> {\n        self.state.read(|s| {\n            let skip = s.receipts.len().saturating_sub(count);\n            s.receipts.iter().skip(skip).cloned().collect()\n        })\n    }\n\n    pub fn reset_billing_cycle(&self) -> u64 {\n        self.state.with(|s| {\n            let previous = s.spent;\n            s.spent = 0;\n            s.receipts.clear();\n            previous\n        })\n    }\n\n    pub fn has_room_for(&self, cost: u64) -> bool {\n        let limit = self.config.monthly_limit;\n        self.state.read(|s| s.spent.saturating_add(cost) <= limit)\n    }\n\n    pub async fn charge_usage(&self, event: &UsageEvent) -> Result<ChargeReceipt, WalletError> {\n        let cost = event.total_cost()?;\n        let limit = self.config.monthly_limit;\n        let remaining = self.state.read(|s| limit.saturating_sub(s.spent));\n        if remaining < cost {\n            self.state.with(|s| s.denied_events += 1);\n            return Err(WalletError::LimitExceeded {\n                requested: cost,\n                remaining,\n            });\n        }\n\n        dispatch_billing_event(event.event_id, &event.sku, cost)\n            .await\n            .map_err(WalletError::BillingBackend)?;\n\n        let cap = self.config.max_receipts;\n        let receipt = self.state.with(|s| {\n            s.spent = s.spent.saturating_add(cost);\n            s.accepted_events += 1;\n            let rem = limit.saturating_sub(s.spent);\n            let receipt = ChargeReceipt {\n                event_id: event.event_id,\n                charged: cost,\n                remaining: rem,\n            };\n            s.push_receipt(receipt.clone(), cap);\n            receipt\n        });\n        Ok(receipt)\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_quota_wallet_safe",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_stale_quota_wallet",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::VecDeque;\n\n#[derive(Clone, Debug)]\npub struct WalletConfig {\n    pub org_slug: Str,\n    pub monthly_limit: u64,\n    pub alert_percent: u8,\n    pub max_receipts: usize,\n}\n\nimpl WalletConfig {\n    pub fn alert_threshold(&self) -> u64 {\n        self.monthly_limit\n            .saturating_mul(u64::from(self.alert_percent))\n            / 100\n    }\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum WalletError {\n    InvalidCharge,\n    LimitExceeded { requested: u64, remaining: u64 },\n    BillingBackend(Str),\n}\n\n#[derive(Clone, Debug)]\npub struct UsageEvent {\n    pub event_id: u64,\n    pub sku: Str,\n    pub units: u64,\n    pub unit_price: u64,\n}\n\nimpl UsageEvent {\n    pub fn total_cost(&self) -> Result<u64, WalletError> {\n        let cost = self.units.saturating_mul(self.unit_price);\n        if cost == 0 {\n            return Err(WalletError::InvalidCharge);\n        }\n        Ok(cost)\n    }\n}\n\n#[derive(Clone, Debug)]\npub struct ChargeReceipt {\n    pub event_id: u64,\n    pub charged: u64,\n    pub remaining: u64,\n}\n\n#[derive(Clone, Debug)]\npub struct WalletSummary {\n    pub spent: u64,\n    pub remaining: u64,\n    pub accepted_events: u64,\n    pub denied_events: u64,\n    pub alert_triggered: bool,\n}\n\nstruct WalletState {\n    spent: u64,\n    accepted_events: u64,\n    denied_events: u64,\n    receipts: VecDeque<ChargeReceipt>,\n}\n\nimpl WalletState {\n    fn new(max_receipts: usize) -> Self {\n        Self {\n            spent: 0,\n            accepted_events: 0,\n            denied_events: 0,\n            receipts: VecDeque::with_capacity(max_receipts.min(128)),\n        }\n    }\n\n    fn push_receipt(&mut self, receipt: ChargeReceipt, cap: usize) {\n        if cap == 0 {\n            return;\n        }\n        while self.receipts.len() >= cap {\n            self.receipts.pop_front();\n        }\n        self.receipts.push_back(receipt);\n    }\n}\n\npub struct OrgUsageWallet {\n    config: WalletConfig,\n    state: Actor<WalletState>,\n}\n\nimpl OrgUsageWallet {\n    pub fn new(config: WalletConfig) -> Self {\n        let cap = config.max_receipts;\n        Self {\n            config,\n            state: Actor::new(WalletState::new(cap)),\n        }\n    }\n\n    pub fn org_slug(&self) -> &Str {\n        &self.config.org_slug\n    }\n\n    pub fn summary(&self) -> WalletSummary {\n        let limit = self.config.monthly_limit;\n        let alert_at = self.config.alert_threshold();\n        self.state.read(|s| WalletSummary {\n            spent: s.spent,\n            remaining: limit.saturating_sub(s.spent),\n            accepted_events: s.accepted_events,\n            denied_events: s.denied_events,\n            alert_triggered: s.spent >= alert_at,\n        })\n    }\n\n    pub fn recent_receipts(&self, count: usize) -> Vec<ChargeReceipt> {\n        self.state.read(|s| {\n            let skip = s.receipts.len().saturating_sub(count);\n            s.receipts.iter().skip(skip).cloned().collect()\n        })\n    }\n\n    pub fn reset_billing_cycle(&self) -> u64 {\n        self.state.with(|s| {\n            let previous = s.spent;\n            s.spent = 0;\n            s.receipts.clear();\n            previous\n        })\n    }\n\n    pub fn has_room_for(&self, cost: u64) -> bool {\n        let limit = self.config.monthly_limit;\n        self.state.read(|s| s.spent.saturating_add(cost) <= limit)\n    }\n\n    pub async fn charge_usage(&self, event: &UsageEvent) -> Result<ChargeReceipt, WalletError> {\n        let cost = event.total_cost()?;\n        let limit = self.config.monthly_limit;\n        let cap = self.config.max_receipts;\n        let receipt = self.state.with(|s| {\n            let remaining = limit.saturating_sub(s.spent);\n            if remaining < cost {\n                s.denied_events += 1;\n                return Err(WalletError::LimitExceeded {\n                    requested: cost,\n                    remaining,\n                });\n            }\n            s.spent = s.spent.saturating_add(cost);\n            s.accepted_events += 1;\n            let rem = limit.saturating_sub(s.spent);\n            let receipt = ChargeReceipt {\n                event_id: event.event_id,\n                charged: cost,\n                remaining: rem,\n            };\n            s.push_receipt(receipt.clone(), cap);\n            Ok(receipt)\n        })?;\n\n        dispatch_billing_event(event.event_id, &event.sku, cost)\n            .await\n            .map_err(WalletError::BillingBackend)?;\n        Ok(receipt)\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_wal_offset_bug",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_stale_wal_offset",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Bytes, Str};\nuse std::sync::atomic::{AtomicU64, Ordering};\n\n#[derive(Clone, Debug)]\npub struct WalConfig {\n    pub partition_name: Str,\n    pub max_record_bytes: usize,\n    pub start_lsn: u64,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum WalError {\n    EmptyRecord,\n    RecordTooLarge { len: usize, max: usize },\n    DiskFailure(Str),\n}\n\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct AppendSpan {\n    pub first_lsn: u64,\n    pub next_lsn: u64,\n}\n\nimpl AppendSpan {\n    pub fn byte_len(self) -> u64 {\n        self.next_lsn.saturating_sub(self.first_lsn)\n    }\n}\n\npub struct WalWriter {\n    config: WalConfig,\n    next_lsn: AtomicU64,\n}\n\nimpl WalWriter {\n    pub fn new(config: WalConfig) -> Self {\n        let start = config.start_lsn;\n        Self {\n            config,\n            next_lsn: AtomicU64::new(start),\n        }\n    }\n\n    pub fn partition_name(&self) -> &Str {\n        &self.config.partition_name\n    }\n\n    pub fn current_lsn(&self) -> u64 {\n        self.next_lsn.load(Ordering::Acquire)\n    }\n\n    pub fn check_record(&self, record: &Bytes) -> Result<u64, WalError> {\n        if record.is_empty() {\n            return Err(WalError::EmptyRecord);\n        }\n        if record.len() > self.config.max_record_bytes {\n            return Err(WalError::RecordTooLarge {\n                len: record.len(),\n                max: self.config.max_record_bytes,\n            });\n        }\n        Ok(record.len() as u64)\n    }\n\n    pub async fn append_record(&self, record: Bytes) -> Result<AppendSpan, WalError> {\n        let len = self.check_record(&record)?;\n        let first = self.next_lsn.load(Ordering::Acquire);\n        flush_wal_block(&self.config.partition_name, first, &record)\n            .await\n            .map_err(WalError::DiskFailure)?;\n        let next = first + len;\n        self.next_lsn.store(next, Ordering::Release);\n        Ok(AppendSpan {\n            first_lsn: first,\n            next_lsn: next,\n        })\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_wal_offset_safe",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_stale_wal_offset",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Bytes, Str};\nuse std::sync::atomic::{AtomicU64, Ordering};\n\n#[derive(Clone, Debug)]\npub struct WalConfig {\n    pub partition_name: Str,\n    pub max_record_bytes: usize,\n    pub start_lsn: u64,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum WalError {\n    EmptyRecord,\n    RecordTooLarge { len: usize, max: usize },\n    DiskFailure(Str),\n}\n\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct AppendSpan {\n    pub first_lsn: u64,\n    pub next_lsn: u64,\n}\n\nimpl AppendSpan {\n    pub fn byte_len(self) -> u64 {\n        self.next_lsn.saturating_sub(self.first_lsn)\n    }\n}\n\npub struct WalWriter {\n    config: WalConfig,\n    next_lsn: AtomicU64,\n}\n\nimpl WalWriter {\n    pub fn new(config: WalConfig) -> Self {\n        let start = config.start_lsn;\n        Self {\n            config,\n            next_lsn: AtomicU64::new(start),\n        }\n    }\n\n    pub fn partition_name(&self) -> &Str {\n        &self.config.partition_name\n    }\n\n    pub fn current_lsn(&self) -> u64 {\n        self.next_lsn.load(Ordering::Acquire)\n    }\n\n    pub fn check_record(&self, record: &Bytes) -> Result<u64, WalError> {\n        if record.is_empty() {\n            return Err(WalError::EmptyRecord);\n        }\n        if record.len() > self.config.max_record_bytes {\n            return Err(WalError::RecordTooLarge {\n                len: record.len(),\n                max: self.config.max_record_bytes,\n            });\n        }\n        Ok(record.len() as u64)\n    }\n\n    pub async fn append_record(&self, record: Bytes) -> Result<AppendSpan, WalError> {\n        let len = self.check_record(&record)?;\n        let first = self.next_lsn.fetch_add(len, Ordering::AcqRel);\n        flush_wal_block(&self.config.partition_name, first, &record)\n            .await\n            .map_err(WalError::DiskFailure)?;\n        Ok(AppendSpan {\n            first_lsn: first,\n            next_lsn: first + len,\n        })\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_term_fencing_bug",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_stale_term_fencing",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::VecDeque;\n\n#[derive(Clone, Debug)]\npub struct ClusterConfig {\n    pub node_id: Str,\n    pub cluster_name: Str,\n    pub max_committed_log: usize,\n}\n\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum NodeRole {\n    Follower,\n    Leader,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum CommitError {\n    NotLeader { current_term: u64 },\n    QuorumFailed(Str),\n}\n\n#[derive(Clone, Debug)]\npub struct CommittedEntry {\n    pub term: u64,\n    pub index: u64,\n    pub command: Str,\n}\n\n#[derive(Clone, Debug)]\npub struct ElectionSnapshot {\n    pub term: u64,\n    pub role: NodeRole,\n    pub commit_index: u64,\n}\n\nstruct ElectionState {\n    term: u64,\n    role: NodeRole,\n    commit_index: u64,\n    recent_commits: VecDeque<CommittedEntry>,\n}\n\nimpl ElectionState {\n    fn new(cap: usize) -> Self {\n        Self {\n            term: 1,\n            role: NodeRole::Follower,\n            commit_index: 0,\n            recent_commits: VecDeque::with_capacity(cap.min(128)),\n        }\n    }\n\n    fn record_commit(&mut self, entry: CommittedEntry, cap: usize) {\n        if cap == 0 {\n            return;\n        }\n        while self.recent_commits.len() >= cap {\n            self.recent_commits.pop_front();\n        }\n        self.recent_commits.push_back(entry);\n    }\n}\n\npub struct ConsensusNode {\n    config: ClusterConfig,\n    state: Actor<ElectionState>,\n}\n\nimpl ConsensusNode {\n    pub fn new(config: ClusterConfig) -> Self {\n        let cap = config.max_committed_log;\n        Self {\n            config,\n            state: Actor::new(ElectionState::new(cap)),\n        }\n    }\n\n    pub fn node_id(&self) -> &Str {\n        &self.config.node_id\n    }\n\n    pub fn cluster_name(&self) -> &Str {\n        &self.config.cluster_name\n    }\n\n    pub fn snapshot(&self) -> ElectionSnapshot {\n        self.state.read(|s| ElectionSnapshot {\n            term: s.term,\n            role: s.role,\n            commit_index: s.commit_index,\n        })\n    }\n\n    pub fn promote_to_leader(&self, new_term: u64) -> bool {\n        self.state.with(|s| {\n            if new_term <= s.term {\n                return false;\n            }\n            s.term = new_term;\n            s.role = NodeRole::Leader;\n            true\n        })\n    }\n\n    pub fn step_down(&self, observed_term: u64) {\n        self.state.with(|s| {\n            if observed_term > s.term {\n                s.term = observed_term;\n                s.role = NodeRole::Follower;\n            }\n        });\n    }\n\n    pub fn recent_commits(&self, limit: usize) -> Vec<CommittedEntry> {\n        self.state.read(|s| {\n            let skip = s.recent_commits.len().saturating_sub(limit);\n            s.recent_commits.iter().skip(skip).cloned().collect()\n        })\n    }\n\n    pub async fn propose_command(&self, command: Str) -> Result<CommittedEntry, CommitError> {\n        let (term, role, next_index) = self\n            .state\n            .read(|s| (s.term, s.role, s.commit_index.saturating_add(1)));\n        if role != NodeRole::Leader {\n            return Err(CommitError::NotLeader { current_term: term });\n        }\n\n        replicate_to_quorum(&self.config.cluster_name, term, next_index, &command)\n            .await\n            .map_err(CommitError::QuorumFailed)?;\n\n        let cap = self.config.max_committed_log;\n        let entry = self.state.with(|s| {\n            s.commit_index = next_index;\n            let entry = CommittedEntry {\n                term,\n                index: next_index,\n                command,\n            };\n            s.record_commit(entry.clone(), cap);\n            entry\n        });\n        Ok(entry)\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_term_fencing_safe",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_stale_term_fencing",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::VecDeque;\n\n#[derive(Clone, Debug)]\npub struct ClusterConfig {\n    pub node_id: Str,\n    pub cluster_name: Str,\n    pub max_committed_log: usize,\n}\n\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum NodeRole {\n    Follower,\n    Leader,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum CommitError {\n    NotLeader { current_term: u64 },\n    StaleTerm { expected: u64, actual: u64 },\n    QuorumFailed(Str),\n}\n\n#[derive(Clone, Debug)]\npub struct CommittedEntry {\n    pub term: u64,\n    pub index: u64,\n    pub command: Str,\n}\n\n#[derive(Clone, Debug)]\npub struct ElectionSnapshot {\n    pub term: u64,\n    pub role: NodeRole,\n    pub commit_index: u64,\n}\n\nstruct ElectionState {\n    term: u64,\n    role: NodeRole,\n    commit_index: u64,\n    recent_commits: VecDeque<CommittedEntry>,\n}\n\nimpl ElectionState {\n    fn new(cap: usize) -> Self {\n        Self {\n            term: 1,\n            role: NodeRole::Follower,\n            commit_index: 0,\n            recent_commits: VecDeque::with_capacity(cap.min(128)),\n        }\n    }\n\n    fn record_commit(&mut self, entry: CommittedEntry, cap: usize) {\n        if cap == 0 {\n            return;\n        }\n        while self.recent_commits.len() >= cap {\n            self.recent_commits.pop_front();\n        }\n        self.recent_commits.push_back(entry);\n    }\n}\n\npub struct ConsensusNode {\n    config: ClusterConfig,\n    state: Actor<ElectionState>,\n}\n\nimpl ConsensusNode {\n    pub fn new(config: ClusterConfig) -> Self {\n        let cap = config.max_committed_log;\n        Self {\n            config,\n            state: Actor::new(ElectionState::new(cap)),\n        }\n    }\n\n    pub fn node_id(&self) -> &Str {\n        &self.config.node_id\n    }\n\n    pub fn cluster_name(&self) -> &Str {\n        &self.config.cluster_name\n    }\n\n    pub fn snapshot(&self) -> ElectionSnapshot {\n        self.state.read(|s| ElectionSnapshot {\n            term: s.term,\n            role: s.role,\n            commit_index: s.commit_index,\n        })\n    }\n\n    pub fn promote_to_leader(&self, new_term: u64) -> bool {\n        self.state.with(|s| {\n            if new_term <= s.term {\n                return false;\n            }\n            s.term = new_term;\n            s.role = NodeRole::Leader;\n            true\n        })\n    }\n\n    pub fn step_down(&self, observed_term: u64) {\n        self.state.with(|s| {\n            if observed_term > s.term {\n                s.term = observed_term;\n                s.role = NodeRole::Follower;\n            }\n        });\n    }\n\n    pub fn recent_commits(&self, limit: usize) -> Vec<CommittedEntry> {\n        self.state.read(|s| {\n            let skip = s.recent_commits.len().saturating_sub(limit);\n            s.recent_commits.iter().skip(skip).cloned().collect()\n        })\n    }\n\n    pub async fn propose_command(&self, command: Str) -> Result<CommittedEntry, CommitError> {\n        let (term, role, base_index) = self.state.read(|s| (s.term, s.role, s.commit_index));\n        if role != NodeRole::Leader {\n            return Err(CommitError::NotLeader { current_term: term });\n        }\n        let next_index = base_index.saturating_add(1);\n\n        replicate_to_quorum(&self.config.cluster_name, term, next_index, &command)\n            .await\n            .map_err(CommitError::QuorumFailed)?;\n\n        let cap = self.config.max_committed_log;\n        self.state.with(|s| {\n            if s.role != NodeRole::Leader {\n                return Err(CommitError::NotLeader {\n                    current_term: s.term,\n                });\n            }\n            if s.term != term || s.commit_index != base_index {\n                return Err(CommitError::StaleTerm {\n                    expected: term,\n                    actual: s.term,\n                });\n            }\n            s.commit_index = next_index;\n            let entry = CommittedEntry {\n                term,\n                index: next_index,\n                command,\n            };\n            s.record_commit(entry.clone(), cap);\n            Ok(entry)\n        })\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_lease_renew_bug",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_stale_lease_renew",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\n\n#[derive(Clone, Debug)]\npub struct LeaseConfig {\n    pub service_name: Str,\n    pub ttl_secs: u64,\n    pub renew_window_secs: u64,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum LeaseError {\n    NotHeld,\n    CoordinatorError(Str),\n}\n\nstruct LeaseState {\n    generation: u64,\n    expires_at_secs: u64,\n    held: bool,\n}\n\npub struct ServiceLease {\n    config: LeaseConfig,\n    state: Actor<LeaseState>,\n}\n\nimpl ServiceLease {\n    pub fn new(config: LeaseConfig) -> Self {\n        Self {\n            config,\n            state: Actor::new(LeaseState {\n                generation: 0,\n                expires_at_secs: 0,\n                held: false,\n            }),\n        }\n    }\n\n    pub fn service_name(&self) -> &Str {\n        &self.config.service_name\n    }\n\n    pub fn install_lease(&self, generation: u64, expires_at_secs: u64) {\n        self.state.with(|s| {\n            s.generation = generation;\n            s.expires_at_secs = expires_at_secs;\n            s.held = true;\n        });\n    }\n\n    pub fn revoke(&self) {\n        self.state.with(|s| {\n            s.generation += 1;\n            s.expires_at_secs = 0;\n            s.held = false;\n        });\n    }\n\n    pub async fn renew_if_needed(&self, now_secs: u64) -> Result<u64, LeaseError> {\n        let (held, generation, expires_at) = self\n            .state\n            .read(|s| (s.held, s.generation, s.expires_at_secs));\n        if !held {\n            return Err(LeaseError::NotHeld);\n        }\n        if expires_at.saturating_sub(now_secs) > self.config.renew_window_secs {\n            return Ok(expires_at);\n        }\n\n        let granted_expiry =\n            request_lease_extension(&self.config.service_name, generation, self.config.ttl_secs)\n                .await\n                .map_err(LeaseError::CoordinatorError)?;\n\n        self.state.with(|s| {\n            s.expires_at_secs = granted_expiry;\n            s.held = true;\n        });\n        Ok(granted_expiry)\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_lease_renew_safe",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_stale_lease_renew",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\n\n#[derive(Clone, Debug)]\npub struct LeaseConfig {\n    pub service_name: Str,\n    pub ttl_secs: u64,\n    pub renew_window_secs: u64,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum LeaseError {\n    NotHeld,\n    GenerationChanged,\n    CoordinatorError(Str),\n}\n\nstruct LeaseState {\n    generation: u64,\n    expires_at_secs: u64,\n    held: bool,\n}\n\npub struct ServiceLease {\n    config: LeaseConfig,\n    state: Actor<LeaseState>,\n}\n\nimpl ServiceLease {\n    pub fn new(config: LeaseConfig) -> Self {\n        Self {\n            config,\n            state: Actor::new(LeaseState {\n                generation: 0,\n                expires_at_secs: 0,\n                held: false,\n            }),\n        }\n    }\n\n    pub fn service_name(&self) -> &Str {\n        &self.config.service_name\n    }\n\n    pub fn install_lease(&self, generation: u64, expires_at_secs: u64) {\n        self.state.with(|s| {\n            s.generation = generation;\n            s.expires_at_secs = expires_at_secs;\n            s.held = true;\n        });\n    }\n\n    pub fn revoke(&self) {\n        self.state.with(|s| {\n            s.generation += 1;\n            s.expires_at_secs = 0;\n            s.held = false;\n        });\n    }\n\n    pub async fn renew_if_needed(&self, now_secs: u64) -> Result<u64, LeaseError> {\n        let (held, generation, expires_at) = self\n            .state\n            .read(|s| (s.held, s.generation, s.expires_at_secs));\n        if !held {\n            return Err(LeaseError::NotHeld);\n        }\n        if expires_at.saturating_sub(now_secs) > self.config.renew_window_secs {\n            return Ok(expires_at);\n        }\n\n        let granted_expiry =\n            request_lease_extension(&self.config.service_name, generation, self.config.ttl_secs)\n                .await\n                .map_err(LeaseError::CoordinatorError)?;\n\n        self.state.with(|s| {\n            if !s.held || s.generation != generation {\n                return Err(LeaseError::GenerationChanged);\n            }\n            s.expires_at_secs = granted_expiry;\n            Ok(granted_expiry)\n        })\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_batch_seq_bug",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_stale_batch_seq",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::Str;\nuse std::sync::atomic::{AtomicU64, Ordering};\n\n#[derive(Clone, Debug)]\npub struct BatchConfig {\n    pub topic: Str,\n    pub max_items: usize,\n    pub initial_seq: u64,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum PublishError {\n    EmptyBatch,\n    TooManyItems { len: usize, max: usize },\n    BrokerError(Str),\n}\n\npub struct BatchPublisher {\n    config: BatchConfig,\n    next_seq: AtomicU64,\n}\n\nimpl BatchPublisher {\n    pub fn new(config: BatchConfig) -> Self {\n        let initial = config.initial_seq;\n        Self {\n            config,\n            next_seq: AtomicU64::new(initial),\n        }\n    }\n\n    pub fn topic(&self) -> &Str {\n        &self.config.topic\n    }\n\n    pub fn current_seq(&self) -> u64 {\n        self.next_seq.load(Ordering::Acquire)\n    }\n\n    pub fn validate_batch(&self, items: &[Str]) -> Result<(), PublishError> {\n        if items.is_empty() {\n            return Err(PublishError::EmptyBatch);\n        }\n        if items.len() > self.config.max_items {\n            return Err(PublishError::TooManyItems {\n                len: items.len(),\n                max: self.config.max_items,\n            });\n        }\n        Ok(())\n    }\n\n    pub async fn emit_batch(&self, items: &[Str]) -> Result<u64, PublishError> {\n        self.validate_batch(items)?;\n        let seq = self.next_seq.load(Ordering::Acquire);\n        publish_topic_batch(&self.config.topic, seq, items)\n            .await\n            .map_err(PublishError::BrokerError)?;\n        self.next_seq.store(seq + 1, Ordering::Release);\n        Ok(seq)\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_batch_seq_safe",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_stale_batch_seq",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::Str;\nuse std::sync::atomic::{AtomicU64, Ordering};\n\n#[derive(Clone, Debug)]\npub struct BatchConfig {\n    pub topic: Str,\n    pub max_items: usize,\n    pub initial_seq: u64,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum PublishError {\n    EmptyBatch,\n    TooManyItems { len: usize, max: usize },\n    BrokerError(Str),\n}\n\npub struct BatchPublisher {\n    config: BatchConfig,\n    next_seq: AtomicU64,\n}\n\nimpl BatchPublisher {\n    pub fn new(config: BatchConfig) -> Self {\n        let initial = config.initial_seq;\n        Self {\n            config,\n            next_seq: AtomicU64::new(initial),\n        }\n    }\n\n    pub fn topic(&self) -> &Str {\n        &self.config.topic\n    }\n\n    pub fn current_seq(&self) -> u64 {\n        self.next_seq.load(Ordering::Acquire)\n    }\n\n    pub fn validate_batch(&self, items: &[Str]) -> Result<(), PublishError> {\n        if items.is_empty() {\n            return Err(PublishError::EmptyBatch);\n        }\n        if items.len() > self.config.max_items {\n            return Err(PublishError::TooManyItems {\n                len: items.len(),\n                max: self.config.max_items,\n            });\n        }\n        Ok(())\n    }\n\n    pub async fn emit_batch(&self, items: &[Str]) -> Result<u64, PublishError> {\n        self.validate_batch(items)?;\n        let seq = self.next_seq.fetch_add(1, Ordering::AcqRel);\n        publish_topic_batch(&self.config.topic, seq, items)\n            .await\n            .map_err(PublishError::BrokerError)?;\n        Ok(seq)\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_lint_dropped_mutex_window_bug",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "lint_overlap",
+    "pair": null,
+    "existing_lint": "clippy::disallowed_types",
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::Str;\nuse std::sync::{Arc, Mutex};\n\n#[derive(Clone, Debug)]\npub struct ThrottleConfig {\n    pub endpoint: Str,\n    pub burst_limit: u64,\n    pub refill_amount: u64,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum ThrottleError {\n    Throttled,\n    BackendError(Str),\n}\n\nstruct CreditBucket {\n    tokens: u64,\n    dispatched: u64,\n}\n\npub struct EndpointThrottle {\n    config: ThrottleConfig,\n    bucket: Arc<Mutex<CreditBucket>>,\n}\n\nimpl EndpointThrottle {\n    pub fn new(config: ThrottleConfig) -> Self {\n        let initial = config.burst_limit;\n        Self {\n            config,\n            bucket: Arc::new(Mutex::new(CreditBucket {\n                tokens: initial,\n                dispatched: 0,\n            })),\n        }\n    }\n\n    pub fn endpoint(&self) -> &Str {\n        &self.config.endpoint\n    }\n\n    pub fn refill(&self) {\n        let mut guard = self.bucket.lock().unwrap();\n        let next = guard.tokens.saturating_add(self.config.refill_amount);\n        guard.tokens = next.min(self.config.burst_limit);\n    }\n\n    pub fn remaining_tokens(&self) -> u64 {\n        self.bucket.lock().unwrap().tokens\n    }\n\n    pub async fn dispatch_call(&self, cost: u64, payload: &[u8]) -> Result<(), ThrottleError> {\n        let current = {\n            let guard = self.bucket.lock().unwrap();\n            guard.tokens\n        };\n        if current < cost {\n            return Err(ThrottleError::Throttled);\n        }\n\n        call_backend(&self.config.endpoint, payload)\n            .await\n            .map_err(ThrottleError::BackendError)?;\n\n        let mut guard = self.bucket.lock().unwrap();\n        guard.tokens = current - cost;\n        guard.dispatched += 1;\n        Ok(())\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_lint_dropped_rwlock_bug",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "lint_overlap",
+    "pair": null,
+    "existing_lint": "clippy::disallowed_types",
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::Str;\nuse std::sync::{Arc, RwLock};\n\n#[derive(Clone, Debug)]\npub struct GatewayConfig {\n    pub upstream_host: Str,\n    pub max_inflight_units: u64,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum GatewayError {\n    Overloaded,\n    RpcFailed(Str),\n}\n\nstruct QuotaCounter {\n    used_units: u64,\n    completed_rpcs: u64,\n}\n\npub struct RpcGateway {\n    config: GatewayConfig,\n    quota: Arc<RwLock<QuotaCounter>>,\n}\n\nimpl RpcGateway {\n    pub fn new(config: GatewayConfig) -> Self {\n        Self {\n            config,\n            quota: Arc::new(RwLock::new(QuotaCounter {\n                used_units: 0,\n                completed_rpcs: 0,\n            })),\n        }\n    }\n\n    pub fn upstream_host(&self) -> &Str {\n        &self.config.upstream_host\n    }\n\n    pub fn used_units(&self) -> u64 {\n        self.quota.read().unwrap().used_units\n    }\n\n    pub async fn forward_rpc(&self, units: u64, body: &[u8]) -> Result<(), GatewayError> {\n        let used = {\n            let guard = self.quota.read().unwrap();\n            guard.used_units\n        };\n        if used.saturating_add(units) > self.config.max_inflight_units {\n            return Err(GatewayError::Overloaded);\n        }\n\n        send_upstream_rpc(&self.config.upstream_host, body)\n            .await\n            .map_err(GatewayError::RpcFailed)?;\n\n        let mut guard = self.quota.write().unwrap();\n        guard.used_units = used.saturating_add(units);\n        guard.completed_rpcs += 1;\n        Ok(())\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_decoy_tokio_mutex_held_safe",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "lint_decoy",
+    "pair": null,
+    "existing_lint": "clippy::await_holding_lock",
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::Str;\nuse std::sync::Arc;\nuse tokio::sync::Mutex;\n\n#[derive(Clone, Debug)]\npub struct RelayConfig {\n    pub channel_id: Str,\n    pub max_frames: u64,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum RelayError {\n    FrameCapReached,\n    TransportFailed(Str),\n}\n\nstruct RelayState {\n    next_frame_id: u64,\n    delivered_frames: u64,\n}\n\npub struct OrderedRelay {\n    config: RelayConfig,\n    state: Arc<Mutex<RelayState>>,\n}\n\nimpl OrderedRelay {\n    pub fn new(config: RelayConfig) -> Self {\n        Self {\n            config,\n            state: Arc::new(Mutex::new(RelayState {\n                next_frame_id: 1,\n                delivered_frames: 0,\n            })),\n        }\n    }\n\n    pub fn channel_id(&self) -> &Str {\n        &self.config.channel_id\n    }\n\n    pub async fn send_ordered(&self, payload: &[u8]) -> Result<u64, RelayError> {\n        let mut guard = self.state.lock().await;\n        if guard.delivered_frames >= self.config.max_frames {\n            return Err(RelayError::FrameCapReached);\n        }\n        let frame_id = guard.next_frame_id;\n        deliver_frame(&self.config.channel_id, frame_id, payload)\n            .await\n            .map_err(RelayError::TransportFailed)?;\n        guard.next_frame_id = frame_id + 1;\n        guard.delivered_frames += 1;\n        Ok(frame_id)\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_stale_insuff_external_commit",
+    "rule": "stale_read_across_await",
+    "split": "held_out",
+    "slice": "insufficient_context",
+    "pair": null,
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "insufficient_context",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use crate::quorum::{QuorumClient, QuorumError};\nuse adamantium::{Actor, Str};\n\n#[derive(Clone, Debug)]\npub struct SyncOptions {\n    pub group_name: Str,\n    pub batch_step: u64,\n}\n\nstruct LocalMarker {\n    last_synced: u64,\n    attempts: u64,\n}\n\npub struct CheckpointSync {\n    config: SyncOptions,\n    marker: Actor<LocalMarker>,\n}\n\nimpl CheckpointSync {\n    pub fn new(config: SyncOptions) -> Self {\n        Self {\n            config,\n            marker: Actor::new(LocalMarker {\n                last_synced: 0,\n                attempts: 0,\n            }),\n        }\n    }\n\n    pub fn group_name(&self) -> &Str {\n        &self.config.group_name\n    }\n\n    pub async fn sync_next(&self, quorum: &QuorumClient) -> Result<u64, QuorumError> {\n        let current = self.marker.read(|m| m.last_synced);\n        let proposed = current.saturating_add(self.config.batch_step);\n        let accepted = quorum\n            .commit_sequence(&self.config.group_name, current, proposed)\n            .await?;\n        self.marker.with(|m| {\n            m.last_synced = accepted;\n            m.attempts += 1;\n        });\n        Ok(accepted)\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_unbounded_cert_cache_bug",
+    "rule": "unbounded_collection_growth",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_unbounded_cert_cache",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "violation"
+    },
+    "source": "use adamantium::{Actor, Bytes, Str};\nuse std::collections::HashMap;\n\n#[derive(Clone, Debug)]\npub struct TlsCacheConfig {\n    pub cluster_domain: Str,\n    pub default_ttl_secs: u64,\n    pub max_certs: usize,\n}\n\n#[derive(Clone, Debug)]\npub struct CertBundle {\n    pub sni: Str,\n    pub pem_der: Bytes,\n    pub expires_at_secs: u64,\n}\n\nimpl CertBundle {\n    pub fn is_valid_at(&self, now_secs: u64) -> bool {\n        now_secs < self.expires_at_secs\n    }\n}\n\n#[derive(Clone, Copy, Debug, Default)]\npub struct CertCacheStats {\n    pub cached_entries: usize,\n    pub hits: u64,\n    pub misses: u64,\n    pub inserts: u64,\n}\n\nimpl CertCacheStats {\n    pub fn hit_ratio_pct(self) -> u64 {\n        let total = self.hits.saturating_add(self.misses);\n        if total == 0 {\n            return 0;\n        }\n        self.hits.saturating_mul(100) / total\n    }\n}\n\nstruct CertCacheState {\n    certs: HashMap<Str, CertBundle>,\n    hits: u64,\n    misses: u64,\n    inserts: u64,\n}\n\nimpl CertCacheState {\n    fn new() -> Self {\n        Self {\n            certs: HashMap::new(),\n            hits: 0,\n            misses: 0,\n            inserts: 0,\n        }\n    }\n}\n\npub struct TlsCertCache {\n    config: TlsCacheConfig,\n    state: Actor<CertCacheState>,\n}\n\nimpl TlsCertCache {\n    pub fn new(config: TlsCacheConfig) -> Self {\n        Self {\n            config,\n            state: Actor::new(CertCacheState::new()),\n        }\n    }\n\n    pub fn cluster_domain(&self) -> &Str {\n        &self.config.cluster_domain\n    }\n\n    pub fn default_ttl_secs(&self) -> u64 {\n        self.config.default_ttl_secs\n    }\n\n    pub fn stats(&self) -> CertCacheStats {\n        self.state.read(|s| CertCacheStats {\n            cached_entries: s.certs.len(),\n            hits: s.hits,\n            misses: s.misses,\n            inserts: s.inserts,\n        })\n    }\n\n    pub fn lookup(&self, sni: &str, now_secs: u64) -> Option<CertBundle> {\n        self.state.with(|s| {\n            if let Some(bundle) = s.certs.get(sni) {\n                if bundle.is_valid_at(now_secs) {\n                    s.hits += 1;\n                    return Some(bundle.clone());\n                }\n            }\n            s.misses += 1;\n            None\n        })\n    }\n\n    pub fn insert(&self, bundle: CertBundle) {\n        self.state.with(|s| {\n            s.certs.insert(bundle.sni.clone(), bundle);\n            s.inserts += 1;\n        });\n    }\n\n    pub fn contains_sni(&self, sni: &str) -> bool {\n        self.state.read(|s| s.certs.contains_key(sni))\n    }\n\n    pub fn count_valid(&self, now_secs: u64) -> usize {\n        self.state.read(|s| {\n            s.certs\n                .values()\n                .filter(|bundle| bundle.is_valid_at(now_secs))\n                .count()\n        })\n    }\n\n    pub fn list_snis(&self, limit: usize) -> Vec<Str> {\n        self.state\n            .read(|s| s.certs.keys().take(limit).cloned().collect())\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_unbounded_cert_cache_safe",
+    "rule": "unbounded_collection_growth",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_unbounded_cert_cache",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Bytes, Str};\nuse std::collections::{HashMap, VecDeque};\n\n#[derive(Clone, Debug)]\npub struct TlsCacheConfig {\n    pub cluster_domain: Str,\n    pub default_ttl_secs: u64,\n    pub max_certs: usize,\n}\n\n#[derive(Clone, Debug)]\npub struct CertBundle {\n    pub sni: Str,\n    pub pem_der: Bytes,\n    pub expires_at_secs: u64,\n}\n\nimpl CertBundle {\n    pub fn is_valid_at(&self, now_secs: u64) -> bool {\n        now_secs < self.expires_at_secs\n    }\n}\n\n#[derive(Clone, Copy, Debug, Default)]\npub struct CertCacheStats {\n    pub cached_entries: usize,\n    pub hits: u64,\n    pub misses: u64,\n    pub inserts: u64,\n    pub evictions: u64,\n}\n\nimpl CertCacheStats {\n    pub fn hit_ratio_pct(self) -> u64 {\n        let total = self.hits.saturating_add(self.misses);\n        if total == 0 {\n            return 0;\n        }\n        self.hits.saturating_mul(100) / total\n    }\n}\n\nstruct CertCacheState {\n    certs: HashMap<Str, CertBundle>,\n    order: VecDeque<Str>,\n    hits: u64,\n    misses: u64,\n    inserts: u64,\n    evictions: u64,\n}\n\nimpl CertCacheState {\n    fn new(cap: usize) -> Self {\n        Self {\n            certs: HashMap::with_capacity(cap.min(256)),\n            order: VecDeque::with_capacity(cap.min(256)),\n            hits: 0,\n            misses: 0,\n            inserts: 0,\n            evictions: 0,\n        }\n    }\n}\n\npub struct TlsCertCache {\n    config: TlsCacheConfig,\n    state: Actor<CertCacheState>,\n}\n\nimpl TlsCertCache {\n    pub fn new(config: TlsCacheConfig) -> Self {\n        let cap = config.max_certs;\n        Self {\n            config,\n            state: Actor::new(CertCacheState::new(cap)),\n        }\n    }\n\n    pub fn cluster_domain(&self) -> &Str {\n        &self.config.cluster_domain\n    }\n\n    pub fn default_ttl_secs(&self) -> u64 {\n        self.config.default_ttl_secs\n    }\n\n    pub fn stats(&self) -> CertCacheStats {\n        self.state.read(|s| CertCacheStats {\n            cached_entries: s.certs.len(),\n            hits: s.hits,\n            misses: s.misses,\n            inserts: s.inserts,\n            evictions: s.evictions,\n        })\n    }\n\n    pub fn lookup(&self, sni: &str, now_secs: u64) -> Option<CertBundle> {\n        self.state.with(|s| {\n            if let Some(bundle) = s.certs.get(sni) {\n                if bundle.is_valid_at(now_secs) {\n                    s.hits += 1;\n                    return Some(bundle.clone());\n                }\n            }\n            s.misses += 1;\n            None\n        })\n    }\n\n    pub fn insert(&self, bundle: CertBundle) {\n        let cap = self.config.max_certs;\n        if cap == 0 {\n            return;\n        }\n        self.state.with(|s| {\n            let key = bundle.sni.clone();\n            if !s.certs.contains_key(&key) {\n                while s.certs.len() >= cap {\n                    if let Some(oldest) = s.order.pop_front() {\n                        if s.certs.remove(&oldest).is_some() {\n                            s.evictions += 1;\n                            break;\n                        }\n                    } else {\n                        break;\n                    }\n                }\n                s.order.push_back(key.clone());\n            }\n            s.certs.insert(key, bundle);\n            s.inserts += 1;\n        });\n    }\n\n    pub fn contains_sni(&self, sni: &str) -> bool {\n        self.state.read(|s| s.certs.contains_key(sni))\n    }\n\n    pub fn count_valid(&self, now_secs: u64) -> usize {\n        self.state.read(|s| {\n            s.certs\n                .values()\n                .filter(|bundle| bundle.is_valid_at(now_secs))\n                .count()\n        })\n    }\n\n    pub fn list_snis(&self, limit: usize) -> Vec<Str> {\n        self.state\n            .read(|s| s.certs.keys().take(limit).cloned().collect())\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_unbounded_inflight_calls_bug",
+    "rule": "unbounded_collection_growth",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_unbounded_inflight_calls",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "violation"
+    },
+    "source": "use adamantium::{Actor, Bytes, Str};\nuse std::collections::HashMap;\nuse tokio::sync::oneshot;\n\n#[derive(Clone, Debug)]\npub struct RpcMuxConfig {\n    pub peer_name: Str,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum MuxError {\n    ChannelClosed,\n    SendFailed(Str),\n}\n\nstruct InflightTable {\n    next_id: u64,\n    pending: HashMap<u64, oneshot::Sender<Bytes>>,\n}\n\npub struct RpcClientMux {\n    config: RpcMuxConfig,\n    state: Actor<InflightTable>,\n}\n\nimpl RpcClientMux {\n    pub fn new(config: RpcMuxConfig) -> Self {\n        Self {\n            config,\n            state: Actor::new(InflightTable {\n                next_id: 1,\n                pending: HashMap::new(),\n            }),\n        }\n    }\n\n    pub fn peer_name(&self) -> &Str {\n        &self.config.peer_name\n    }\n\n    pub fn inflight_count(&self) -> usize {\n        self.state.read(|s| s.pending.len())\n    }\n\n    pub fn on_reply(&self, call_id: u64, payload: Bytes) -> bool {\n        let sender = self.state.with(|s| s.pending.remove(&call_id));\n        if let Some(tx) = sender {\n            let _ = tx.send(payload);\n            return true;\n        }\n        false\n    }\n\n    pub async fn call(&self, payload: Bytes) -> Result<Bytes, MuxError> {\n        let (tx, rx) = oneshot::channel();\n        let call_id = self.state.with(|s| {\n            let id = s.next_id;\n            s.next_id += 1;\n            s.pending.insert(id, tx);\n            id\n        });\n        write_wire_frame(&self.config.peer_name, call_id, &payload)\n            .await\n            .map_err(MuxError::SendFailed)?;\n        rx.await.map_err(|_| MuxError::ChannelClosed)\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_unbounded_inflight_calls_safe",
+    "rule": "unbounded_collection_growth",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_unbounded_inflight_calls",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Bytes, Str};\nuse std::collections::HashMap;\nuse tokio::sync::oneshot;\n\n#[derive(Clone, Debug)]\npub struct RpcMuxConfig {\n    pub peer_name: Str,\n    pub max_inflight: usize,\n}\n\n#[derive(Clone, Debug, PartialEq, Eq)]\npub enum MuxError {\n    TooManyInflight,\n    ChannelClosed,\n    SendFailed(Str),\n}\n\nstruct InflightTable {\n    next_id: u64,\n    pending: HashMap<u64, oneshot::Sender<Bytes>>,\n}\n\nstruct PendingGuard<'a> {\n    state: &'a Actor<InflightTable>,\n    call_id: u64,\n}\n\nimpl Drop for PendingGuard<'_> {\n    fn drop(&mut self) {\n        self.state.with(|s| {\n            s.pending.remove(&self.call_id);\n        });\n    }\n}\n\npub struct RpcClientMux {\n    config: RpcMuxConfig,\n    state: Actor<InflightTable>,\n}\n\nimpl RpcClientMux {\n    pub fn new(config: RpcMuxConfig) -> Self {\n        Self {\n            config,\n            state: Actor::new(InflightTable {\n                next_id: 1,\n                pending: HashMap::new(),\n            }),\n        }\n    }\n\n    pub fn peer_name(&self) -> &Str {\n        &self.config.peer_name\n    }\n\n    pub fn inflight_count(&self) -> usize {\n        self.state.read(|s| s.pending.len())\n    }\n\n    pub fn on_reply(&self, call_id: u64, payload: Bytes) -> bool {\n        let sender = self.state.with(|s| s.pending.remove(&call_id));\n        if let Some(tx) = sender {\n            let _ = tx.send(payload);\n            return true;\n        }\n        false\n    }\n\n    pub async fn call(&self, payload: Bytes) -> Result<Bytes, MuxError> {\n        let (tx, rx) = oneshot::channel();\n        let cap = self.config.max_inflight;\n        let call_id = self.state.with(|s| {\n            if s.pending.len() >= cap {\n                return Err(MuxError::TooManyInflight);\n            }\n            let id = s.next_id;\n            s.next_id += 1;\n            s.pending.insert(id, tx);\n            Ok(id)\n        })?;\n        let _guard = PendingGuard {\n            state: &self.state,\n            call_id,\n        };\n        write_wire_frame(&self.config.peer_name, call_id, &payload)\n            .await\n            .map_err(MuxError::SendFailed)?;\n        rx.await.map_err(|_| MuxError::ChannelClosed)\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_unbounded_event_sink_loop_bug",
+    "rule": "unbounded_collection_growth",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_unbounded_event_sink_loop",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "violation"
+    },
+    "source": "use adamantium::Str;\nuse tokio::sync::mpsc;\n\n#[derive(Clone, Debug)]\npub struct SinkConfig {\n    pub pipeline_name: Str,\n    pub emit_interval: usize,\n}\n\n#[derive(Clone, Debug)]\npub struct MetricSample {\n    pub metric: Str,\n    pub value: f64,\n    pub ts_ms: u64,\n}\n\npub struct TelemetrySink {\n    config: SinkConfig,\n}\n\nimpl TelemetrySink {\n    pub fn new(config: SinkConfig) -> Self {\n        Self { config }\n    }\n\n    pub fn pipeline_name(&self) -> &Str {\n        &self.config.pipeline_name\n    }\n\n    pub async fn run(&self, mut rx: mpsc::Receiver<MetricSample>) {\n        let mut collected = Vec::new();\n        while let Some(sample) = rx.recv().await {\n            collected.push(sample);\n            if collected.len() % self.config.emit_interval == 0 {\n                let start = collected.len().saturating_sub(self.config.emit_interval);\n                export_samples(&self.config.pipeline_name, &collected[start..]).await;\n            }\n        }\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_unbounded_event_sink_loop_safe",
+    "rule": "unbounded_collection_growth",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_unbounded_event_sink_loop",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::Str;\nuse tokio::sync::mpsc;\n\n#[derive(Clone, Debug)]\npub struct SinkConfig {\n    pub pipeline_name: Str,\n    pub batch_size: usize,\n}\n\n#[derive(Clone, Debug)]\npub struct MetricSample {\n    pub metric: Str,\n    pub value: f64,\n    pub ts_ms: u64,\n}\n\npub struct TelemetrySink {\n    config: SinkConfig,\n}\n\nimpl TelemetrySink {\n    pub fn new(config: SinkConfig) -> Self {\n        Self { config }\n    }\n\n    pub fn pipeline_name(&self) -> &Str {\n        &self.config.pipeline_name\n    }\n\n    pub async fn run(&self, mut rx: mpsc::Receiver<MetricSample>) {\n        let cap = self.config.batch_size.max(1);\n        let mut batch = Vec::with_capacity(cap);\n        while let Some(sample) = rx.recv().await {\n            batch.push(sample);\n            if batch.len() >= cap {\n                export_samples(&self.config.pipeline_name, &batch).await;\n                batch.clear();\n            }\n        }\n        if !batch.is_empty() {\n            export_samples(&self.config.pipeline_name, &batch).await;\n            batch.clear();\n        }\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_unbounded_session_registry_bug",
+    "rule": "unbounded_collection_growth",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_unbounded_session_registry",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::HashSet;\n\n#[derive(Clone, Debug)]\npub struct RegistryConfig {\n    pub realm: Str,\n}\n\nstruct TokenHistory {\n    seen_tokens: HashSet<Str>,\n    accepted: u64,\n    replayed: u64,\n}\n\npub struct NonceRegistry {\n    config: RegistryConfig,\n    state: Actor<TokenHistory>,\n}\n\nimpl NonceRegistry {\n    pub fn new(config: RegistryConfig) -> Self {\n        Self {\n            config,\n            state: Actor::new(TokenHistory {\n                seen_tokens: HashSet::new(),\n                accepted: 0,\n                replayed: 0,\n            }),\n        }\n    }\n\n    pub fn realm(&self) -> &Str {\n        &self.config.realm\n    }\n\n    pub fn check_and_record(&self, nonce: Str) -> bool {\n        self.state.with(|s| {\n            if s.seen_tokens.insert(nonce) {\n                s.accepted += 1;\n                true\n            } else {\n                s.replayed += 1;\n                false\n            }\n        })\n    }\n\n    pub fn counts(&self) -> (u64, u64) {\n        self.state.read(|s| (s.accepted, s.replayed))\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_unbounded_session_registry_safe",
+    "rule": "unbounded_collection_growth",
+    "split": "held_out",
+    "slice": "semantic_only",
+    "pair": "wf2_unbounded_session_registry",
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::{Actor, Str};\nuse std::collections::{HashSet, VecDeque};\n\n#[derive(Clone, Debug)]\npub struct RegistryConfig {\n    pub realm: Str,\n    pub max_nonces: usize,\n}\n\nstruct TokenHistory {\n    seen_tokens: HashSet<Str>,\n    fifo: VecDeque<Str>,\n    accepted: u64,\n    replayed: u64,\n}\n\npub struct NonceRegistry {\n    config: RegistryConfig,\n    state: Actor<TokenHistory>,\n}\n\nimpl NonceRegistry {\n    pub fn new(config: RegistryConfig) -> Self {\n        let cap = config.max_nonces;\n        Self {\n            config,\n            state: Actor::new(TokenHistory {\n                seen_tokens: HashSet::with_capacity(cap.min(512)),\n                fifo: VecDeque::with_capacity(cap.min(512)),\n                accepted: 0,\n                replayed: 0,\n            }),\n        }\n    }\n\n    pub fn realm(&self) -> &Str {\n        &self.config.realm\n    }\n\n    pub fn check_and_record(&self, nonce: Str) -> bool {\n        let cap = self.config.max_nonces;\n        self.state.with(|s| {\n            if s.seen_tokens.contains(&nonce) {\n                s.replayed += 1;\n                return false;\n            }\n            if cap > 0 {\n                while s.seen_tokens.len() >= cap {\n                    if let Some(oldest) = s.fifo.pop_front() {\n                        s.seen_tokens.remove(&oldest);\n                    } else {\n                        break;\n                    }\n                }\n                s.fifo.push_back(nonce.clone());\n                s.seen_tokens.insert(nonce);\n            }\n            s.accepted += 1;\n            true\n        })\n    }\n\n    pub fn counts(&self) -> (u64, u64) {\n        self.state.read(|s| (s.accepted, s.replayed))\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_unbounded_lint_mutex_seen_ips_bug",
+    "rule": "unbounded_collection_growth",
+    "split": "held_out",
+    "slice": "lint_overlap",
+    "pair": null,
+    "existing_lint": "clippy::disallowed_types",
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "violation"
+    },
+    "source": "use adamantium::Str;\nuse std::collections::HashSet;\nuse std::net::IpAddr;\nuse std::sync::{Arc, Mutex};\n\n#[derive(Clone, Debug)]\npub struct FirewallConfig {\n    pub zone_name: Str,\n}\n\npub struct SeenIpTracker {\n    config: FirewallConfig,\n    seen: Arc<Mutex<HashSet<IpAddr>>>,\n}\n\nimpl SeenIpTracker {\n    pub fn new(config: FirewallConfig) -> Self {\n        Self {\n            config,\n            seen: Arc::new(Mutex::new(HashSet::new())),\n        }\n    }\n\n    pub fn zone_name(&self) -> &Str {\n        &self.config.zone_name\n    }\n\n    pub fn observe_client(&self, ip: IpAddr) -> bool {\n        let mut guard = self.seen.lock().unwrap();\n        guard.insert(ip)\n    }\n\n    pub fn unique_clients(&self) -> usize {\n        self.seen.lock().unwrap().len()\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_unbounded_decoy_mutex_bounded_log_safe",
+    "rule": "unbounded_collection_growth",
+    "split": "held_out",
+    "slice": "lint_decoy",
+    "pair": null,
+    "existing_lint": "clippy::disallowed_types",
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "no_violation"
+    },
+    "source": "use adamantium::Str;\nuse std::collections::VecDeque;\nuse std::sync::{Arc, Mutex};\n\n#[derive(Clone, Debug)]\npub struct TraceConfig {\n    pub component: Str,\n    pub max_records: usize,\n}\n\n#[derive(Clone, Debug)]\npub struct TraceRecord {\n    pub span_id: u64,\n    pub message: Str,\n}\n\npub struct BoundedTraceLog {\n    config: TraceConfig,\n    records: Arc<Mutex<VecDeque<TraceRecord>>>,\n}\n\nimpl BoundedTraceLog {\n    pub fn new(config: TraceConfig) -> Self {\n        let cap = config.max_records;\n        Self {\n            config,\n            records: Arc::new(Mutex::new(VecDeque::with_capacity(cap.min(256)))),\n        }\n    }\n\n    pub fn component(&self) -> &Str {\n        &self.config.component\n    }\n\n    pub fn append(&self, record: TraceRecord) {\n        let cap = self.config.max_records;\n        if cap == 0 {\n            return;\n        }\n        let mut guard = self.records.lock().unwrap();\n        while guard.len() >= cap {\n            guard.pop_front();\n        }\n        guard.push_back(record);\n    }\n\n    pub fn snapshot(&self) -> Vec<TraceRecord> {\n        self.records.lock().unwrap().iter().cloned().collect()\n    }\n}\n"
+  },
+  {
+    "name": "wf2_ho_unbounded_insuff_external_journal",
+    "rule": "unbounded_collection_growth",
+    "split": "held_out",
+    "slice": "insufficient_context",
+    "pair": null,
+    "existing_lint": null,
+    "labels": {
+      "split_actor_invariant": "no_violation",
+      "stale_read_across_await": "no_violation",
+      "unbounded_collection_growth": "insufficient_context"
+    },
+    "source": "use crate::journal::{ExternalJournal, JournalEntry};\nuse adamantium::Str;\n\n#[derive(Clone, Debug)]\npub struct RecorderConfig {\n    pub stream_id: Str,\n}\n\npub struct AuditRecorder {\n    config: RecorderConfig,\n    journal: ExternalJournal,\n}\n\nimpl AuditRecorder {\n    pub fn new(config: RecorderConfig, journal: ExternalJournal) -> Self {\n        Self { config, journal }\n    }\n\n    pub fn stream_id(&self) -> &Str {\n        &self.config.stream_id\n    }\n\n    pub fn record(&self, actor: Str, action: Str, ts_ms: u64) {\n        self.journal.append(JournalEntry {\n            stream_id: self.config.stream_id.clone(),\n            actor,\n            action,\n            ts_ms,\n        });\n    }\n\n    pub fn entry_count(&self) -> usize {\n        self.journal.len()\n    }\n}\n"
   }
 ]
