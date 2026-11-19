@@ -252,8 +252,9 @@ pub(crate) fn begin_wait(operation: &'static str, wait_id: u64) -> Option<u64> {
     Some(token)
 }
 
-pub(crate) fn end_wait(token: u64, wait_id: u64, cancelled: bool) {
+pub(crate) fn end_wait(token: u64, operation: &'static str, wait_id: u64, cancelled: bool) {
     let teardown = cancelled && is_teardown();
+    let by_task_id = current_task_id();
     with_collector(|collector| {
         if teardown {
             if collector.teardown_snapshot.is_none() {
@@ -265,6 +266,8 @@ pub(crate) fn end_wait(token: u64, wait_id: u64, cancelled: bool) {
         }
         let entry = collector.active_waits.remove(&token);
         let queue_id = entry.as_ref().map_or(wait_id, |entry| entry.wait_id);
+        let op = entry.as_ref().map_or(operation, |entry| entry.operation);
+        let mut handed_off = None;
         if let Some(waiters) = collector.queue_waiters.get_mut(&queue_id) {
             let mut was_notified = false;
             waiters.retain(|waiter| {
@@ -280,31 +283,40 @@ pub(crate) fn end_wait(token: u64, wait_id: u64, cancelled: bool) {
                 && let Some(next) = waiters.iter_mut().find(|waiter| !waiter.notified)
             {
                 next.notified = true;
+                handed_off = Some(next.task_id);
             }
             if waiters.is_empty() {
                 collector.queue_waiters.remove(&queue_id);
             }
         }
-        let Some(entry) = entry else {
-            return;
-        };
         let timestamp = clock::elapsed();
-        let event = if cancelled {
-            RawEvent::WaitCancelled {
+        if let Some(entry) = entry {
+            let event = if cancelled {
+                RawEvent::WaitCancelled {
+                    timestamp,
+                    task_id: entry.task_id,
+                    operation: entry.operation,
+                    wait_id: entry.wait_id,
+                }
+            } else {
+                RawEvent::WaitCompleted {
+                    timestamp,
+                    task_id: entry.task_id,
+                    operation: entry.operation,
+                    wait_id: entry.wait_id,
+                }
+            };
+            collector.events.push(event);
+        }
+        if let Some(target_task_id) = handed_off {
+            collector.events.push(RawEvent::Wakeup {
                 timestamp,
-                task_id: entry.task_id,
-                operation: entry.operation,
-                wait_id: entry.wait_id,
-            }
-        } else {
-            RawEvent::WaitCompleted {
-                timestamp,
-                task_id: entry.task_id,
-                operation: entry.operation,
-                wait_id: entry.wait_id,
-            }
-        };
-        collector.events.push(event);
+                by_task_id,
+                target_task_ids: vec![target_task_id],
+                operation: op,
+                wait_id: queue_id,
+            });
+        }
     });
 }
 

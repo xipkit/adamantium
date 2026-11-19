@@ -106,7 +106,7 @@ impl Future for Waiter {
             }
             Poll::Ready(()) => {
                 if let Some(token) = self.trace_token.take() {
-                    super::trace::end_wait(token, self.wait_id, false);
+                    super::trace::end_wait(token, self.operation, self.wait_id, false);
                 }
             }
         }
@@ -130,7 +130,7 @@ impl Drop for Waiter {
         self.world.step_unless_panicking();
         #[cfg(feature = "deterministic")]
         if let Some(token) = self.trace_token.take() {
-            super::trace::end_wait(token, self.wait_id, true);
+            super::trace::end_wait(token, self.operation, self.wait_id, true);
         }
         // EventListener passes an unconsumed notification to the next waiter.
     }

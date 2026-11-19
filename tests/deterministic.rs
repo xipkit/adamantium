@@ -1057,3 +1057,74 @@ fn explain_tracks_successive_wakeups_and_caught_panic_waiter_drops() {
         "{timeline}"
     );
 }
+
+#[test]
+fn explain_records_wakeup_handoff_when_notified_waiter_is_cancelled() {
+    use futures_util::FutureExt;
+
+    async fn handoff_scenario() {
+        let (tx, rx) = Channel::<u32>::bounded(1).split();
+        let cancel = Cancellation::new();
+        let mut tasks = Tasks::<()>::new();
+
+        let rx1 = rx.clone();
+        let cancel1 = cancel.clone();
+        tasks.spawn_named("cancelled-receiver", async move {
+            let mut receive = Box::pin(rx1.receive());
+            {
+                let waker = futures_util::task::noop_waker();
+                let mut cx = std::task::Context::from_waker(&waker);
+                assert!(receive.as_mut().poll_unpin(&mut cx).is_pending());
+            }
+            cancel1.cancelled().await;
+            drop(receive);
+            Ok(())
+        });
+        time::sleep(Duration::from_millis(1)).await;
+
+        let rx2 = rx.clone();
+        tasks.spawn_named("surviving-receiver", async move {
+            assert_eq!(rx2.receive().await, Some(99));
+            Ok(())
+        });
+        time::sleep(Duration::from_millis(1)).await;
+
+        // Notify cancelled-receiver, then cancel it before it polls `receive` again;
+        // dropping its waiter hands the notification off to surviving-receiver.
+        tx.send(99).await.unwrap();
+        cancel.cancel();
+        tasks.join(Ok(())).await.unwrap();
+    }
+
+    let record = testing::check(
+        Config {
+            iterations: 1,
+            ..config()
+        },
+        handoff_scenario,
+    )
+    .unwrap();
+    let timeline = testing::explain(&record, handoff_scenario);
+    assert_eq!(timeline.failure(), None);
+
+    let channel_wakeups: Vec<Vec<Option<String>>> = timeline
+        .events()
+        .iter()
+        .filter_map(|event| match event.kind() {
+            TimelineEventKind::Wakeup {
+                operation: "channel.receive",
+                target_task_names,
+                ..
+            } => Some(target_task_names.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        channel_wakeups,
+        vec![
+            vec![Some("cancelled-receiver".to_owned())],
+            vec![Some("surviving-receiver".to_owned())],
+        ],
+        "{timeline}"
+    );
+}
