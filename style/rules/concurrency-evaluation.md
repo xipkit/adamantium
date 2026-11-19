@@ -175,3 +175,51 @@ cargo build --locked -p cargo-adamantium
 node style/scripts/evaluate-decisions.mjs --dry-run --pack concurrency --split held_out
 node style/scripts/evaluate-decisions.mjs --pack concurrency --cli target/debug/cargo-adamantium --split held_out --metrics
 ```
+
+## Whole-file cancellation evaluation (ADAM-221)
+
+ADAM-221 tested whether `partial_mutation_on_cancellation` can join the shipped concurrency pack (`split_actor_invariant` + `unbounded_collection_growth`) through `cargo adamantium style check --pack concurrency` (whole files, every pack rule in one request, no per-case `--context`), focusing on the two ADAM-207 confusions (`Drop` guards that reset status and peek-then-pop vs pop-then-send) and evaluating whether a dev-chosen probability floor is needed.
+
+### Corpus and protocol
+
+- **Fresh whole-file cases committed before evaluation (`a231b9c`).** Added 4 new whole-file `dev` cases (`wf_dev_cancel_*`, 2 pairs covering `Drop` status-reset guards and `AsyncActor` queue ordering) and 22 new synthetic Rust 2024 whole-file `held_out` cases (`wf_ho_cancel_*`, 61–252 lines, 6 files >= 150 lines, all formatted with `rustfmt --edition 2024`, 0 `--context`), labeled for all four candidate rules:
+  - 3 `Drop` status/state-reset guard pairs (`wf_ho_cancel_deploy_status`, `wf_ho_cancel_index_rebuild`, `wf_ho_cancel_shard_lease`),
+  - 3 peek-then-pop vs pop-then-send pairs in `AsyncActor` handlers (`wf_ho_cancel_webhook_outbox`, `wf_ho_cancel_mail_spool`, `wf_ho_cancel_batch_drain`),
+  - 2 additional semantic pairs (two-phase escrow hold vs atomic post-await commit in `wf_ho_cancel_credit_escrow`; active handshake counter vs monotonic attempt/timestamp telemetry in `wf_ho_cancel_handshake_counter`),
+  - 2 `lint_overlap` violations (`tokio::time::timeout`, `tokio::select!` + `tokio::time::sleep`),
+  - 2 `lint_decoy` safe files (read-only `tokio::time::timeout` and `Drop`-guarded `tokio::select!`),
+  - 2 `insufficient_context` files delegating to external handles (`TransferPermit`, `StageHandle`).
+- **Cross-rule labeling.** Added `partial_mutation_on_cancellation` labels to all 44 existing ADAM-222 whole-file `held_out` cases (marking the 3 genuine pre-await unguarded mutations—`wf_ho_unbounded_rpc_inflight_bug`, `wf_ho_stale_budget_charge_safe`, and `wf_ho_stale_cursor_advance_safe`—as `violation` and the remaining 41 as `no_violation`), bringing `held_out` to 66 whole files (264 rule labels).
+- **Dev tuning and floor check.** All `dev` runs sent the 3-rule candidate pack (`split_actor_invariant`, `unbounded_collection_growth`, `partial_mutation_on_cancellation`) through the rebuilt `cargo-adamantium` binary on the 30 `dev` cancellation cases (26 ADAM-207 + 4 new whole-file, 0 `--context`):
+
+| Run | Cases | Input tokens | Precision | Recall | Exact 3-class | Pairs | `insufficient_context` | Safe FP |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dev round 1 (ADAM-207 wording) | 30 | 75,909 | 91.7% (11/12) | 84.6% (11/13) | 27/30 | 9/11 | 3 (all true) | 1 (`cancel_ho_pop_before_send_safe`, P=0.710) |
+| Dev round 2 (add pre-await pop/drain) | 30 | 100,194 | 92.9% (13/14) | 100.0% (13/13) | 29/30 | 10/11 | 3 (all true) | 1 (`cancel_ho_pop_before_send_safe`, P=0.990) |
+| Dev round 3 (clarify order relative to `.await`) | 30 | 103,385 | **100.0% (13/13)** | **100.0% (13/13)** | **30/30** | **11/11** | **3** (all true) | **0** |
+
+  Because dev round 3 achieved 30/30 exact with 0 false positives and `P(violation) >= 0.910` on all 13 true positives (13/13 located), no probability floor was motivated on `dev`. The revised wording in [`concurrency-decisions.json`](concurrency-decisions.json) was frozen at raw argmax before running `held_out` once.
+
+### Frozen held-out results through the CLI (66 whole files, 198 rule evaluations)
+
+Single frozen 3-rule `held_out` run (`291,358` input tokens across all 66 files; `105,809` input tokens across the 22 new `wf_ho_cancel_*` files):
+
+| Slice / Rule | Precision | Recall | F1 | Exact 3-class | Pairs (`bug`+`safe`) | `insufficient_context` | Located TP | Safe FP |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `partial_mutation_on_cancellation` (22 new `wf_ho_cancel_*`) | 90.9% (10/11) | 100.0% (10/10) | 95.2% | 21/22 (95.5%) | 7/8 | 2 (both true) | 8/10 | **1** |
+| `partial_mutation_on_cancellation` (all 66 `held_out`) | 68.4% (13/19) | 100.0% (13/13) | 81.3% | 60/66 (90.9%) | 7/8 | 2 (both true) | 10/13 | **6** |
+| `unbounded_collection_growth` (all 66 `held_out`) | 87.5% (7/8) | 100.0% (7/7) | 93.3% | 65/66 (98.5%) | 6/6 | 1 (true) | 6/7 | 1 (`wf_ho_cancel_shard_lease_bug`, P=0.690) |
+| `split_actor_invariant` (all 66 `held_out`, untouched) | 60.0% (6/10) | 100.0% (6/6) | 75.0% | 62/66 (93.9%) | 5/5 | 1 (true) | 5/6 | 4 (all pre-existing `wf_ho_stale_*`; 0 on new 22) |
+
+Representative false positives on `partial_mutation_on_cancellation` (0 refusals, 0 `insufficient_context` false positives):
+
+- **Peek-then-send-then-pop channel relays (2 safe FPs):**
+  - `wf_ho_cancel_mail_spool_safe` (`P(violation)=0.860`, `confidence=0.790`): `AsyncActor` peeks `state.spool.front().cloned()`, awaits `tx.send(mail).await`, and calls `state.spool.pop_front()` only on `Ok(())`.
+  - `wf_ho_stale_outbox_relay_safe` (`P(violation)=0.760`, `confidence=0.640`): identical `AsyncActor` peek -> `tx.send(front).await` -> `state.queue.pop_front()` pattern in the ADAM-222 whole-file set.
+- **Cross-rule confusion with read-only-before-await stale-read code (4 FPs):**
+  - `wf_ho_stale_budget_charge_bug` (`P=0.800`), `wf_ho_stale_flag_patch_bug` (`P=0.640`), `wf_ho_stale_cursor_advance_bug` (`P=0.860`), and `wf_ho_stale_lint_dropped_mutex_bug` (`P=0.980`): none of these files mutate shared state before `.await`, yet Decisions still flagged them as `partial_mutation_on_cancellation`.
+- **Why a probability floor does not fix it:** `dev` already hit 30/30 exact at raw argmax (giving no dev basis for a floor), and on `held_out` the false positives reach `P=0.860` (on a safe `AsyncActor` channel relay, exceeding the true positive `wf_ho_cancel_webhook_outbox_bug` at `P=0.810`) and `P=0.980` (tying true positives).
+
+### Ship decision (ADAM-221)
+
+- **`partial_mutation_on_cancellation` — Kept out of `--pack concurrency`.** Although `Drop` status-reset guards are now handled cleanly (3/3 new pairs plus the `tokio::select!` guarded decoy, 0 FPs) and recall reached 100% (10/10 on the new cases, 13/13 overall), the rule still flagged safe peek-then-send-then-pop `AsyncActor` channel relays (`P=0.760–0.860`) and read-only-before-await stale-read code (`P=0.640–0.980`), which cannot be separated cleanly by a probability floor. `--pack concurrency` remains unchanged (`split_actor_invariant` and `unbounded_collection_growth`).

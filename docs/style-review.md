@@ -114,7 +114,7 @@ The shipped rules live in [`cli/src/style/concurrency-decisions.json`](../cli/sr
 The evaluation is in [`style/rules/concurrency-evaluation.md`](../style/rules/concurrency-evaluation.md). Two more candidate rules stay out of the pack:
 
 - `stale_read_across_await` still flagged correct whole files (2 safe cases and 1 insufficient-context case out of 44) after whole-file revision.
-- `partial_mutation_on_cancellation` had false positives in ADAM-207 and is evaluated separately in ADAM-221.
+- `partial_mutation_on_cancellation` still flagged safe peek-then-send-then-pop `AsyncActor` channel relays (and read-only-before-await stale-read files) at high probability (`P=0.760–0.980`) in whole-file CLI evaluation (ADAM-221).
 
 On the 44 whole-file held-out cases run through `cargo adamantium style check --pack concurrency`, `unbounded_collection_growth` scored 100% precision (7/7), 100% recall (7/7), 44/44 exact 3-class accuracy, and 0 findings / 0 unresolved on Adamantium's own 36 `src/` files. `split_actor_invariant` found all 6 of its whole-file bugs and flagged none of its own or `unbounded_collection_growth`'s safe cases, though it did produce 4 false positives on whole-file async structs with a single Actor, atomic, or Mutex (tracked in ADAM-223).
 
