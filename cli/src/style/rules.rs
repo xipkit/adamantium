@@ -11,9 +11,10 @@ pub enum Pack {
     /// The judgment-based parts of the Google Rust style guide.
     #[default]
     Google,
-    /// Concurrency bugs that Clippy and the Dylint lints can't see: stale
-    /// reads across an await, invariants split across Actors, and collections
-    /// that grow without bound.
+    /// Concurrency bugs that Clippy and the Dylint lints can't see. For now
+    /// only state with a joint invariant split across separate Actors, locks
+    /// or atomics: the other evaluated rules flagged correct code when asked
+    /// about whole files.
     Concurrency,
 }
 
@@ -109,18 +110,11 @@ mod tests {
     }
 
     #[test]
-    fn the_concurrency_pack_ships_the_rules_adam_207_scored_without_false_positives() {
+    fn the_concurrency_pack_ships_only_the_rule_that_held_up_on_whole_files() {
         let rules = RuleSet::load(Pack::Concurrency).unwrap();
         assert_eq!(rules.model, "gpt-6-luna");
         let names: Vec<_> = rules.questions.iter().map(|q| q.name.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "stale_read_across_await",
-                "split_actor_invariant",
-                "unbounded_collection_growth"
-            ]
-        );
+        assert_eq!(names, ["split_actor_invariant"]);
     }
 
     /// The evaluation's precision and recall hold only for the wording it
@@ -136,7 +130,7 @@ mod tests {
             serde_json::from_str(Pack::Concurrency.definitions()).unwrap();
         assert_eq!(shipped["model"], evaluated["model"]);
         let shipped = shipped["questions"].as_array().unwrap();
-        assert_eq!(shipped.len(), 3);
+        assert_eq!(shipped.len(), 1);
         for question in shipped {
             let name = &question["name"];
             let original = evaluated["questions"]
