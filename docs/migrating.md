@@ -379,6 +379,9 @@ itself. Limit work may enter one `KeyedLimit`, for exclusion per key inside
 a shared limit. Entering any other limit inside limit work panics instead.
 Otherwise, finish the first work before entering the second limit.
 
+Like Tokio semaphore acquisitions, calls to `Limit` and `KeyedLimit` yield
+before taking a place when the task's cooperative budget is exhausted.
+
 Before:
 
 ```rust
