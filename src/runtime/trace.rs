@@ -115,9 +115,12 @@ pub(crate) struct Guard {
 
 impl Guard {
     pub(crate) fn enter() -> Self {
-        COLLECTOR.set(Some(Collector::new()));
         ACTIVE.set(true);
         Self { _private: () }
+    }
+
+    pub(crate) fn reset() {
+        COLLECTOR.set(Some(Collector::new()));
     }
 
     pub(crate) fn finish(self) -> Option<Collector> {
