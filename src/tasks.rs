@@ -303,19 +303,12 @@ fn lock<V>(shared: &Shared<V>) -> Guard<'_, V> {
     shared.lock()
 }
 
-/// Keep unstarted work alive until registration releases the set lock. Tokio
-/// can destroy a submitted task synchronously when its runtime is shut down;
-/// that work's destructor may itself use a spawner for this set.
 #[allow(
     clippy::expect_used,
-    reason = "the returned FnOnce takes the work exactly once"
+    reason = "each registered task starts at most once"
 )]
-fn retain<W: Send>(work: W) -> (Shared<Option<W>>, impl FnOnce() -> W + Send) {
-    let retained = shared(Some(work));
-    let task = Arc::clone(&retained);
-    (retained, move || {
-        lock(&task).take().expect("task starts once")
-    })
+fn take_work<W>(task: Shared<Option<W>>) -> W {
+    lock(&task).take().expect("task starts once")
 }
 
 // If runtime cancellation left the caller holding the last reference, preserve
@@ -324,16 +317,6 @@ fn release_work<E, W>(errors: &SharedErrors<E>, retained: Shared<Option<W>>) {
     if let Err(payload) = panic::catch_unwind(panic::AssertUnwindSafe(|| drop(retained))) {
         keep_panic(errors, JoinError::Panic(payload));
     }
-}
-
-fn spawn<E>(
-    set: &Shared<JoinSet>,
-    errors: &SharedErrors<E>,
-    future: impl Future<Output = ()> + Send + 'static,
-) {
-    let (retained, work) = retain(future);
-    lock(set).spawn(async move { work().await });
-    release_work(errors, retained);
 }
 
 struct Registering<'a> {
@@ -488,6 +471,14 @@ async fn handled<X>(future: impl Future<Output = Result<(), X>>, on_error: impl 
     }
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "the scope owner does not check admission"
+)]
+fn owner_submission<T>(result: Result<T, SpawnError>) -> T {
+    result.expect("owner submission cannot be rejected")
+}
+
 fn no_result() -> ! {
     panic::resume_unwind(Box::new(
         "adamantium: a task ended without a result and without a panic",
@@ -529,7 +520,7 @@ pub struct Tasks<E> {
     errors: SharedErrors<E>,
     cancellation: Option<Cancellation>,
     #[cfg(feature = "tracing")]
-    named: Option<Shared<trace::Running>>,
+    named: Shared<trace::Running>,
 }
 
 /// A cloneable capability to add tasks to one [`Tasks`] scope.
@@ -546,9 +537,11 @@ pub struct Spawner<E> {
     set: Shared<JoinSet>,
     world: World,
     errors: SharedErrors<E>,
+    #[cfg(feature = "tracing")]
+    named: Shared<trace::Running>,
 }
 
-/// The scope has closed admission and the submitted future was not started.
+/// The scope has closed admission and the submitted work was not started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpawnError;
 
@@ -574,35 +567,228 @@ impl<E: Send + 'static> Spawner<E> {
         T: Send + 'static,
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
+        self.submit_future(true, future)
+    }
+
+    /// Starts a named task as in [`Tasks::spawn_named`], with tracing spans
+    /// and deterministic timeline names when the corresponding features are enabled.
+    pub fn spawn_named<T, F>(
+        &self,
+        name: impl Into<crate::Str>,
+        future: F,
+    ) -> Result<Task<T, E>, SpawnError>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, E>> + Send + 'static,
+    {
+        self.spawn(self.name_future(name, future))
+    }
+
+    /// Starts a task whose error goes to the handler, as in [`Tasks::spawn_handled`].
+    /// If admission has closed, neither the future nor the handler runs.
+    pub fn spawn_handled<X, F, H>(&self, future: F, on_error: H) -> Result<(), SpawnError>
+    where
+        X: 'static,
+        F: Future<Output = Result<(), X>> + Send + 'static,
+        H: FnOnce(X) + Send + 'static,
+    {
+        self.submit_handled(true, handled(future, on_error))
+    }
+
+    /// Starts a named task whose error goes to the handler, as in [`Tasks::spawn_handled_named`].
+    pub fn spawn_handled_named<X, F, H>(
+        &self,
+        name: impl Into<crate::Str>,
+        future: F,
+        on_error: H,
+    ) -> Result<(), SpawnError>
+    where
+        X: 'static,
+        F: Future<Output = Result<(), X>> + Send + 'static,
+        H: FnOnce(X) + Send + 'static,
+    {
+        self.submit_handled(true, self.name_future(name, handled(future, on_error)))
+    }
+
+    /// Registers blocking work as in [`Tasks::spawn_blocking`].
+    /// Scope shutdown waits for admitted closures that have started.
+    pub fn spawn_blocking<T, F>(&self, f: F) -> Result<Task<T, E>, SpawnError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        self.submit_blocking(true, f)
+    }
+
+    /// Registers named blocking work as in [`Tasks::spawn_blocking_named`].
+    pub fn spawn_blocking_named<T, F>(
+        &self,
+        name: impl Into<crate::Str>,
+        f: F,
+    ) -> Result<Task<T, E>, SpawnError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        self.spawn_blocking(self.name_blocking(name, f))
+    }
+
+    fn register<W: Send + 'static>(
+        &self,
+        require_open: bool,
+        work: W,
+        submit: impl FnOnce(&mut JoinSet, Shared<Option<W>>),
+    ) -> Result<(), SpawnError> {
         self.world.check();
-        let (tx, rx) = Reply::pair();
-        let errors = Arc::clone(&self.errors);
-        // Declared before retained work so its destruction is included in
-        // registration, even if the runtime panics or cancels synchronously.
+        // Keep registration alive until any synchronously cancelled work
+        // has been destroyed outside the set lock.
         let mut registering = Registering {
             set: &self.set,
             admitted: false,
         };
-        let (retained, work) = retain(async move {
-            let result = future.await.map_err(|error| record(&errors, error));
-            deliver(&errors, tx, result);
-        });
+        let retained = shared(Some(work));
         {
             let mut set = lock(&self.set);
-            if set.begin_spawn() {
+            // The owner already reaped and may still submit after observing
+            // a panic, so it can drain the new work before resuming the panic.
+            if require_open {
+                if !set.begin_spawn() {
+                    return Err(SpawnError);
+                }
                 registering.admitted = true;
-                set.spawn(async move { work().await });
+                set.reap_successes();
+            }
+            submit(&mut set, Arc::clone(&retained));
+        }
+        release_work(&self.errors, retained);
+        Ok(())
+    }
+
+    fn submit_future<T, F>(&self, require_open: bool, future: F) -> Result<Task<T, E>, SpawnError>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T, E>> + Send + 'static,
+    {
+        self.world.check();
+        let (tx, rx) = Reply::pair();
+        let errors = Arc::clone(&self.errors);
+        self.submit_handled(require_open, async move {
+            let result = future.await.map_err(|error| record(&errors, error));
+            deliver(&errors, tx, result);
+        })?;
+        Ok(self.task(rx))
+    }
+
+    fn submit_handled(
+        &self,
+        require_open: bool,
+        future: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<(), SpawnError> {
+        self.register(require_open, future, |set, work| {
+            set.spawn(async move { take_work(work).await });
+        })
+    }
+
+    fn submit_blocking<T, F>(&self, require_open: bool, f: F) -> Result<Task<T, E>, SpawnError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        self.world.check();
+        let (tx, rx) = Reply::pair();
+        let errors = Arc::clone(&self.errors);
+        self.register(
+            require_open,
+            move || {
+                let result = f().map_err(|error| record(&errors, error));
+                deliver(&errors, tx, result);
+            },
+            |set, work| set.spawn_blocking(move || take_work(work)()),
+        )?;
+        Ok(self.task(rx))
+    }
+
+    fn task<T>(&self, rx: ReplyReceiver<Result<T, Receipt>>) -> Task<T, E> {
+        Task {
+            world: self.world,
+            rx,
+            errors: Arc::clone(&self.errors),
+        }
+    }
+
+    fn name_future<F: Future + Send + 'static, N: Into<crate::Str>>(
+        &self,
+        name: N,
+        future: F,
+    ) -> impl Future<Output = F::Output> + Send + 'static + use<F, N, E> {
+        self.world.check();
+        #[cfg(feature = "tracing")]
+        let name = name.into();
+        #[cfg(all(feature = "tracing", feature = "deterministic"))]
+        let future = crate::runtime::trace::named_str(self.world, name.clone(), future);
+        #[cfg(feature = "tracing")]
+        let future = trace::instrument(&self.named, name, future);
+        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
+        let future = crate::runtime::trace::named(self.world, name, future);
+        #[cfg(all(not(feature = "tracing"), not(feature = "deterministic")))]
+        let _ = name;
+        future
+    }
+
+    fn name_blocking<T, F, N: Into<crate::Str>>(
+        &self,
+        name: N,
+        f: F,
+    ) -> impl FnOnce() -> Result<T, E> + Send + 'static + use<T, F, N, E>
+    where
+        T: 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        self.world.check();
+        #[cfg(feature = "tracing")]
+        let name = name.into();
+        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
+        let name = if self.world.is_model() && crate::runtime::trace::is_active() {
+            Some(name.into())
+        } else {
+            None
+        };
+        #[cfg(feature = "tracing")]
+        {
+            #[cfg(feature = "deterministic")]
+            let trace_name = if self.world.is_model() && crate::runtime::trace::is_active() {
+                Some(name.clone())
+            } else {
+                None
+            };
+            let (running, span) = trace::track(&self.named, name);
+            let dispatch = tracing::dispatcher::get_default(Clone::clone);
+            move || {
+                #[cfg(feature = "deterministic")]
+                if let Some(trace_name) = trace_name {
+                    crate::runtime::trace::record_current_task_name(&trace_name);
+                }
+                tracing::dispatcher::with_default(&dispatch, move || {
+                    span.in_scope(move || {
+                        let _running = running;
+                        f()
+                    })
+                })
             }
         }
-        if registering.admitted {
-            release_work(&self.errors, retained);
-            Ok(Task {
-                world: self.world,
-                rx,
-                errors: Arc::clone(&self.errors),
-            })
-        } else {
-            Err(SpawnError)
+        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
+        {
+            move || {
+                if let Some(name) = name {
+                    crate::runtime::trace::record_current_task_name(&name);
+                }
+                f()
+            }
+        }
+        #[cfg(all(not(feature = "tracing"), not(feature = "deterministic")))]
+        {
+            let _ = name;
+            f
         }
     }
 }
@@ -614,6 +800,8 @@ impl<E> Clone for Spawner<E> {
             set: Arc::clone(&self.set),
             world: self.world,
             errors: Arc::clone(&self.errors),
+            #[cfg(feature = "tracing")]
+            named: Arc::clone(&self.named),
         }
     }
 }
@@ -688,6 +876,8 @@ impl<E: Send + 'static> Tasks<E> {
             set: Arc::clone(&self.set),
             world: self.world,
             errors: Arc::clone(&self.errors),
+            #[cfg(feature = "tracing")]
+            named: Arc::clone(&self.named),
         }
     }
 
@@ -708,7 +898,7 @@ impl<E: Send + 'static> Tasks<E> {
             }),
             cancellation: None,
             #[cfg(feature = "tracing")]
-            named: None,
+            named: shared(trace::Running::default()),
         }
     }
 
@@ -984,50 +1174,21 @@ impl<E: Send + 'static> Tasks<E> {
     {
         self.world.check();
         self.reap();
-        let (tx, rx) = Reply::pair();
-        let errors = Arc::clone(&self.errors);
-        spawn(&self.set, &self.errors, async move {
-            let result = future.await.map_err(|error| record(&errors, error));
-            // Without a handle to take it, a value is dropped.
-            deliver(&errors, tx, result);
-        });
-        Task {
-            world: self.world,
-            rx,
-            errors: Arc::clone(&self.errors),
-        }
+        owner_submission(self.spawner().submit_future(false, future))
     }
 
     /// Starts a named task. With the `tracing` feature, its future is polled
     /// inside an `adamantium.task` span with a `task.name` field, parented to
     /// the current span. Unfinished named tasks are reported at scope deadlines.
-    /// Without `tracing`, this behaves as [`spawn`](Self::spawn) without
-    /// converting or storing the name.
+    /// Deterministic timeline capture also records the name. When neither
+    /// tracing nor timeline capture is active, the name is unused.
     pub fn spawn_named<T, F>(&mut self, name: impl Into<crate::Str>, future: F) -> Task<T, E>
     where
         T: Send + 'static,
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
-        self.world.check();
-        #[cfg(feature = "tracing")]
-        let name = name.into();
-        #[cfg(all(feature = "tracing", feature = "deterministic"))]
-        let future = crate::runtime::trace::named_str(self.world, name.clone(), future);
-        #[cfg(feature = "tracing")]
-        {
-            let future = self.instrument(name, future);
-            self.spawn(future)
-        }
-        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
-        {
-            let future = crate::runtime::trace::named(self.world, name, future);
-            self.spawn(future)
-        }
-        #[cfg(all(not(feature = "tracing"), not(feature = "deterministic")))]
-        {
-            let _ = name;
-            self.spawn(future)
-        }
+        let future = self.spawner().name_future(name, future);
+        self.spawn(future)
     }
 
     /// Starts `future` as a task whose error goes to `on_error` instead of
@@ -1074,15 +1235,18 @@ impl<E: Send + 'static> Tasks<E> {
     {
         self.world.check();
         self.reap();
-        spawn(&self.set, &self.errors, handled(future, on_error));
+        owner_submission(
+            self.spawner()
+                .submit_handled(false, handled(future, on_error)),
+        );
     }
 
     /// Starts a named task whose error goes to `on_error`, with the contract
     /// of [`spawn_handled`](Self::spawn_handled). With the `tracing` feature,
     /// the task, `on_error` included, runs inside an `adamantium.task` span
     /// as for [`spawn_named`](Self::spawn_named), and is reported at scope
-    /// deadlines until it ends. Without `tracing`, this behaves as
-    /// `spawn_handled` without converting or storing the name.
+    /// deadlines until it ends. Deterministic timeline capture also records
+    /// the name.
     pub fn spawn_handled_named<X, F, H>(
         &mut self,
         name: impl Into<crate::Str>,
@@ -1093,27 +1257,10 @@ impl<E: Send + 'static> Tasks<E> {
         F: Future<Output = Result<(), X>> + Send + 'static,
         H: FnOnce(X) + Send + 'static,
     {
-        self.world.check();
-        #[cfg(feature = "tracing")]
-        let name = name.into();
-        #[cfg(all(feature = "tracing", feature = "deterministic"))]
-        let future = crate::runtime::trace::named_str(self.world, name.clone(), future);
-        #[cfg(feature = "tracing")]
-        {
-            self.reap();
-            let task = self.instrument(name, handled(future, on_error));
-            spawn(&self.set, &self.errors, task);
-        }
-        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
-        {
-            let future = crate::runtime::trace::named(self.world, name, future);
-            self.spawn_handled(future, on_error);
-        }
-        #[cfg(all(not(feature = "tracing"), not(feature = "deterministic")))]
-        {
-            let _ = name;
-            self.spawn_handled(future, on_error);
-        }
+        let spawner = self.spawner();
+        let future = spawner.name_future(name, handled(future, on_error));
+        self.reap();
+        owner_submission(spawner.submit_handled(false, future));
     }
 
     /// Registers blocking work directly with this scope.
@@ -1130,77 +1277,20 @@ impl<E: Send + 'static> Tasks<E> {
     {
         self.world.check();
         self.reap();
-        let (tx, rx) = Reply::pair();
-        let errors = Arc::clone(&self.errors);
-        let (retained, work) = retain(move || {
-            let result = f().map_err(|error| record(&errors, error));
-            // A dropped handle discards the value.
-            deliver(&errors, tx, result);
-        });
-        lock(&self.set).spawn_blocking(move || work()());
-        release_work(&self.errors, retained);
-        Task {
-            world: self.world,
-            rx,
-            errors: Arc::clone(&self.errors),
-        }
+        owner_submission(self.spawner().submit_blocking(false, f))
     }
 
     /// Registers named blocking work, with the same cleanup contract as
     /// [`spawn_blocking`](Self::spawn_blocking). With `tracing`, the closure
     /// runs inside an `adamantium.task` span and is included in deadline reports
-    /// until it finishes. Without `tracing`, the name is not converted or stored.
+    /// until it finishes. Deterministic timeline capture also records the name.
     pub fn spawn_blocking_named<T, F>(&mut self, name: impl Into<crate::Str>, f: F) -> Task<T, E>
     where
         T: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
-        self.world.check();
-        #[cfg(feature = "tracing")]
-        let name = name.into();
-        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
-        let name = if self.world.is_model() && crate::runtime::trace::is_active() {
-            Some(name.into())
-        } else {
-            None
-        };
-        #[cfg(feature = "tracing")]
-        {
-            #[cfg(feature = "deterministic")]
-            let trace_name = if self.world.is_model() && crate::runtime::trace::is_active() {
-                Some(name.clone())
-            } else {
-                None
-            };
-            let (running, span) = self.track(name);
-            let dispatch = tracing::dispatcher::get_default(Clone::clone);
-            self.spawn_blocking(move || {
-                #[cfg(feature = "deterministic")]
-                if let Some(trace_name) = trace_name {
-                    crate::runtime::trace::record_current_task_name(&trace_name);
-                }
-                tracing::dispatcher::with_default(&dispatch, move || {
-                    span.in_scope(move || {
-                        let _running = running;
-                        f()
-                    })
-                })
-            })
-        }
-        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
-        {
-            self.spawn_blocking(move || {
-                if let Some(name) = name {
-                    crate::runtime::trace::record_current_task_name(&name);
-                }
-                f()
-            })
-        }
-        #[cfg(all(not(feature = "tracing"), not(feature = "deterministic")))]
-        {
-            let _ = name;
-            self.spawn_blocking(f)
-        }
+        let f = self.spawner().name_blocking(name, f);
+        self.spawn_blocking(f)
     }
 
     /// Waits for a task and returns its result. If the task panicked, the
@@ -1846,6 +1936,53 @@ mod retention_tests {
                 }
             }
             Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handled_spawner_reaps_completed_entries_before_join() {
+        let tasks = Tasks::<()>::new();
+        let spawner = tasks.spawner();
+        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for _ in 0..100 {
+                spawner.spawn_handled(async { Err(()) }, |()| {}).unwrap();
+                while !tasks.is_empty() {
+                    yield_now().await;
+                }
+                assert_eq!(lock(&tasks.set).len(), 1);
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(tasks.join(Ok(())).await, Ok(()));
+    }
+
+    #[cfg(not(target_os = "wasi"))]
+    #[tokio::test]
+    async fn spawner_reaping_leaves_panics_for_scope_shutdown() {
+        let tasks = Tasks::<()>::new();
+        let spawner = tasks.spawner();
+        spawner
+            .spawn_handled(async { panic!("handled task panic") }, |(): ()| {})
+            .unwrap();
+        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !tasks.is_empty() {
+                yield_now().await;
+            }
+            spawner
+                .spawn_handled(std::future::pending(), |(): ()| {})
+                .unwrap();
+            // The second submission reaps the first task. Joining must
+            // still see its panic and abort the pending sibling.
+            let panic = AssertUnwindSafe(tasks.join(Ok(())))
+                .catch_unwind()
+                .await
+                .unwrap_err();
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"handled task panic"));
         })
         .await
         .unwrap();
