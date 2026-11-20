@@ -67,7 +67,6 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Capture {
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let mut fields = Fields::default();
         event.record(&mut fields);
-        // Name the task whose span the event is in, as `in task`.
         let task = ctx.event_span(event).and_then(|span| {
             let extensions = span.extensions();
             extensions.get::<Fields>()?.0.get("task.name").cloned()
@@ -108,7 +107,6 @@ async fn deadlines_report_only_unfinished_named_tasks_in_body_and_join() {
                     let failed =
                         tasks.spawn_named("handled error", async { Err::<(), _>("handled") });
                     tasks.spawn_named("stuck", forever());
-                    // A duplicate name must remain after its sibling finishes.
                     let duplicate = tasks.spawn_named("duplicate", async { Ok(()) });
                     tasks.spawn_named("duplicate", forever());
                     tasks.spawn_named("duplicate", forever());
@@ -130,7 +128,6 @@ async fn deadlines_report_only_unfinished_named_tasks_in_body_and_join() {
                 },
             ));
             begin(scope.as_mut()).await;
-            // Drive the body until completed children have sent their results.
             let mut started = Box::pin(started.receive());
             std::future::poll_fn(|cx| {
                 assert!(scope.as_mut().poll(cx).is_pending());
@@ -398,7 +395,6 @@ async fn cancellation_and_unnamed_scopes_produce_no_diagnostics() {
     assert!(capture.events.lock().unwrap().is_empty());
 }
 
-/// A worker that fails on its first two starts.
 fn flaky(starts: &Actor<u32>) -> impl FnMut(Option<&'static str>) -> FlakyStart + Send + use<> {
     let starts = starts.clone();
     move |_| {

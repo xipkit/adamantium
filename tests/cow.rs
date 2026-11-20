@@ -282,7 +282,6 @@ fn str_nested_windows_share_storage() {
 
 #[test]
 fn str_multibyte_utf8_boundary_checks() {
-    // Byte layout: 'a' (0..1), 'é' (1..3), '€' (3..6), '🦀' (6..10), 'z' (10..11)
     let original = Str::from("aé€🦀z");
     assert_eq!(original.len(), 11);
 
@@ -306,7 +305,6 @@ fn str_multibyte_utf8_boundary_checks() {
         "é"
     );
 
-    // Invalid UTF-8 boundaries on the full string.
     for (start, end) in [
         (0, 2),
         (2, 3),
@@ -334,14 +332,12 @@ fn str_multibyte_utf8_boundary_checks() {
             .is_none()
     );
 
-    // Valid empty slices on UTF-8 char boundaries.
     for offset in [0, 1, 3, 6, 10, 11] {
         let empty = original.slice(offset..offset).unwrap();
         assert!(empty.is_empty());
         assert_eq!(empty.as_ptr(), original.as_ptr().wrapping_add(offset));
     }
 
-    // Invalid UTF-8 boundaries relative to a nested window ("é€🦀", len 9).
     for (start, end) in [(0, 1), (1, 1), (1, 2), (2, 3), (5, 8), (6, 6)] {
         assert!(mid.slice(start..end).is_none(), "nested {start}..{end}");
     }
@@ -419,7 +415,6 @@ fn str_window_make_mut_isolates_overlapping_windows_and_parent() {
     assert_eq!(parent.as_str(), "pr");
     assert_eq!(overlap.as_str(), "amefo");
     assert!(!overlap.is_shared());
-    // Unique strict window must still materialize only the window on mutation.
     overlap += "!";
     overlap.extend(['?']);
     overlap.extend(["ok"]);

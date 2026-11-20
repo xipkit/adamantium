@@ -1,38 +1,11 @@
-//! The clock used for waits and deadlines, available with the `tokio` feature.
-//!
-//! Build deadlines from [`now`], for example
-//! `time::now() + Duration::from_secs(5)`, and wait with [`sleep`] or
-//! [`sleep_until`]. Deadlines remain [`tokio::time::Instant`] values accepted
-//! by the library's `_until` methods. Use [`std::time::Instant::now`] to
-//! measure elapsed wall-clock time instead.
-//!
-//! Outside `adamantium::testing` (with the `deterministic` feature), these functions
-//! delegate to Tokio, including its paused test clock. Inside an execution they
-//! use virtual time: the clock advances to the earliest pending deadline only
-//! when no application task can run. All timers at that instant become ready
-//! together; the scheduler explores the order in which their tasks resume.
-//!
-//! Each execution starts at the same opaque origin in this process. Compare
-//! elapsed durations, not the origin, across processes. Build deadlines inside
-//! the execution that uses them; `Instant` itself carries no execution identity.
-//! A sleep belongs to the execution where it is first polled and cannot be
-//! polled or dropped in another execution. Dropping it unregisters its timer.
-//!
-//! ```
-//! use adamantium::time;
-//! use std::time::Duration;
-//! # #[tokio::main] async fn main() {
-//! let deadline = time::now() + Duration::from_millis(10);
-//! time::sleep_until(deadline).await;
-//! time::sleep(Duration::from_millis(10)).await;
-//! # }
-//! ```
-
 use std::time::Duration;
 
 use tokio::time::Instant;
 
 /// Returns the current instant for building deadlines.
+///
+/// Uses Tokio's clock or the deterministic harness's virtual clock. Build
+/// and use a deadline inside the same execution.
 #[allow(
     clippy::disallowed_methods,
     reason = "the clock entry point delegates to Tokio here"
@@ -56,18 +29,25 @@ pub async fn sleep(duration: Duration) {
     wait(Delay::For(duration)).await;
 }
 
-/// Waits until `deadline`, built from [`now`], without blocking the worker thread.
+/// Waits until `deadline`, built from [`now`], without blocking the thread.
 ///
-/// Uses virtual time in the deterministic harness; otherwise requires Tokio's
-/// time driver, with millisecond timer granularity. Dropping the future cancels
-/// the wait. Past and current virtual deadlines are immediately ready.
+/// Uses the harness's virtual clock or Tokio's time driver with millisecond
+/// granularity. Past virtual deadlines are ready immediately. Dropping the
+/// future cancels the wait. Poll and drop it in the same execution.
+///
+/// ```
+/// use adamantium::time;
+/// use std::time::Duration;
+/// # #[tokio::main] async fn main() {
+/// let deadline = time::now() + Duration::from_millis(10);
+/// time::sleep_until(deadline).await;
+/// time::sleep(Duration::from_millis(10)).await;
+/// # }
+/// ```
 pub async fn sleep_until(deadline: Instant) {
     wait(Delay::Until(deadline)).await;
 }
 
-/// The longest relative wait, matching the far-future delay newer Tokio
-/// versions use. Older versions keep any representable delay, so capping here
-/// gives every supported version and the modeled clock the same contract.
 const MAX_DELAY: Duration = Duration::from_secs(86400 * 365 * 30);
 
 enum Delay {
@@ -113,32 +93,19 @@ async fn wait(delay: Delay) {
     .await;
 }
 
-/// How [`Interval`] schedules the next tick when a tick completes at or after
-/// the following scheduled deadline.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MissedTickBehavior {
-    /// Schedules the next tick one `period` after the current time.
-    ///
-    /// Prevents burst catch-up after a slow iteration by spacing the next tick
-    /// a full `period` from when the missed tick returned. This is the default.
     #[default]
     Delay,
-    /// Advances by whole multiples of `period` to the next scheduled tick
-    /// strictly after the current time.
-    ///
-    /// Preserves the original phase grid (`start + k * period`), skipping any
-    /// ticks that fell in the past without firing a burst.
     Skip,
 }
 
-/// A drift-free periodic timer built on [`adamantium::time`](self).
+/// A periodic timer on Tokio's clock or the deterministic virtual clock.
 ///
-/// Uses Tokio's clock in production (and its paused test clock in unit tests)
-/// and virtual time inside `adamantium::testing`.
-///
-/// Unlike `tokio::time::interval`, `Interval` defaults to
-/// [`MissedTickBehavior::Delay`] rather than burst catch-up, does not panic on a
-/// zero period, and provides [`Interval::tick_until`] for clean cancellation.
+/// After a missed tick, [`MissedTickBehavior::Delay`] (the default) starts a
+/// new period. [`MissedTickBehavior::Skip`] keeps the original schedule and
+/// skips elapsed periods. Zero periods are valid. Use
+/// [`Self::tick_until`] to stop on cancellation.
 ///
 /// ```
 /// use adamantium::{Cancellation, time};

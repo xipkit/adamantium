@@ -1,8 +1,3 @@
-//! Serve TCP connections in a scope, with a concurrency limit, per-connection
-//! error handling, and graceful shutdown on a signal: the server stops
-//! accepting, lets the connections in flight finish for a grace period, then
-//! aborts the rest.
-
 use adamantium::{Actor, Cancellation, Limit, ScopeError, Tasks, concurrently};
 use std::{io, net::SocketAddr, time::Duration};
 use tokio::{
@@ -13,8 +8,6 @@ use tokio::{
 const MAX_CONNECTIONS: usize = 4;
 const GRACE: Duration = Duration::from_secs(10);
 
-/// Answers one line with the same line in upper case. A request of `fail`
-/// is a protocol error, which ends this connection only.
 async fn serve(stream: TcpStream) -> io::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut request = String::new();
@@ -31,8 +24,6 @@ async fn serve(stream: TcpStream) -> io::Result<()> {
         .await
 }
 
-/// Sends `request` and returns the whole response, which is empty when the
-/// server closed the connection without answering.
 async fn ask(address: SocketAddr, request: &str) -> io::Result<String> {
     let mut stream = TcpStream::connect(address).await?;
     stream.write_all(format!("{request}\n").as_bytes()).await?;

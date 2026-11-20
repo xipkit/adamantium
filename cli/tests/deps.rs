@@ -1,8 +1,3 @@
-//! `cargo adamantium deps` on the `deps` fixture, whose path dependencies
-//! stand in for real crates. In their sources, each use of a disallowed path
-//! ends with a comment naming the entry it matches, and each call the audit
-//! can only count by name ends with `// unresolved`.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
@@ -30,7 +25,6 @@ fn deps_at(path: &Path, args: &[&str]) -> io::Result<Output> {
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-/// Uses of disallowed paths, as `(entry, file, line)`.
 type Sites = BTreeSet<(String, String, u64)>;
 
 fn report(args: &[&str]) -> TestResult<Value> {
@@ -52,7 +46,6 @@ fn dependency<'a>(report: &'a Value, name: &str) -> TestResult<&'a Value> {
         .ok_or_else(|| format!("no {name} in {report}").into())
 }
 
-/// Every Rust file under `dir`, relative to `root`.
 fn sources(root: &Path, dir: &Path, files: &mut Vec<(String, String)>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
@@ -70,8 +63,6 @@ fn sources(root: &Path, dir: &Path, files: &mut Vec<(String, String)>) -> io::Re
     Ok(())
 }
 
-/// The sites the comments in a vendored crate's sources mark, as
-/// `(entry, file, line)`, and the number of lines marked `unresolved`.
 fn marked(name: &str) -> io::Result<(Sites, usize)> {
     let root = fixture().join("vendor").join(name);
     let mut files = Vec::new();
@@ -94,7 +85,6 @@ fn marked(name: &str) -> io::Result<(Sites, usize)> {
     Ok((sites, unresolved))
 }
 
-/// The sites a dependency's report lists. Every call has a reason.
 fn reported(dependency: &Value) -> TestResult<Sites> {
     let mut sites = BTreeSet::new();
     let field = |value: &Value, name: &str| -> TestResult<String> {
@@ -211,7 +201,6 @@ fn deps_counts_each_kind_of_unsafe_and_notes_forbidding_crates() {
         dependency(&report, "helper").unwrap()["unsafe"]["blocks"],
         1
     );
-    // An `unsafe extern` block, but not a plain `extern` one.
     assert_eq!(
         dependency(&report, "ffi").unwrap()["unsafe"],
         json!({
@@ -225,8 +214,6 @@ fn deps_counts_each_kind_of_unsafe_and_notes_forbidding_crates() {
             "in_macros": 0,
         })
     );
-    // Attributes that `unsafe_code` reports, such as `#[no_mangle]`, and
-    // the ones written in a macro body.
     assert_eq!(
         dependency(&report, "exports").unwrap()["unsafe"],
         json!({
@@ -240,9 +227,6 @@ fn deps_counts_each_kind_of_unsafe_and_notes_forbidding_crates() {
             "in_macros": 4,
         })
     );
-    // `global_asm!` calls, by each path and `use` that leads to it, but not
-    // where a `macro_rules!` hides it, and the ones in a macro body read as
-    // tokens, as rustc reports them.
     assert_eq!(
         dependency(&report, "assembly").unwrap()["unsafe"],
         json!({
@@ -256,7 +240,6 @@ fn deps_counts_each_kind_of_unsafe_and_notes_forbidding_crates() {
             "in_macros": 2,
         })
     );
-    // By attribute, by a lint level string, and by a lint level table.
     for name in ["safe", "old", "codegen"] {
         assert_eq!(
             dependency(&report, name).unwrap()["forbids_unsafe"],
@@ -286,7 +269,6 @@ fn deps_names_source_it_could_not_scan() {
 #[test]
 fn deps_names_modules_declared_in_macro_bodies_it_could_not_read() {
     let report = report(&[]).unwrap();
-    // Modules in conditional macro branches that can't be built aren't listed.
     assert_eq!(
         dependency(&report, "platform").unwrap()["unscanned"],
         json!([{
@@ -300,9 +282,6 @@ fn deps_names_modules_declared_in_macro_bodies_it_could_not_read() {
 #[test]
 fn deps_scans_each_conditional_macro_branch_that_may_be_built() {
     let report = report(&[]).unwrap();
-    // Unknown predicates keep both possible branches. Nested `cfg_if!` and
-    // `cfg_select!` invocations load their modules too, as does the call of
-    // the crate's own macro. `hidden.rs` isn't counted.
     assert_eq!(
         dependency(&report, "platform").unwrap()["unsafe"],
         json!({
@@ -322,10 +301,6 @@ fn deps_scans_each_conditional_macro_branch_that_may_be_built() {
 fn deps_reads_modules_the_crates_own_macros_declare() {
     let report = report(&[]).unwrap();
     let facade = dependency(&report, "facade").unwrap();
-    // The `unsafe impl` in `root!` counts where it is called, not in the
-    // definition's body, and the modules it declares are scanned, one where
-    // its `#[path]` may put it, as is the one `backend!` declares through
-    // `$crate::declare!`.
     assert_eq!(
         facade["unsafe"],
         json!({

@@ -1,5 +1,3 @@
-//! These tests run with and without the `tokio` feature, so they poll by hand.
-
 use adamantium::{Channel, Limit};
 use std::{
     future::{Future, pending, ready},

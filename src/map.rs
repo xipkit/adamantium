@@ -16,15 +16,9 @@ use indexmap::IndexMap;
 /// because indexing a missing key would panic; use [`get`](Self::get).
 pub struct Map<K, V>(Arc<IndexMap<K, V>>);
 
-/// An occupied or vacant entry returned by [`Map::entry`].
-///
-/// The map's storage is already unique when this view is created. Updating
-/// an occupied entry keeps its position; inserting a vacant entry appends it.
 #[derive(Debug)]
 pub enum Entry<'a, K, V> {
-    /// An entry whose key is already in the map.
     Occupied(OccupiedEntry<'a, K, V>),
-    /// An entry whose key is absent from the map.
     Vacant(VacantEntry<'a, K, V>),
 }
 
@@ -374,7 +368,6 @@ impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for Map<K, V> {
     }
 }
 
-/// Equal when the same keys map to equal values, whatever the order.
 impl<K: Hash + Eq, V: PartialEq> PartialEq for Map<K, V> {
     fn eq(&self, other: &Self) -> bool {
         *self.0 == *other.0

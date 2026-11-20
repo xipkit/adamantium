@@ -101,7 +101,6 @@ fn strict_findings_have_text_and_sarif_reports() {
     );
 }
 
-/// A standalone crate with unchecked arithmetic and its checked alternatives.
 fn strict_project(workspace: bool) -> io::Result<tempfile::TempDir> {
     let dir = tempfile::tempdir()?;
     fs::create_dir(dir.path().join("src"))?;
@@ -359,8 +358,6 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
     let first = &report["findings"][0];
     assert!(first["file"].as_str().unwrap().ends_with(".rs"));
     assert!(first["line"].as_u64().is_some());
-    // Each finding carries the trimmed text of the line it starts on, so a
-    // baseline can match it after the line moves, and an actionable remediation.
     for finding in report["findings"].as_array().unwrap() {
         assert!(
             !finding["remediation"]
@@ -384,8 +381,6 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
             .trim();
         assert_eq!(finding["source"], expected, "{finding}");
     }
-    // The binary depends on the library. Its finding is only reported when
-    // the library's findings do not fail the build and skip what depends on it.
     assert!(
         report["findings"]
             .as_array()
@@ -396,14 +391,6 @@ fn check_reports_every_rule_the_violations_fixture_breaks() {
     );
 }
 
-/// Each fixture must produce a disallowed method finding on exactly the lines
-/// of its `src` files that end in `// disallowed`, and on no others. `runtime`
-/// covers Tokio's runtime entry points; `unstable` covers `task::Builder`,
-/// which needs `--cfg tokio_unstable`; `indexing` covers panicking index methods
-/// beside their checked alternatives; `channels` covers unbounded constructors
-/// beside their bounded alternatives; `time` covers clock entry points beside
-/// Adamantium's wrappers and wall-clock measurements.
-/// `spawns` covers async-std and smol's spawn entry points beside runtime entry.
 #[test]
 fn check_reports_disallowed_methods() {
     for name in [
@@ -462,9 +449,6 @@ fn check_reports_disallowed_methods() {
     }
 }
 
-/// Checks the fixture `name` and asserts that it produces a finding on exactly
-/// the lines of `src/lib.rs` marked with a disallowed lint, for that rule, and
-/// no other finding. Marks prefixed with `strict` apply only in that tier.
 fn check_marked_rules(name: &str, strict: bool) -> TestResult<Vec<serde_json::Value>> {
     let root = fixture(name);
     let mut marked = Vec::new();
@@ -545,8 +529,6 @@ fn check_reports_uncontrolled_randomness_and_allows_owned_seeds() {
     assert!(stderr.contains("use adamantium::random"), "{stderr}");
 }
 
-/// Direct calls and imported aliases are reported, while structured deadlines
-/// and reasoned local exceptions remain allowed.
 #[test]
 fn check_reports_timeouts_and_allows_structured_deadlines() {
     for finding in check_marked_rules("cancellation", false).unwrap() {
@@ -563,9 +545,6 @@ fn check_reports_select_at_each_unexcepted_call() {
     assert_eq!(findings.len(), 8, "{findings:?}");
 }
 
-/// Every access method of a `thread_local!` value is reported, called on the
-/// static or through a `&LocalKey`, unless a local allow exempts it. Atomics,
-/// `OnceLock` and `LazyLock` statics, and a static `Actor` are not.
 #[test]
 fn check_reports_thread_locals_and_allows_atomics_and_statics() {
     let mut methods: Vec<String> = check_marked_rules("state", false)
@@ -620,7 +599,6 @@ fn check_covers_every_workspace_member() {
         files.iter().any(|file| file.ends_with("member/src/lib.rs")),
         "the member package was not checked: {files:?}"
     );
-    // The root includes shared.rs through `#[path = "../shared.rs"]`.
     assert!(
         files.contains(&"shared.rs"),
         "the included file is not reported under its plain name: {files:?}"
@@ -684,8 +662,6 @@ fn check_applies_the_skip_list() {
     );
 }
 
-/// Runs `check` on `dir` with `args`, returning its exit code, stdout and
-/// stderr.
 fn check_with(dir: &Path, args: &[&str]) -> io::Result<(Option<i32>, Vec<u8>, String)> {
     let output = adamantium()
         .args(["adamantium", "check"])
@@ -770,7 +746,6 @@ fn check_reports_recursive_macros_at_each_caller() {
 fn check_with_a_baseline_fails_only_on_new_findings() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("src")).unwrap();
-    // No overflow-checks, so the baseline also covers a finding without a line.
     fs::write(
         dir.path().join("Cargo.toml"),
         "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -788,7 +763,6 @@ fn check_with_a_baseline_fails_only_on_new_findings() {
     fs::write(&baseline, stdout).unwrap();
     let baseline = baseline.to_str().unwrap();
 
-    // Code added above the old finding moves and reindents it, and adds one.
     fs::write(
         &lib,
         "pub fn second(v: Option<i32>) -> i32 {\n    v.expect(\"set\")\n}\n\npub mod inner {\n    pub fn first(v: Option<i32>) -> i32 {\n        v.unwrap()\n    }\n}\n",
@@ -813,7 +787,6 @@ fn check_with_a_baseline_fails_only_on_new_findings() {
     );
     assert_eq!(report["baseline_unmatched"], 0, "{report}");
 
-    // Text output shows only the new finding's diagnostic.
     let (code, _, stderr) = check_with(dir.path(), &["--baseline", baseline]).unwrap();
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("expect_used"), "{stderr}");
@@ -824,7 +797,6 @@ fn check_with_a_baseline_fails_only_on_new_findings() {
         "{stderr}"
     );
 
-    // Fixing both leaves the check clean and says the baseline is stale.
     fs::write(
         &lib,
         "pub fn first(v: Option<i32>) -> i32 {\n    v.unwrap_or(0)\n}\n",
@@ -862,7 +834,6 @@ fn check_with_a_baseline_fails_only_on_new_findings() {
     assert_eq!(report["status"], "clean", "{report}");
     assert_eq!(report["baseline_unmatched"], 1, "{report}");
 
-    // Without a baseline, every finding counts and none is matched.
     let (code, stdout, stderr) = check_with(dir.path(), &["--format", "json"]).unwrap();
     assert_eq!(code, Some(1), "{stderr}");
     let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
@@ -1268,9 +1239,6 @@ fn check_reports_spanless_lint_warnings_once_in_json_and_text() {
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-/// Runs `check --format sarif` on `dir`, passing `cargo_args` on to Clippy,
-/// and returns its exit code and log, or an error if the log does not match
-/// the SARIF 2.1.0 schema.
 fn check_sarif(
     dir: &Path,
     env: &[(&str, &Path)],
@@ -1296,9 +1264,6 @@ fn check_sarif(
     Ok((output.status.code(), log))
 }
 
-/// Where `log` breaks the SARIF 2.1.0 schema. The schema is SchemaStore's
-/// copy of the OASIS schema, which declares draft 7, so that URI formats are
-/// checked.
 fn sarif_schema_errors(log: &serde_json::Value) -> TestResult<Vec<String>> {
     let schema: serde_json::Value = serde_json::from_str(include_str!("sarif-schema-2.1.0.json"))?;
     let validator = jsonschema::options()
@@ -1310,7 +1275,6 @@ fn sarif_schema_errors(log: &serde_json::Value) -> TestResult<Vec<String>> {
         .collect())
 }
 
-/// The file a result's location names, resolved against the run's base URI.
 fn sarif_path(run: &serde_json::Value, result: &serde_json::Value) -> Option<PathBuf> {
     let artifact = result.pointer("/locations/0/physicalLocation/artifactLocation")?;
     let uri = artifact.get("uri")?.as_str()?;
@@ -1321,7 +1285,6 @@ fn sarif_path(run: &serde_json::Value, result: &serde_json::Value) -> Option<Pat
                 .get(base.as_str()?)?
                 .get("uri")?
                 .as_str()?;
-            // A base URI must end in `/` to resolve relative references.
             base.ends_with('/').then(|| format!("{base}{uri}"))?
         }
         None => uri.to_owned(),
@@ -1342,7 +1305,6 @@ fn sarif_path(run: &serde_json::Value, result: &serde_json::Value) -> Option<Pat
     String::from_utf8(bytes).ok().map(PathBuf::from)
 }
 
-/// Each result's rule and URI, sorted.
 fn sarif_artifacts(log: &serde_json::Value) -> Option<Vec<(String, String)>> {
     let mut artifacts = Vec::new();
     for result in log.pointer("/runs/0/results")?.as_array()? {
@@ -1382,8 +1344,6 @@ fn sarif_schema_check_rejects_an_invalid_log() {
     );
 }
 
-/// The SARIF log has one result per finding in the JSON report, at the same
-/// place and for the same rule.
 #[test]
 fn check_reports_the_violations_fixture_as_sarif() {
     let output = adamantium()
@@ -1473,9 +1433,6 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// GitHub resolves relative URIs against the repository root, while Clippy
-/// names files relative to the workspace root and the overflow check names
-/// the checked package's own manifest.
 #[test]
 fn sarif_uris_are_relative_to_the_git_repository_root() {
     let repository = tempfile::tempdir().unwrap();
@@ -1520,8 +1477,6 @@ fn sarif_uris_are_relative_to_the_git_repository_root() {
     );
 }
 
-/// `--manifest-path` after `--` makes Clippy check another workspace, whose
-/// root its file names are relative to.
 #[test]
 fn sarif_uris_follow_a_forwarded_manifest_path() {
     let repository = tempfile::tempdir().unwrap();
@@ -1568,7 +1523,6 @@ fn sarif_uris_follow_a_forwarded_manifest_path() {
     }
 }
 
-/// Outside a git repository, URIs are relative to the workspace root.
 #[test]
 fn sarif_uris_outside_git_are_relative_to_the_workspace() {
     let dir = tempfile::tempdir().unwrap();
@@ -1733,8 +1687,6 @@ fn init_uses_workspace_tables_in_a_workspace() {
 
 const BARE_MANIFEST: &str = "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n";
 
-/// A package with a bare `Cargo.toml`, whose `clippy.toml` path `write`
-/// fills in.
 fn package_with_clippy_toml(
     write: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<tempfile::TempDir> {
@@ -1922,7 +1874,6 @@ fn explain_has_an_example_for_every_rule_in_text_and_json() {
         "the release profile must set overflow-checks = true, so integer overflow panics instead of wrapping".into(),
     ));
 
-    // Run outside a Cargo project: explanations must work without loading one.
     let dir = tempfile::tempdir().unwrap();
     for (name, qualified, why) in names {
         let output = adamantium()

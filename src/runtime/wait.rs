@@ -1,10 +1,3 @@
-//! Notification boundary shared by queue and latest-value primitives.
-//!
-//! Register a listener, recheck the protected condition, then await it. Event
-//! operations are linearization points: the harness runs on one OS thread and
-//! its wakers mark tasks runnable without switching tasks inside Event's lock.
-//! We schedule before each operation, including cancellation's wake handoff.
-
 use std::{
     future::Future,
     pin::Pin,
@@ -36,7 +29,7 @@ impl WaitQueue {
         }
     }
 
-    /// Checks once on the fast path and again after registration to avoid a lost wake.
+    // Checks once on the fast path and again after registration to avoid a lost wake.
     pub(crate) async fn wait_for<T>(&self, mut check: impl FnMut() -> Option<T>) -> T {
         self.world
             .cooperative(async {
@@ -82,10 +75,7 @@ impl WaitQueue {
         self.event.notify(usize::MAX);
     }
 
-    /// Notifies like [`notify_all`](Self::notify_all), but without a
-    /// scheduling step, for use inside a waker. A waker can run inside
-    /// another primitive's critical section, where the harness must not
-    /// switch tasks.
+    // Wake without a scheduling step because a waker may hold another lock.
     pub(crate) fn notify_all_from_waker(&self) {
         #[cfg(feature = "deterministic")]
         super::trace::record_wakeup(self.operation, self.wait_id, true);

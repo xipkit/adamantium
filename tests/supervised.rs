@@ -98,7 +98,6 @@ async fn a_panic_is_not_restarted() {
 async fn a_task_that_restarts_with_no_wait_lets_the_scope_end() {
     let starts = Actor::new(0_u64);
     let count = starts.clone();
-    // No restart stays in a window of no length, so the task restarts forever.
     let restarts = Restarts::new(1, Duration::ZERO);
     let result = Tasks::run(async |tasks| {
         drop(tasks.spawn_supervised(restarts, move |_| {
@@ -132,10 +131,6 @@ mod paused {
                     *starts
                 });
                 async move {
-                    // The second start stays healthy for longer than the
-                    // window, so the first restart no longer counts when it
-                    // fails, and it restarts too. The third start fails
-                    // inside that restart's window.
                     if start == 2 {
                         time::sleep(Duration::from_secs(11)).await;
                     }
@@ -174,8 +169,6 @@ mod paused {
         let restarts = Restarts::new(1, Duration::from_secs(10)).backoff(backoff);
         let result = Tasks::run(async |tasks| {
             let worker = tasks.spawn_supervised(restarts, move |error: Option<u64>| async move {
-                // Fails at 0 seconds, restarts at 8, and fails again at 13:
-                // 13 seconds after the failure, but 5 after the restart.
                 if error.is_some() {
                     time::sleep(Duration::from_secs(5)).await;
                 }

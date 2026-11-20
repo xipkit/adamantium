@@ -1,22 +1,3 @@
-//! The skip list a project keeps in its `Cargo.toml`, so that it can adopt
-//! the rules one at a time and exempt the places where a rule does not
-//! apply:
-//!
-//! ```toml
-//! [workspace.metadata.adamantium]
-//! skip = ["tests/", "examples/"]              # nothing is checked here
-//! allow = ["indexing_slicing", "unwrap_used"] # these rules are off, for now
-//!
-//! [workspace.metadata.adamantium.exceptions]
-//! future_not_send = ["src/syntax/", "src/bytecode.rs"] # this rule is off here
-//! ```
-//!
-//! A single package uses `[package.metadata.adamantium]`. Paths are globs
-//! relative to the directory holding `Cargo.toml`, and a path without
-//! wildcards also names everything under it. Rules go by their bare name or
-//! by the qualified one `cargo adamantium rules` prints. The list applies to
-//! `cargo adamantium check`; a `[lints]` table cannot scope a rule to a path.
-
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
@@ -32,7 +13,6 @@ use crate::lints::{self, EXPERIMENTAL_LINTS, OVERFLOW_RULE};
 /// A project's skip list. The default skips nothing.
 #[derive(Debug)]
 pub struct Config {
-    /// The table the list came from, such as `workspace.metadata.adamantium`.
     pub table: Option<String>,
     skip: GlobSet,
     allow: HashSet<String>,
@@ -126,7 +106,6 @@ impl Config {
     }
 }
 
-/// The strings in an array item, or none when the item is absent.
 fn strings(item: Option<&Item>, key: &str) -> Result<Vec<String>> {
     let Some(item) = item else {
         return Ok(Vec::new());
@@ -139,9 +118,6 @@ fn strings(item: Option<&Item>, key: &str) -> Result<Vec<String>> {
         .collect()
 }
 
-/// Globs for the paths in an array item. A path without wildcards also names
-/// everything under it, so `tests/`, `tests` and `tests/**` all cover the
-/// directory.
 fn globs(item: Option<&Item>, key: &str) -> Result<GlobSet> {
     let mut set = GlobSetBuilder::new();
     for path in strings(item, key)? {
@@ -165,7 +141,6 @@ fn glob(pattern: &str, key: &str) -> Result<Glob> {
         .with_context(|| format!("`{key}` in Cargo.toml has an invalid glob {pattern:?}"))
 }
 
-/// The qualified name of a rule given by either of its names.
 fn qualify(name: &str, table: &str) -> Result<String> {
     if name == OVERFLOW_RULE || Some(name) == OVERFLOW_RULE.strip_prefix("adamantium::") {
         return Ok(OVERFLOW_RULE.to_owned());

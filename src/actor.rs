@@ -4,16 +4,9 @@ use crate::runtime::{Lock, Shared};
 
 /// Shared state whose methods run one at a time.
 ///
-/// An `Actor` wraps a value that several tasks use. [`with`](Self::with)
-/// runs a closure with exclusive access to the value. The closure is
-/// synchronous, so the lock can't be held across an await, and a method
-/// can't call another actor: a nested `with` or `read` on any actor, this
-/// one or another, panics instead of risking a deadlock. Those two rules are what
-/// make a program with actors free of lock deadlocks and of locks held
-/// through a cancellation.
-///
-/// Write the state as a plain struct with plain `&mut self` methods, which
-/// are testable with no concurrency at all, and call them through `with`:
+/// [`Self::with`] gives a synchronous closure exclusive access to the state.
+/// The closure cannot hold the lock across an await. Nested `with` or `read`
+/// calls on any actor panic to prevent deadlock.
 ///
 /// ```
 /// # use adamantium::Actor;
@@ -29,23 +22,17 @@ use crate::runtime::{Lock, Shared};
 /// assert_eq!(tally.read(Tally::total), 1);
 /// ```
 ///
-/// Work that waits, such as a network call, happens in a task; the actor
-/// records its result afterwards. With the `tokio` feature, `AsyncActor`
-/// provides a mailbox worker for state that must stay exclusively owned
-/// across an await, such as a connection with an in-flight exchange.
+/// Run async work outside the actor and record its result with `with`.
+/// Use `AsyncActor` if the state must stay exclusively owned across awaits.
 ///
-/// Clones share ownership of the state. Storing a clone in its own state,
-/// directly or through other actors, creates a strong reference cycle that
-/// keeps the states alive after the last external handle is dropped. Cycles
-/// are not detected or collected; keep ownership acyclic or remove the
-/// cycle-forming handles before releasing the last external handle.
+/// Clones share the same state. Remove any strong reference cycles before
+/// dropping the last external handle to avoid leaking the state.
 pub struct Actor<S> {
     state: Shared<Lock<S>>,
 }
 
 thread_local! {
-    /// How many actor methods the current thread is inside. A method is
-    /// synchronous, so a task can't move threads while it runs one.
+    // Actor methods run synchronously, so nesting cannot cross threads.
     #[allow(clippy::disallowed_types, reason = "a per-thread counter, never shared")]
     static DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -84,7 +71,6 @@ fn set_depth(depth: usize) {
 const NESTED: &str = "adamantium: Actor::with was called inside another actor's method; \
 an actor method can't call an actor, so call the second actor after the first returns";
 
-/// Marks the current thread as inside an actor method until dropped.
 struct Inside;
 
 impl Inside {

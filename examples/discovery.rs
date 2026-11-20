@@ -1,5 +1,3 @@
-//! Traverse a small graph whose children discover more work in one scope.
-
 use adamantium::{Actor, SpawnError, Spawner, Tasks};
 use std::{collections::BTreeSet, future::Future, pin::Pin};
 

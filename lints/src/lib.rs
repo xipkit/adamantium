@@ -63,7 +63,6 @@ enum LintKind {
 }
 
 impl LintKind {
-    /// The lint, its message and its help.
     fn diagnostic(self) -> (&'static rustc_lint::Lint, &'static str, &'static str) {
         match self {
             Self::BlockingInAsync => (
@@ -128,9 +127,6 @@ impl<'tcx> LateLintPass<'tcx> for Execution {
     fn check_body(&mut self, cx: &LateContext<'tcx>, body: &Body<'tcx>) {
         let body = cx.tcx.hir_body(body.id());
         let owner = cx.tcx.hir_body_owner_def_id(body.id());
-        // Constant arguments can be type-checked separately from their HIR
-        // owner. They cannot execute runtime I/O or actor methods; nested
-        // runtime closures are still checked through their own bodies.
         if !matches!(
             cx.tcx.def_kind(owner),
             DefKind::Fn | DefKind::AssocFn | DefKind::Closure
@@ -154,14 +150,11 @@ impl<'tcx> LateLintPass<'tcx> for Execution {
     }
 }
 
-/// How a walk uses what it finds.
 enum Mode<'a> {
-    /// Reports effects that conflict with the walk's context.
     Check {
         reported: &'a mut HashSet<(HirId, LintKind)>,
         visited: &'a mut HashSet<(HirId, Context)>,
     },
-    /// Collects the effects of one body, whatever its caller's context.
     Summarize {
         node: LocalDefId,
         root: DefId,
@@ -170,14 +163,6 @@ enum Mode<'a> {
     },
 }
 
-/// Follows one body through the code that runs synchronously with it.
-///
-/// Closures that are invoked inline and futures that are polled by an
-/// `.await` are lexically part of the walked body, so the walk enters them
-/// with the context they run in and reports inside them. Local functions and
-/// the futures of local async functions run wherever they are called from,
-/// so they are represented by their [`Summary`] and reported where they are
-/// called or awaited.
 struct Walker<'a, 'tcx> {
     cx: &'a LateContext<'tcx>,
     summaries: &'a mut Summaries,
@@ -186,17 +171,12 @@ struct Walker<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> Walker<'a, 'tcx> {
-    /// The effects of running `node`'s body. Reads of other summaries are
-    /// recorded as dependencies so that [`Summaries`] can recompute `node`
-    /// when one of them grows.
     fn summarize(
         cx: &'a LateContext<'tcx>,
         summaries: &'a mut Summaries,
         node: LocalDefId,
     ) -> Summary {
         let tcx = cx.tcx;
-        // An opaque future stands for its hidden type, which is polled from
-        // the expression its defining function returns.
         let opaque = tcx.def_kind(node) == DefKind::OpaqueTy;
         let owner = if opaque { tcx.local_parent(node) } else { node };
         let Some(body) = tcx.hir_maybe_body_owned_by(owner) else {
@@ -235,11 +215,6 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
         self.context = previous;
     }
 
-    /// Records or reports `effect` happening at `site`. `via` names the local
-    /// body whose summary produced it; `None` means `site` is the operation.
-    ///
-    /// Blocking is not reported where a future is polled: the future's own
-    /// body is async code, so its blocking calls are reported there.
     fn occur(
         &mut self,
         effect: Effect,
@@ -268,8 +243,6 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
         }
     }
 
-    /// Records that the walked body invokes or polls a value of the generic
-    /// type parameter `param`, which the caller's arguments decide.
     fn record_use(&mut self, site: &'tcx Expr<'tcx>, param: u32, how: How) {
         let site_root = self
             .cx
@@ -294,7 +267,6 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
         }
     }
 
-    /// Applies the summary of `node`, instantiated with `args`, at `site`.
     fn apply(
         &mut self,
         site: &'tcx Expr<'tcx>,
@@ -319,7 +291,6 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
         }
     }
 
-    /// Follows a call of a value of type `ty` at `site`, run in `context`.
     fn invoke(&mut self, site: &'tcx Expr<'tcx>, ty: Ty<'tcx>, context: Context) {
         self.within(context, |walker| match *ty.peel_refs().kind() {
             ty::Closure(id, _) => {
@@ -344,8 +315,6 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
         });
     }
 
-    /// Follows the polling of a future of type `ty` at `site`, run in
-    /// `context`. Only polling runs a future's body; constructing it does not.
     fn poll(&mut self, site: &'tcx Expr<'tcx>, ty: Ty<'tcx>, context: Context) {
         let tcx = self.cx.tcx;
         let polled = Context {
@@ -366,9 +335,6 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
                     return;
                 };
                 if let Some(opaque) = def_id.as_local() {
-                    // An async function's future is its coroutine. Any other
-                    // local future, such as another function's future that a
-                    // helper returns, is summarized as its hidden type.
                     if let ty::Coroutine(coroutine, _) = *tcx
                         .type_of(def_id)
                         .instantiate_identity()
@@ -393,9 +359,6 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
         });
     }
 
-    /// Follows the polling of a `Limit` or `KeyedLimit` `run` future: the
-    /// limit is entered, then its work is called and the work's future is
-    /// polled while the place is held.
     fn enter_limit(
         &mut self,
         site: &'tcx Expr<'tcx>,
@@ -463,13 +426,8 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
         } else if let Some((node, args)) = self.resolve(site, id, args) {
             self.apply(site, node, args, false);
         }
-        // Unknown callback APIs are not followed. Blocking-pool callbacks
-        // consequently start in their own context. Argument expressions are
-        // still visited in the caller context by walk_expr.
     }
 
-    /// The local function body that a call of `id` with `args` runs, if it
-    /// can be named without knowing the caller's generic parameters.
     fn resolve(
         &self,
         site: &'tcx Expr<'tcx>,
@@ -492,7 +450,6 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
         } else {
             (id, args)
         };
-        // Coroutine bodies are polled, never called; `poll` follows them.
         let local = id.as_local()?;
         (matches!(tcx.def_kind(id), DefKind::Fn | DefKind::AssocFn)
             && tcx.hir_maybe_body_owned_by(local).is_some())
@@ -530,9 +487,6 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
 
 impl<'tcx> Visitor<'tcx> for Walker<'_, 'tcx> {
     fn visit_body(&mut self, body: &Body<'tcx>) {
-        // A closure can be invoked repeatedly through aliases. The context
-        // bounds traversal to a few visits per body instead of expanding a
-        // potentially exponential call tree.
         let key = (body.id().hir_id, self.context);
         let first = match &mut self.mode {
             Mode::Check { visited, .. } => visited.insert(key),
@@ -572,7 +526,6 @@ impl<'tcx> Visitor<'tcx> for Walker<'_, 'tcx> {
                 }
             }
             ExprKind::Match(scrutinee, _, MatchSource::AwaitDesugar) => {
-                // Constructing the future runs first, then it is polled.
                 intravisit::walk_expr(self, expr);
                 if let Some(future) = awaited(self.cx, scrutinee) {
                     self.poll(expr, self.types(future).expr_ty(future), self.context);
@@ -618,7 +571,6 @@ fn is_async(cx: &LateContext<'_>, id: LocalDefId) -> bool {
         .is_some_and(|kind| kind.is_async_desugaring())
 }
 
-/// The future an `.await` polls, before `IntoFuture::into_future`.
 fn awaited<'tcx>(cx: &LateContext<'tcx>, scrutinee: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
     if let ExprKind::Call(function, [future]) = scrutinee.kind
         && let ty::FnDef(id, _) = cx
@@ -634,7 +586,6 @@ fn awaited<'tcx>(cx: &LateContext<'tcx>, scrutinee: &'tcx Expr<'tcx>) -> Option<
     }
 }
 
-/// The future polled through references, `Pin` and `Box`.
 fn pointee(mut ty: Ty<'_>) -> Ty<'_> {
     loop {
         ty = match *ty.kind() {
@@ -645,9 +596,6 @@ fn pointee(mut ty: Ty<'_>) -> Ty<'_> {
     }
 }
 
-/// The future that limit work returns, from the `FnOnce` bound on the
-/// work in `function`'s signature. A generic work type keeps its future
-/// generic, so a helper that wraps a limit records polling it.
 fn work_future<'tcx>(
     cx: &LateContext<'tcx>,
     function: DefId,
@@ -667,7 +615,6 @@ fn work_future<'tcx>(
         })
 }
 
-/// The expression a body evaluates to, inside any enclosing blocks.
 fn tail<'tcx>(mut expr: &'tcx Expr<'tcx>) -> &'tcx Expr<'tcx> {
     while let ExprKind::Block(block, _) = expr.kind
         && let Some(inner) = block.expr
@@ -677,7 +624,6 @@ fn tail<'tcx>(mut expr: &'tcx Expr<'tcx>) -> &'tcx Expr<'tcx> {
     expr
 }
 
-/// Which limit a `run` or `run_until` function enters, if any.
 fn limit_kind(cx: &LateContext<'_>, function: DefId) -> Option<LimitKind> {
     if !matches!(cx.tcx.item_name(function).as_str(), "run" | "run_until") {
         return None;
@@ -775,8 +721,6 @@ fn blocking(
         return true;
     }
     let owner = owner.and_then(|ty| adt_path(cx, ty));
-    // Only standard I/O traits count. A user trait named `read` on a File
-    // is not evidence of blocking I/O.
     let io_trait = [
         "alloc::io::read::Read::",
         "core::io::write::Write::",

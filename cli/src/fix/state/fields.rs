@@ -1,15 +1,3 @@
-//! Struct fields of type `Arc<Mutex<T>>` that become `Actor<T>`.
-//!
-//! A field is a candidate when it is private, its struct is declared once in
-//! the file, and its struct derives at most `Clone` and `Default`. Its uses are followed only through receivers fix can trace to
-//! the struct: `self` in the struct's `impl`, and parameters and locals
-//! declared as the struct or a reference to it. A guard of the field becomes
-//! a callback as a local's does, a clone of it joins the field's group, and a
-//! struct literal may set it to a constructor or to a tracked local. Any
-//! other use leaves the field, and every value holding its state, for
-//! review. The checks that need the whole package happen when the plans are
-//! settled.
-
 use std::collections::BTreeSet;
 
 use proc_macro2::TokenStream;
@@ -18,16 +6,12 @@ use syn::{Expr, ExprField, ExprStruct, Item, Member, Pat, Type, visit::Visit};
 use super::{Group, ItemScope, Reason, Resolved, Var, Walker, bare};
 use crate::fix::scan::{idents, macro_attribute};
 
-/// A candidate field.
 pub(super) struct Field {
-    /// The struct that declares it.
     pub(super) structure: String,
-    /// The variable that stands for it.
     pub(super) var: usize,
 }
 
 impl<'a> Walker<'a> {
-    /// Finds the fields that could become actors, before any of their uses.
     pub(super) fn candidates(&mut self, tree: &'a syn::File) {
         struct Declared<'w>(&'w mut std::collections::HashMap<String, usize>);
         impl<'ast> Visit<'ast> for Declared<'_> {
@@ -84,9 +68,6 @@ impl<'a> Walker<'a> {
                 vec![self.edit(range, actor)],
             );
             group.member = Some(member.clone());
-            // A struct's visibility doesn't matter: an actor is `Send`,
-            // `Sync`, `Unpin` and unwind safe exactly when the `Arc<Mutex<T>>`
-            // was, so code outside the module can't tell the difference.
             if !matches!(field.vis, syn::Visibility::Inherited) {
                 group.refuse(Reason::Unfollowed(
                     "code outside its module might use it, since it is visible there",
@@ -123,8 +104,6 @@ impl<'a> Walker<'a> {
                 mutex_ref: false,
                 record: None,
             });
-            // A second candidate of the same name is refused once the
-            // package's fields are counted.
             self.fields.insert(
                 member,
                 Field {
@@ -135,7 +114,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// The struct that `name` resolves to here, if it declares candidates.
     fn structure(&self, name: &syn::Ident) -> Option<String> {
         let name = bare(name);
         (self.fields.values().any(|field| field.structure == name)
@@ -144,8 +122,6 @@ impl<'a> Walker<'a> {
         .then_some(name)
     }
 
-    /// The struct that a path naming a type resolves to: `Self` in an
-    /// `impl` of it, or its name.
     pub(super) fn literal_struct(&self, path: &syn::Path) -> Option<String> {
         if path.leading_colon.is_some() || path.segments.len() != 1 {
             return None;
@@ -158,7 +134,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// The struct that a variable of type `ty` holds or points to.
     pub(super) fn record_type(&self, ty: &Type) -> Option<String> {
         match ty {
             Type::Reference(reference) => self.record_type(&reference.elem),
@@ -168,7 +143,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// The struct an `impl` is for.
     pub(super) fn impl_struct(&self, item: &syn::ItemImpl) -> Option<String> {
         match &*item.self_ty {
             Type::Path(path) if path.qself.is_none() => self.literal_struct(&path.path),
@@ -176,7 +150,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Notes the struct a parameter or closure input of type `ty` holds.
     pub(super) fn record(&mut self, pat: &Pat, ty: &Type) {
         let Pat::Ident(ident) = pat else {
             return;
@@ -192,7 +165,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// The candidate that `member` names.
     pub(super) fn candidate(&self, member: &Member) -> Option<&Field> {
         match member {
             Member::Named(name) => self.fields.get(&bare(name)),
@@ -200,8 +172,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Whether `base` is a value of `structure`: `self` in its `impl`, or a
-    /// variable declared as it.
     fn traced(&self, base: &Expr, structure: &str) -> bool {
         let Expr::Path(path) = base else {
             return false;
@@ -223,8 +193,6 @@ impl<'a> Walker<'a> {
             .is_some_and(|var| var.record.as_deref() == Some(structure))
     }
 
-    /// The variable for the candidate field that `expr` reads through a
-    /// traced receiver.
     pub(super) fn field_place(&self, expr: &Expr) -> Option<usize> {
         let Expr::Field(access) = expr else {
             return None;
@@ -234,7 +202,6 @@ impl<'a> Walker<'a> {
             .then_some(field.var)
     }
 
-    /// The receiver's name in a field access: `self` in `self.state`.
     pub(super) fn place_base(&self, expr: &Expr) -> Option<String> {
         let Expr::Field(access) = expr else {
             return None;
@@ -246,8 +213,6 @@ impl<'a> Walker<'a> {
         path.path.get_ident().map(bare)
     }
 
-    /// A struct literal, whose candidate fields must be set to a constructor
-    /// or to a value holding a tracked state.
     pub(super) fn literal(&mut self, literal: &'a ExprStruct) {
         let structure = if literal.qself.is_none() {
             self.literal_struct(&literal.path)
@@ -305,7 +270,6 @@ impl<'a> Walker<'a> {
         self.visit_expr(expr);
     }
 
-    /// Refuses a candidate field used in a form fix doesn't rewrite.
     pub(super) fn stray(&mut self, access: &ExprField) {
         let Some(field) = self.candidate(&access.member) else {
             return;
@@ -319,16 +283,12 @@ impl<'a> Walker<'a> {
         self.refuse(var, Reason::Unfollowed(reason));
     }
 
-    /// Refuses the candidate field called `name`, if there is one.
     pub(super) fn mention_field(&mut self, name: &str, reason: Reason) {
         if let Some(var) = self.fields.get(name).map(|field| field.var) {
             self.refuse(var, reason);
         }
     }
 
-    /// Refuses every candidate field and function that an attribute
-    /// macro's input names, since the macro may use them in code fix can't
-    /// see.
     pub(super) fn attribute_macro(&mut self, tokens: TokenStream) {
         let mut names = BTreeSet::<String>::new();
         idents(tokens, &mut names);
@@ -339,8 +299,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Refuses candidate fields that a pattern takes apart, which binds
-    /// their state where fix can't follow it.
     pub(super) fn destructures(&mut self, pat: &Pat) {
         struct Members(Vec<String>);
         impl<'ast> Visit<'ast> for Members {
@@ -358,8 +316,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Refuses candidate fields named by a struct on the left of a
-    /// destructuring assignment.
     pub(super) fn assigns(&mut self, left: &Expr) {
         struct Members(Vec<String>);
         impl<'ast> Visit<'ast> for Members {
@@ -380,8 +336,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Notes where a guard of `var` becomes a callback: the function that
-    /// takes it and the names of what the callback might run.
     pub(super) fn lock_site(&mut self, var: usize, runs: BTreeSet<String>) {
         let Some(group) = self.group_of(var) else {
             return;
@@ -428,7 +382,6 @@ impl<'a> Walker<'a> {
     }
 }
 
-/// `T` in `Arc<Mutex<T>>`.
 fn state_type(ty: &Type) -> Option<&Type> {
     fn inner(ty: &Type) -> Option<&Type> {
         let Type::Path(path) = ty else {
@@ -445,8 +398,6 @@ fn state_type(ty: &Type) -> Option<&Type> {
     inner(inner(ty)?)
 }
 
-/// Whether `state` might be unsized given the struct's generics: a
-/// parameter declared `?Sized`, or an associated type, which may be too.
 pub(super) fn may_be_unsized(state: &Type, generics: &syn::Generics) -> bool {
     let params: BTreeSet<String> = generics
         .type_params()
@@ -507,8 +458,6 @@ mod tests {
 
     const COUNTER: &str = "use std::sync::{Arc, Mutex};\n#[derive(Clone, Default)]\nstruct Counter {\n    hits: Arc<Mutex<u64>>,\n    name: String,\n}\n";
 
-    /// Asserts that `body`, after the `Counter` struct, changes nothing and
-    /// that `Counter.hits` is refused for `reason`.
     fn refused(body: &str, reason: Reason) {
         let source = format!("{COUNTER}{body}\n");
         let (fixed, refusals) = fix(&source, MUTEXES);

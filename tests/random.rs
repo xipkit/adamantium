@@ -10,7 +10,6 @@ fn draws_up_to_a_bound_include_both_ends_and_nothing_past_them() {
         seen[usize::try_from(draw).unwrap()] = true;
     }
     assert_eq!(seen, [true; 4]);
-    // The largest bound covers every value, so it can draw any of them.
     let mut high = false;
     for _ in 0..64 {
         high |= random::up_to(u64::MAX) > u64::MAX / 2;

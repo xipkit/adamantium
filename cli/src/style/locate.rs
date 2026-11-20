@@ -1,11 +1,3 @@
-//! Locating the lines that break a rule, through the Decisions API. Decisions
-//! answers only choices, predicates and scores, so a location takes two
-//! requests over the file with numbered lines: a choice among fixed windows of
-//! lines, then choices of the first and last line within the chosen window,
-//! widened a little in case the code crosses its edge. The prompts and
-//! thresholds are the ones measured on ADAM-133; changing them means measuring
-//! again.
-
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -17,17 +9,12 @@ use crate::style::{
     rules::Question,
 };
 
-/// The most choices Decisions accepts in one question.
 const MAX_CHOICES: usize = 255;
-/// The narrowest window the first request offers.
 const MIN_WINDOW_LINES: usize = 10;
-/// Lines added on each side of the chosen window before asking for its edges.
 const WINDOW_PADDING: usize = 3;
-/// Below this confidence in a window, a finding gets no location.
 const MIN_WINDOW_CONFIDENCE: f64 = 0.5;
 const WHOLE_FILE: &str = "whole_file";
 
-/// The requests that locate each question's violation in one file.
 pub(crate) struct Locator<'a> {
     model: &'a str,
     questions: &'a [Question],
@@ -37,9 +24,8 @@ pub(crate) struct Locator<'a> {
 }
 
 impl<'a> Locator<'a> {
-    /// Prepares to locate `file`'s violations, or returns `None` when it
-    /// can't be: the file has no lines, or with line numbers it exceeds
-    /// `max_input_bytes`.
+    /// Prepares a window selection and then an edge selection for each finding.
+    /// Returns `None` when the file is empty or exceeds the input or choice limit.
     pub fn new(file: &FileReview<'a>, max_input_bytes: usize) -> Result<Option<Self>> {
         let line_count = file.source.lines().count();
         if line_count == 0 {
@@ -53,8 +39,6 @@ impl<'a> Locator<'a> {
         if serde_json::to_vec(&evidence)?.len() > max_input_bytes {
             return Ok(None);
         }
-        // One choice is kept for the whole file, and the padded window must
-        // still fit in one question's choices.
         let width = MIN_WINDOW_LINES.max(line_count.div_ceil(MAX_CHOICES - 1));
         if width + 2 * WINDOW_PADDING > MAX_CHOICES {
             return Ok(None);
@@ -93,7 +77,7 @@ impl<'a> Locator<'a> {
         }))
     }
 
-    /// The first request: which window holds each rule's violation.
+    /// Builds the request to select a window for each violation.
     pub fn window_request(&self) -> Value {
         let questions: Vec<Value> = self
             .questions
@@ -224,8 +208,6 @@ impl<'a> Locator<'a> {
             .collect()
     }
 
-    /// The rules whose edges the second request asks for, with their
-    /// candidate lines: those with more than one candidate line.
     fn edge_rules<'q>(
         questions: &'q [Question],
         candidates: &'q [Option<LineRange>],
@@ -245,7 +227,6 @@ impl<'a> Locator<'a> {
     }
 }
 
-/// `source` with each line prefixed by its number, right-aligned, and ` | `.
 fn numbered(source: &str, line_count: usize) -> String {
     let width = line_count.to_string().len();
     source
@@ -264,8 +245,6 @@ fn edge_name(edge: &str, rule: &str) -> String {
     format!("{edge}_line__{rule}")
 }
 
-/// The answers in `response` by name. They must be exactly one for each of
-/// `names`.
 fn answers<'r>(response: &'r Value, names: &[&str]) -> Result<BTreeMap<&'r str, &'r Value>> {
     let answers = response["answers"]
         .as_array()
@@ -289,7 +268,6 @@ fn answer<'r>(answers: &BTreeMap<&str, &'r Value>, name: &str) -> Result<&'r Val
     answers.get(name).copied().context("missing named answer")
 }
 
-/// A choice answer's selected value and confidence, or `None` for a refusal.
 fn selected(answer: &Value) -> Result<Option<(&str, f64)>> {
     if answer["type"] == "refusal" {
         return Ok(None);
@@ -395,7 +373,6 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        // The source fits the limit but the line numbers push it over.
         let source = lines(100);
         let limit = source.len() + 200;
         assert!(

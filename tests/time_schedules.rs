@@ -66,7 +66,6 @@ fn virtual_sleep_and_absolute_deadlines_run_without_a_tokio_runtime() {
             let later = time::sleep(TICK);
             time::sleep_until(start + TICK).await;
             assert_eq!(time::now(), start + TICK);
-            // Relative sleeps start at first poll, just like the production wrapper.
             later.await;
             assert_eq!(time::now(), start + TICK * 2);
             for deadline in [start, time::now(), time::now() - Duration::from_nanos(1)] {
@@ -106,7 +105,6 @@ fn oversized_sleeps_and_retry_backoffs_finish_and_replay() {
 #[cfg(not(target_os = "wasi"))]
 #[test]
 fn modeled_relative_sleep_delays_match_tokio() {
-    // Whole milliseconds: Tokio's timer wheel rounds shorter waits up.
     const DURATIONS: [Duration; 5] = [
         Duration::ZERO,
         Duration::from_millis(1),
@@ -315,7 +313,6 @@ fn dropping_the_earliest_sleep_unregisters_it_and_repoll_updates_the_waker() {
             let child = seen.clone();
             let mut tasks = Tasks::<()>::new();
             tasks.spawn(async move {
-                // Moving between logical tasks in one execution is supported.
                 retained.await;
                 child.with(|seen| *seen = Some(time::now()));
                 Ok(())
@@ -567,8 +564,6 @@ fn a_child_error_at_the_deadline_wins_if_recorded_before_abort() {
             let mut tasks = Tasks::<&str>::new();
             drop(tasks.spawn(async move {
                 time::sleep_until(deadline).await;
-                // Without a scheduling point between waking and failing, the
-                // abort comes first in too few schedules to rely on reaching.
                 tokio::task::yield_now().await;
                 Err::<(), _>("timed failure")
             }));
@@ -806,7 +801,6 @@ fn virtual_interval_missed_tick_policies_and_zero_period_replay() {
         let start = time::now();
         let period = TICK;
 
-        // Delay: misses two ticks and schedules the next a full period after now.
         let mut delay = time::Interval::new(period);
         assert_eq!(delay.tick().await, start);
         time::sleep(period * 2 + Duration::from_millis(5)).await;
@@ -814,7 +808,6 @@ fn virtual_interval_missed_tick_policies_and_zero_period_replay() {
         assert_eq!(missed, start + period * 2 + Duration::from_millis(5));
         assert_eq!(delay.tick().await, missed + period);
 
-        // Skip: misses ticks and snaps back to the original phase grid.
         let origin = time::now();
         let mut skip =
             time::Interval::new(period).with_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -826,7 +819,6 @@ fn virtual_interval_missed_tick_policies_and_zero_period_replay() {
         );
         assert_eq!(skip.tick().await, origin + period * 3);
 
-        // Zero period never panics under either policy.
         for behavior in [
             time::MissedTickBehavior::Delay,
             time::MissedTickBehavior::Skip,
@@ -846,13 +838,11 @@ fn virtual_interval_tick_until_cancels_cleanly_and_loses_tie_to_cancellation() {
         let cancellation = Cancellation::new();
         let mut interval = time::Interval::at(start + TICK, TICK);
 
-        // Pre-cancelled wins over an immediately ready tick.
         let pre = Cancellation::new();
         pre.cancel();
         let mut ready = time::Interval::new(TICK);
         assert_eq!(ready.tick_until(&pre).await, None);
 
-        // Concurrent task cancels before the first tick fires.
         Tasks::run(async |t| {
             let cancel_handle = cancellation.clone();
             t.spawn(async move {
@@ -867,7 +857,6 @@ fn virtual_interval_tick_until_cancels_cleanly_and_loses_tie_to_cancellation() {
         .await
         .unwrap();
 
-        // Cancellation wins when a tick and cancel become ready at the same instant.
         let tie_cancel = Cancellation::new();
         let mut tie = time::Interval::at(time::now() + TICK, TICK);
         Tasks::run(async |t| {
@@ -883,7 +872,6 @@ fn virtual_interval_tick_until_cancels_cleanly_and_loses_tie_to_cancellation() {
         .await
         .unwrap();
 
-        // Zero-period tick_until yields so a sibling task can cancel on the same scheduler.
         let zero_cancel = Cancellation::new();
         let worker_cancel = zero_cancel.clone();
         Tasks::run(async move |t| {

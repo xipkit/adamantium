@@ -1,5 +1,3 @@
-//! Reading and editing a project's `Cargo.toml`.
-
 use std::{
     fs,
     io::ErrorKind,
@@ -116,8 +114,6 @@ pub fn init(root: &Path, force: bool, config: &Config, strict: bool) -> Result<C
         }
     };
     let strict_clippy = lints::clippy_toml(true)?;
-    // A plain init keeps an installed strict tier, just as it keeps strict
-    // lint levels. The bundled default file can be upgraded without --force.
     let strict = strict || existing_clippy.as_deref() == Some(strict_clippy.as_bytes());
     let clippy_toml = if strict { &strict_clippy } else { CLIPPY_TOML };
     let write_clippy = existing_clippy.as_deref() != Some(clippy_toml.as_bytes());
@@ -198,8 +194,6 @@ pub fn init(root: &Path, force: bool, config: &Config, strict: bool) -> Result<C
     Ok(changes)
 }
 
-/// The table at `key` in `parent`, created if missing. An implicit table
-/// prints no header of its own when all it holds is other tables.
 fn table_in<'a>(parent: &'a mut Table, key: &str, implicit: bool) -> Result<&'a mut Table> {
     let item = parent.entry(key).or_insert_with(|| {
         let mut table = Table::new();

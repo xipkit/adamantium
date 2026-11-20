@@ -36,7 +36,6 @@ pub struct Bytes {
         reason = "copy-on-write needs a growable buffer behind the Arc"
     )]
     storage: Arc<Vec<u8>>,
-    // None covers the entire Vec, whose length can change through make_mut.
     window: Option<Range<usize>>,
 }
 

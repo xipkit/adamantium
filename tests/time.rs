@@ -1,4 +1,3 @@
-// Every test here pauses the clock, which Tokio cannot do on WASI.
 #![cfg(all(feature = "tokio", not(target_os = "wasi")))]
 
 use std::{pin::pin, task::Poll, time::Duration};
@@ -85,7 +84,6 @@ async fn interval_is_drift_free_within_a_period() {
         let period = Duration::from_secs(10);
         let mut interval = Interval::at(start + period, period).with_missed_tick_behavior(behavior);
 
-        // Waking 3s late (< period) still schedules the next tick on the original grid.
         tokio::time::advance(Duration::from_secs(13)).await;
         assert_eq!(interval.tick().await, start + Duration::from_secs(13));
 
@@ -105,7 +103,6 @@ async fn interval_is_drift_free_within_a_period() {
 async fn interval_missed_tick_delay_and_skip() {
     let period = Duration::from_secs(10);
 
-    // Delay: waits a full period after the missed tick completes.
     let start = time::now();
     let mut delay = Interval::new(period);
     assert_eq!(delay.tick().await, start);
@@ -121,7 +118,6 @@ async fn interval_missed_tick_delay_and_skip() {
         Poll::Ready(start + Duration::from_secs(35))
     );
 
-    // Skip: aligns the next tick to the original phase grid without a burst.
     let start = time::now();
     let mut skip = Interval::new(period).with_missed_tick_behavior(MissedTickBehavior::Skip);
     assert_eq!(skip.tick().await, start);
@@ -167,11 +163,9 @@ async fn interval_tick_until_cancels_cleanly_and_wins_over_ready_tick() {
     let cancellation = Cancellation::new();
     let mut interval = Interval::new(Duration::from_secs(5));
 
-    // Pre-cancelled wins over an immediately ready tick.
     cancellation.cancel();
     assert_eq!(interval.tick_until(&cancellation).await, None);
 
-    // Mid-wait cancellation returns None without advancing past the current time.
     let cancellation = Cancellation::new();
     let mut interval = Interval::at(start + Duration::from_secs(5), Duration::from_secs(5));
     assert_eq!(
@@ -187,7 +181,6 @@ async fn interval_tick_until_cancels_cleanly_and_wins_over_ready_tick() {
     );
     assert_eq!(time::now(), start + Duration::from_secs(2));
 
-    // Uncancelled tick_until fires at the deadline.
     let active = Cancellation::new();
     assert_eq!(
         interval.tick_until(&active).await,

@@ -27,6 +27,10 @@ Tokio on WASI has no multi-threaded runtime and no paused clock, so tests that n
 
 The repository follows its own rules. Where the library needs restricted features, such as the `JoinSet` inside `Tasks` and the `Mutex` inside `Actor`, the code uses an `allow` with a reason. The CLI tests run `cargo adamantium check` against fixture crates with and without rule violations. They require Clippy and network access on the first run.
 
+Use plain technical English to document public Rust functions and structs. Keep
+internal comments for non-obvious concurrency invariants. Leave Kan card keys
+out of comments.
+
 ## Releasing
 
 Both crates use the MIT license and share the version in `[workspace.package]`.

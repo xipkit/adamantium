@@ -156,7 +156,7 @@ fn dropping_scope_aborts_children_and_requests_shutdown() {
                 Ok(())
             });
             let scope = tasks.join_until(signal.clone(), None, Ok(()));
-            drop(scope); // Never polled; registration and abort must still happen.
+            drop(scope);
             assert!(signal.is_cancelled());
             assert_eq!(finished.receive().await, Some(()));
         })
@@ -555,8 +555,6 @@ fn orphaned_errors_stop_the_body_and_claimed_or_kept_ones_do_not() {
                     pending::<()>().await;
                     Ok(())
                 });
-                // The schedule decides whether the task fails before or after
-                // its handle is dropped; either way the error is orphaned.
                 drop(tasks.spawn(async { Err::<(), _>("orphaned") }));
                 pending::<Result<(), &str>>().await
             })
@@ -634,8 +632,6 @@ fn a_task_panic_stops_a_running_body_after_draining_its_siblings() {
             assert_eq!(panic.downcast_ref::<&str>(), Some(&"connection"));
             assert_eq!(dropped.snapshot(), 1);
 
-            // Reaping races value for the same panic. Whichever finds it, the
-            // sibling is drained and the panic is resumed.
             let dropped = Actor::new(0);
             let guard = Dropped(dropped.clone());
             let scope = Tasks::<&str>::run(async move |tasks| {
@@ -672,8 +668,6 @@ fn a_task_panic_stops_a_running_body_after_draining_its_siblings() {
             assert_eq!(dropped.snapshot(), 1);
             assert!(signal.is_cancelled());
 
-            // A shutdown requested once the task has panicked may win the
-            // poll, but the panic still wins the result.
             let signal = Cancellation::new();
             let request = signal.clone();
             let scope = Tasks::<&str>::run_until(signal, None, async move |tasks| {

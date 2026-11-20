@@ -1,12 +1,3 @@
-//! `SingleFlight` under the deterministic harness, with a model of Clu's
-//! store sync as the fixture.
-//!
-//! Clu commits control-plane writes to a local database and acknowledges a
-//! write only once a push to the remote database covers it. Concurrent
-//! acknowledgments share a push. A push covers the commits made before it
-//! started, so an acknowledgment that joined an older push calls again; the
-//! push it joins then started after the first one ended.
-
 #![cfg(feature = "deterministic")]
 #![allow(
     clippy::disallowed_types,
@@ -38,7 +29,6 @@ fn config() -> Config {
     }
 }
 
-/// Explores the schedules, then checks that they repeat and replay.
 fn check<F, Fut>(factory: F)
 where
     F: Fn() -> Fut + Send + Sync + 'static + Clone,
@@ -51,27 +41,18 @@ where
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Remote {
-    /// The newest commit the remote database has.
     pushed: u64,
-    /// Pushes started, finished or not.
     started: u32,
-    /// Pushes dropped before they finished.
     cancelled: u32,
-    /// Whether a dropped push is still cleaning up.
     cleaning: bool,
-    /// Pushes that started while a dropped one was still cleaning up.
     started_during_cleanup: u32,
 }
 
-/// One control-plane database and its connection to the remote copy.
 #[derive(Clone)]
 struct Store {
-    /// The newest local commit.
     commits: Actor<u64>,
     remote: Actor<Remote>,
-    /// Each push waits for one answer from the network.
     network: Channel<Result<(), String>>,
-    /// Told when a dropped push begins to clean up.
     cleanups: Channel<()>,
     sync: SingleFlight<&'static str, Result<u64, String>>,
 }
@@ -94,7 +75,6 @@ impl Store {
         })
     }
 
-    /// Waits until a push covers `commit`.
     async fn acknowledge(&self, commit: u64) -> Result<(), String> {
         loop {
             let covered = self.sync.run("control", || self.clone().push()).await?;
@@ -104,7 +84,6 @@ impl Store {
         }
     }
 
-    /// Pushes every commit made before it starts, and returns the newest.
     async fn push(self) -> Result<u64, String> {
         let target = self.commits.snapshot();
         self.remote.with(|remote| {
@@ -126,8 +105,6 @@ impl Store {
         Ok(target)
     }
 
-    /// Shares a push until `cancellation` is requested or `deadline`
-    /// passes, and returns the newest commit it covered.
     async fn sync_until(
         &self,
         cancellation: &Cancellation,
@@ -147,11 +124,8 @@ impl Store {
     }
 }
 
-/// How many steps a dropped push takes to close its connection.
 const CLOSING_STEPS: usize = 8;
 
-/// Records a push dropped before it finished, then closes its connection
-/// over several steps, between any two of which another task can run.
 struct Cleanup {
     remote: Actor<Remote>,
     cleanups: Channel<()>,
@@ -175,8 +149,6 @@ impl Drop for Cleanup {
     }
 }
 
-/// Runs `call`, sending on `joined` once it has been polled, which is when
-/// it starts or joins a push.
 async fn joining<F: Future>(call: F, joined: &Channel<()>) -> F::Output {
     let mut call = pin!(call);
     let mut first = true;
@@ -190,7 +162,6 @@ async fn joining<F: Future>(call: F, joined: &Channel<()>) -> F::Output {
     .await
 }
 
-/// Runs `call` until it finishes or `leave` is sent, which drops it.
 async fn leaving<F: Future>(call: F, leave: &Channel<()>) -> Option<F::Output> {
     race((async { Some(call.await) }, async {
         leave.receive().await;
@@ -199,7 +170,6 @@ async fn leaving<F: Future>(call: F, leave: &Channel<()>) -> Option<F::Output> {
     .await
 }
 
-/// Counts the executions in which `seen` held, across every exploration.
 #[derive(Clone, Default)]
 struct Seen(Arc<Mutex<usize>>);
 
@@ -314,7 +284,6 @@ fn dropping_the_first_caller_lets_the_others_finish() {
                 let store = store.clone();
                 async move {
                     joined.receive().await;
-                    // The first caller leaves while the push may finish.
                     leave.try_send(()).unwrap();
                     store.answer(Ok(()));
                 }
@@ -367,7 +336,6 @@ fn a_call_arriving_during_cleanup_starts_a_new_push() {
             let commit = store.commit();
             let (started, leave) = (Channel::bounded(1), Channel::bounded(1));
             store.answer(Ok(()));
-            // Hold the answer back until the first push is gone.
             let answer = store.network.try_receive().unwrap();
             let first: Worker = Box::pin({
                 let (store, started, leave) = (store.clone(), started.clone(), leave.clone());
@@ -381,8 +349,6 @@ fn a_call_arriving_during_cleanup_starts_a_new_push() {
                 async move {
                     started.receive().await;
                     leave.try_send(()).unwrap();
-                    // Arrive once the first push has been dropped, while
-                    // its cleanup may still be running.
                     store.cleanups.receive().await;
                     let call = store.acknowledge(commit);
                     let mut call = pin!(call);
@@ -438,19 +404,14 @@ fn a_failed_push_reaches_every_caller_and_the_next_acknowledgment_retries() {
     });
 }
 
-/// How long a caller of `run_until` waits before it stops.
 const TICK: Duration = Duration::from_millis(1);
 
-/// Which of two callers sharing a push stops waiting.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Caller {
-    /// The caller that starts the push.
     Starter,
-    /// The caller that joins it.
     Joiner,
 }
 
-/// How a caller stops waiting.
 #[derive(Clone, Copy)]
 enum Stop {
     Cancel,
@@ -466,9 +427,6 @@ impl Stop {
     }
 }
 
-/// A caller that stops at `at`, by `stop`: one of `run_until`'s two
-/// arguments, and a worker that requests the cancellation at `at` when that
-/// is how it stops.
 fn stopping_at(stop: Stop, at: Instant) -> (Cancellation, Option<Instant>, Worker) {
     let cancellation = Cancellation::new();
     match stop {
@@ -484,9 +442,6 @@ fn stopping_at(stop: Stop, at: Instant) -> (Cancellation, Option<Instant>, Worke
     }
 }
 
-/// Two callers share a push, and `leaver` stops just as the network
-/// answers. The other caller finishes the push, whether or not the one that
-/// stopped had been woken to poll it.
 fn one_caller_stops_and_the_other_finishes_the_push(leaver: Caller, stop: Stop) {
     let left = Seen::default();
     let handed_on = Seen::default();
@@ -524,8 +479,7 @@ fn one_caller_stops_and_the_other_finishes_the_push(leaver: Caller, stop: Stop) 
                     }
                     assert_eq!(result, Err(stop.error()));
                     left.record(true);
-                    // The network had answered, so the push was woken, but
-                    // it had not finished: the other caller must poll it.
+                    // The reply woke the push. The remaining caller must poll it.
                     handed_on.record(answered.snapshot() && store.remote().pushed == 0);
                 })
             };
@@ -573,9 +527,6 @@ fn a_joiner_past_its_deadline_leaves_the_push_to_the_starter() {
     one_caller_stops_and_the_other_finishes_the_push(Caller::Joiner, Stop::Deadline);
 }
 
-/// Both callers sharing a push stop before the network answers, `first`
-/// before the other. The push outlives the first and is dropped with the
-/// last, and the next call starts a new one.
 fn the_last_caller_to_stop_drops_the_push(first: Caller, stops: [Stop; 2]) {
     check(move || async move {
         let store = Store::new();
@@ -688,16 +639,10 @@ fn a_call_already_cancelled_neither_starts_nor_joins_a_push() {
     assert!(joined_first.count() > 0, "no push was in flight to join");
 }
 
-/// How many steps the operation's first poll takes after it finds its
-/// answer missing.
 const LINGERING_STEPS: usize = 64;
 
-/// Two callers share an operation, and `leaver` is cancelled while the
-/// starter is still in the operation's first poll. The joiner joins and the
-/// answer arrives during that poll too, so the starter can leave the
-/// operation woken but unpolled, before it ever listened for a wake: the
-/// joiner, which looked while the operation was being polled, must still be
-/// told to take it.
+// The first poll can leave the operation woken before the starter listens.
+// Cancellation must pass that wake to the joiner.
 fn a_caller_cancelled_during_the_first_poll_hands_the_operation_on(leaver: Caller) {
     let left = Seen::default();
     let observed = left.clone();
@@ -706,8 +651,7 @@ fn a_caller_cancelled_during_the_first_poll_hands_the_operation_on(leaver: Calle
         async move {
             let flights = SingleFlight::<&str, Result<u32, String>>::new();
             let answers = Channel::<u32>::bounded(1);
-            // Told, from inside the first poll, that the operation waits
-            // for its answer. That poll then takes several more steps.
+            // This signal fires while the operation is still in its first poll.
             let waiting = Channel::<()>::bounded(1);
             let operation = {
                 let (answers, waiting) = (answers.clone(), waiting.clone());

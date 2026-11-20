@@ -9,6 +9,7 @@ pub(crate) struct Scan {
 }
 
 impl Scan {
+    /// Finds the Rust files to review under the requested path.
     pub fn discover(path: &Path) -> Result<Self> {
         let target = path
             .canonicalize()
@@ -61,6 +62,7 @@ impl Scan {
         })
     }
 
+    /// Returns the path written to the report.
     pub fn relative_path(&self, path: &Path) -> String {
         path.strip_prefix(&self.root)
             .unwrap_or(path)

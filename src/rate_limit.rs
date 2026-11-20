@@ -72,8 +72,6 @@ impl RateLimit {
         let mut stop = pin!(shutdown(cancellation, deadline));
         let mut wake: Option<Option<Instant>> = None;
         loop {
-            // The first pass looks for room at once; later passes sleep until
-            // the oldest start leaves the window.
             let room = async {
                 match wake {
                     None => {}
@@ -109,15 +107,10 @@ impl RateLimit {
         result
     }
 
-    /// Records a start now if the window has room. Otherwise returns
-    /// when the oldest start leaves it, or `None` if that is past the end of
-    /// time.
     fn take(&self) -> Result<(), Option<Instant>> {
         self.started.with(|started| {
-            // Read the clock under the lock, so starts are recorded in the
-            // order they are admitted and time spent waiting for the lock
-            // doesn't count against the window. Expiry looks only at the
-            // front, which relies on that order.
+            // Read the clock under the lock. Expiry checks the front and requires
+            // starts to be recorded in admission order.
             let now = time::now();
             while let Some(start) = started.front()
                 && start.checked_add(self.per).is_some_and(|end| end <= now)

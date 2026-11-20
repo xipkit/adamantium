@@ -178,7 +178,6 @@ on_both_runtimes! {
             };
             drop(timeout(HUNG, stream.next()).await.unwrap().unwrap().unwrap());
             let _finished = timeout(HUNG, completed.acquire_many(8)).await.unwrap().unwrap();
-            // Leave the consumer paused while all work in its window finishes.
             for _ in 0..10 { tokio::task::yield_now().await; }
             assert_eq!(taken.load(Ordering::SeqCst), 8);
             assert_eq!(live.load(Ordering::SeqCst), 7);
@@ -316,7 +315,6 @@ on_both_runtimes! {
                 } else { future::pending().await }
             }
         }));
-        // A select loser drops next(), but must not cancel or discard its task.
         #[expect(
             clippy::disallowed_methods,
             reason = "exercise dropping next() when it loses a select"
@@ -416,8 +414,6 @@ async fn recorded_error_wins_over_cancellation_and_buffered_success() {
         },
     ));
     pending(stream.as_mut()).await;
-    // On this current-thread runtime the children complete during this yield,
-    // while the consumer remains paused and cannot begin cleanup yet.
     tokio::task::yield_now().await;
     cancel.cancel();
     assert_eq!(
@@ -591,8 +587,6 @@ async fn exhausted_cooperative_budget_pauses_intake_and_preserves_results() {
         tokio::task::coop::consume_budget().await;
     }
     future::poll_fn(|cx| {
-        // Even ready results wait for a fresh budget. Do not bypass Tokio's
-        // cooperative yield by refilling or emitting buffered values here.
         assert!(stream.as_mut().poll_next(cx).is_pending());
         assert_eq!(taken.load(Ordering::SeqCst), 2);
         Poll::Ready(())

@@ -1,5 +1,3 @@
-//! Running Clippy with the rules and turning its output into a report.
-
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, HashSet, VecDeque},
@@ -20,37 +18,52 @@ use crate::{
     manifest, sarif,
 };
 
-/// The version of the JSON report's layout.
 const SCHEMA_VERSION: u32 = 3;
 
 /// Arguments for `cargo adamantium check`.
 #[derive(clap::Args)]
 pub struct Args {
-    /// The project directory, or its Cargo.toml.
-    #[arg(default_value = ".")]
+    #[arg(default_value = ".", help = "The project directory, or its Cargo.toml")]
     path: PathBuf,
     #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
     format: ReportFormat,
-    /// Also run the experimental lints from this explicitly built Dylint library.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Also run the experimental lints from this explicitly built Dylint library"
+    )]
     dylint_library: Option<PathBuf>,
-    /// Include the strict rules for arithmetic and synchronization.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Include the strict rules for arithmetic and synchronization"
+    )]
     strict: bool,
-    /// Leave out findings from an earlier `--format json` report.
-    #[arg(long, value_name = "REPORT")]
+    #[arg(
+        long,
+        value_name = "REPORT",
+        help = "Leave out findings from an earlier `--format json` report"
+    )]
     baseline: Option<PathBuf>,
-    /// Remove findings that no longer occur from the given baseline file.
-    #[arg(long, requires = "baseline")]
+    #[arg(
+        long,
+        requires = "baseline",
+        help = "Remove findings that no longer occur from the given baseline file"
+    )]
     update_baseline: bool,
-    /// Exit with status 1 if the given baseline still has unmatched findings.
-    #[arg(long, requires = "baseline")]
+    #[arg(
+        long,
+        requires = "baseline",
+        help = "Exit with status 1 if the given baseline still has unmatched findings"
+    )]
     fail_on_stale_baseline: bool,
-    /// In text output, summarize findings by rule and by the 10 most affected files.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "In text output, summarize findings by rule and by the 10 most affected files"
+    )]
     summary: bool,
-    /// Arguments passed on to `cargo clippy`, such as `--release` or `-p name`.
-    #[arg(last = true)]
+    #[arg(
+        last = true,
+        help = "Arguments passed on to `cargo clippy`, such as `--release` or `-p name`"
+    )]
     cargo_args: Vec<String>,
 }
 
@@ -61,27 +74,18 @@ pub struct Report {
     pub root: PathBuf,
     pub status: Status,
     pub findings: Vec<Finding>,
-    /// Findings the project's skip list left out, counted by rule.
     pub skipped: BTreeMap<String, usize>,
-    /// Findings the baseline matched, so they were left out, counted by rule.
     pub baselined: BTreeMap<String, usize>,
-    /// How many of the baseline's findings this check did not match, because
-    /// they were fixed or their line changed, or `None` without a baseline.
     pub baseline_unmatched: Option<usize>,
-    /// Warnings about Clippy configuration or unavailable lints.
     pub warnings: Vec<Problem>,
     pub errors: Vec<Problem>,
 }
 
-/// Whether the check completed and found rule violations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
-    /// No rule was broken.
     Clean,
-    /// At least one rule was broken.
     Findings,
-    /// The project did not build, so the rules could not all be checked.
     Error,
 }
 
@@ -93,11 +97,7 @@ pub struct Finding {
     pub file: String,
     pub line: Option<u64>,
     pub column: Option<u64>,
-    /// The source line the finding starts on, without its indentation or
-    /// trailing whitespace, or `None` when the finding has no line.
     pub source: Option<String>,
-    /// The applicable replacement and migration guide section or `explain`
-    /// command, when the CLI has guidance for this finding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
 }
@@ -110,16 +110,10 @@ pub struct Problem {
     pub line: Option<u64>,
 }
 
-/// The findings of an earlier JSON report, which a check leaves out so that
-/// only new findings fail it. A finding is known by its rule, its path
-/// relative to the project root and the text of its line, so it stays matched
-/// when edits elsewhere move it. Findings that share all three are counted,
-/// and only those beyond the earlier count are new.
 #[derive(Debug)]
 struct Baseline {
     original: String,
     report: Value,
-    /// Indices of the original findings this check has not matched yet.
     remaining: BTreeMap<BaselineKey, VecDeque<usize>>,
 }
 
@@ -130,7 +124,6 @@ struct BaselineKey {
     source: Option<String>,
 }
 
-/// The parts of an earlier report that a baseline uses.
 #[derive(Deserialize)]
 struct EarlierReport {
     root: PathBuf,
@@ -173,7 +166,6 @@ struct Span {
     line_start: u64,
     column_start: u64,
     is_primary: bool,
-    /// The source lines the span covers, starting with `line_start`.
     #[serde(default)]
     text: Vec<SpanLine>,
     expansion: Option<Box<Expansion>>,
@@ -196,7 +188,6 @@ impl Span {
 
 impl Drop for Span {
     fn drop(&mut self) {
-        // Deep macro backtraces must also be dropped without recursive stack use.
         let mut expansion = self.expansion.take();
         while let Some(mut caller) = expansion {
             expansion = caller.span.expansion.take();
@@ -226,7 +217,6 @@ enum DiagnosticKey {
 }
 
 impl Baseline {
-    /// Reads a report written by `check --format json`.
     fn load(path: &Path) -> Result<Self> {
         let text =
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -265,8 +255,6 @@ impl Baseline {
         })
     }
 
-    /// Matches a finding against one of the earlier findings not yet
-    /// matched, returning whether there was one.
     fn take(&mut self, rule: &str, path: &str, source: Option<&str>) -> bool {
         let key = BaselineKey {
             rule: rule.to_owned(),
@@ -279,12 +267,10 @@ impl Baseline {
             .is_some()
     }
 
-    /// How many earlier findings were never matched.
     fn unmatched(&self) -> usize {
         self.remaining.values().map(VecDeque::len).sum()
     }
 
-    /// Removes just the unmatched rows, retaining the original report data and order.
     fn prune(mut self, path: &Path) -> Result<usize> {
         let stale: HashSet<usize> = self.remaining.values().flatten().copied().collect();
         if stale.is_empty() {
@@ -314,7 +300,6 @@ impl Baseline {
     }
 }
 
-/// Writes a replacement next to the original and publishes it only if the baseline still matches.
 fn replace_baseline(path: &Path, original: &str, report: &Value) -> Result<()> {
     let path = path.canonicalize()?;
     let parent = path
@@ -324,8 +309,6 @@ fn replace_baseline(path: &Path, original: &str, report: &Value) -> Result<()> {
     serde_json::to_writer_pretty(&mut updated, report)?;
     writeln!(updated)?;
 
-    // On Unix the lock serializes updaters. Windows locks prevent reading through
-    // a second handle, so the portable snapshot check still runs before replacing.
     #[cfg(unix)]
     let _lock = {
         let file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
@@ -465,7 +448,6 @@ fn print_text(stderr: &mut impl Write, report: &Report, summary: bool) -> io::Re
     }
 }
 
-/// Counts each name, ranked by descending count and then by name.
 fn ranked_counts<'a>(names: impl Iterator<Item = &'a str>) -> Vec<(&'a str, usize)> {
     let mut counts = BTreeMap::new();
     for name in names {
@@ -476,8 +458,6 @@ fn ranked_counts<'a>(names: impl Iterator<Item = &'a str>) -> Vec<(&'a str, usiz
     counts
 }
 
-/// The summary's note on findings the skip list or the baseline left out,
-/// such as ` (3 skipped by the skip list in Cargo.toml, 2 in the baseline)`.
 fn left_out_note(report: &Report) -> String {
     let skipped: usize = report.skipped.values().sum();
     let baselined: usize = report.baselined.values().sum();
@@ -502,11 +482,6 @@ fn print_json(value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
-/// Writes Adamantium's `clippy.toml` into `dir`, which becomes
-/// `CLIPPY_CONF_DIR`, and returns the path Clippy's diagnostics will name it
-/// by and its contents. Clippy canonicalizes `CLIPPY_CONF_DIR` before reading
-/// it, so when `dir` is reached through a symlink, as macOS's temporary
-/// directory is through `/var`, the two spellings differ.
 fn write_clippy_config(
     dir: &Path,
     strict: bool,
@@ -520,7 +495,6 @@ fn write_clippy_config(
     Ok((path, toml))
 }
 
-/// Checks a project without a baseline.
 pub(crate) fn check(
     root: &Path,
     cargo_args: &[String],
@@ -530,7 +504,6 @@ pub(crate) fn check(
     check_with_suggestions(root, cargo_args, echo, strict, None)
 }
 
-/// Checks a project and collects raw diagnostics for the findings when requested.
 pub(crate) fn check_with_suggestions(
     root: &Path,
     cargo_args: &[String],
@@ -562,18 +535,11 @@ fn check_selected(
     if !selects_targets(cargo_args) {
         command.arg("--all-targets");
     }
-    // Cargo checks only the root package unless told otherwise, which would
-    // skip every other workspace member.
     if !selects_packages(cargo_args) {
         command.arg("--workspace");
     }
     command
         .args(cargo_args)
-        // Only adamantium's rules count; a project runs plain Clippy for the
-        // rest. The rules run as warnings and every lint is capped at a
-        // warning, so a crate with findings still builds and the crates and
-        // test targets that depend on it are checked too. A lint the project
-        // itself denies would otherwise stop the build at the first crate.
         .args(["--", "--cap-lints", "warn", "-A", "clippy::all"]);
     for lint in lints::selected(strict) {
         command.args(["-W", &lint.qualified()]);
@@ -638,11 +604,9 @@ fn check_selected(
                         let before = sorted.findings.len();
                         classify(diagnostic, &setting, &mut sorted);
                         if sorted.findings.len() > before
-                        && let Some(diagnostics) = diagnostics.as_mut()
-                        // Deep macro diagnostics are still reported by check,
-                        // but are never candidates for source fixes.
-                        && let Ok(raw) = serde_json::from_str::<serde_json::Value>(&line)
-                        && let Some(message) = raw.get("message")
+                            && let Some(diagnostics) = diagnostics.as_mut()
+                            && let Ok(raw) = serde_json::from_str::<serde_json::Value>(&line)
+                            && let Some(message) = raw.get("message")
                         {
                             diagnostics.push(message.clone());
                         }
@@ -720,16 +684,12 @@ fn check_selected(
 
 fn parse_cargo_line(line: &str) -> serde_json::Result<CargoLine> {
     let mut deserializer = serde_json::Deserializer::from_str(line);
-    // Rust macro backtraces can exceed JSON's default nesting limit. Grow
-    // the stack while decoding rather than dropping those diagnostics.
     deserializer.disable_recursion_limit();
     let parsed = CargoLine::deserialize(serde_stacker::Deserializer::new(&mut deserializer))?;
     deserializer.end()?;
     Ok(parsed)
 }
 
-/// Uses only the library explicitly selected by the caller, ignoring consumer
-/// Dylint metadata. Setup failures never turn into a Clippy-only clean result.
 fn dylint_command(root: &Path, cargo_args: &[String], library: &Path) -> Result<Command> {
     let library = library
         .canonicalize()
@@ -767,8 +727,6 @@ fn dylint_command(root: &Path, cargo_args: &[String], library: &Path) -> Result<
         command.arg("--workspace");
     }
     command.args(cargo_args);
-    // Dylint passes these to rustc, not Cargo. Keep consumer RUSTFLAGS for
-    // target/cfg selection; force our warnings even under crate-level denies.
     let mut flags = String::from("--cap-lints warn");
     for lint in EXPERIMENTAL_LINTS {
         flags.push_str(" -W ");
@@ -778,7 +736,6 @@ fn dylint_command(root: &Path, cargo_args: &[String], library: &Path) -> Result<
     Ok(command)
 }
 
-/// What `classify` needs to know about the run.
 struct Setting<'a> {
     root: &'a Path,
     clippy_config: &'a Path,
@@ -788,14 +745,11 @@ struct Setting<'a> {
     echo: bool,
 }
 
-/// The diagnostics `classify` has sorted so far.
 #[derive(Default)]
 struct Sorted<'a> {
-    /// Diagnostics already sorted, since Clippy repeats them across targets.
     seen: HashSet<DiagnosticKey>,
     findings: Vec<Finding>,
     skipped: BTreeMap<String, usize>,
-    /// The earlier findings not yet matched, when the check has a baseline.
     baseline: Option<&'a mut Baseline>,
     baselined: BTreeMap<String, usize>,
     warnings: Vec<Problem>,
@@ -803,7 +757,6 @@ struct Sorted<'a> {
 }
 
 impl Sorted<'_> {
-    /// Whether the baseline has this finding, counting it as baselined if so.
     fn in_baseline(&mut self, rule: &str, path: &str, source: Option<&str>) -> bool {
         let matched = self
             .baseline
@@ -816,8 +769,6 @@ impl Sorted<'_> {
     }
 }
 
-/// Whether the arguments for `cargo clippy` already choose which packages to
-/// check, in which case adding `--workspace` would override that choice.
 fn selects_packages(cargo_args: &[String]) -> bool {
     cargo_args.iter().any(|arg| {
         matches!(
@@ -848,10 +799,6 @@ fn selects_targets(args: &[String]) -> bool {
     })
 }
 
-/// Sorts one diagnostic into a finding, a skipped or baselined finding, a
-/// build error, a configuration or unavailable-lint warning, or noise,
-/// echoing diagnostics when `echo` is set. Without a primary span, only unknown or removed lint
-/// warnings are kept; compiler summaries are dropped.
 fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted<'_>) {
     let Some(span) = diagnostic.spans.iter().find(|span| span.is_primary) else {
         let Some(code) = diagnostic.code else {
@@ -880,8 +827,6 @@ fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted<'
         });
         return;
     };
-    // Recursive expansions can point into a dependency. Use the invocation
-    // for the location, deduplication, skips and source-based baseline.
     let span = span.call_site();
     let about_config = Path::new(&span.file_name) == setting.clippy_config;
     let file = normalize(&span.file_name);
@@ -894,8 +839,6 @@ fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted<'
         line: span.line_start,
         column: span.column_start,
     };
-    // Clippy reports a lint once per target, so a library and its tests
-    // repeat each other.
     if !sorted.seen.insert(key) {
         return;
     }
@@ -949,8 +892,6 @@ fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted<'
     }
 }
 
-/// `file` relative to `root`, for the skip list. Clippy already names
-/// workspace files relative to the directory it runs in.
 fn relative<'a>(root: &Path, file: &'a str) -> &'a str {
     Path::new(file)
         .strip_prefix(root)
@@ -959,10 +900,6 @@ fn relative<'a>(root: &Path, file: &'a str) -> &'a str {
         .unwrap_or(file)
 }
 
-/// `file` relative to `root`, with `/` between segments, for matching a
-/// baseline. A report names files with the separators of the platform that
-/// wrote it, so a baseline written on Windows names `src\lib.rs` what Linux
-/// names `src/lib.rs`, and its root is not a path Linux can strip.
 fn portable_path(root: &Path, file: &str) -> String {
     let root = root.to_string_lossy().replace('\\', "/");
     let file = file.replace('\\', "/");
@@ -1238,7 +1175,6 @@ mod tests {
 
     #[test]
     fn recorded_tokio_expansion_matches_the_rendered_location() {
-        // Clippy 1.100.0 with tokio 1.54.1 and tokio::select disallowed.
         let diagnostic: Diagnostic =
             serde_json::from_str(include_str!("../tests/diagnostics/tokio-select.json")).unwrap();
         let rendered = diagnostic.rendered.as_ref().unwrap().clone();
@@ -1419,7 +1355,6 @@ mod tests {
         );
     }
 
-    /// An unwrap finding in `file` at `line`, on a line reading `text`.
     fn unwrap_at(file: &str, line: u64, text: &str, message: &str) -> Diagnostic {
         let mut diagnostic = diagnostic(file, "warning", Some("clippy::unwrap_used"), message);
         let span = diagnostic.spans.first_mut().unwrap();
@@ -1479,18 +1414,14 @@ mod tests {
         let report = classify_against(
             Some(baseline),
             vec![
-                // Moved down and reindented, with Clippy's message reworded.
                 unwrap_at(
                     "src/lib.rs",
                     40,
                     "        let a = x.unwrap();",
                     "new wording",
                 ),
-                // Named relative to this project's root, not the earlier one.
                 unwrap_at("project/src/main.rs", 3, "let b = y.unwrap();", "unwrap"),
-                // The line was edited, so the finding is new.
                 unwrap_at("src/lib.rs", 41, "let a = x.unwrap(); // edited", "unwrap"),
-                // The same line in another file is new.
                 unwrap_at("src/other.rs", 1, "let a = x.unwrap();", "unwrap"),
             ],
         );
@@ -1619,7 +1550,6 @@ mod tests {
                 "{root} {file}"
             );
         }
-        // A sibling directory that shares the root's prefix is not inside it.
         assert_eq!(
             portable_path(
                 Path::new("/home/ci/project"),

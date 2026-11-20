@@ -84,7 +84,6 @@ async fn receive_until_ends_when_cancelled_and_keeps_the_queue() {
         Poll::Ready(Err(ReceiveError::Cancelled))
     );
 
-    // A request already present wins over a queued message, which stays.
     sender.try_send(9).unwrap();
     assert_eq!(
         receiver.receive_until(&cancellation, None).await,
@@ -208,7 +207,6 @@ async fn each_receive_wakes_another_waiting_sender() {
     assert!(poll_once(first.as_mut(), &first_wake).is_pending());
     assert!(poll_once(second.as_mut(), &second_wake).is_pending());
 
-    // Two places open before either woken sender runs.
     assert_eq!(ch.try_receive(), Ok(0));
     assert_eq!(ch.try_receive(), Ok(1));
     assert_eq!(first_wake.wakes(), 1);
@@ -326,8 +324,6 @@ async fn cancellation_stops_producers_and_consumers_without_losing_values() {
         delivered.push(value);
     }
     delivered.sort_unstable();
-    // Each producer sent id, id + 3, ... up to the value it got back, and
-    // every sent value was either received or is still queued.
     let mut expected: Vec<u64> = handed_back
         .iter()
         .flat_map(|&stopped| (stopped % 3..stopped).step_by(3))

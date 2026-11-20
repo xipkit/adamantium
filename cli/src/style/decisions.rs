@@ -1,5 +1,3 @@
-//! The OpenAI Decisions API as a style review provider.
-
 use std::{
     collections::BTreeMap,
     env,
@@ -24,8 +22,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const RETRY_BUDGET: Duration = Duration::from_secs(180);
 const MAX_SERVER_DELAY: Duration = Duration::from_secs(30);
 
-/// A Decisions API client that answers every question for a file in one
-/// request.
 pub(crate) struct Decisions {
     agent: ureq::Agent,
     key: String,
@@ -33,6 +29,7 @@ pub(crate) struct Decisions {
 }
 
 impl Decisions {
+    /// Builds a Decisions API client with the given credential.
     pub fn new(key: String) -> Self {
         let config = ureq::Agent::config_builder()
             .https_only(true)
@@ -305,7 +302,6 @@ pub(crate) fn api_key() -> Result<String> {
                 break;
             }
             if started.elapsed() >= Duration::from_secs(10) {
-                // Report the timeout below even if cleanup fails.
                 drop(child.kill());
                 drop(child.wait());
                 bail!("Keychain lookup timed out; set OPENAI_API_KEY instead");

@@ -158,7 +158,6 @@ fn last_receiver_drop_ends_queued_and_blocked_replies_while_senders_remain() {
             let workers: Vec<Worker> = vec![
                 Box::pin(async move {
                     assert_eq!(queued_answer.receive().await, None);
-                    // Ending the reply must not wait for this sender to drop.
                     assert!(requests.is_closed());
                     drop(requests);
                 }),
@@ -200,7 +199,6 @@ fn cancelled_receive_hands_wakeup_to_competing_receiver() {
                     assert_eq!(other.receive().await, Some(7));
                 }),
             ];
-            // The cancellation can race the producer's notification after spawning.
             let workers = testing::parallel(workers);
             let cancel = async {
                 drop(cancelled);
@@ -404,7 +402,6 @@ fn escaped_handles_and_registered_futures_reject_other_executions() {
     assert!(catch_unwind(AssertUnwindSafe(|| channel.try_send(1))).is_err());
     assert!(catch_unwind(AssertUnwindSafe(|| drop(channel))).is_err());
 
-    // Cancellation of a registered production future is itself an owned operation.
     let sender = Arc::new(Channel::bounded(1));
     sender.try_send(1).unwrap();
     let writer = sender.clone();

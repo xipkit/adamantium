@@ -26,7 +26,6 @@ fn config() -> Config {
     }
 }
 
-/// What each execution of a factory observed, in execution order.
 type Log<T> = Arc<Mutex<Vec<T>>>;
 
 fn log<T>() -> Log<T> {
@@ -41,7 +40,6 @@ fn last<T: Clone>(log: &Log<T>) -> T {
     log.lock().unwrap().last().unwrap().clone()
 }
 
-/// A factory that records `scenario`'s output in `log` for every execution.
 fn logging<T, F, Fut>(
     log: &Log<T>,
     scenario: F,
@@ -67,7 +65,6 @@ async fn draws() -> Vec<u64> {
     draws
 }
 
-/// The waits between the attempts of a retry that never succeeds.
 async fn retry_waits(backoff: Backoff) -> Vec<Duration> {
     let mut starts = Vec::new();
     let result = adamantium::retry(&Cancellation::new(), None, backoff, || {
@@ -85,10 +82,8 @@ fn jittered() -> Backoff {
         .jitter()
 }
 
-/// The delays `jittered` would wait without jitter.
 const DELAYS: [u64; 8] = [1, 2, 4, 8, 16, 16, 16, 16];
 
-/// How many random draws a record made, read from its saved form.
 fn random_steps(record: &Replay) -> usize {
     let json = serde_json::to_value(record).unwrap();
     json["steps"]
@@ -169,7 +164,6 @@ fn jittered_retry_waits_stay_between_half_and_all_of_each_delay() {
             );
         }
     }
-    // Callers that fail together retry apart.
     let mut distinct = observed.clone();
     distinct.sort();
     distinct.dedup();

@@ -1,8 +1,3 @@
-//! Deterministic execution timeline collector for [`crate::testing::explain`].
-//!
-//! Records task names, virtual timestamps, wait operations and wakeups without
-//! calling into Shuttle or altering scheduling decisions.
-
 #![allow(
     clippy::disallowed_types,
     clippy::disallowed_methods,

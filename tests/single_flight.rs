@@ -1,5 +1,3 @@
-//! These tests run with and without the `tokio` feature, so they poll by hand.
-
 use adamantium::{Channel, SingleFlight};
 use std::{
     future::{Future, pending, ready},
@@ -16,7 +14,6 @@ fn poll_once<F: Future + ?Sized>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
 }
 
-/// Counts the operations started and dropped, finished or not.
 #[derive(Clone, Default)]
 struct Counts {
     started: Arc<AtomicUsize>,
@@ -32,7 +29,6 @@ impl Counts {
         self.dropped.load(Ordering::SeqCst)
     }
 
-    /// An operation that returns the next value from `answers`.
     fn operation(
         &self,
         answers: &Channel<Result<u32, String>>,
@@ -55,7 +51,6 @@ impl Drop for Dropped {
     }
 }
 
-/// A waker that counts its wakes.
 #[derive(Default)]
 struct Wakes(AtomicUsize);
 
@@ -175,7 +170,6 @@ fn dropping_the_last_caller_drops_the_operation_and_its_entry() {
     assert_eq!((counts.started(), counts.dropped()), (1, 1));
     assert!(flights.is_empty());
 
-    // The next call starts a new operation.
     answers.try_send(Ok(5)).unwrap();
     let mut next = pin!(flights.run("db", || counts.operation(&answers)));
     assert_eq!(poll_once(next.as_mut()), Poll::Ready(Ok(5)));
@@ -288,7 +282,6 @@ fn the_operation_cannot_call_for_its_own_key() {
     let flights = SingleFlight::<u8, u32>::new();
     let inner = flights.clone();
     let mut first = pin!(flights.run(1, || async move {
-        // Another key is fine; the same key would wait for itself.
         let other = inner.run(2, || ready(2)).await;
         other + inner.run(1, || ready(1)).await
     }));
@@ -307,8 +300,6 @@ fn creating_the_operation_cannot_call_for_its_own_key() {
     let flights = SingleFlight::<u8, u32>::new();
     let inner = flights.clone();
     let mut first = pin!(flights.run(1, || {
-        // Waiting for the same key while creating the operation would wait
-        // for an operation that doesn't exist yet.
         let mut nested = pin!(inner.run(1, || ready(1)));
         ready(u32::from(poll_once(nested.as_mut()).is_ready()))
     }));
@@ -321,7 +312,6 @@ fn creating_the_operation_cannot_call_for_its_own_key() {
     assert!(flights.is_empty());
 }
 
-/// Wakes itself and returns `Pending` on its first poll, as a yield does.
 struct YieldOnce {
     yielded: bool,
 }
@@ -361,7 +351,6 @@ fn a_yielding_operation_lets_another_caller_take_its_turn() {
     let mut first = pin!(flights.run(1, || YieldOnce { yielded: false }));
     let mut second = pin!(flights.run(1, || YieldOnce { yielded: false }));
     assert_eq!(poll_once(first.as_mut()), Poll::Pending);
-    // The operation is still woken, so the second caller polls it next.
     assert_eq!(poll_once(second.as_mut()), Poll::Ready(12));
     assert_eq!(poll_once(first.as_mut()), Poll::Ready(12));
 }
@@ -394,9 +383,6 @@ fn a_wake_the_polling_caller_leaves_behind_reaches_the_others() {
                     Poll::Pending
                 }
                 2 => {
-                    // The operation wakes itself, then the second caller
-                    // looks while it is still being polled, as it could
-                    // from another thread.
                     cx.waker().wake_by_ref();
                     let mut second = slot.lock().unwrap();
                     let second = second.as_mut().unwrap();
@@ -418,7 +404,6 @@ fn a_wake_the_polling_caller_leaves_behind_reaches_the_others() {
     operation_waker.lock().unwrap().take().unwrap().wake();
     assert!(poll_once(first.as_mut()).is_pending());
     let looked = wakes.0.load(Ordering::SeqCst);
-    // The first caller leaves before it is polled again.
     drop(first);
     assert!(
         wakes.0.load(Ordering::SeqCst) > looked,
@@ -452,8 +437,6 @@ fn a_wake_during_the_first_poll_reaches_the_others_when_the_creator_leaves() {
             if polls > 1 {
                 return Poll::Ready(5);
             }
-            // The operation wakes itself on its first poll, and another
-            // thread's caller joins while it is still being polled.
             cx.waker().wake_by_ref();
             let (joined, second_wakes) = (joined.clone(), Arc::clone(&second_wakes));
             let second = std::thread::spawn(move || {
@@ -472,7 +455,6 @@ fn a_wake_during_the_first_poll_reaches_the_others_when_the_creator_leaves() {
     let mut first = Box::pin(flights.run(1, operation));
     assert!(poll_once(first.as_mut()).is_pending());
     let looked = wakes.0.load(Ordering::SeqCst);
-    // The creator leaves before it is polled again.
     drop(first);
     assert!(
         wakes.0.load(Ordering::SeqCst) > looked,
@@ -522,8 +504,6 @@ fn many_callers_share_one_operation_whatever_order_they_poll_in() {
         assert!(poll_once(call.as_mut()).is_pending());
     }
     answers.try_send(Ok(11)).unwrap();
-    // The last caller, which never polled the operation, finishes it, and
-    // the others collect copies.
     for call in calls.iter_mut().rev() {
         assert_eq!(poll_once(call.as_mut()), Poll::Ready(Ok(11)));
     }
@@ -571,8 +551,7 @@ mod until {
             assert_eq!(result, Err(ScopeError::Cancelled));
             assert_eq!(counts.started(), 1);
         }
-        // Had the cancelled call joined, the operation would outlive the
-        // only caller left in it.
+        // The operation would survive if the cancelled call had joined.
         assert_eq!(counts.dropped(), 1);
         assert!(flights.is_empty());
     }
@@ -748,7 +727,6 @@ mod until {
             assert!(flights.is_empty());
         }
 
-        // The next call starts a new operation.
         answers.try_send(Ok(6)).unwrap();
         let result = flights
             .run_until("db", &Cancellation::new(), None, || {

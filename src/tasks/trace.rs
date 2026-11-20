@@ -36,8 +36,6 @@ pub(super) fn track(tasks: &Shared<Running>, name: Str) -> (Registration, tracin
     (registration, span)
 }
 
-/// Runs `future` inside its own `adamantium.task` span, under the current
-/// subscriber, and reports it as running at a deadline until it ends.
 pub(super) fn instrument<F: Future + Send>(
     tasks: &Shared<Running>,
     name: Str,

@@ -208,7 +208,6 @@ fn dropping_last_receiver_wakes_all_pending_senders() {
     assert_eq!(sender.try_send(4), Err(TrySendError::Closed(4)));
 }
 
-/// What queued [`Witness`] values saw of their channel as they dropped.
 #[derive(Default)]
 struct Seen {
     dropped: AtomicUsize,
@@ -217,9 +216,6 @@ struct Seen {
     sent: AtomicUsize,
 }
 
-/// A queued value that, as it drops, records whether its channel was closed,
-/// whether a pending operation had been woken, and whether a send on the
-/// channel still succeeded.
 struct Witness {
     channel: Option<Sender<Witness>>,
     pending: Arc<WakeCounter>,
@@ -582,7 +578,6 @@ mod stream {
             let idle_wake = Arc::new(WakeCounter::default());
             let active_wake = Arc::new(WakeCounter::default());
             for value in 1..=2 {
-                // Cancel Next, retaining its receiver and therefore its stream listener.
                 assert!(poll_once(pin!(idle.next()), &idle_wake).is_pending());
                 let receiver = if same_handle { &idle } else { &other };
                 let mut active = pin!(receiver.receive());
@@ -787,7 +782,6 @@ fn cancelling_receive_after_a_stolen_message_keeps_the_next_waiter_live() {
     sender.try_send(7).unwrap();
     assert!(first_wake.0.load(Ordering::SeqCst) > 0);
     assert_eq!(receiver.try_receive(), Ok(7));
-    // Consume the notification, fail the empty recheck and register again.
     assert!(poll_once(first.as_mut(), &first_wake).is_pending());
     drop(first);
     assert_eq!(second_wake.0.load(Ordering::SeqCst), 0);
@@ -815,7 +809,6 @@ fn cancelling_send_after_a_stolen_slot_keeps_the_next_waiter_live() {
     assert_eq!(receiver.try_receive(), Ok(0));
     assert!(first_wake.0.load(Ordering::SeqCst) > 0);
     sender.try_send(99).unwrap();
-    // Consume the notification, fail the full recheck and register again.
     assert!(poll_once(first.as_mut(), &first_wake).is_pending());
     drop(first);
     assert_eq!(second_wake.0.load(Ordering::SeqCst), 0);

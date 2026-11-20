@@ -2,12 +2,7 @@ use std::{borrow::Borrow, fmt, hash::Hash, iter::FusedIterator};
 
 use indexmap::IndexMap;
 
-/// A map that holds at most `capacity` entries and evicts the least recently
-/// used one to make room for a new key.
-///
-/// Use it for caches and session tables that live inside an
-/// [`Actor`](crate::Actor), where a plain map would grow with every key
-/// ever seen:
+/// A map that evicts the least recently used entry to stay within capacity.
 ///
 /// ```
 /// use adamantium::{Actor, BoundedMap, Inserted};
@@ -27,65 +22,36 @@ use indexmap::IndexMap;
 ///
 /// # Eviction policy
 ///
-/// Entries are kept in order of use, from most to least recent. These count
-/// as a use and make the entry the most recent:
-///
-/// - [`get`](Self::get) and [`get_mut`](Self::get_mut) of a present key;
-/// - every [`insert`](Self::insert), whether it adds a key or replaces the
-///   value of one already there.
-///
-/// [`peek`](Self::peek), [`contains_key`](Self::contains_key) and
-/// [`iter`](Self::iter) read without changing the order. Inserting a new key
-/// into a full map first removes the least recently used entry and returns
-/// it in [`Inserted::Evicted`], so the caller can close or log it. Replacing
-/// a value never evicts.
-///
-/// A capacity of zero is allowed and holds nothing: every insert hands its
-/// own key and value straight back as evicted.
+/// [`Self::get`], [`Self::get_mut`], and [`Self::insert`] mark the entry as
+/// most recently used. [`Self::peek`], [`Self::contains_key`], and [`Self::iter`]
+/// preserve the order. Inserting a new key into a full map returns the
+/// least recently used entry in [`Inserted::Evicted`]. At zero capacity,
+/// every insert returns the entry just offered.
 ///
 /// # Costs
 ///
-/// Every operation takes O(1) time, amortized over the growth of the
-/// storage. The order is a doubly linked list threaded through the entries
-/// by position, so nothing is copied to reorder it. Storage grows as entries
-/// arrive and its entry list never reserves room past `capacity`, so a large
-/// capacity costs nothing until it is used. [`clear`](Self::clear),
-/// [`remove`](Self::remove) and eviction keep the storage for reuse.
-///
-/// Unlike [`Map`](crate::Map), a `BoundedMap` is a plain owned value:
-/// cloning it copies every entry. It is meant to be owned by one `Actor`,
-/// not shared by value between tasks.
+/// Lookups, inserts, and removals take amortized O(1) time. Storage grows on
+/// demand up to capacity and is kept for reuse. Cloning copies every entry.
 #[derive(Clone)]
 pub struct BoundedMap<K, V> {
     entries: IndexMap<K, Slot<V>>,
     capacity: usize,
-    /// Position of the most recently used entry.
     head: Option<usize>,
-    /// Position of the least recently used entry.
     tail: Option<usize>,
 }
 
-/// A value and the positions of its neighbours in the order of use.
 #[derive(Clone)]
 struct Slot<V> {
     value: V,
-    /// The next more recently used entry.
     newer: Option<usize>,
-    /// The next less recently used entry.
     older: Option<usize>,
 }
 
-/// What [`BoundedMap::insert`] did.
 #[must_use = "an evicted or replaced value may need closing or logging; use `drop` to discard it"]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Inserted<K, V> {
-    /// The key was new and there was room for it.
     Added,
-    /// The key was present. Its old value is returned; nothing was evicted.
     Replaced(V),
-    /// The key was new and the map was full, so the least recently used
-    /// entry was removed and returned. With a capacity of zero, this is the
-    /// key and value just offered.
     Evicted(K, V),
 }
 
@@ -155,7 +121,6 @@ impl<K, V> BoundedMap<K, V> {
         self.entries.get_index_mut(index).map(|(_, slot)| slot)
     }
 
-    /// Takes the entry at `index` out of the order, joining its neighbours.
     fn unlink(&mut self, index: usize) {
         let Some(&Slot { newer, older, .. }) = self.slot(index) else {
             return;
@@ -170,7 +135,6 @@ impl<K, V> BoundedMap<K, V> {
         }
     }
 
-    /// Makes the unlinked entry at `index` the most recently used.
     fn push_front(&mut self, index: usize) {
         let old_head = self.head;
         let Some(slot) = self.slot_mut(index) else {
@@ -185,7 +149,6 @@ impl<K, V> BoundedMap<K, V> {
         self.head = Some(index);
     }
 
-    /// Makes the entry at `index` the most recently used.
     fn touch(&mut self, index: usize) {
         if self.head != Some(index) {
             self.unlink(index);
@@ -193,8 +156,6 @@ impl<K, V> BoundedMap<K, V> {
         }
     }
 
-    /// Removes the entry at `index` in O(1). The last entry moves into the
-    /// hole, so its neighbours are pointed at its new position.
     fn remove_index(&mut self, index: usize) -> Option<(K, V)> {
         self.unlink(index);
         let (key, slot) = self.entries.swap_remove_index(index)?;
@@ -295,8 +256,6 @@ impl<K: Hash + Eq, V> BoundedMap<K, V> {
         self.remove_index(index).map(|(_, value)| value)
     }
 
-    /// Makes room for one more entry when the storage is full, doubling it
-    /// but never past `capacity`.
     fn reserve_one(&mut self) {
         let len = self.entries.len();
         if len == self.entries.capacity() {
@@ -365,7 +324,6 @@ impl<'a, K, V> IntoIterator for &'a BoundedMap<K, V> {
 }
 
 impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for BoundedMap<K, V> {
-    /// Shows the capacity and the entries from most to least recently used.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         struct Entries<'a, K, V>(&'a BoundedMap<K, V>);
         impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for Entries<'_, K, V> {

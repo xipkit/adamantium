@@ -228,8 +228,6 @@ fn shared_state_fixture(name: &str) -> String {
 fn shared_state_rewrites_build_pass_check_and_keep_behavior() {
     let source = shared_state_fixture("rewrite.rs");
     let dir = binary(&source);
-    // An actor needs no runtime, so the rewrite works without the `tokio`
-    // feature.
     let manifest = dir.path().join("Cargo.toml");
     let text = fs::read_to_string(&manifest).unwrap();
     let text = text
@@ -336,9 +334,6 @@ fn shared_state_fix_cannot_follow_is_reported_and_left_unchanged() {
 
 #[test]
 fn fixes_that_break_the_build_are_restored() {
-    // Every rewrite here is sound by itself, but the library asserts the
-    // length of a module's source, so any rewrite of that module stops the
-    // build, the way a rewrite that syntax alone can't vet would.
     let module = "pub async fn wait() { tokio::time::sleep(std::time::Duration::ZERO).await; }\n";
     let library = format!(
         "mod wait;\nconst _: () = assert!(include_str!(\"wait.rs\").len() == {}, \"wait.rs changed\");\npub fn value() -> u32 {{ dbg!(7) }}\n",
@@ -372,8 +367,6 @@ fn fixes_that_break_the_build_are_restored() {
     assert_eq!(fs::read_to_string(&wait).unwrap(), module);
 }
 
-/// A project whose only target is a binary with `main` as its main file, so
-/// no other crate can call its functions.
 #[allow(clippy::unwrap_used, reason = "a failed fixture setup fails the test")]
 fn binary(main: &str) -> tempfile::TempDir {
     let dir = project("");
@@ -455,9 +448,6 @@ fn shared_state_fields_fix_cannot_follow_are_reported_and_left_unchanged() {
 
 #[test]
 fn shared_state_whose_function_runs_inside_a_callback_is_left_unchanged() {
-    // Rewriting `hits` would make `count` call an actor inside `total`'s
-    // callback, which panics. In the second, only `bump` locks it, through
-    // its parameter.
     for (source, reports) in [
         (
             "use std::sync::{Arc, Mutex};\n\nfn count() -> u32 {\n    let hits = Arc::new(Mutex::new(0u32));\n    *hits.lock().unwrap() += 1;\n    let value = *hits.lock().unwrap();\n    value\n}\n\nfn main() {\n    let total = adamantium::Actor::new(0u32);\n    total.with(|total| *total += count());\n    println!(\"{}\", total.read(|total| *total));\n}\n",
@@ -501,7 +491,6 @@ fn shared_state_whose_function_runs_inside_a_callback_is_left_unchanged() {
     }
 }
 
-/// Runs a fixture as a user would, including actual future suspension.
 #[allow(
     clippy::unwrap_used,
     reason = "a failed fixture command fails the test"
@@ -739,8 +728,6 @@ fn bounded_async_library_and_callable_or_fake_roots_stay_byte_identical() {
         assert_manual(dir.path(), "src/main.rs", &source, Some("future boundary"));
     }
 
-    // A re-exported real macro is still not a verified dependency/path, nor
-    // does a Tokio annotation on an ordinary function make it the entry.
     for (extra, main) in [
         (
             "mod tokio { pub use real_tokio::*; }",
@@ -882,7 +869,6 @@ fn bounded_async_cargo_target_identity_is_required() {
         assert_manual(dir.path(), filename, &source, None);
     }
 
-    // The entry is identified by Cargo, not by a conventional filename.
     let dir = binary(&source);
     fs::rename(
         dir.path().join("src/main.rs"),
@@ -908,7 +894,6 @@ fn bounded_async_cargo_target_identity_is_required() {
     assert_eq!(execute(dir.path()), b"7 11\n");
 }
 
-/// A binary whose Tokio dependency has the `sync` feature that channels need.
 #[allow(clippy::unwrap_used, reason = "a failed fixture setup fails the test")]
 fn channel_binary(main: &str) -> tempfile::TempDir {
     let dir = binary(main);
@@ -933,7 +918,6 @@ fn channel_fixture(name: &str) -> String {
 
 #[test]
 fn channel_rewrites_keep_behavior_pass_check_and_are_idempotent() {
-    // Only the strict rules report a bounded mpsc channel.
     for (name, rewritten, strict) in [
         ("reply", "::adamantium::Reply::pair()", None),
         ("watch", "::adamantium::Watch::new(0u32);", None),

@@ -1,7 +1,3 @@
-//! Execution-local timer registry and idle driver. The scheduler excludes the
-//! driver while any application task is runnable. Waking from the driver task,
-//! rather than the scheduler callback, avoids reentering Shuttle's state borrow.
-
 #![allow(
     clippy::disallowed_types,
     clippy::disallowed_methods,
