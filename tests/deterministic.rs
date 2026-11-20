@@ -1006,11 +1006,12 @@ fn failure_displays_the_failing_execution_timeline_and_replay() {
     assert!(report.contains("Timeline:"), "{report}");
     assert!(
         report.lines().any(|line| {
-            line.starts_with("  5ms failed (Panic) at task#")
-                && line.ends_with(" \"failing-worker\"")
+            line.starts_with("  5ms task#")
+                && line.contains(" \"failing-worker\" resumed from time.sleep")
         }),
         "{report}"
     );
+    assert!(report.contains("5ms failed (Panic)"), "{report}");
     assert!(!report.contains("passing-worker"), "{report}");
     assert!(!report.contains("sensitive-panic-payload"), "{report}");
 }
