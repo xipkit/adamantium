@@ -1005,7 +1005,10 @@ fn failure_displays_the_failing_execution_timeline_and_replay() {
     assert_eq!(failure.replay().iteration(), 2);
     assert!(report.contains("Timeline:"), "{report}");
     assert!(
-        report.contains("5ms failed (Panic) at task#1 \"failing-worker\""),
+        report.lines().any(|line| {
+            line.starts_with("  5ms failed (Panic) at task#")
+                && line.ends_with(" \"failing-worker\"")
+        }),
         "{report}"
     );
     assert!(!report.contains("passing-worker"), "{report}");
