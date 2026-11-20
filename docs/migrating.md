@@ -39,7 +39,7 @@ changes behavior in a way to check.
 | `JoinHandle::abort` on a long-lived task | `Tasks::run_until` with a `Cancellation` | No |
 | `tokio::spawn` inside a task | A scope inside the task | No |
 | `tokio::time::sleep` | `time::sleep` | Yes |
-| `tokio::time::interval` | A loop over `time::sleep_until` | Mostly |
+| `tokio::time::interval` | `time::Interval` | Mostly |
 | `rand::random::<u64>()`, `fastrand::u64(..)` | `random::u64()` | Yes |
 | `fastrand::u64(0..=max)`, `rand::random_range(0..=max)` for a `u64` range | `random::up_to(max)` | Yes |
 
@@ -1059,14 +1059,13 @@ async fn main() -> Result<(), ScopeError<std::io::Error>> {
     let shutdown = Cancellation::new();
     let result = Tasks::run_until(shutdown.clone(), None, async |t| {
         let flushes = flushes.clone();
-        t.spawn::<(), _>(async move {
-            let period = Duration::from_millis(5);
-            let mut next = time::now() + period;
-            loop {
-                time::sleep_until(next).await;
-                next += period;
+        let task_shutdown = shutdown.clone();
+        t.spawn(async move {
+            let mut ticks = time::Interval::new(Duration::from_millis(5));
+            while let Some(_) = ticks.tick_until(&task_shutdown).await {
                 flushes.with(|f| *f += 1);
             }
+            Ok(())
         });
         time::sleep(Duration::from_millis(20)).await;
         shutdown.cancel();
@@ -1082,12 +1081,11 @@ async fn main() -> Result<(), ScopeError<std::io::Error>> {
 }
 ```
 
-`tokio::time::interval` and `tokio::time::sleep` become a loop over
-`time::sleep_until` and `time::sleep`, so waits go through Adamantium's clock.
-A task that never returns has no value for Rust to infer its type from, so
-the spawn names it: `spawn::<(), _>`. Give each scope its own `Cancellation`, since a scope cancels its signal when
-it ends. Work that must stop when an outer scope stops can watch a clone of
-the outer signal.
+`tokio::time::interval` becomes `time::Interval`, and `tokio::time::sleep`
+becomes `time::sleep`, so waits go through Adamantium's clock. `tick_until`
+stops the loop cleanly when `shutdown` is cancelled. Give each scope its own
+`Cancellation`, since a scope cancels its signal when it ends. Work that must
+stop when an outer scope stops can watch a clone of the outer signal.
 
 ### Spawning from inside a task
 
