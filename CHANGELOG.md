@@ -10,6 +10,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `cargo-adamantium`: `check --update-baseline` prunes resolved findings,
+  `--fail-on-stale-baseline` requires an up-to-date baseline in CI, and
+  `--summary` shows counts by rule and hotspot file.
 - `cargo-adamantium`: `style check --pack concurrency` reviews files for
   state with a joint invariant split across separate Actors, locks or
   atomics (`split_actor_invariant`) and unbounded in-memory collection growth
@@ -19,6 +22,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   including recursive ones, and report blocking, nested actor access and the
   new `adamantium_nested_limit` where async code or a callback calls the
   helper or awaits its future.
+- `cargo-adamantium`: the experimental `adamantium_blocking_in_actor` lint
+  reports file, network, process and thread-blocking operations inside an
+  actor's `with` or `read` callback, directly or through local helpers, where
+  they hold the actor's lock while they wait.
+- `cargo-adamantium`: the experimental `adamantium_race_with_timer` lint
+  accepts `Feed::receive` and `Watcher::changed` as drop-safe arms, since
+  dropping either loses nothing.
 - `adamantium`: `Tasks::spawner()` returns a cloneable `Spawner` so children
   can add siblings to their scope, with the same joining and error rules.
   Spawning after the scope closes returns `SpawnError` without starting work.
