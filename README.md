@@ -60,6 +60,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `Tasks` | A scope that owns its tasks. It waits for them. If one fails, it aborts the others. `spawn_handled` sends a task's error to a handler instead, and `spawn_supervised` restarts a task that fails, within a `Restarts` budget. |
 | `concurrently`, `first_ok` | Run a function on many items with a concurrency limit. |
 | `Actor` | Shared state. Each access is a synchronous closure, so no lock is held across an `await`. |
+| `BoundedMap` | A map that holds at most a fixed number of entries and evicts the least recently used one. Use it for caches and session tables inside an `Actor`. |
 | `AsyncActor` | One worker that owns its state and handles one message at a time. Use it when the state must `await`. |
 | `Channel`, `Reply`, `Watch` | A bounded queue, a one-shot reply, and the latest value of some state. |
 | `Topic` | Sends each message to every subscriber. It waits for a slow subscriber and drops no message. |
@@ -83,7 +84,7 @@ The [library guide](docs/library.md) describes each type, and [`examples/server.
 | `tracing` | No | Named task spans, and a warning that lists unfinished tasks when a deadline expires |
 | `deterministic` | No | A test harness with random, PCT, and bounded DFS scheduling and replay. See [Deterministic tests](docs/testing.md). |
 
-With `default-features = false`, the values, `Actor`, `Channel`, `Topic`, `Fanout`, `Reply`, `Watch`, `Limit`, `KeyedLimit`, `SingleFlight`, and `race` work without Tokio.
+With `default-features = false`, the values, `Actor`, `BoundedMap`, `Channel`, `Topic`, `Fanout`, `Reply`, `Watch`, `Limit`, `KeyedLimit`, `SingleFlight`, and `race` work without Tokio.
 
 ### WASI
 
@@ -143,7 +144,7 @@ Code that follows the rules has these properties:
 | Every value can cross a task | Futures must be `Send`. `Rc`, `RefCell`, `Cell`, and thread-local values are not allowed. |
 | No task outlives its scope | `tokio::spawn`, `JoinSet`, and `std::thread::spawn` are not allowed. Use `Tasks`. |
 | No lock is held across an `await` or inside another lock | `Mutex` and `RwLock` are not allowed. Use `Actor`. |
-| No queue grows without a limit | Unbounded channels are not allowed. Use `Channel`. |
+| No queue grows without a limit | Unbounded channels are not allowed. Use `Channel`. For a cache or table inside an `Actor`, use `BoundedMap`. |
 | No channel drops messages | Tokio's `broadcast` channel is not allowed. Use `Topic`, or `Fanout` to disconnect a subscriber that falls behind. |
 | No worker thread is blocked | `std::thread::sleep`, `block_in_place`, and `spawn_blocking` are not allowed. Use `blocking`. |
 | No timeout drops a future in the middle of its work | `tokio::time::timeout` is not allowed. Use `Tasks::run_until` or the `_until` methods. |

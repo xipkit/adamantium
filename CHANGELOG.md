@@ -10,6 +10,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `adamantium`: `BoundedMap` holds at most a fixed number of entries and
+  evicts the least recently used one to make room for a new key, so a cache
+  or session table inside an `Actor` stays bounded. `insert` returns the
+  evicted or replaced entry in `Inserted`.
 - `cargo-adamantium`: `style check --pack concurrency` reviews files for
   state with a joint invariant split across separate Actors, locks or
   atomics (`split_actor_invariant`) and unbounded in-memory collection growth
