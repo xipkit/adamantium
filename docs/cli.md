@@ -26,15 +26,20 @@ cargo adamantium deps               # show which dependencies use unsafe code or
 
 | Status | Meaning |
 | --- | --- |
-| `0` | No findings |
-| `1` | Findings |
-| `2` | The project did not build |
+| `0` | No findings and any requested baseline check passed |
+| `1` | Findings or a stale baseline with `--fail-on-stale-baseline` |
+| `2` | The project did not build or the command failed |
 
 The exit status is the same for every output format.
 
 ### Text output
 
 `check` prints the diagnostics and a summary to stderr.
+
+`--summary` replaces the final list of files with a count for each rule and
+for up to ten files with the most findings. Both lists run from highest to
+lowest count, with ties sorted by name. The counts use the findings shown
+in the diagnostics.
 
 ### JSON output
 
@@ -310,12 +315,39 @@ cargo adamantium check --baseline adamantium-baseline.json
 
 With `--baseline`, `check` leaves out the findings that the baseline already has.
 
-- The status, the exit status, and the findings in the JSON and SARIF reports cover only new findings.
+- The findings in the JSON and SARIF reports cover only new findings.
 - Text output shows diagnostics only for new findings.
 - The JSON report counts the matched findings by rule in its `baselined` map.
 - `baseline_unmatched` is the number of baseline findings that the check did not find. It is `null` without a baseline.
 
-Make a new baseline after you fix findings. The fixed findings then cannot come back.
+Use `--update-baseline` after fixing findings so those findings fail the check
+if they return.
+
+```sh
+cargo adamantium check --baseline adamantium-baseline.json --update-baseline
+```
+
+`--update-baseline` removes unmatched entries in place and only writes the file
+when the check builds and finds entries to remove. New findings still appear
+in the report and exit with status `1`. After pruning, `baseline_unmatched`
+is `0`.
+
+Use `--fail-on-stale-baseline` in CI to require a baseline update when you fix
+findings.
+
+```sh
+cargo adamantium check --baseline adamantium-baseline.json --fail-on-stale-baseline
+```
+
+A stale baseline exits with status `1` even when the JSON report's `status`
+is `clean`. If you pass both flags, `check` prunes the file before evaluating
+whether it is stale.
+
+Both flags require `--baseline`. For projects with OS-specific findings, keep
+one baseline file per OS and pass the file for the OS being checked. For
+example, a POSIX shell can select `"adamantium-baseline-$(uname -s).json"`.
+Use the same package, target, feature, and lint selections as when the
+baseline was created so the check can still see the same set of findings.
 
 ### How a finding matches
 
