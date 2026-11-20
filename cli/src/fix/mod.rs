@@ -1,23 +1,22 @@
 //! Conservative fixes: compiler suggestions first, then guide-approved syntax.
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
 use anyhow::{Context, Result, bail};
-use proc_macro2::Span;
 use serde_json::Value;
-use syn::{spanned::Spanned, visit::Visit};
 
 use crate::{
     check,
-    lints::{GUIDE, Hint},
+    lints::{GUIDE, Hint, RWLOCK_READ, RWLOCK_WRITE, quoted_path},
     manifest,
 };
 
 mod channels;
+mod expressions;
 mod scan;
 mod source;
 mod state;
@@ -33,7 +32,7 @@ struct Edit {
 struct StateSource {
     file: PathBuf,
     source: String,
-    mutexes: BTreeSet<(usize, usize)>,
+    locks: state::LockSpans,
 }
 
 pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<ExitCode> {
@@ -48,6 +47,8 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
     }
     let mut edits = Vec::new();
     let mut fallback = Vec::new();
+    // The imports that each file's accepted rewrites can leave unused.
+    let mut imports: BTreeMap<PathBuf, Vec<&[&str]>> = BTreeMap::new();
     for diagnostic in &diagnostics {
         let mut suggestions = Vec::new();
         machine_suggestions(diagnostic, &root, &mut suggestions);
@@ -60,18 +61,34 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
     }
     // Every compiler suggestion gets priority, even when another diagnostic
     // appeared first in Cargo's stream.
-    for diagnostic in fallback {
-        for suggestion in mechanical(diagnostic, &root)? {
-            accept(&mut edits, suggestion);
+    for (file, mut calls) in expressions::callees(fallback, &root) {
+        for api in [Api::Core, Api::Tokio] {
+            if calls.values().any(|call| call.api() == api)
+                && !migration_available(&file, &root, api)?
+            {
+                calls.retain(|_, call| call.api() != api);
+            }
+        }
+        if calls.is_empty() {
+            continue;
+        }
+        let source = fs::read_to_string(&file)?;
+        let mut applied = false;
+        for suggestion in expressions::plan(&file, &source, &calls) {
+            applied |= accept(&mut edits, suggestion);
+        }
+        if applied {
+            imports
+                .entry(file)
+                .or_default()
+                .extend_from_slice(expressions::IMPORTS);
         }
     }
-    // The imports that each file's accepted rewrites can leave unused.
-    let mut imports: BTreeMap<PathBuf, Vec<&[&str]>> = BTreeMap::new();
     // A shared-state rewrite changes every use of a binding at once, so it
     // plans a whole file and its edits stand or fall together. A field's
     // rewrite also depends on the rest of its package.
     let mut packages: BTreeMap<PathBuf, Vec<StateSource>> = BTreeMap::new();
-    for (file, mutexes) in mutexes(&diagnostics, &root) {
+    for (file, locks) in locks(&diagnostics, &root) {
         if !migration_available(&file, &root, Api::Core)? {
             continue;
         }
@@ -82,22 +99,23 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
         packages.entry(package).or_default().push(StateSource {
             file,
             source,
-            mutexes,
+            locks,
         });
     }
     for (package, drafts) in packages {
         let krate = scan::Crate::scan(&package)?;
         let drafts = drafts
             .into_iter()
-            .map(|input| state::plan(&input.file, &input.source, &input.mutexes, &krate))
+            .map(|input| state::plan(&input.file, &input.source, &input.locks, &krate))
             .collect();
         for (file, outcome) in state::settle(drafts, &krate) {
             for refusal in &outcome.refusals {
                 eprintln!(
-                    "{}:{}: `{}` stays an `Arc<Mutex<_>>`: {}\n  Review {GUIDE}#{}",
+                    "{}:{}: `{}` stays an `{}`: {}\n  Review {GUIDE}#{}",
                     file.strip_prefix(&root).unwrap_or(&file).display(),
                     refusal.line,
                     refusal.name,
+                    refusal.kind.description(),
                     refusal
                         .boundary
                         .as_deref()
@@ -428,98 +446,59 @@ fn machine_suggestions(node: &Value, root: &Path, output: &mut Vec<Vec<Edit>>) {
     }
 }
 
-fn mechanical(diagnostic: &Value, root: &Path) -> Result<Vec<Vec<Edit>>> {
-    let message = diagnostic["message"].as_str().unwrap_or("");
-    if diagnostic
-        .get("code")
-        .and_then(|code| code.get("code"))
-        .and_then(Value::as_str)
-        != Some("clippy::disallowed_methods")
-        || !(message.contains("`tokio::time::sleep`")
-            || message.contains("`tokio::task::spawn_blocking`"))
-    {
-        return Ok(Vec::new());
+/// The resolved path named by a Clippy disallowed item diagnostic.
+fn disallowed_path<'a>(diagnostic: &'a Value, rule: &str) -> Option<&'a str> {
+    if diagnostic.get("code")?.get("code")?.as_str()? != rule {
+        return None;
     }
-    let Some(span) = diagnostic["spans"]
-        .as_array()
-        .and_then(|spans| spans.iter().find(|s| s["is_primary"] == true))
-    else {
-        return Ok(Vec::new());
-    };
-    if !span["expansion"].is_null() {
-        return Ok(Vec::new());
-    }
-    let Some(file) = span["file_name"]
-        .as_str()
-        .and_then(|name| source_file(root, name))
-    else {
-        return Ok(Vec::new());
-    };
-    if !migration_available(&file, root, Api::Tokio)? {
-        return Ok(Vec::new());
-    }
-    let source = fs::read_to_string(&file)?;
-    let Ok(tree) = syn::parse_file(&source) else {
-        return Ok(Vec::new());
-    };
-    let Some(start) = span["byte_start"]
-        .as_u64()
-        .and_then(|n| usize::try_from(n).ok())
-    else {
-        return Ok(Vec::new());
-    };
-    let mut visitor = Mechanical {
-        source: &source,
-        prefix: usize::from(source.starts_with('\u{feff}')) * '\u{feff}'.len_utf8()
-            + tree.shebang.as_ref().map_or(0, String::len),
-        file,
-        start,
-        end: span["byte_end"]
-            .as_u64()
-            .and_then(|n| usize::try_from(n).ok())
-            .unwrap_or(start),
-        message,
-        edits: Vec::new(),
-    };
-    visitor.visit_file(&tree);
-    Ok(visitor.edits.into_iter().map(|edit| vec![edit]).collect())
+    quoted_path(diagnostic.get("message")?.as_str()?)
 }
 
-/// The byte ranges in each project file that Clippy resolved to
-/// `std::sync::Mutex`, outside macro expansions.
-fn mutexes(diagnostics: &[Value], root: &Path) -> BTreeMap<PathBuf, BTreeSet<(usize, usize)>> {
-    let mut files: BTreeMap<PathBuf, BTreeSet<(usize, usize)>> = BTreeMap::new();
+/// Primary spans in project files that did not come from a macro expansion.
+fn primary_locations<'a>(
+    diagnostic: &'a Value,
+    root: &'a Path,
+) -> impl Iterator<Item = (PathBuf, (usize, usize))> + 'a {
+    diagnostic["spans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|span| span["is_primary"] == true && span["expansion"].is_null())
+        .filter_map(|span| {
+            Some((
+                source_file(root, span["file_name"].as_str()?)?,
+                (
+                    usize::try_from(span["byte_start"].as_u64()?).ok()?,
+                    usize::try_from(span["byte_end"].as_u64()?).ok()?,
+                ),
+            ))
+        })
+}
+
+/// The byte ranges Clippy resolved to a standard-library lock or guard method.
+fn locks(diagnostics: &[Value], root: &Path) -> BTreeMap<PathBuf, state::LockSpans> {
+    use state::{LockEvidence, LockKind};
+
+    let mut files: BTreeMap<PathBuf, state::LockSpans> = BTreeMap::new();
     for diagnostic in diagnostics {
-        if diagnostic
-            .get("code")
-            .and_then(|code| code.get("code"))
-            .and_then(Value::as_str)
-            != Some("clippy::disallowed_types")
-            || !diagnostic["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("`std::sync::Mutex`"))
-        {
-            continue;
-        }
-        for span in diagnostic["spans"].as_array().into_iter().flatten() {
-            if span["is_primary"] != true || !span["expansion"].is_null() {
-                continue;
-            }
-            let range = span["byte_start"]
-                .as_u64()
-                .zip(span["byte_end"].as_u64())
-                .and_then(|(start, end)| {
-                    Some((usize::try_from(start).ok()?, usize::try_from(end).ok()?))
-                });
-            if let Some(file) = span["file_name"]
-                .as_str()
-                .and_then(|name| source_file(root, name))
-                && let Some(range) = range
-            {
-                files.entry(file).or_default().insert(range);
-            }
+        let evidence = match disallowed_path(diagnostic, "clippy::disallowed_types") {
+            Some("std::sync::Mutex") => LockEvidence::Type(LockKind::Mutex),
+            Some("std::sync::RwLock") => LockEvidence::Type(LockKind::RwLock),
+            _ => match disallowed_path(diagnostic, "clippy::disallowed_methods") {
+                Some(RWLOCK_READ) => LockEvidence::Read,
+                Some(RWLOCK_WRITE) => LockEvidence::Write,
+                _ => continue,
+            },
+        };
+        for (file, range) in primary_locations(diagnostic, root) {
+            files.entry(file).or_default().insert(range, evidence);
         }
     }
+    files.retain(|_, spans| {
+        spans
+            .values()
+            .any(|evidence| matches!(evidence, LockEvidence::Type(_)))
+    });
     files
 }
 
@@ -646,72 +625,6 @@ fn adamantium_api(file: &Path, root: &Path) -> Result<Api> {
     })
 }
 
-struct Mechanical<'a> {
-    source: &'a str,
-    prefix: usize,
-    file: PathBuf,
-    start: usize,
-    end: usize,
-    message: &'a str,
-    edits: Vec<Edit>,
-}
-
-impl Mechanical<'_> {
-    fn range(&self, span: Span) -> Option<std::ops::Range<usize>> {
-        let range = span.byte_range();
-        let range = (range.start + self.prefix)..(range.end + self.prefix);
-        self.source.get(range.clone()).map(|_| range)
-    }
-    fn matches(&self, span: Span) -> bool {
-        self.range(span)
-            .is_some_and(|r| r.start == self.start && r.end == self.end)
-    }
-    fn replace(&mut self, span: Span, replacement: String) {
-        if let Some(range) = self.range(span) {
-            self.edits.push(Edit {
-                file: self.file.clone(),
-                start: range.start,
-                end: range.end,
-                replacement,
-            });
-        }
-    }
-}
-
-impl<'ast> Visit<'ast> for Mechanical<'_> {
-    fn visit_expr_await(&mut self, node: &'ast syn::ExprAwait) {
-        // Only a directly awaited call preserves Tokio's timer-construction
-        // boundary. Exact path spans avoid discarding compound callee effects.
-        if self.message.contains("`tokio::time::sleep`")
-            && let syn::Expr::Call(call) = &*node.base
-            && let syn::Expr::Path(path) = &*call.func
-            && self.matches(path.span())
-        {
-            self.replace(path.span(), "::adamantium::time::sleep".to_owned());
-        }
-        syn::visit::visit_expr_await(self, node);
-    }
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if self.message.contains("`tokio::task::spawn_blocking`")
-            && node.method == "unwrap"
-            && node.args.is_empty()
-            && let syn::Expr::Await(awaited) = &*node.receiver
-            && let syn::Expr::Call(call) = &*awaited.base
-            && let syn::Expr::Path(path) = &*call.func
-            && self.matches(path.span())
-            // The wrapper has a different generic parameter order. Retaining
-            // inference by dropping a turbofish can silently change the result.
-            && path.path.segments.iter().all(|segment| matches!(segment.arguments, syn::PathArguments::None))
-            && let Some(args) = self.range(call.paren_token.span.join())
-            && let Some(text) = self.source.get(args)
-        {
-            self.replace(node.span(), format!("::adamantium::blocking{text}.await"));
-            return;
-        }
-        syn::visit::visit_expr_method_call(self, node);
-    }
-}
-
 // One whole-file unified hunk keeps the preview valid without an external diff
 // executable, including files with no trailing newline.
 fn diff(file: &Path, before: &str, after: &str) {
@@ -736,6 +649,7 @@ mod tests {
     use super::*;
     use crate::lints::{DISALLOWED_MACROS, DISALLOWED_METHODS, DISALLOWED_TYPES};
     use serde_json::json;
+    use std::collections::BTreeSet;
 
     #[test]
     fn compiler_suggestions_keep_multipart_edits_atomic() {

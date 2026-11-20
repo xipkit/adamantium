@@ -1,10 +1,10 @@
-//! Parameters and return values of type `Arc<Mutex<T>>` that become
+//! Parameters and return values with shared standard-library locks that become
 //! `Actor<T>`.
 //!
 //! A function is a candidate when it is private, it isn't async, `extern` or
 //! a trait's, and no attribute macro reads it. Each of its parameters typed
-//! `Arc<Mutex<T>>`, `&Arc<Mutex<T>>` or `&Mutex<T>`, and a return type of
-//! `Arc<Mutex<T>>`, gets a group of its own, as a field does. A call fix
+//! `Arc<Lock<T>>`, `&Arc<Lock<T>>` or `&Lock<T>`, and a return type of
+//! `Arc<Lock<T>>`, gets a group of its own, as a field does. A call fix
 //! follows names the function directly: `f(..)` for a free function, and
 //! `self.f(..)`, `Self::f(..)` or `Type::f(..)` in an `impl` of its type for
 //! a method. Every argument to a candidate parameter must be a value fix
@@ -20,8 +20,8 @@ use std::collections::hash_map::Entry;
 use syn::{Block, Expr, ImplItem, Item, Pat, PathArguments, ReturnType, Stmt, Type, visit::Visit};
 
 use super::{
-    Edit, Group, ItemScope, Reason, Resolved, UNLOCATED, Walker, bare, fields::may_be_unsized,
-    item_attributes,
+    Edit, Group, ItemScope, LockKind, Reason, Resolved, UNLOCATED, Walker, bare,
+    fields::may_be_unsized, item_attributes,
 };
 use crate::fix::scan::macro_attribute;
 
@@ -34,7 +34,7 @@ pub(super) struct Callee {
     /// Whether it takes `self`.
     receiver: bool,
     /// For each parameter after `self`, the group of a candidate, and
-    /// whether its type is `&Mutex<T>`.
+    /// whether it is a reference to the lock itself.
     params: Vec<Option<(usize, bool)>>,
     /// The group of the value it returns, for a candidate return type.
     returns: Option<usize>,
@@ -137,17 +137,18 @@ impl<'a> Walker<'a> {
                 continue;
             };
             let param = match &*typed.pat {
-                Pat::Ident(ident) if ident.by_ref.is_none() && ident.subpat.is_none() => {
-                    self.parameter_type(&typed.ty, &sized).map(|(edit, mutex)| {
+                Pat::Ident(ident) if ident.by_ref.is_none() && ident.subpat.is_none() => self
+                    .parameter_type(&typed.ty, &sized)
+                    .map(|(edit, kind, lock_ref)| {
                         let group = self.groups.len();
                         self.groups.push(Group::new(
                             bare(&ident.ident),
                             self.text.line(ident.ident.span()),
+                            kind,
                             vec![edit],
                         ));
-                        (group, mutex)
-                    })
-                }
+                        (group, lock_ref)
+                    }),
                 _ => None,
             };
             params.push(param);
@@ -156,13 +157,16 @@ impl<'a> Walker<'a> {
         let returns = match &sig.output {
             ReturnType::Type(_, ty) => self
                 .arc_state(ty)
-                .filter(|state| sized(state))
-                .and_then(|state| Some(self.edit(self.text.of(ty)?, self.actor_of(state)?)))
-                .map(|edit| {
+                .filter(|(_, state)| sized(state))
+                .and_then(|(kind, state)| {
+                    Some((kind, self.edit(self.text.of(ty)?, self.actor_of(state)?)))
+                })
+                .map(|(kind, edit)| {
                     let group = self.groups.len();
                     self.groups.push(Group::new(
                         format!("{name}()"),
                         self.text.line(sig.ident.span()),
+                        kind,
                         vec![edit],
                     ));
                     group
@@ -194,13 +198,16 @@ impl<'a> Walker<'a> {
         });
     }
 
-    /// The edit that makes a parameter of type `Arc<Mutex<T>>`,
-    /// `&Arc<Mutex<T>>` or `&Mutex<T>` hold an actor, and whether it is the
-    /// last.
-    fn parameter_type(&self, ty: &Type, sized: &impl Fn(&Type) -> bool) -> Option<(Edit, bool)> {
-        let (held, state, mutex) = match ty {
+    /// The parameter's actor edit, lock kind and whether it refers directly
+    /// to the lock instead of its `Arc`.
+    fn parameter_type(
+        &self,
+        ty: &Type,
+        sized: &impl Fn(&Type) -> bool,
+    ) -> Option<(Edit, LockKind, bool)> {
+        let (held, (kind, state), lock_ref) = match ty {
             Type::Reference(reference) if reference.mutability.is_none() => {
-                match self.mutex_state(&reference.elem) {
+                match self.lock_state(&reference.elem) {
                     Some(state) => (&*reference.elem, state, true),
                     None => (&*reference.elem, self.arc_state(&reference.elem)?, false),
                 }
@@ -210,7 +217,11 @@ impl<'a> Walker<'a> {
         if !sized(state) {
             return None;
         }
-        Some((self.edit(self.text.of(held)?, self.actor_of(state)?), mutex))
+        Some((
+            self.edit(self.text.of(held)?, self.actor_of(state)?),
+            kind,
+            lock_ref,
+        ))
     }
 
     /// The type an `impl` is for, when it is a single name for an item that
@@ -240,7 +251,7 @@ impl<'a> Walker<'a> {
     /// Makes the parameter at `position` of the candidate `callee`, just
     /// declared by `pat`, hold its group's state.
     pub(super) fn parameter(&mut self, callee: usize, position: usize, pat: &Pat) {
-        let Some((group, mutex)) = self
+        let Some((group, lock_ref)) = self
             .callees
             .get(callee)
             .and_then(|callee| callee.params.get(position).copied().flatten())
@@ -254,7 +265,7 @@ impl<'a> Walker<'a> {
             && let Some(entry) = self.vars.get_mut(var)
         {
             entry.group = Some(group);
-            entry.mutex_ref = mutex;
+            entry.lock_ref = lock_ref;
             entry.spelling = ident.ident.to_string();
         }
     }
@@ -307,7 +318,7 @@ impl<'a> Walker<'a> {
 
     /// A value that a function returning the state of `group` returns.
     pub(super) fn returned(&mut self, group: usize, expr: &'a Expr) {
-        if let Some(constructor) = self.constructor(expr)
+        if let Some((_, constructor)) = self.constructor(expr)
             && let Some(range) = self.text.of(expr)
         {
             self.visit_expr(expr);
@@ -515,7 +526,10 @@ impl<'a> Walker<'a> {
 mod tests {
     use std::path::Path;
 
-    use super::super::{Reason, plan, settle, tests::fix};
+    use super::super::{
+        Reason, plan, settle,
+        tests::{fix, mutex_spans},
+    };
     use crate::fix::scan::Crate;
 
     const MUTEXES: &[&str] = &["Mutex", "Mutex<u64>"];
@@ -574,14 +588,7 @@ mod tests {
         let source = format!(
             "use std::sync::{{Arc, Mutex}};\n{BUMP}fn f() {{ let m = Arc::new(Mutex::new(1)); bump(&m); }}\n"
         );
-        let spans = MUTEXES
-            .iter()
-            .flat_map(|mutex| {
-                source
-                    .match_indices(mutex)
-                    .map(|(start, _)| (start, start + mutex.len()))
-            })
-            .collect();
+        let spans = mutex_spans(&source, MUTEXES);
         for (other, refused) in [
             ("fn g() -> u8 { 1 }\n", false),
             ("fn g() { super::bump(&todo!()); }\n", true),
