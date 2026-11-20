@@ -33,6 +33,11 @@ declare_lint! {
     "a known blocking operation executes on an async task"
 }
 declare_lint! {
+    pub ADAMANTIUM_BLOCKING_IN_ACTOR,
+    Warn,
+    "a known blocking operation executes inside an actor callback"
+}
+declare_lint! {
     pub ADAMANTIUM_NESTED_ACTOR_ACCESS,
     Warn,
     "actor access executes inside another actor callback"
@@ -50,10 +55,44 @@ declare_lint! {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum LintKind {
-    Blocking,
+    BlockingInAsync,
+    BlockingInActor,
     NestedActor,
     NestedLimit,
     RaceWithTimer,
+}
+
+impl LintKind {
+    /// The lint, its message and its help.
+    fn diagnostic(self) -> (&'static rustc_lint::Lint, &'static str, &'static str) {
+        match self {
+            Self::BlockingInAsync => (
+                ADAMANTIUM_BLOCKING_IN_ASYNC,
+                "blocking operation executes inside async code",
+                "use adamantium::blocking or Tasks::spawn_blocking for blocking work",
+            ),
+            Self::BlockingInActor => (
+                ADAMANTIUM_BLOCKING_IN_ACTOR,
+                "blocking operation holds an actor's lock while it waits",
+                "do the blocking work before or after the callback, and record its result in the actor",
+            ),
+            Self::NestedActor => (
+                ADAMANTIUM_NESTED_ACTOR_ACCESS,
+                "actor access inside an actor callback panics at runtime",
+                "access the second actor after the outer callback returns",
+            ),
+            Self::NestedLimit => (
+                ADAMANTIUM_NESTED_LIMIT,
+                "limit entered inside limit work panics at runtime",
+                "enter only a KeyedLimit inside Limit work, and other limits after the work finishes",
+            ),
+            Self::RaceWithTimer => (
+                ADAMANTIUM_RACE_WITH_TIMER,
+                "racing a timer against a future that may not be drop-safe",
+                "use adamantium::until or a *_until method, or race only documented drop-safe operations",
+            ),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -65,6 +104,7 @@ struct Execution {
 impl_lint_pass!(
     Execution => [
         ADAMANTIUM_BLOCKING_IN_ASYNC,
+        ADAMANTIUM_BLOCKING_IN_ACTOR,
         ADAMANTIUM_NESTED_ACTOR_ACCESS,
         ADAMANTIUM_NESTED_LIMIT,
         ADAMANTIUM_RACE_WITH_TIMER,
@@ -76,6 +116,7 @@ impl_lint_pass!(
 pub fn register_lints(_: &rustc_session::Session, store: &mut rustc_lint::LintStore) {
     store.register_lints(&[
         ADAMANTIUM_BLOCKING_IN_ASYNC,
+        ADAMANTIUM_BLOCKING_IN_ACTOR,
         ADAMANTIUM_NESTED_ACTOR_ACCESS,
         ADAMANTIUM_NESTED_LIMIT,
         ADAMANTIUM_RACE_WITH_TIMER,
@@ -216,12 +257,12 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
                 },
             ),
             Mode::Check { reported, .. } => {
-                if effect.conflicts(context)
+                if let Some(lint) = effect.violation(context)
                     && !(polled && effect == Effect::Blocking)
-                    && reported.insert((site.hir_id, effect.lint()))
+                    && reported.insert((site.hir_id, lint))
                 {
                     let notes = self.summaries.chain(effect, via);
-                    report(self.cx, effect, site, notes);
+                    report(self.cx, lint, effect, site, notes);
                 }
             }
         }
@@ -473,15 +514,14 @@ impl<'a, 'tcx> Walker<'a, 'tcx> {
             && race_has_unsafe_timer(self.cx, arms)
             && reported.insert((site.hir_id, LintKind::RaceWithTimer))
         {
+            let (lint, message, help) = LintKind::RaceWithTimer.diagnostic();
             self.cx.tcx.emit_node_span_lint(
-                ADAMANTIUM_RACE_WITH_TIMER,
+                lint,
                 site.hir_id,
                 site.span.source_callsite(),
                 rustc_errors::DiagDecorator(|diag| {
-                    diag.primary_message("racing a timer against a future that may not be drop-safe");
-                    diag.help(
-                        "use adamantium::until or a *_until method, or race only documented drop-safe operations",
-                    );
+                    diag.primary_message(message);
+                    diag.help(help);
                 }),
             );
         }
@@ -547,27 +587,12 @@ impl<'tcx> Visitor<'tcx> for Walker<'_, 'tcx> {
 
 fn report<'tcx>(
     cx: &LateContext<'tcx>,
+    kind: LintKind,
     effect: Effect,
     site: &'tcx Expr<'tcx>,
     notes: Vec<Origin>,
 ) {
-    let (lint, message, help) = match effect {
-        Effect::Blocking => (
-            ADAMANTIUM_BLOCKING_IN_ASYNC,
-            "blocking operation executes inside async code",
-            "use adamantium::blocking or Tasks::spawn_blocking for blocking work",
-        ),
-        Effect::Actor => (
-            ADAMANTIUM_NESTED_ACTOR_ACCESS,
-            "actor access inside an actor callback panics at runtime",
-            "access the second actor after the outer callback returns",
-        ),
-        Effect::Limit | Effect::KeyedLimit => (
-            ADAMANTIUM_NESTED_LIMIT,
-            "limit entered inside limit work panics at runtime",
-            "enter only a KeyedLimit inside Limit work, and other limits after the work finishes",
-        ),
-    };
+    let (lint, message, help) = kind.diagnostic();
     let last = notes.len().saturating_sub(1);
     cx.tcx.emit_node_span_lint(
         lint,
