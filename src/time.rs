@@ -4,10 +4,14 @@
 //! Build deadlines from [`now`], for example
 //! `time::now() + Duration::from_secs(5)`, and wait with [`sleep`] or
 //! [`sleep_until`]. Deadlines remain [`tokio::time::Instant`] values accepted
-//! by the library's `_until` methods. Use [`std::time::Instant::now`] to
-//! measure elapsed wall-clock time instead. For absolute timestamps from
-//! outside the process, such as a JWT or cookie `exp`, compare against
-//! [`wall_now`].
+//! by the library's `_until` methods.
+//!
+//! Read [`now`] for every duration that program logic depends on: cache and
+//! token TTLs, expiry, retry and backoff windows, rate limits and timeouts.
+//! Checks built on it run in virtual time in the deterministic harness. Use
+//! [`std::time::Instant::now`] only for metrics and logging, whose values never
+//! decide what the program does. For absolute timestamps from outside the
+//! process, such as a JWT or cookie `exp`, compare against [`wall_now`].
 //!
 //! Outside `adamantium::testing` (with the `deterministic` feature), [`now`],
 //! [`sleep`] and [`sleep_until`] delegate to Tokio, including its paused test

@@ -102,6 +102,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   formats.
 - `adamantium`: `testing::Config` has a `wall_epoch` field. Struct literals
   that list every field need `..Config::default()`.
+- `adamantium`: the `time` docs and the `tokio::time::Instant::now` lint
+  message direct TTLs, cache expiry and retry windows to `time::now()`, and
+  `std::time::Instant::now()` only to metrics and logging.
 - `cargo-adamantium`: Default rules report Tokio `oneshot`, Tokio `watch`,
   and `std::sync::mpsc::sync_channel`. Strict rules also report bounded Tokio
   `mpsc`, `Notify`, and `Semaphore`. Broadcast diagnostics recommend
