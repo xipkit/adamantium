@@ -60,7 +60,7 @@ pub fn nesting(a: &State, b: &State) {
 }
 
 pub async fn combined(a: &State, b: &State) {
-    a.read(|_| { disk::read("missing"); }); // blocking
+    a.read(|_| { disk::read("missing"); }); // actor-blocking
     let _future = a.read(|_| async { b.snapshot(); disk::read("missing"); }); // blocking
 }
 
@@ -157,12 +157,20 @@ async fn const_arguments() {
 
 async fn custom_work() {}
 
+struct Lookalike;
+impl Lookalike {
+    async fn changed(&mut self) {}
+    async fn receive(&mut self) {}
+}
+
 async fn race_with_timer(
     ch: &metal::Channel<()>,
     rx: &metal::Receiver<()>,
     reply_rx: &metal::ReplyReceiver<()>,
     reply: &metal::Reply<()>,
     watcher: &mut metal::Watcher<u8>,
+    feed: &mut metal::Feed<u8>,
+    lookalike: &mut Lookalike,
     cancel: &metal::Cancellation,
 ) {
     use metal::{Race, race, time};
@@ -177,6 +185,8 @@ async fn race_with_timer(
     race((time::sleep(delay), async { rx.receive().await; }, async { custom_work().await })).await; // race
     race((async { time::sleep(delay).await }, async { rx.receive().await; custom_work().await })).await; // race
     race((time::sleep(delay), async { (async { rx.receive().await; }).await; })).await; // race
+    race((time::sleep(delay), lookalike.changed())).await; // race
+    race((time::sleep(delay), async { lookalike.receive().await; })).await; // race
 
     // Allowed: every arm is on the documented drop-safe list.
     race((time::sleep(delay), async { ch.receive().await; })).await;
@@ -185,6 +195,10 @@ async fn race_with_timer(
     race((time::sleep(delay), reply.closed())).await;
     race((time::sleep(delay), async { watcher.receive().await; })).await;
     race((time::sleep(delay), async { watcher.wait_for(|v| *v > 0).await; })).await;
+    race((time::sleep(delay), async { watcher.changed().await; })).await;
+    race((watcher.changed(), async { time::sleep(delay).await; None })).await;
+    race((time::sleep(delay), async { feed.receive().await; })).await;
+    race((feed.receive(), async { time::sleep(delay).await; Err(metal::Ended::Closed) })).await;
     race((time::sleep(delay), time::sleep(delay))).await;
     race((time::sleep(delay), time::sleep_until(deadline))).await;
     race((time::sleep(delay), cancel.cancelled())).await;
@@ -262,6 +276,45 @@ pub fn actor_helpers(a: &State, b: &State) {
     peek(b);
     peek_deep(b, 3);
     let _ = blocking({ let a = a.clone(); move || { peek(&a); } });
+}
+
+fn save(_: &mut u8) { disk::write("missing", b""); }
+fn persist(a: &State) { a.with(|_| { load(); }); } // actor-blocking
+fn status() -> bool { std::process::Command::new("true").status().is_ok() }
+
+pub fn actor_blocking(a: &State, socket: &mut std::net::TcpStream) {
+    a.with(|_| { disk::read("missing"); }); // actor-blocking
+    a.read(|_| socket.write_all(b"hello")); // actor-blocking
+    a.with(|_| sleep!()); // actor-blocking
+    a.read(|_| { load(); }); // actor-blocking
+    a.with(|_| walk(3)); // actor-blocking
+    a.read(|_| odd(3)); // actor-blocking
+    a.with(|_| status()); // actor-blocking
+    a.with(save); // actor-blocking
+    update(a, |_| { load(); }); // actor-blocking
+    a.with(|_| { retry(|| { load(); }); }); // actor-blocking
+    a.with(|_| Some(1).map(|_| load())); // actor-blocking
+    a.read(|_| { let c = || load(); c(); }); // actor-blocking
+    persist(a);
+    // Allowed: the I/O runs before or after the callback, is handed to a
+    // blocking thread, or is only constructed inside it.
+    let text = disk::read("missing");
+    a.with(|state| *state = text.map_or(0, |bytes| bytes.len() as u8));
+    let value = a.snapshot();
+    disk::write("missing", [value]);
+    a.with(|_| { let _ = blocking(|| load()); });
+    a.with(|_| offload());
+    a.with(|_| { let _deferred = || load(); });
+    a.with(|_| { let _later = construct(); });
+    a.with(|_| Cursor::new(b"hi").read(&mut [0]));
+    a.read(|_| { count(3); is_even(3); });
+    Unrelated.with(|| { load(); });
+}
+
+pub async fn actor_blocking_async(a: &State) {
+    a.with(|_| { load(); }); // actor-blocking
+    persist(a); // blocking
+    a.with(|_| { let _ = blocking(|| load()); });
 }
 
 async fn enter(l: &Limit) { l.run(|| async {}).await; }

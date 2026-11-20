@@ -17,6 +17,7 @@ cli, library = args.cli.resolve(), args.library.resolve()
 fixture = Path(__file__).resolve().parent / "fixtures"
 rules = {
     "blocking": "adamantium_blocking_in_async",
+    "actor-blocking": "adamantium_blocking_in_actor",
     "nested": "adamantium_nested_actor_access",
     "limit": "adamantium_nested_limit",
     "race": "adamantium_race_with_timer",
@@ -81,10 +82,11 @@ with tempfile.TemporaryDirectory(prefix="adamantium-lints-") as temporary:
     assert diagnostics(check(root, "--package=lint-consumer", "--bin=lint-consumer")) == marked(root, member=False, targets=False), "--bin checked extra targets"
     assert not diagnostics(check(root, lib=None)), "ordinary check loaded experimental lints"
 
-    manifest.write_text(original + '\n[workspace.metadata.adamantium]\nskip = ["member/", "tests/"]\nallow = ["adamantium_blocking_in_async", "adamantium_nested_limit", "adamantium_race_with_timer"]\n[workspace.metadata.adamantium.exceptions]\nadamantium_nested_actor_access = ["src/"]\n')
+    manifest.write_text(original + '\n[workspace.metadata.adamantium]\nskip = ["member/", "tests/"]\nallow = ["adamantium_blocking_in_async", "adamantium_blocking_in_actor", "adamantium_nested_limit", "adamantium_race_with_timer"]\n[workspace.metadata.adamantium.exceptions]\nadamantium_nested_actor_access = ["src/"]\n')
     skipped = check(root)
     assert not diagnostics(skipped), skipped
     assert skipped["skipped"][rules["blocking"]] == len([x for x in marked(root) if x[0] == rules["blocking"]]), skipped
+    assert skipped["skipped"][rules["actor-blocking"]] == len([x for x in marked(root) if x[0] == rules["actor-blocking"]]), skipped
     assert skipped["skipped"][rules["nested"]] == len([x for x in marked(root) if x[0] == rules["nested"]]), skipped
     assert skipped["skipped"][rules["race"]] == len([x for x in marked(root) if x[0] == rules["race"]]), skipped
     assert skipped["skipped"][rules["limit"]] == len([x for x in marked(root) if x[0] == rules["limit"]]), skipped
