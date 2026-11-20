@@ -93,6 +93,7 @@ Time:
 - A sleep belongs to the execution in which it is first polled. The harness rejects a pending sleep that is carried into another execution.
 - The clock origin is opaque and shared within a process. A replay in another process keeps the elapsed virtual durations.
 - An `Instant` carries no execution identity. Build deadlines inside each execution of the factory.
+- `time::wall_now()` starts every execution at `Config::wall_epoch`, 2026-01-01T00:00:00Z by default, and advances in lockstep with `time::now()`. A `Replay` records the epoch and a replay reuses it, so `exp` checks against absolute timestamps repeat exactly.
 
 Randomness:
 
@@ -102,7 +103,7 @@ Randomness:
 
 - Use `#[test]`, not `#[tokio::test]`.
 - Create primitives inside the execution that uses them.
-- Draw random numbers from `adamantium::random`. Replace I/O, real time, other randomness, and foreign executors with deterministic fixtures.
+- Draw random numbers from `adamantium::random`. Read time from `time::now()` and `time::wall_now()`. Replace I/O, other clocks, other randomness, and foreign executors with deterministic fixtures.
 
 ## Limits
 

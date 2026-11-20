@@ -23,6 +23,7 @@ fn config() -> Config {
         seed: 203,
         iterations: 50,
         max_steps: 10_000,
+        ..Config::default()
     }
 }
 

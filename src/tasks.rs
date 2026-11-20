@@ -1901,6 +1901,7 @@ mod retention_tests {
             seed: 187,
             iterations: 100,
             max_steps: 30_000,
+            ..crate::testing::Config::default()
         };
         let replay = crate::testing::check(config, panic_scenario).unwrap();
         assert_eq!(
@@ -2041,6 +2042,7 @@ mod retention_tests {
             seed: 224,
             iterations: 100,
             max_steps: 10_000,
+            ..crate::testing::Config::default()
         };
         let replay = crate::testing::check(config, reaped_error_during_join).unwrap();
         assert_eq!(
@@ -2088,6 +2090,7 @@ mod retention_tests {
             seed: 195,
             iterations: 50,
             max_steps: 100_000,
+            ..crate::testing::Config::default()
         };
         let replay = crate::testing::check(config, idle_server_scenario).unwrap();
         assert_eq!(
@@ -2126,6 +2129,7 @@ mod retention_tests {
             seed: 195,
             iterations: 200,
             max_steps: 30_000,
+            ..crate::testing::Config::default()
         };
         let replay = crate::testing::check(config, panic_reaped_by_either_scenario).unwrap();
         assert_eq!(
@@ -2162,6 +2166,7 @@ mod retention_tests {
             seed: 187,
             iterations: 20,
             max_steps: 100_000,
+            ..crate::testing::Config::default()
         };
         let replay = crate::testing::check(config, scenario).unwrap();
         assert_eq!(crate::testing::replay(&replay, scenario).unwrap(), replay);
@@ -2206,6 +2211,7 @@ mod schedule_tests {
             seed: 160,
             iterations: 500,
             max_steps: 20_000,
+            ..Config::default()
         };
         let replay = testing::check(config, scenario).unwrap();
         assert_eq!(testing::check(config, scenario).unwrap(), replay);

@@ -9,6 +9,9 @@
 //! Replace actual blocking I/O with fixtures using modeled primitives.
 //! [`crate::time`] drives virtual deadlines without wall-clock waits. Time advances
 //! to the earliest pending deadline only when no application task can run.
+//! [`crate::time::wall_now`] starts each execution at [`Config::wall_epoch`] and
+//! advances with virtual time, so expiry checks against absolute timestamps
+//! replay exactly.
 //! OS signals remain unsupported.
 //! Outside a harness execution, enabling the feature leaves production behavior
 //! intact, including ordinary `#[tokio::test]` tests in the same build.
@@ -43,9 +46,9 @@
 //! requires compatible dependencies, scheduling behavior and fixture inputs.
 //!
 //! [`crate::random`] draws from the scheduler, so a seed decides the draws and a
-//! replay repeats them. Real I/O, native threads, wall-clock time, other
-//! randomness and foreign executors are outside the model: replace them with
-//! deterministic fixtures.
+//! replay repeats them. Real I/O, native threads, other clocks (such as
+//! `SystemTime::now`), other randomness and foreign executors are outside the
+//! model: replace them with deterministic fixtures.
 //! Arbitrary foreign futures cannot all be detected. A step limit counts
 //! scheduling operations, not CPU instructions; it cannot stop a CPU-only loop.
 
@@ -63,7 +66,7 @@ use std::{
     panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use serde::{Deserialize, Serialize};
@@ -81,7 +84,7 @@ pub use duplex::{
 };
 
 const ENGINE: &str = "shuttle=0.9.10;engine=0.1.8;std=0.1.5;schedulers=0.1.1";
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 4;
 
 /// Bounds for schedule exploration. Every execution gets fresh factory state.
 #[derive(Clone, Copy, Debug)]
@@ -92,6 +95,10 @@ pub struct Config {
     pub iterations: usize,
     /// Scheduling step limit per execution. Must be nonzero.
     pub max_steps: usize,
+    /// What [`crate::time::wall_now`] reports at the start of every execution.
+    /// Must not precede [`SystemTime::UNIX_EPOCH`]. Defaults to
+    /// 2026-01-01T00:00:00Z.
+    pub wall_epoch: SystemTime,
 }
 
 impl Default for Config {
@@ -100,6 +107,7 @@ impl Default for Config {
             seed: 0,
             iterations: 100,
             max_steps: 10_000,
+            wall_epoch: SystemTime::UNIX_EPOCH + Duration::from_secs(1_767_225_600),
         }
     }
 }
@@ -167,6 +175,7 @@ pub struct Replay {
     iterations: usize,
     iteration: usize,
     max_steps: usize,
+    wall_epoch: SystemTime,
     data_seed: u64,
     // None means a scheduler-owned random draw, Some identifies a logical task.
     steps: Vec<Option<usize>>,
@@ -183,6 +192,7 @@ impl Replay {
             iterations: exploration.config.iterations,
             iteration: 0,
             max_steps: exploration.config.max_steps,
+            wall_epoch: exploration.config.wall_epoch,
             data_seed: 0,
             steps: Vec::new(),
         }
@@ -217,6 +227,11 @@ impl Replay {
     /// The scheduling step limit for this execution.
     pub fn max_steps(&self) -> usize {
         self.max_steps
+    }
+
+    /// What [`crate::time::wall_now`] reported at the start of the execution.
+    pub fn wall_epoch(&self) -> SystemTime {
+        self.wall_epoch
     }
 
     /// The exact pinned scheduling engine and component versions.
@@ -323,7 +338,7 @@ pub enum FailureKind {
 /// A failed execution and its replay record. Debug output excludes user payloads.
 pub struct Failure {
     kind: FailureKind,
-    replay: Replay,
+    replay: Box<Replay>,
 }
 
 impl Failure {
@@ -365,8 +380,8 @@ impl std::error::Error for Failure {}
 /// [`DfsStatus::IterationLimit`] in its record. Any execution that exceeds
 /// [`Config::max_steps`] fails with [`FailureKind::StepLimit`].
 ///
-/// Panics for zero bounds, a nested harness, a current Tokio runtime, or Shuttle
-/// environment overrides that would silently change the recorded seed.
+/// Panics for zero bounds, a [`Config::wall_epoch`] before the Unix epoch, a
+/// nested harness, a current Tokio runtime, or Shuttle environment overrides that would silently change the recorded seed.
 pub fn check<F, Fut>(config: impl Into<Exploration>, factory: F) -> Result<Replay, Failure>
 where
     F: Fn() -> Fut + Send + Sync + 'static,
@@ -377,10 +392,15 @@ where
         seed,
         iterations,
         max_steps,
+        wall_epoch,
     } = exploration.config;
     assert!(
         iterations > 0 && max_steps > 0,
         "adamantium::testing bounds must be nonzero"
+    );
+    assert!(
+        wall_epoch >= SystemTime::UNIX_EPOCH,
+        "adamantium::testing wall_epoch must not precede UNIX_EPOCH"
     );
     assert!(
         !matches!(exploration.scheduler, SchedulerMode::Pct { depth: 0 }),
@@ -409,7 +429,8 @@ where
     }
 }
 
-/// Replays one saved execution with fresh state and the original step limit.
+/// Replays one saved execution with fresh state, the original step limit and
+/// the original [`Config::wall_epoch`].
 /// Incompatible metadata panics before the scenario runs. The fixture inputs
 /// must match the original run. A change to the schedule fails explicitly.
 pub fn replay<F, Fut>(record: &Replay, factory: F) -> Result<Replay, Failure>
@@ -1126,8 +1147,9 @@ impl<S: Scheduler> Scheduler for Recording<S> {
         }
         trace.data_seed = schedule.seed;
         trace.steps.clear();
+        let wall_epoch = trace.wall_epoch;
         drop(trace);
-        Execution::next();
+        Execution::next(wall_epoch);
         Some(schedule)
     }
 
@@ -1207,7 +1229,7 @@ where
     };
     let failure = Failure {
         kind,
-        replay: record,
+        replay: Box::new(record),
     };
     eprintln!("{failure}");
     Err(failure)

@@ -32,6 +32,7 @@ mod virtual_time {
             seed: 202,
             iterations: 200,
             max_steps: 20_000,
+            ..Config::default()
         };
         let record = testing::check(config, factory.clone()).unwrap();
         assert_eq!(testing::replay(&record, factory).unwrap(), record);
