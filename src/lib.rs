@@ -4,7 +4,8 @@
 //! The crate has two halves. The library gives that fragment its vocabulary:
 //! copy-on-write values ([`Str`], [`Bytes`], [`Array`], [`Deque`], [`Map`], [`Set`]), a
 //! structured task scope (`Tasks`), shared state whose methods run one at
-//! a time ([`Actor`]), a bounded channel ([`Channel`]), a channel that sends
+//! a time ([`Actor`]), a map that evicts its least recently used entry
+//! to stay within a capacity ([`BoundedMap`]), a bounded channel ([`Channel`]), a channel that sends
 //! each message to every subscriber ([`Topic`]), a publisher that never
 //! waits and disconnects a subscriber that falls behind ([`Fanout`]), a
 //! one-shot reply ([`Reply`]), the latest value of shared state
@@ -23,7 +24,7 @@
 //! `time` module, and `retry` and `RateLimit`, whose waits all end when a
 //! `Cancellation` is requested. `Tasks::spawn_supervised` restarts a task
 //! that fails, as often as a [`Restarts`] allows.
-//! Disable default features to use the values, synchronous actors, channels, topics,
+//! Disable default features to use the values, synchronous actors, `BoundedMap`, channels, topics,
 //! fanouts, replies, watches, `Limit`, `KeyedLimit` and `SingleFlight` without a
 //! Tokio dependency.
 //!
@@ -42,6 +43,7 @@ mod actor;
 mod array;
 #[cfg(feature = "tokio")]
 mod async_actor;
+mod bounded_map;
 mod bytes;
 mod channel;
 mod deque;
@@ -74,6 +76,7 @@ pub use actor::Actor;
 pub use array::Array;
 #[cfg(feature = "tokio")]
 pub use async_actor::AsyncActor;
+pub use bounded_map::{BoundedMap, BoundedMapIter, Inserted};
 pub use bytes::Bytes;
 pub use channel::{Channel, Closed, Receiver, Sender, TryReceiveError, TrySendError};
 #[cfg(feature = "tokio")]
