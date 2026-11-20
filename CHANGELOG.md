@@ -10,6 +10,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `adamantium`: `SingleFlight::run_until` waits for a shared operation only
+  until a `Cancellation` is requested or a deadline passes. A caller that
+  stops leaves the operation to the others sharing it, and drops it only if
+  it was the last.
 - `adamantium`: `AsyncActor::new_named` names the actor worker for `tracing`
   spans, scope deadline reports, and `testing::explain` timelines.
   `AsyncActor::try_send` and `AsyncActor::send_until` match `Channel`, and
