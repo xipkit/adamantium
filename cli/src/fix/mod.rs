@@ -996,6 +996,11 @@ mod tests {
                 Hint::Guide("tasks"),
             ),
             (
+                "clippy::disallowed_methods",
+                method("std::time::SystemTime::now"),
+                Hint::Guide("the-wall-clock"),
+            ),
+            (
                 "clippy::disallowed_types",
                 kind("tokio::sync::Mutex"),
                 Hint::Guide("a-lock-held-across-an-await"),

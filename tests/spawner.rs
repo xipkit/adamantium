@@ -48,6 +48,7 @@ macro_rules! scenario {
                         seed: 192,
                         iterations: 200,
                         max_steps: 30_000,
+                        ..adamantium::testing::Config::default()
                     },
                     run,
                 ).unwrap();
@@ -139,6 +140,7 @@ fn explain_includes_all_spawner_task_names() {
             seed: 224,
             iterations: 20,
             max_steps: 10_000,
+            ..adamantium::testing::Config::default()
         },
         scenario,
     )
@@ -591,6 +593,7 @@ fn handles_reject_foreign_executions() {
             seed: 192,
             iterations: 1,
             max_steps: 1_000,
+            ..adamantium::testing::Config::default()
         },
         move || {
             let output = output.clone();

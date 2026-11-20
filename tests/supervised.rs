@@ -226,6 +226,7 @@ fn every_schedule_restarts_the_task_and_keeps_its_value() {
         seed: 183,
         iterations: 200,
         max_steps: 20_000,
+        ..Config::default()
     };
     let checked = testing::check(config, || async {
         let starts = Actor::new(0);

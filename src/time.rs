@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tokio::time::Instant;
 
@@ -16,6 +16,36 @@ pub fn now() -> Instant {
         return crate::runtime::clock::now();
     }
     Instant::now()
+}
+
+/// Returns the wall-clock time for comparing absolute timestamps.
+///
+/// In the deterministic harness, starts at `Config::wall_epoch` and advances
+/// with virtual time so replay sees the same timestamps. Outside the harness,
+/// reads the system clock, independent of Tokio's paused clock. Use [`now`]
+/// to measure durations.
+///
+/// ```
+/// use adamantium::time;
+/// use std::time::{Duration, UNIX_EPOCH};
+///
+/// fn expired(exp_secs: u64) -> bool {
+///     time::wall_now() >= UNIX_EPOCH + Duration::from_secs(exp_secs)
+/// }
+///
+/// assert!(expired(1_000_000_000)); // 2001-09-09
+/// assert!(!expired(4_102_444_800)); // 2100-01-01
+/// ```
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the wall-clock entry point delegates to the system clock here"
+)]
+pub fn wall_now() -> SystemTime {
+    #[cfg(feature = "deterministic")]
+    if crate::runtime::World::current().is_model() {
+        return crate::runtime::clock::wall_now();
+    }
+    SystemTime::now()
 }
 
 /// Waits for `duration` to elapse without blocking the worker thread.

@@ -39,19 +39,23 @@ pub struct Args {
     strict: bool,
     #[arg(
         long,
+        conflicts_with = "strict",
+        help = "Disable the strict tier set in Cargo.toml"
+    )]
+    no_strict: bool,
+    #[arg(
+        long,
         value_name = "REPORT",
         help = "Leave out findings from an earlier `--format json` report"
     )]
     baseline: Option<PathBuf>,
     #[arg(
         long,
-        requires = "baseline",
         help = "Remove findings that no longer occur from the given baseline file"
     )]
     update_baseline: bool,
     #[arg(
         long,
-        requires = "baseline",
         help = "Exit with status 1 if the given baseline still has unmatched findings"
     )]
     fail_on_stale_baseline: bool,
@@ -339,17 +343,29 @@ impl Status {
 /// Runs the check, applies any baseline options, and prints the report.
 pub fn run(args: Args) -> Result<ExitCode> {
     let root = manifest::root(&args.path)?;
-    let baseline_path = args.baseline.as_deref();
+    let config = Config::load(&root)?;
+    let baseline_path = args.baseline.as_deref().or(config.baseline.as_deref());
+    if baseline_path.is_none() && (args.update_baseline || args.fail_on_stale_baseline) {
+        let flag = if args.update_baseline {
+            "--update-baseline"
+        } else {
+            "--fail-on-stale-baseline"
+        };
+        bail!("{flag} requires --baseline <REPORT> or a baseline in Cargo.toml");
+    }
     let mut baseline = baseline_path.map(Baseline::load).transpose()?;
     let text = matches!(args.format, ReportFormat::Text);
     let mut report = check_selected(
         &root,
         &args.cargo_args,
-        text,
-        args.strict,
-        baseline.as_mut(),
-        None,
-        args.dylint_library.as_deref(),
+        &config,
+        CheckOptions {
+            echo: text,
+            strict: args.strict || (!args.no_strict && config.strict),
+            baseline: baseline.as_mut(),
+            dylint_library: args.dylint_library.as_deref(),
+            ..CheckOptions::default()
+        },
     )?;
     let pruned = if args.update_baseline
         && report.status != Status::Error
@@ -511,19 +527,42 @@ pub(crate) fn check_with_suggestions(
     strict: bool,
     diagnostics: Option<&mut Vec<serde_json::Value>>,
 ) -> Result<Report> {
-    check_selected(root, cargo_args, echo, strict, None, diagnostics, None)
+    let config = Config::load(root)?;
+    check_selected(
+        root,
+        cargo_args,
+        &config,
+        CheckOptions {
+            echo,
+            strict,
+            diagnostics,
+            ..CheckOptions::default()
+        },
+    )
+}
+
+#[derive(Default)]
+struct CheckOptions<'a> {
+    echo: bool,
+    strict: bool,
+    baseline: Option<&'a mut Baseline>,
+    diagnostics: Option<&'a mut Vec<Value>>,
+    dylint_library: Option<&'a Path>,
 }
 
 fn check_selected(
     root: &Path,
     cargo_args: &[String],
-    echo: bool,
-    strict: bool,
-    baseline: Option<&mut Baseline>,
-    mut diagnostics: Option<&mut Vec<serde_json::Value>>,
-    dylint_library: Option<&Path>,
+    config: &Config,
+    options: CheckOptions<'_>,
 ) -> Result<Report> {
-    let config = Config::load(root)?;
+    let CheckOptions {
+        echo,
+        strict,
+        baseline,
+        mut diagnostics,
+        dylint_library,
+    } = options;
     let conf = tempfile::tempdir().context("creating a directory for clippy.toml")?;
     let (clippy_config, clippy_toml) = write_clippy_config(conf.path(), strict)?;
 
@@ -569,7 +608,7 @@ fn check_selected(
         root,
         clippy_config: &clippy_config,
         clippy_toml: &clippy_toml,
-        config: &config,
+        config,
         rules: &rules,
         echo,
     };

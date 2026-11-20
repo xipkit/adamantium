@@ -13,7 +13,7 @@ use std::{
     panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use serde::{Deserialize, Serialize};
@@ -34,17 +34,20 @@ pub use duplex::{
 };
 
 const ENGINE: &str = "shuttle=0.9.10;engine=0.1.8;std=0.1.5;schedulers=0.1.1";
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 4;
 
 /// Bounds for schedule exploration.
 ///
 /// `seed` controls random and PCT scheduling. DFS uses a fixed data seed.
 /// `iterations` and `max_steps` must be nonzero.
+/// `wall_epoch` sets the initial [`crate::time::wall_now`] for each execution.
+/// It defaults to 2026-01-01T00:00:00Z and must be at or after the Unix epoch.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
     pub seed: u64,
     pub iterations: usize,
     pub max_steps: usize,
+    pub wall_epoch: SystemTime,
 }
 
 impl Default for Config {
@@ -53,6 +56,7 @@ impl Default for Config {
             seed: 0,
             iterations: 100,
             max_steps: 10_000,
+            wall_epoch: SystemTime::UNIX_EPOCH + Duration::from_secs(1_767_225_600),
         }
     }
 }
@@ -153,6 +157,7 @@ pub struct Replay {
     iterations: usize,
     iteration: usize,
     max_steps: usize,
+    wall_epoch: SystemTime,
     data_seed: u64,
     steps: Vec<Option<usize>>,
 }
@@ -168,6 +173,7 @@ impl Replay {
             iterations: exploration.config.iterations,
             iteration: 0,
             max_steps: exploration.config.max_steps,
+            wall_epoch: exploration.config.wall_epoch,
             data_seed: 0,
             steps: Vec::new(),
         }
@@ -202,6 +208,11 @@ impl Replay {
     /// The scheduling step limit for this execution.
     pub fn max_steps(&self) -> usize {
         self.max_steps
+    }
+
+    /// What [`crate::time::wall_now`] reported at the start of the execution.
+    pub fn wall_epoch(&self) -> SystemTime {
+        self.wall_epoch
     }
 
     /// The exact pinned scheduling engine and component versions.
@@ -304,6 +315,7 @@ pub enum FailureKind {
 pub struct Failure {
     kind: FailureKind,
     timeline: Box<Timeline>,
+    shrink_message: Option<String>,
 }
 
 impl Failure {
@@ -348,8 +360,8 @@ impl std::error::Error for Failure {}
 ///
 /// # Panics
 ///
-/// Panics for zero bounds, a nested harness, an active Tokio runtime, or
-/// Shuttle environment overrides that change the seed.
+/// Panics for zero bounds, a wall epoch before the Unix epoch, a nested
+/// harness, an active Tokio runtime, or Shuttle overrides that change the seed.
 ///
 /// ```
 /// use adamantium::{Actor, testing::{self, Config}};
@@ -374,10 +386,15 @@ where
         seed,
         iterations,
         max_steps,
+        wall_epoch,
     } = exploration.config;
     assert!(
         iterations > 0 && max_steps > 0,
         "adamantium::testing bounds must be nonzero"
+    );
+    assert!(
+        wall_epoch >= SystemTime::UNIX_EPOCH,
+        "adamantium::testing wall_epoch must not precede UNIX_EPOCH"
     );
     assert!(
         !matches!(exploration.scheduler, SchedulerMode::Pct { depth: 0 }),
@@ -407,7 +424,8 @@ where
     .map(|(record, _)| record)
 }
 
-/// Replays one saved execution with fresh state and the original step limit.
+/// Replays one saved execution with fresh state, the original step limit and
+/// the original [`Config::wall_epoch`].
 /// Incompatible metadata panics before the scenario runs. The fixture inputs
 /// must match the original run. A change to the schedule fails explicitly.
 pub fn replay<F, Fut>(record: &Replay, factory: F) -> Result<Replay, Failure>
@@ -418,6 +436,114 @@ where
     let validation = record.validate();
     assert!(validation.is_ok(), "{validation:?}");
     play(record, ReplayPolicy::Exact, factory).map(|(record, _)| record)
+}
+
+/// Minimizes a failing schedule by removing chunks of steps and simplifying
+/// task switches. It prefers fewer steps, then fewer switches, and stops when
+/// no tried chunk, single-step deletion or switch edit improves the schedule.
+///
+/// Each attempt runs a fresh factory with the original data seed and step
+/// limit. Reductions must reproduce the original failure category and message.
+/// Panics must also end in the same last scheduled task. Failures with opaque panic
+/// payloads are returned unchanged because their identity cannot be compared.
+///
+/// Returns `None` if the record passes or diverges under the factory. Panics
+/// on incompatible metadata, like [`replay`]. The returned record uses the
+/// ordinary replay format and can be passed to [`explain`] or [`Replay::save`].
+pub fn shrink<F, Fut>(record: &Replay, factory: F) -> Option<Replay>
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()>,
+{
+    let validation = record.validate();
+    assert!(validation.is_ok(), "{validation:?}");
+
+    let factory = Arc::new(factory);
+    let probe = |candidate: &Replay| {
+        let factory = Arc::clone(&factory);
+        play(candidate, ReplayPolicy::Shrink, move || factory()).err()
+    };
+    let baseline = probe(record)?;
+    if baseline.kind == FailureKind::ReplayMismatch || baseline.replay() != record {
+        return None;
+    }
+    let Some(message) = baseline.shrink_message.as_deref() else {
+        return Some(record.clone());
+    };
+
+    let mut best = record.clone();
+    loop {
+        let cost = schedule_cost(&best);
+        let improve = |candidate: &Replay| {
+            let failure = probe(candidate)?;
+            let same_task = baseline.kind != FailureKind::Panic
+                || failure.timeline.events.last().map(TimelineEvent::kind)
+                    == baseline.timeline.events.last().map(TimelineEvent::kind);
+            (failure.kind == baseline.kind
+                && failure.shrink_message.as_deref() == Some(message)
+                && same_task
+                && schedule_cost(failure.replay()) < cost)
+                .then_some(failure.timeline.replay)
+        };
+        match reduce_schedule(&best, improve) {
+            Some(reduced) => best = reduced,
+            None => return Some(best),
+        }
+    }
+}
+
+fn schedule_cost(record: &Replay) -> (usize, usize) {
+    let mut previous = None;
+    let switches = record
+        .steps
+        .iter()
+        .flatten()
+        .filter(|&&task| {
+            previous
+                .replace(task)
+                .is_some_and(|previous| previous != task)
+        })
+        .count();
+    (record.steps.len(), switches)
+}
+
+fn reduce_schedule(record: &Replay, improve: impl Fn(&Replay) -> Option<Replay>) -> Option<Replay> {
+    let mut candidate = record.clone();
+    let len = record.steps.len();
+    let mut chunk = len;
+    loop {
+        for start in (0..len).step_by(chunk) {
+            candidate.steps.clone_from(&record.steps);
+            candidate.steps.drain(start..len.min(start + chunk));
+            if let Some(reduced) = improve(&candidate) {
+                return Some(reduced);
+            }
+        }
+        if chunk == 1 {
+            break;
+        }
+        chunk = chunk.div_ceil(2);
+    }
+
+    // Keep the previous task running across a recorded switch when possible.
+    let mut previous = None;
+    for (index, task) in record.steps.iter().enumerate() {
+        let Some(task) = *task else { continue };
+        let Some(previous) = previous.replace(task) else {
+            continue;
+        };
+        if previous == task {
+            continue;
+        }
+        candidate.steps.clone_from(&record.steps);
+        if let Some(choice) = candidate.steps.get_mut(index) {
+            *choice = Some(previous);
+        }
+        if let Some(reduced) = improve(&candidate) {
+            return Some(reduced);
+        }
+    }
+    None
 }
 
 /// A task observed during [`explain`].
@@ -944,6 +1070,7 @@ where
 enum ReplayPolicy {
     Exact,
     Prefix,
+    Shrink,
 }
 
 fn play<F, Fut>(
@@ -975,7 +1102,7 @@ impl Playback {
     fn next_step(&mut self) -> Option<Option<usize>> {
         let step = self.steps.next();
         assert!(
-            step.is_some() || matches!(self.policy, ReplayPolicy::Prefix),
+            step.is_some() || !matches!(self.policy, ReplayPolicy::Exact),
             "schedule ended early"
         );
         step
@@ -1004,6 +1131,12 @@ impl Scheduler for Playback {
                 "scheduled task is not runnable: {task:?}"
             );
             return Some(task);
+        }
+        if matches!(self.policy, ReplayPolicy::Shrink)
+            && let Some(current) = current
+            && runnable.iter().any(|task| task.id() == current)
+        {
+            return Some(current);
         }
         runnable
             .iter()
@@ -1090,8 +1223,9 @@ impl<S: Scheduler> Scheduler for Recording<S> {
         }
         trace.data_seed = schedule.seed;
         trace.steps.clear();
+        let wall_epoch = trace.wall_epoch;
         drop(trace);
-        Execution::next();
+        Execution::next(wall_epoch);
         Guard::reset();
         Some(schedule)
     }
@@ -1164,28 +1298,39 @@ where
     let kind = if original.is_some_and(|(original, policy)| match policy {
         ReplayPolicy::Exact => original.steps != record.steps,
         ReplayPolicy::Prefix => !record.steps.starts_with(&original.steps),
+        // The candidate may fail before consuming all of its proposed steps.
+        ReplayPolicy::Shrink => false,
     }) {
         FailureKind::ReplayMismatch
     } else {
-        match result {
+        match &result {
             Ok(_) => return Ok((record, collector)),
-            Err(payload) => classify(&*payload, original.is_some()),
+            Err(payload) => classify(&**payload, original.is_some()),
         }
+    };
+    let shrinking = matches!(original, Some((_, ReplayPolicy::Shrink)));
+    let shrink_message = if shrinking {
+        result
+            .as_ref()
+            .err()
+            .and_then(|payload| panic_message(&**payload))
+            .map(str::to_owned)
+    } else {
+        None
     };
     let failure = Failure {
         kind,
+        shrink_message,
         timeline: Box::new(build_timeline(record, Some(kind), collector)),
     };
-    eprintln!("{failure}");
+    if !shrinking {
+        eprintln!("{failure}");
+    }
     Err(failure)
 }
 
 fn classify(payload: &(dyn Any + Send), replaying: bool) -> FailureKind {
-    let message = payload
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("");
+    let message = panic_message(payload).unwrap_or("");
     if message.starts_with("exceeded max_steps bound ") {
         FailureKind::StepLimit
     } else if message.starts_with("deadlock! blocked tasks:") {
@@ -1200,6 +1345,13 @@ fn classify(payload: &(dyn Any + Send), replaying: bool) -> FailureKind {
     } else {
         FailureKind::Panic
     }
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> Option<&str> {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
 }
 
 #[cfg(test)]

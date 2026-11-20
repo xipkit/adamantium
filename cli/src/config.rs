@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -10,10 +10,13 @@ use toml_edit::{DocumentMut, Item};
 
 use crate::lints::{self, EXPERIMENTAL_LINTS, OVERFLOW_RULE};
 
-/// A project's skip list. The default skips nothing.
+/// A project's command defaults and skip list.
 #[derive(Debug)]
 pub struct Config {
     pub table: Option<String>,
+    pub strict: bool,
+    pub baseline: Option<PathBuf>,
+    pub deps_baseline: Option<PathBuf>,
     skip: GlobSet,
     allow: HashSet<String>,
     exceptions: BTreeMap<String, GlobSet>,
@@ -23,6 +26,9 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             table: None,
+            strict: false,
+            baseline: None,
+            deps_baseline: None,
             skip: GlobSet::empty(),
             allow: HashSet::new(),
             exceptions: BTreeMap::new(),
@@ -31,17 +37,17 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Reads the skip list from the `Cargo.toml` in `root`.
+    /// Reads project settings from the `Cargo.toml` in `root`.
     pub fn load(root: &Path) -> Result<Config> {
         let path = root.join("Cargo.toml");
         let doc: DocumentMut = fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?
             .parse()
             .with_context(|| format!("parsing {}", path.display()))?;
-        Config::parse(&doc)
+        Config::parse(&doc, root)
     }
 
-    fn parse(doc: &DocumentMut) -> Result<Config> {
+    fn parse(doc: &DocumentMut, root: &Path) -> Result<Config> {
         let found = ["workspace", "package"].into_iter().find_map(|top| {
             let item = doc.get(top)?.get("metadata")?.get("adamantium")?;
             Some((format!("{top}.metadata.adamantium"), item))
@@ -53,12 +59,40 @@ impl Config {
             .as_table_like()
             .ok_or_else(|| anyhow!("[{table_name}] in Cargo.toml is not a table"))?;
         for (key, _) in table.iter() {
-            if !matches!(key, "skip" | "allow" | "exceptions") {
+            if !matches!(
+                key,
+                "skip" | "allow" | "exceptions" | "strict" | "baseline" | "deps"
+            ) {
                 bail!(
-                    "unknown key `{key}` in [{table_name}]; the keys are skip, allow and exceptions"
+                    "unknown key `{key}` in [{table_name}]; the keys are skip, allow, exceptions, strict, baseline and deps"
                 );
             }
         }
+        let strict = if let Some(item) = table.get("strict") {
+            item.as_bool()
+                .ok_or_else(|| anyhow!("`{table_name}.strict` in Cargo.toml is not a boolean"))?
+        } else {
+            false
+        };
+        let baseline = baseline_path(
+            table.get("baseline"),
+            root,
+            &format!("{table_name}.baseline"),
+        )?;
+        let deps_baseline = if let Some(item) = table.get("deps") {
+            let section = format!("{table_name}.deps");
+            let deps = item
+                .as_table_like()
+                .ok_or_else(|| anyhow!("[{section}] in Cargo.toml is not a table"))?;
+            for (key, _) in deps.iter() {
+                if key != "baseline" {
+                    bail!("unknown key `{key}` in [{section}]; the only key is baseline");
+                }
+            }
+            baseline_path(deps.get("baseline"), root, &format!("{section}.baseline"))?
+        } else {
+            None
+        };
         let skip = globs(table.get("skip"), &format!("{table_name}.skip"))?;
         let mut allow = HashSet::new();
         for name in strings(table.get("allow"), &format!("{table_name}.allow"))? {
@@ -77,6 +111,9 @@ impl Config {
         }
         Ok(Config {
             table: Some(table_name),
+            strict,
+            baseline,
+            deps_baseline,
             skip,
             allow,
             exceptions,
@@ -104,6 +141,19 @@ impl Config {
     pub fn skips_paths(&self) -> bool {
         !self.skip.is_empty()
     }
+}
+
+fn baseline_path(item: Option<&Item>, root: &Path, key: &str) -> Result<Option<PathBuf>> {
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    let path = item
+        .as_str()
+        .ok_or_else(|| anyhow!("`{key}` in Cargo.toml is not a path string"))?;
+    if path.is_empty() {
+        bail!("`{key}` in Cargo.toml has an empty path");
+    }
+    Ok(Some(root.join(path)))
 }
 
 fn strings(item: Option<&Item>, key: &str) -> Result<Vec<String>> {
@@ -161,13 +211,16 @@ mod tests {
     use super::*;
 
     fn parse(toml: &str) -> Result<Config> {
-        Config::parse(&toml.parse().unwrap())
+        Config::parse(&toml.parse().unwrap(), Path::new("project"))
     }
 
     #[test]
     fn a_manifest_without_the_table_skips_nothing() {
         let config = parse("[package]\nname = \"demo\"\n").unwrap();
         assert!(config.table.is_none());
+        assert!(!config.strict);
+        assert!(config.baseline.is_none());
+        assert!(config.deps_baseline.is_none());
         assert!(!config.skips("clippy::unwrap_used", "src/lib.rs"));
         assert!(config.adopted("clippy::unwrap_used"));
         assert!(!config.skips_paths());
@@ -213,6 +266,73 @@ mod tests {
         .unwrap();
         assert_eq!(config.table.as_deref(), Some("package.metadata.adamantium"));
         assert!(config.skips("clippy::panic", "src/lib.rs"));
+    }
+
+    #[test]
+    fn defaults_use_the_selected_table_and_resolve_paths_from_its_manifest() {
+        let package = "[package.metadata.adamantium]\n\
+                       strict = false\n\
+                       baseline = 'ci/package-check.json'\n\
+                       deps.baseline = 'ci/package-deps.json'\n";
+        let config = parse(package).unwrap();
+        assert!(!config.strict);
+        let root = Path::new("project");
+        assert_eq!(config.baseline, Some(root.join("ci/package-check.json")));
+        assert_eq!(
+            config.deps_baseline,
+            Some(root.join("ci/package-deps.json"))
+        );
+
+        let config = parse(&format!(
+            "{package}\n\
+             [workspace.metadata.adamantium]\n\
+             strict = true\n\
+             baseline = 'ci/workspace-check.json'\n\
+             [workspace.metadata.adamantium.deps]\n\
+             baseline = 'ci/workspace-deps.json'\n"
+        ))
+        .unwrap();
+        assert!(config.strict);
+        assert_eq!(config.baseline, Some(root.join("ci/workspace-check.json")));
+        assert_eq!(
+            config.deps_baseline,
+            Some(root.join("ci/workspace-deps.json"))
+        );
+    }
+
+    #[test]
+    fn invalid_defaults_name_the_key_or_table() {
+        for (setting, expected) in [
+            (
+                "strict = 'true'",
+                "`package.metadata.adamantium.strict` in Cargo.toml is not a boolean",
+            ),
+            (
+                "baseline = false",
+                "`package.metadata.adamantium.baseline` in Cargo.toml is not a path string",
+            ),
+            (
+                "baseline = ''",
+                "`package.metadata.adamantium.baseline` in Cargo.toml has an empty path",
+            ),
+            (
+                "deps = []",
+                "[package.metadata.adamantium.deps] in Cargo.toml is not a table",
+            ),
+            (
+                "deps.baseline = 3",
+                "`package.metadata.adamantium.deps.baseline` in Cargo.toml is not a path string",
+            ),
+            (
+                "deps.basline = 'ci/deps.json'",
+                "unknown key `basline` in [package.metadata.adamantium.deps]; the only key is baseline",
+            ),
+        ] {
+            let error = parse(&format!("[package.metadata.adamantium]\n{setting}"))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(error, expected);
+        }
     }
 
     #[test]

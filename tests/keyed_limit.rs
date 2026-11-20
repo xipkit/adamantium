@@ -273,6 +273,7 @@ fn modeled_arrivals_and_evictions_keep_one_holder_per_key() {
             seed: 199,
             iterations: 300,
             max_steps: 20_000,
+            ..Config::default()
         },
         || async {
             let connections = Limit::new(3);

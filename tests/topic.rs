@@ -310,6 +310,7 @@ fn every_schedule_delivers_every_message_to_every_subscriber_in_order() {
         seed: 181,
         iterations: 300,
         max_steps: 20_000,
+        ..Config::default()
     };
     let checked = testing::check(config, || async {
         let mut topic = Topic::new(1);

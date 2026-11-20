@@ -70,7 +70,8 @@ disallowed-methods = [
   { path = "tokio::time::sleep_until", reason = "use adamantium::time::sleep_until so waits go through Adamantium's clock", allow-invalid = true },
   { path = "tokio::time::interval", reason = "use adamantium::time::Interval so periodic waits go through Adamantium's clock", allow-invalid = true },
   { path = "tokio::time::interval_at", reason = "use adamantium::time::Interval::at so periodic waits go through Adamantium's clock", allow-invalid = true },
-  { path = "tokio::time::Instant::now", reason = "build deadlines from adamantium::time::now; std::time::Instant::now is allowed for measuring elapsed time", allow-invalid = true },
+  { path = "tokio::time::Instant::now", reason = "build deadlines, TTLs and retry windows from adamantium::time::now; std::time::Instant::now is allowed only for metrics and logging", allow-invalid = true },
+  { path = "std::time::SystemTime::now", reason = "compare absolute timestamps such as a JWT or cookie exp with adamantium::time::wall_now, which the deterministic harness models; a timestamp only for logging can carry an #[expect] with a reason" },
   # Thread-local generators and constructors that obtain their own seed.
   { path = "rand::random", reason = "use adamantium::random for draws that the deterministic harness can seed and replay", allow-invalid = true },
   { path = "rand::thread_rng", reason = "use adamantium::random for draws that the deterministic harness can seed and replay", allow-invalid = true },

@@ -1,6 +1,10 @@
 #![cfg(all(feature = "tokio", not(target_os = "wasi")))]
 
-use std::{pin::pin, task::Poll, time::Duration};
+use std::{
+    pin::pin,
+    task::Poll,
+    time::{Duration, SystemTime},
+};
 
 use adamantium::{
     Cancellation, Tasks,
@@ -14,6 +18,29 @@ async fn now_follows_the_paused_clock() {
     assert_eq!(time::now(), start);
     tokio::time::advance(Duration::from_secs(5)).await;
     assert_eq!(time::now(), start + Duration::from_secs(5));
+}
+
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "bounds the reading with the system clock it delegates to"
+)]
+fn wall_now_reads_the_system_clock() {
+    let before = SystemTime::now();
+    let wall = time::wall_now();
+    assert!(before <= wall && wall <= SystemTime::now());
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "bounds the reading with the system clock it delegates to"
+)]
+async fn wall_now_ignores_the_paused_clock() {
+    let day = Duration::from_secs(60 * 60 * 24);
+    let before = SystemTime::now();
+    tokio::time::advance(day).await;
+    assert!(time::wall_now() < before + day);
 }
 
 #[tokio::test(start_paused = true)]

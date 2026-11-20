@@ -232,6 +232,7 @@ fn no_schedule_runs_more_work_than_the_limit() {
         seed: 182,
         iterations: 300,
         max_steps: 20_000,
+        ..Config::default()
     };
     let checked = testing::check(config, || async {
         let limit = Limit::new(2);

@@ -12,7 +12,7 @@ use std::{
     pin::Pin,
     sync::OnceLock,
     task::{Context, Poll, Waker},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use shuttle::scheduler::{Task, TaskId};
@@ -28,6 +28,7 @@ thread_local! {
 struct Clock {
     origin: Instant,
     now: Instant,
+    wall_epoch: SystemTime,
     next_id: u64,
     timers: BTreeMap<(Instant, u64), (Waker, u64)>,
     driver: Option<(TaskId, Waker)>,
@@ -43,7 +44,7 @@ fn with<T>(f: impl FnOnce(&mut Clock) -> T) -> T {
     })
 }
 
-pub(crate) fn reset() {
+pub(crate) fn reset(wall_epoch: SystemTime) {
     // Instant has no portable constant constructor. Its opaque origin is shared
     // across executions; only virtual durations influence scheduling or replay.
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
@@ -51,6 +52,7 @@ pub(crate) fn reset() {
     CLOCK.set(Some(Clock {
         origin,
         now: origin,
+        wall_epoch,
         next_id: 0,
         timers: BTreeMap::new(),
         driver: None,
@@ -63,6 +65,20 @@ pub(crate) fn clear() {
 
 pub(crate) fn now() -> Instant {
     with(|clock| clock.now)
+}
+
+pub(crate) fn wall_now() -> SystemTime {
+    with(|clock| {
+        let elapsed = clock.now.saturating_duration_since(clock.origin);
+        #[allow(
+            clippy::expect_used,
+            reason = "an epoch plus virtual time past SystemTime's range is a test configuration error"
+        )]
+        clock
+            .wall_epoch
+            .checked_add(elapsed)
+            .expect("modeled wall clock exceeds the SystemTime range")
+    })
 }
 
 pub(crate) fn elapsed() -> Duration {
