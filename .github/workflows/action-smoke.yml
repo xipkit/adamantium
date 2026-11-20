@@ -46,9 +46,12 @@ jobs:
         with:
           rev: 576dff216296d5e8a960c6972779639e93e40f7c
           working-directory: cli/tests/fixtures/violations
+          sarif: 'true'
       - name: Assert violations failed
         if: steps.violations.outcome != 'failure'
         run: exit 1
+      - name: Verify findings in SARIF
+        run: python3 -c 'import json, os; report = json.load(open(os.environ["RUNNER_TEMP"] + "/adamantium.sarif")); assert report["runs"][0]["results"]'
       - name: Create dependency baseline
         working-directory: cli/tests/fixtures/action-smoke
         run: |
@@ -59,7 +62,7 @@ jobs:
           rev: 576dff216296d5e8a960c6972779639e93e40f7c
           working-directory: cli/tests/fixtures/action-smoke
           sarif: 'true'
-          upload-sarif: ${{ github.event_name == 'push' }}
+          upload-sarif: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
           deps: 'true'
           deps-baseline: ${{ runner.temp }}/deps-baseline.json
           style: concurrency
