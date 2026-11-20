@@ -46,6 +46,7 @@ pub struct Example {
 /// Names registered by the opt-in Dylint library, excluded from `init`.
 pub const EXPERIMENTAL_LINTS: &[&str] = &[
     "adamantium_blocking_in_async",
+    "adamantium_blocking_in_actor",
     "adamantium_nested_actor_access",
     "adamantium_nested_limit",
     "adamantium_race_with_timer",
@@ -79,6 +80,7 @@ impl<'a> Hint<'a> {
             "clippy::disallowed_methods" => disallowed(message, DISALLOWED_METHODS),
             "clippy::disallowed_types" => disallowed(message, DISALLOWED_TYPES),
             "adamantium_blocking_in_async" => Some("blocking-work"),
+            "adamantium_blocking_in_actor" => Some("blocking-work-inside-a-callback"),
             "adamantium_nested_actor_access" => Some("two-locks-at-once"),
             "adamantium_nested_limit" => Some("two-limits-at-once"),
             "adamantium_race_with_timer" => Some("the-first-event"),
@@ -309,6 +311,9 @@ fn rule_replacement(rule: &str) -> Option<&'static str> {
         "adamantium_blocking_in_async" => {
             Some("Use adamantium::blocking or Tasks::spawn_blocking for blocking work.")
         }
+        "adamantium_blocking_in_actor" => Some(
+            "Do the blocking work before or after the callback, and record its result in the actor.",
+        ),
         "adamantium_nested_actor_access" => {
             Some("Access the second actor after the outer callback returns.")
         }
@@ -565,7 +570,7 @@ async fn example() {
         "disallowed_methods",
         "panicking index methods, unmodeled channel constructors, unstructured spawns, Tokio select!, drop-to-cancel timeouts, blocking calls, clocks outside adamantium::time, uncontrolled randomness, thread-local access, leaks and weak references, listed in clippy.toml",
         example(
-            "Use adamantium::Array::remove/insert and split_at_checked for checked index operations, Channel for bounded queues, Reply for one reply, Topic or Fanout for delivery to every subscriber, and Watch for latest-value state. Use Tasks::run and Tasks::spawn for scoped tasks. Replace tokio::select! with adamantium::first_ok for the first success. Use Tasks::run_until with Cancellation for scoped work and receive_until/send_until for channel operations with cancellation or deadlines. Use adamantium::blocking for blocking work and adamantium::time::sleep or sleep_until for timers. Build deadlines with adamantium::time::now and periodic waits with a loop over adamantium::time::sleep_until. Use adamantium::random for draws that the deterministic harness can seed and replay. Pass values in, or share them through an Actor, instead of keeping them in a thread-local. Let resources drop and use owned values in place of weak references.",
+            "Use adamantium::Array::remove/insert and split_at_checked for checked index operations, Channel for bounded queues, Reply for one reply, Topic or Fanout for delivery to every subscriber, and Watch for latest-value state. Use Tasks::run and Tasks::spawn for scoped tasks. Replace tokio::select! with adamantium::first_ok for the first success. Use Tasks::run_until with Cancellation for scoped work and receive_until/send_until for channel operations with cancellation or deadlines. Use adamantium::blocking for blocking work and adamantium::time::sleep or sleep_until for timers. Build deadlines with adamantium::time::now and periodic waits with adamantium::time::Interval. Use adamantium::random for draws that the deterministic harness can seed and replay. Pass values in, or share them through an Actor, instead of keeping them in a thread-local. Let resources drop and use owned values in place of weak references.",
             r#"async fn example() -> Result<u32, tokio::task::JoinError> {
     let task = tokio::spawn(async { 42 });
     task.await

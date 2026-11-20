@@ -245,6 +245,220 @@ fn str_unique_clear_retains_allocation() {
 }
 
 #[test]
+fn str_nested_windows_share_storage() {
+    let original = Str::from("prefixframefooter");
+    let window = original.slice(6..11).unwrap();
+    let nested = window.slice(1..=3).unwrap();
+
+    assert!(original.is_shared());
+    assert!(window.is_shared());
+    assert!(nested.is_shared());
+    assert_eq!(window.as_ptr(), original.as_ptr().wrapping_add(6));
+    assert_eq!(nested.as_ptr(), window.as_ptr().wrapping_add(1));
+    assert_eq!(window.as_str(), "frame");
+    assert_eq!(nested.as_str(), "ram");
+    assert_eq!(window.slice(..2).unwrap().as_str(), "fr");
+    assert_eq!(window.slice(2..).unwrap().as_str(), "ame");
+    assert_eq!(
+        window
+            .slice((Bound::Excluded(0), Bound::Included(3)))
+            .unwrap()
+            .as_str(),
+        "ram"
+    );
+
+    assert!(window.slice(4..6).is_none());
+    assert!(window.slice(6..).is_none());
+    assert!(window.slice(..=5).is_none());
+    let (start, end) = (3, 2);
+    assert!(window.slice(start..end).is_none());
+    assert!(window.slice(..=usize::MAX).is_none());
+    assert!(
+        window
+            .slice((Bound::Excluded(usize::MAX), Bound::Unbounded))
+            .is_none()
+    );
+}
+
+#[test]
+fn str_multibyte_utf8_boundary_checks() {
+    // Byte layout: 'a' (0..1), 'é' (1..3), '€' (3..6), '🦀' (6..10), 'z' (10..11)
+    let original = Str::from("aé€🦀z");
+    assert_eq!(original.len(), 11);
+
+    let accent = original.slice(1..3).unwrap();
+    let mid = original.slice(1..10).unwrap();
+    let euro = mid.slice(2..5).unwrap();
+    let crab = original.slice(6..=9).unwrap();
+
+    assert_eq!(accent.as_str(), "é");
+    assert_eq!(mid.as_str(), "é€🦀");
+    assert_eq!(euro.as_str(), "€");
+    assert_eq!(crab.as_str(), "🦀");
+    assert_eq!(accent.as_ptr(), original.as_ptr().wrapping_add(1));
+    assert_eq!(euro.as_ptr(), original.as_ptr().wrapping_add(3));
+    assert_eq!(crab.as_ptr(), original.as_ptr().wrapping_add(6));
+    assert_eq!(
+        original
+            .slice((Bound::Excluded(0), Bound::Included(2)))
+            .unwrap()
+            .as_str(),
+        "é"
+    );
+
+    // Invalid UTF-8 boundaries on the full string.
+    for (start, end) in [
+        (0, 2),
+        (2, 3),
+        (1, 4),
+        (2, 5),
+        (4, 6),
+        (6, 7),
+        (6, 8),
+        (6, 9),
+        (7, 10),
+        (2, 2),
+        (4, 4),
+        (5, 5),
+        (7, 7),
+        (8, 8),
+        (9, 9),
+    ] {
+        assert!(original.slice(start..end).is_none(), "{start}..{end}");
+    }
+    assert!(original.slice(1..=1).is_none());
+    assert!(original.slice(6..=8).is_none());
+    assert!(
+        original
+            .slice((Bound::Excluded(1), Bound::Unbounded))
+            .is_none()
+    );
+
+    // Valid empty slices on UTF-8 char boundaries.
+    for offset in [0, 1, 3, 6, 10, 11] {
+        let empty = original.slice(offset..offset).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.as_ptr(), original.as_ptr().wrapping_add(offset));
+    }
+
+    // Invalid UTF-8 boundaries relative to a nested window ("é€🦀", len 9).
+    for (start, end) in [(0, 1), (1, 1), (1, 2), (2, 3), (5, 8), (6, 6)] {
+        assert!(mid.slice(start..end).is_none(), "nested {start}..{end}");
+    }
+    assert_eq!(mid.slice(5..9).unwrap().as_str(), "🦀");
+}
+
+#[test]
+fn str_empty_windows_are_valid_at_any_char_boundary() {
+    let original = Str::from("frame");
+    for offset in [0, 2, original.len()] {
+        let mut empty = original.slice(offset..offset).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.as_ptr(), original.as_ptr().wrapping_add(offset));
+        assert!(empty.slice(..).unwrap().is_empty());
+        assert!(empty.slice(..1).is_none());
+        assert!(empty.clone().into_string().is_empty());
+        empty.push('x');
+        assert_eq!(empty.as_str(), "x");
+        assert_eq!(original.as_str(), "frame");
+    }
+    assert!(Str::new().slice(..).unwrap().is_empty());
+}
+
+#[test]
+fn str_windows_are_values_of_the_selected_text() {
+    let original = Str::from("zabbac");
+    let first = original.slice(1..3).unwrap();
+    let second = original.slice(3..5).unwrap();
+    let other_parent = Str::from("xxabyy");
+    let same = other_parent.slice(2..4).unwrap();
+
+    assert_eq!(first, Str::from("ab"));
+    assert_eq!(first, same);
+    assert_ne!(first, second);
+    assert_ne!(first, original);
+    assert_eq!(first, *"ab");
+    assert_eq!(first, "ab");
+    assert_eq!(first, String::from("ab"));
+    assert!(first < second);
+    assert_eq!(first.cmp(&same), std::cmp::Ordering::Equal);
+    assert!(first.chars().eq(['a', 'b']));
+    assert_eq!(<Str as AsRef<str>>::as_ref(&first), "ab");
+    assert_eq!(<Str as AsRef<[u8]>>::as_ref(&first), b"ab");
+    assert_eq!(format!("{first}"), "ab");
+    assert_eq!(format!("{first:?}"), "\"ab\"");
+    assert_eq!(Bytes::from(first.clone()).as_slice(), b"ab");
+
+    let values = HashMap::from([(first.clone(), 1)]);
+    assert_eq!(values.get("ab"), Some(&1));
+    assert_eq!(values.get(&same), Some(&1));
+    assert_eq!(values.get(&Str::from("ab")), Some(&1));
+
+    assert_eq!(String::from(first), "ab");
+    drop(values);
+    drop(original);
+    assert_eq!(second.into_string(), "ba");
+}
+
+#[test]
+fn str_window_make_mut_isolates_overlapping_windows_and_parent() {
+    let mut parent = Str::from("prefixframefooter");
+    let mut frame = parent.slice(6..11).unwrap();
+    let mut overlap = parent.slice(8..13).unwrap();
+
+    let buffer: &mut String = frame.make_mut();
+    assert_eq!(buffer.as_str(), "frame");
+    buffer.make_ascii_uppercase();
+    buffer.push('!');
+    assert_eq!(frame.as_str(), "FRAME!");
+    assert!(!frame.is_shared());
+    assert_eq!(parent.as_str(), "prefixframefooter");
+    assert_eq!(overlap.as_str(), "amefo");
+
+    parent.make_mut().truncate(2);
+    assert_eq!(parent.as_str(), "pr");
+    assert_eq!(overlap.as_str(), "amefo");
+    assert!(!overlap.is_shared());
+    // Unique strict window must still materialize only the window on mutation.
+    overlap += "!";
+    overlap.extend(['?']);
+    overlap.extend(["ok"]);
+    assert_eq!(overlap.as_str(), "amefo!?ok");
+}
+
+#[test]
+fn str_clear_detaches_shared_windows_and_resets_unique_windows() {
+    let parent = Str::from("prefixframefooter");
+    let pointer = parent.as_ptr();
+    let mut window = parent.slice(6..11).unwrap();
+    let mut shared = window.clone();
+    shared.clear();
+    assert!(shared.is_empty());
+    assert!(!shared.is_shared());
+    assert_eq!(window.as_str(), "frame");
+
+    drop(parent);
+    window.clear();
+    assert!(window.is_empty());
+    assert_eq!(window.as_ptr(), pointer);
+    window.push('!');
+    assert_eq!(window.as_str(), "!");
+}
+
+#[test]
+fn str_full_window_reuses_unique_buffer() {
+    let parent = Str::from("frame");
+    let pointer = parent.as_ptr();
+    let mut full = parent.slice(..).unwrap();
+    drop(parent);
+
+    full.make_mut().make_ascii_uppercase();
+    let owned = full.into_string();
+    assert_eq!(owned.as_ptr(), pointer);
+    assert_eq!(owned, "FRAME");
+}
+
+#[test]
 fn bytes_shared_clear_releases_capacity_and_preserves_original() {
     let original = Bytes::from(vec![42; 1_000]);
     let pointer = original.as_ptr();

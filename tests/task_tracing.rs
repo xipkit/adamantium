@@ -277,20 +277,22 @@ async fn panicked_tasks_are_excluded_and_their_panic_still_propagates() {
 
 #[tokio::test]
 async fn spans_follow_async_polls_and_blocking_closures_and_keep_the_parent() {
-    check_spans().await;
+    check_spans(false).await;
+    check_spans(true).await;
 }
 
 #[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn spans_follow_tasks_onto_worker_threads() {
-    check_spans().await;
+    check_spans(false).await;
+    check_spans(true).await;
 }
 
 #[allow(
     clippy::unwrap_used,
     reason = "shared assertions for both runtime flavors"
 )]
-async fn check_spans() {
+async fn check_spans(use_spawner: bool) {
     use tracing::Instrument;
 
     let capture = Capture::default();
@@ -298,7 +300,7 @@ async fn check_spans() {
     async {
         let mut tasks = Tasks::<&str>::new();
         async {
-            let value = tasks.spawn_named("async", async {
+            let future = async {
                 assert_eq!(
                     tracing::Span::current().metadata().unwrap().name(),
                     "adamantium.task"
@@ -309,14 +311,26 @@ async fn check_spans() {
                     "adamantium.task"
                 );
                 Ok(42)
-            });
-            let blocking = tasks.spawn_blocking_named("blocking", || {
+            };
+            let work = || {
                 assert_eq!(
                     tracing::Span::current().metadata().unwrap().name(),
                     "adamantium.task"
                 );
                 Ok(std::thread::current().id())
-            });
+            };
+            let (value, blocking) = if use_spawner {
+                let spawner = tasks.spawner();
+                (
+                    spawner.spawn_named("async", future).unwrap(),
+                    spawner.spawn_blocking_named("blocking", work).unwrap(),
+                )
+            } else {
+                (
+                    tasks.spawn_named("async", future),
+                    tasks.spawn_blocking_named("blocking", work),
+                )
+            };
             tasks.spawn(async { Ok(()) });
             assert_eq!(tasks.value(value).await, Ok(42));
             assert_eq!(
@@ -500,11 +514,16 @@ async fn a_named_handled_task_runs_its_handler_in_its_span_and_is_reported_until
     let result = async {
         Tasks::<&str>::run_until(Cancellation::new(), Some(deadline), async |tasks| {
             let (handled, handled_rx) = Reply::pair();
-            tasks.spawn_handled_named("failed", async { Err("reset") }, move |error| {
-                tracing::warn!(error, "connection failed");
-                handled.send(()).unwrap();
-            });
-            tasks.spawn_handled_named("stuck", forever(), |_| {});
+            let spawner = tasks.spawner();
+            spawner
+                .spawn_handled_named("failed", async { Err("reset") }, move |error| {
+                    tracing::warn!(error, "connection failed");
+                    handled.send(()).unwrap();
+                })
+                .unwrap();
+            spawner
+                .spawn_handled_named("stuck", forever(), |_| {})
+                .unwrap();
             handled_rx.receive().await.unwrap();
             forever().await
         })

@@ -1,7 +1,8 @@
 # Experimental execution-context lints
 
 This opt-in prototype checks operations that Clippy's path lists cannot express:
-blocking work in async execution, actor access nested inside an actor callback,
+blocking work in async execution or inside an actor callback, actor access
+nested inside an actor callback,
 a limit entered inside limit work that forbids it, and `adamantium::race` calls
 that pair a timer with a future that may not be drop-safe.
 Ordinary `cargo adamantium check`, `init`, and library builds do not install or
@@ -56,6 +57,7 @@ is an incomplete check, never a fallback to Clippy-only success.
 Use the existing `skip`, `allow`, and `exceptions` metadata with the exact names:
 
 - `adamantium_blocking_in_async`
+- `adamantium_blocking_in_actor`
 - `adamantium_nested_actor_access`
 - `adamantium_nested_limit`
 - `adamantium_race_with_timer`
@@ -81,6 +83,15 @@ methods; TCP/UDP connect/bind/accept/send/receive and concrete file/socket
 It does not reject every function in those modules or every `Read` implementation:
 an in-memory `Cursor` is allowed. It does not track socket nonblocking mode.
 
+`adamantium_blocking_in_actor` checks the same operations inside an actor's
+`with` or `read` callback, in synchronous or async code, where they hold the actor's
+lock while they wait. A blocking operation inside a callback in async code is
+reported by this lint rather than `adamantium_blocking_in_async`: the callback
+is synchronous, so `blocking(..).await` cannot fix it, and the work has to move
+before or after the callback either way. A helper whose own callback blocks is
+reported inside the helper, and again by `adamantium_blocking_in_async` where
+async code calls it.
+
 `adamantium_nested_actor_access` checks `Actor::with`, `read`, and `snapshot`
 inside either access callback, on the same actor or a different actor. A closure
 merely created inside a callback does not inherit its actor context; calling that
@@ -97,9 +108,9 @@ future constructed inside limit work and polled after it is allowed.
 on tuple literals when at least one arm is a timer (`time::sleep` or
 `time::sleep_until`), flagging the call unless every arm is on the documented
 drop-safe library operations list (`Channel::receive`, `Receiver::receive`,
-`ReplyReceiver::receive`, `Reply::closed`, `Watcher::receive`,
-`Watcher::wait_for`, `time::sleep`, `time::sleep_until`,
-`Cancellation::cancelled`). Arms may be direct future calls or `async { ... }`
+`ReplyReceiver::receive`, `Reply::closed`, `Feed::receive`,
+`Watcher::receive`, `Watcher::changed`, `Watcher::wait_for`, `time::sleep`,
+`time::sleep_until`, `Cancellation::cancelled`). Arms may be direct future calls or `async { ... }`
 blocks whose awaited calls are all on that list.
 
 Inline closure calls (including locally aliased closures), actor callbacks,

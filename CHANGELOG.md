@@ -15,6 +15,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `AsyncActor::try_send` and `AsyncActor::send_until` match `Channel`, and
   `AsyncActor::call` and `AsyncActor::call_until` provide request-reply helpers
   backed by `Reply::pair()`.
+- `adamantium`: `BoundedMap` holds at most a fixed number of entries and
+  evicts the least recently used one to make room for a new key, so a cache
+  or session table inside an `Actor` stays bounded. `insert` returns the
+  evicted or replaced entry in `Inserted`.
 - `cargo-adamantium`: `check --update-baseline` prunes resolved findings,
   `--fail-on-stale-baseline` requires an up-to-date baseline in CI, and
   `--summary` shows counts by rule and hotspot file.
@@ -27,9 +31,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   including recursive ones, and report blocking, nested actor access and the
   new `adamantium_nested_limit` where async code or a callback calls the
   helper or awaits its future.
+- `cargo-adamantium`: the experimental `adamantium_blocking_in_actor` lint
+  reports file, network, process and thread-blocking operations inside an
+  actor's `with` or `read` callback, directly or through local helpers, where
+  they hold the actor's lock while they wait.
+- `cargo-adamantium`: the experimental `adamantium_race_with_timer` lint
+  accepts `Feed::receive` and `Watcher::changed` as drop-safe arms, since
+  dropping either loses nothing.
 - `adamantium`: `Tasks::spawner()` returns a cloneable `Spawner` so children
   can add siblings to their scope, with the same joining and error rules.
   Spawning after the scope closes returns `SpawnError` without starting work.
+- `adamantium`: `Spawner` supports named, handled, and blocking spawns,
+  including named handled and named blocking work.
 - `adamantium`: `Fanout` sends each event to every subscribing `Feed`
   without waiting. A feed whose bounded queue is full is disconnected: it
   receives what it had queued, then `Ended::Overflowed`, and never a later
@@ -71,6 +84,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   new section on bounded queues compares the two.
 - In `adamantium`, `Bytes::slice` checks byte ranges and shares storage.
   Editing a window through `make_mut` copies only the selected bytes.
+- In `adamantium`, `Str::slice` checks UTF-8 byte ranges and shares storage.
+  Editing a window through `make_mut` copies only the selected text.
 - `cargo-adamantium`: `check --format json` and `check --format sarif` include
   an optional `remediation` for each finding, combining the replacement for its
   rule or disallowed path with the migration guide section or `cargo adamantium
