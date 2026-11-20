@@ -36,11 +36,14 @@
 //! to select probabilistic concurrency testing (PCT) or bounded depth-first
 //! search (DFS). [`Replay::dfs_status`] reports whether DFS explored every
 //! reachable schedule or reached the execution limit with choices remaining.
+//! Use [`Config::from_env`] to override the default seed or iteration limit
+//! from the shell.
 //!
-//! A failure returns and prints a payload-free [`Replay`] with the scheduler,
-//! bounds, engine versions and exact schedule. Save records with [`Replay::save`]
-//! and use [`replay_corpus`] to exercise them against one scenario. Replay
-//! requires compatible dependencies, scheduling behavior and fixture inputs.
+//! A failure returns and prints a named task timeline and a payload-free [`Replay`]
+//! with the scheduler, bounds, engine versions and exact schedule. Save records
+//! with [`Replay::save`] and use [`replay_corpus`] to exercise them against one
+//! scenario. Replay requires compatible dependencies, scheduling behavior and
+//! fixture inputs.
 //!
 //! [`crate::random`] draws from the scheduler, so a seed decides the draws and a
 //! replay repeats them. Real I/O, native threads, wall-clock time, other
@@ -57,6 +60,7 @@
 use std::{
     any::Any,
     collections::BTreeMap,
+    ffi::OsStr,
     fmt,
     future::Future,
     io,
@@ -72,7 +76,10 @@ use shuttle::scheduler::{
     Task, TaskId,
 };
 
-use crate::runtime::execution::Execution;
+use crate::runtime::{
+    execution::Execution,
+    trace::{Collector, Guard, RawEvent},
+};
 
 mod duplex;
 pub use duplex::{
@@ -105,6 +112,50 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Starts with the defaults and applies any environment overrides.
+    ///
+    /// `ADAMANTIUM_SEED` sets the unsigned 64-bit seed.
+    /// `ADAMANTIUM_ITERATIONS` sets the positive execution limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error naming the variable if a supplied value
+    /// is non-Unicode, empty, malformed, or out of range.
+    pub fn from_env() -> io::Result<Self> {
+        Self::with_env_values(
+            std::env::var_os("ADAMANTIUM_SEED").as_deref(),
+            std::env::var_os("ADAMANTIUM_ITERATIONS").as_deref(),
+        )
+    }
+
+    fn with_env_values(seed: Option<&OsStr>, iterations: Option<&OsStr>) -> io::Result<Self> {
+        let mut config = Self::default();
+        if let Some(value) = seed {
+            config.seed = value
+                .to_str()
+                .and_then(|value| value.parse().ok())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "ADAMANTIUM_SEED must be an unsigned 64-bit integer",
+                    )
+                })?;
+        }
+        if let Some(value) = iterations {
+            config.iterations = value
+                .to_str()
+                .and_then(|value| value.parse::<std::num::NonZeroUsize>().ok())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "ADAMANTIUM_ITERATIONS must be a positive integer that fits in usize",
+                    )
+                })?
+                .get();
+        }
+        Ok(config)
+    }
+
     /// Selects the scheduler for [`check`]. Passing a `Config` directly uses random scheduling.
     pub fn with_scheduler(self, scheduler: SchedulerMode) -> Exploration {
         Exploration {
@@ -320,10 +371,11 @@ pub enum FailureKind {
     ReplayMismatch,
 }
 
-/// A failed execution and its replay record. Debug output excludes user payloads.
+/// A failed execution with a named task timeline and a replay record.
+/// Display and debug output exclude user payloads.
 pub struct Failure {
     kind: FailureKind,
-    replay: Replay,
+    timeline: Box<Timeline>,
 }
 
 impl Failure {
@@ -335,7 +387,7 @@ impl Failure {
     /// The observed execution record, suitable for [`replay`] or [`Replay::save`].
     /// On a replay mismatch, this contains the steps actually executed.
     pub fn replay(&self) -> &Replay {
-        &self.replay
+        self.timeline.replay()
     }
 }
 
@@ -348,8 +400,9 @@ impl fmt::Debug for Failure {
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "adamantium::testing {:?}: ", self.kind)?;
-        let record = serde_json::to_string(&self.replay).map_err(|_| fmt::Error)?;
-        f.write_str(&record)
+        let record = serde_json::to_string(self.replay()).map_err(|_| fmt::Error)?;
+        writeln!(f, "{record}")?;
+        self.timeline.fmt_events(f)
     }
 }
 
@@ -407,6 +460,7 @@ where
         ),
         SchedulerMode::Dfs => run(record, DfsScheduler::new(None, true), None, factory),
     }
+    .map(|(record, _)| record)
 }
 
 /// Replays one saved execution with fresh state and the original step limit.
@@ -419,7 +473,7 @@ where
 {
     let validation = record.validate();
     assert!(validation.is_ok(), "{validation:?}");
-    play(record, ReplayPolicy::Exact, factory)
+    play(record, ReplayPolicy::Exact, factory).map(|(record, _)| record)
 }
 
 /// A task observed during [`explain`].
@@ -636,6 +690,12 @@ impl fmt::Display for Timeline {
                 self.replay.max_steps
             )?,
         }
+        self.fmt_events(f)
+    }
+}
+
+impl Timeline {
+    fn fmt_events(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if !self.waiting.is_empty() {
             writeln!(f, "Waiting tasks:")?;
             for entry in &self.waiting {
@@ -734,20 +794,20 @@ where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()>,
 {
-    use crate::runtime::trace::{Guard, RawEvent};
-
     let validation = record.validate();
     assert!(validation.is_ok(), "{validation:?}");
 
-    let guard = Guard::enter();
-    let result = play(record, ReplayPolicy::Exact, factory);
-    let collector = guard.finish();
+    match play(record, ReplayPolicy::Exact, factory) {
+        Ok((replay, collector)) => build_timeline(replay, None, collector),
+        Err(failure) => *failure.timeline,
+    }
+}
 
-    let (failure, observed_replay) = match result {
-        Ok(replay) => (None, replay),
-        Err(failure) => (Some(failure.kind()), failure.replay().clone()),
-    };
-
+fn build_timeline(
+    observed_replay: Replay,
+    failure: Option<FailureKind>,
+    collector: Option<Collector>,
+) -> Timeline {
     let Some(collector) = collector else {
         return Timeline {
             failure,
@@ -985,7 +1045,11 @@ enum ReplayPolicy {
     Prefix,
 }
 
-fn play<F, Fut>(record: &Replay, policy: ReplayPolicy, factory: F) -> Result<Replay, Failure>
+fn play<F, Fut>(
+    record: &Replay,
+    policy: ReplayPolicy,
+    factory: F,
+) -> Result<(Replay, Option<Collector>), Failure>
 where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()>,
@@ -1128,6 +1192,7 @@ impl<S: Scheduler> Scheduler for Recording<S> {
         trace.steps.clear();
         drop(trace);
         Execution::next();
+        Guard::reset();
         Some(schedule)
     }
 
@@ -1163,13 +1228,14 @@ fn run<S, F, Fut>(
     scheduler: S,
     original: Option<(&Replay, ReplayPolicy)>,
     factory: F,
-) -> Result<Replay, Failure>
+) -> Result<(Replay, Option<Collector>), Failure>
 where
     S: Scheduler + 'static,
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()>,
 {
     let _execution = Execution::enter();
+    let guard = Guard::enter();
     let max_steps = record.max_steps;
     let trace = Arc::new(Mutex::new(record));
     let scheduler = Recording {
@@ -1193,6 +1259,7 @@ where
             shuttle::future::block_on(crate::runtime::coop::model::task(factory()));
         });
     }));
+    let collector = guard.finish();
     let record = lock(&trace).clone();
     let kind = if original.is_some_and(|(original, policy)| match policy {
         ReplayPolicy::Exact => original.steps != record.steps,
@@ -1201,13 +1268,13 @@ where
         FailureKind::ReplayMismatch
     } else {
         match result {
-            Ok(_) => return Ok(record),
+            Ok(_) => return Ok((record, collector)),
             Err(payload) => classify(&*payload, original.is_some()),
         }
     };
     let failure = Failure {
         kind,
-        replay: record,
+        timeline: Box::new(build_timeline(record, Some(kind), collector)),
     };
     eprintln!("{failure}");
     Err(failure)
@@ -1234,5 +1301,49 @@ fn classify(payload: &(dyn Any + Send), replaying: bool) -> FailureKind {
         FailureKind::ReplayMismatch
     } else {
         FailureKind::Panic
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_overrides_keep_unspecified_defaults() -> io::Result<()> {
+        let defaults = Config::default();
+        for (seed, iterations, expected_seed, expected_iterations) in [
+            (None, None, defaults.seed, defaults.iterations),
+            (Some("42"), None, 42, defaults.iterations),
+            (None, Some("10000"), defaults.seed, 10_000),
+            (Some("18446744073709551615"), Some("1"), u64::MAX, 1),
+        ] {
+            let config = Config::with_env_values(seed.map(OsStr::new), iterations.map(OsStr::new))?;
+            assert_eq!(config.seed, expected_seed);
+            assert_eq!(config.iterations, expected_iterations);
+            assert_eq!(config.max_steps, defaults.max_steps);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn env_overrides_reject_invalid_values() {
+        let invalid = |result: io::Result<Config>, variable: &str| {
+            assert!(
+                matches!(result, Err(error) if error.kind() == io::ErrorKind::InvalidInput
+                    && error.to_string().contains(variable))
+            );
+        };
+        for seed in ["", "-1", "18446744073709551616"] {
+            invalid(
+                Config::with_env_values(Some(OsStr::new(seed)), None),
+                "ADAMANTIUM_SEED",
+            );
+        }
+        for iterations in ["0", "ten", "18446744073709551616"] {
+            invalid(
+                Config::with_env_values(None, Some(OsStr::new(iterations))),
+                "ADAMANTIUM_ITERATIONS",
+            );
+        }
     }
 }

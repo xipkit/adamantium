@@ -1002,7 +1002,7 @@ impl<E: Send + 'static> Tasks<E> {
     /// inside an `adamantium.task` span with a `task.name` field, parented to
     /// the current span. Unfinished named tasks are reported at scope deadlines.
     /// Without `tracing`, this behaves as [`spawn`](Self::spawn) without
-    /// converting or storing the name.
+    /// converting or storing the name outside the deterministic testing harness.
     pub fn spawn_named<T, F>(&mut self, name: impl Into<crate::Str>, future: F) -> Task<T, E>
     where
         T: Send + 'static,
@@ -1082,7 +1082,8 @@ impl<E: Send + 'static> Tasks<E> {
     /// the task, `on_error` included, runs inside an `adamantium.task` span
     /// as for [`spawn_named`](Self::spawn_named), and is reported at scope
     /// deadlines until it ends. Without `tracing`, this behaves as
-    /// `spawn_handled` without converting or storing the name.
+    /// `spawn_handled` without converting or storing the name outside the
+    /// deterministic testing harness.
     pub fn spawn_handled_named<X, F, H>(
         &mut self,
         name: impl Into<crate::Str>,
@@ -1149,7 +1150,8 @@ impl<E: Send + 'static> Tasks<E> {
     /// Registers named blocking work, with the same cleanup contract as
     /// [`spawn_blocking`](Self::spawn_blocking). With `tracing`, the closure
     /// runs inside an `adamantium.task` span and is included in deadline reports
-    /// until it finishes. Without `tracing`, the name is not converted or stored.
+    /// until it finishes. Without `tracing`, the name is only converted and
+    /// stored in the deterministic testing harness.
     pub fn spawn_blocking_named<T, F>(&mut self, name: impl Into<crate::Str>, f: F) -> Task<T, E>
     where
         T: Send + 'static,

@@ -10,6 +10,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `adamantium`: `testing::Config::from_env()` applies `ADAMANTIUM_SEED` and
+  `ADAMANTIUM_ITERATIONS` overrides to the deterministic testing defaults.
+
 - `cargo-adamantium`: `style check --pack concurrency` reviews files for
   state with a joint invariant split across separate Actors, locks or
   atomics (`split_actor_invariant`) and unbounded in-memory collection growth
@@ -69,6 +72,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   explain` command.
 
 ### Changed
+
+- `adamantium`: deterministic test failures print the named task timeline
+  alongside the replay JSON.
 
 - `cargo-adamantium`: a style finding's `guidance` says what goes wrong
   instead of repeating the question asked of the model. Reports record their
