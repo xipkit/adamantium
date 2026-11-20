@@ -35,6 +35,8 @@ inputs:
     default: 'false'
   deps-baseline:
     description: Dependency baseline path relative to the working directory (requires deps)
+  deps-args:
+    description: Cargo metadata/tree arguments for the dependency audit, one per line (requires deps)
   style:
     description: Advisory style review pack (google or concurrency); empty disables it
   style-changed:
@@ -50,6 +52,8 @@ runs:
         UPLOAD_SARIF: ${{ inputs.upload-sarif }}
         DEPS: ${{ inputs.deps }}
         DEPS_BASELINE: ${{ inputs.deps-baseline }}
+        DEPS_ARGS: ${{ inputs.deps-args }}
+        CARGO_ARGS: ${{ inputs.cargo-args }}
         STYLE: ${{ inputs.style }}
         STYLE_CHANGED: ${{ inputs.style-changed }}
       run: |
@@ -64,6 +68,12 @@ runs:
         fi
         if [[ -n "$DEPS_BASELINE" && "$DEPS" != true ]]; then
           echo 'deps-baseline requires deps' >&2; exit 1
+        fi
+        if [[ -n "$DEPS_ARGS" && "$DEPS" != true ]]; then
+          echo 'deps-args requires deps' >&2; exit 1
+        fi
+        if [[ "$DEPS" == true && -n "$CARGO_ARGS" && -z "$DEPS_ARGS" ]]; then
+          echo '::warning::deps-args is empty; ensure the dependency audit uses the intended feature selection.'
         fi
         case "$STYLE" in
           ''|google|concurrency) ;;
@@ -169,11 +179,22 @@ runs:
       working-directory: ${{ inputs.working-directory }}
       env:
         ADAMANTIUM_DEPS_BASELINE: ${{ inputs.deps-baseline }}
+        ADAMANTIUM_DEPS_ARGS: ${{ inputs.deps-args }}
       run: |
         export PATH="$RUNNER_TEMP/adamantium/bin:$PATH"
         args=(adamantium deps --deny-new)
         if [[ -n "$ADAMANTIUM_DEPS_BASELINE" ]]; then
           args+=(--baseline "$ADAMANTIUM_DEPS_BASELINE")
+        fi
+        cargo_args=()
+        while IFS= read -r arg; do
+          arg=${arg%$'\r'}
+          if [[ -n "$arg" ]]; then
+            cargo_args+=("$arg")
+          fi
+        done <<< "$ADAMANTIUM_DEPS_ARGS"
+        if [[ ${#cargo_args[@]} -gt 0 ]]; then
+          args+=(-- "${cargo_args[@]}")
         fi
         "$RUNNER_TEMP/adamantium/bin/cargo-adamantium" "${args[@]}"
     - name: Review style

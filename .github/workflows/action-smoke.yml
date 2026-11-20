@@ -78,6 +78,20 @@ jobs:
           sarif-category: adamantium-smoke-two
       - name: Verify SARIF report
         run: python3 -c 'import json, os; report = json.load(open(os.environ["RUNNER_TEMP"] + "/adamantium.sarif")); assert report["version"] == "2.1.0"'
+      - name: Check feature-gated dependency is audited
+        id: dependency-feature
+        continue-on-error: true
+        uses: ./
+        with:
+          rev: 576dff216296d5e8a960c6972779639e93e40f7c
+          working-directory: cli/tests/fixtures/action-smoke
+          deps: 'true'
+          deps-args: |
+            --features
+            probe
+      - name: Assert dependency audit failed
+        if: steps.dependency-feature.outcome != 'failure'
+        run: exit 1
       - name: Reject invalid inputs
         id: invalid
         continue-on-error: true

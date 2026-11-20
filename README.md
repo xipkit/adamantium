@@ -144,6 +144,7 @@ After checkout and installing Rust with Clippy, use `xipkit/adamantium` with an 
 | `sarif-category` | Code scanning category, default `adamantium`; choose a distinct category for each analysis in a workflow. |
 | `deps` | Set to `true` to run `deps --deny-new`. Without a baseline it checks against zero findings. |
 | `deps-baseline` | Optional dependency report path, relative to `working-directory`; requires `deps: 'true'`. |
+| `deps-args` | Cargo metadata/tree arguments for the audit, one per line. Set feature flags to match `cargo-args`; they are not copied automatically. Requires `deps: 'true'`. Use the same flags when creating the baseline. |
 | `style` | Set to `google` or `concurrency` for an advisory style review. It sends source to OpenAI and requires `OPENAI_API_KEY` in the step environment; requests are billable. |
 | `style-changed` | Optional Git base for the style review. Fetch enough history for the base and merge base to be available. |
 
