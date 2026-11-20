@@ -29,6 +29,7 @@ pub(super) enum Reason {
     ControlFlow,
     InsideActor,
     Calls,
+    RwLockRead,
     Nested(&'static str),
     Poll,
     Unfollowed(&'static str),
@@ -39,6 +40,7 @@ impl Reason {
         match self {
             Self::AcrossStatements => "a-guard-held-across-statements",
             Self::AcrossAwait => "a-lock-held-across-an-await",
+            Self::RwLockRead => "rwlock",
             Self::TwoLocks | Self::InsideActor | Self::Calls | Self::Nested(_) => {
                 "two-locks-at-once"
             }
@@ -56,6 +58,9 @@ impl Reason {
             Self::Calls => {
                 "a statement holding its guard calls a function or another value's method, which might use an actor"
             }
+            Self::RwLockRead => {
+                "its read guard does more than copy the state, so fix can't prove that serializing its readers is safe"
+            }
             Self::Nested(detail) | Self::Unfollowed(detail) => detail,
             Self::Poll => "its future polling context is unproved; the rewrite remains manual",
         }
@@ -65,6 +70,7 @@ impl Reason {
 pub(super) struct Refusal {
     pub(super) line: usize,
     pub(super) name: String,
+    pub(super) kind: LockKind,
     pub(super) reason: Reason,
     pub(super) boundary: Option<String>,
 }
@@ -83,12 +89,37 @@ pub(super) struct Draft {
 
 const ACTOR: &str = "::adamantium::Actor";
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LockKind {
+    Mutex,
+    RwLock,
+}
+
+impl LockKind {
+    pub(super) fn description(self) -> &'static str {
+        match self {
+            Self::Mutex => "Arc<Mutex<_>>",
+            Self::RwLock => "Arc<RwLock<_>>",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum LockEvidence {
+    Type(LockKind),
+    Read,
+    Write,
+}
+
+pub(super) type LockSpans = BTreeMap<(usize, usize), LockEvidence>;
+
 pub(super) const IMPORTS: &[&[&str]] = &[
     &["std", "sync"],
     &["alloc", "sync"],
     &["std", "sync", "Arc"],
     &["alloc", "sync", "Arc"],
     &["std", "sync", "Mutex"],
+    &["std", "sync", "RwLock"],
 ];
 
 const UNLOCATED: Reason = Reason::Unfollowed("fix couldn't find its source text");
@@ -113,12 +144,7 @@ const LOCKS: &[&str] = &[
     "snapshot",
 ];
 
-pub(super) fn plan(
-    file: &Path,
-    source: &str,
-    mutexes: &BTreeSet<(usize, usize)>,
-    krate: &Crate,
-) -> Draft {
+pub(super) fn plan(file: &Path, source: &str, locks: &LockSpans, krate: &Crate) -> Draft {
     let mut draft = Draft {
         file: file.to_path_buf(),
         groups: Vec::new(),
@@ -142,7 +168,7 @@ pub(super) fn plan(
         text: &text,
         krate,
         file,
-        mutexes,
+        locks,
         names: &names,
         macros: &macros,
         vars: Vec::new(),
@@ -385,6 +411,7 @@ impl Draft {
                 Some(reason) => outcome.refusals.push(Refusal {
                     line: group.line,
                     name: group.name,
+                    kind: group.kind,
                     reason,
                     boundary: group.boundary,
                 }),
@@ -705,13 +732,14 @@ struct Var {
     group: Option<usize>,
     used: bool,
     field: bool,
-    mutex_ref: bool,
+    lock_ref: bool,
     record: Option<String>,
 }
 
 struct Group {
     name: String,
     line: usize,
+    kind: LockKind,
     refusal: Option<Reason>,
     edits: Vec<Edit>,
     member: Option<String>,
@@ -723,10 +751,11 @@ struct Group {
 }
 
 impl Group {
-    fn new(name: String, line: usize, edits: Vec<Edit>) -> Self {
+    fn new(name: String, line: usize, kind: LockKind, edits: Vec<Edit>) -> Self {
         Self {
             name,
             line,
+            kind,
             refusal: None,
             edits,
             member: None,
@@ -804,7 +833,7 @@ struct Walker<'a> {
     krate: &'a Crate,
     text: &'a Text<'a>,
     file: &'a Path,
-    mutexes: &'a BTreeSet<(usize, usize)>,
+    locks: &'a LockSpans,
     names: &'a Names,
     macros: &'a HashMap<usize, MacroArgs>,
     vars: Vec<Var>,
@@ -865,7 +894,7 @@ impl<'a> Walker<'a> {
             group,
             used: false,
             field: false,
-            mutex_ref: false,
+            lock_ref: false,
             record: None,
         });
         if let Some(scope) = self.scopes.last_mut() {
@@ -1020,8 +1049,11 @@ impl<'a> Walker<'a> {
         .then_some(resolved)
     }
 
-    fn is_mutex(&self, range: Option<Range<usize>>) -> bool {
-        range.is_some_and(|range| self.mutexes.contains(&(range.start, range.end)))
+    fn lock_kind(&self, range: Range<usize>) -> Option<LockKind> {
+        match self.locks.get(&(range.start, range.end))? {
+            LockEvidence::Type(kind) => Some(*kind),
+            _ => None,
+        }
     }
 
     fn type_prefix(&self, path: &syn::Path) -> Option<Range<usize>> {
@@ -1040,15 +1072,11 @@ impl<'a> Walker<'a> {
         Some(first.start..last.end)
     }
 
-    fn actor_type(&self, ty: &Type) -> Option<String> {
-        self.actor_of(self.arc_state(ty)?)
-    }
-
     fn actor_of(&self, state: &Type) -> Option<String> {
         Some(format!("{ACTOR}<{}>", self.text.get(self.text.of(state)?)?))
     }
 
-    fn arc_state<'t>(&self, ty: &'t Type) -> Option<&'t Type> {
+    fn arc_state<'t>(&self, ty: &'t Type) -> Option<(LockKind, &'t Type)> {
         let Type::Path(arc) = ty else {
             return None;
         };
@@ -1063,20 +1091,21 @@ impl<'a> Walker<'a> {
         if args.args.len() != 1 || !self.is_arc(&prefix, 0) {
             return None;
         }
-        let Some(GenericArgument::Type(mutex)) = args.args.first() else {
+        let Some(GenericArgument::Type(lock)) = args.args.first() else {
             return None;
         };
-        self.mutex_state(mutex)
+        self.lock_state(lock)
     }
 
-    fn mutex_state<'t>(&self, ty: &'t Type) -> Option<&'t Type> {
-        let Type::Path(mutex) = ty else {
+    fn lock_state<'t>(&self, ty: &'t Type) -> Option<(LockKind, &'t Type)> {
+        let Type::Path(lock) = ty else {
             return None;
         };
-        if mutex.qself.is_some() || !self.is_mutex(self.text.of(mutex)) {
+        if lock.qself.is_some() {
             return None;
         }
-        let PathArguments::AngleBracketed(inner) = &mutex.path.segments.last()?.arguments else {
+        let kind = self.lock_kind(self.text.of(lock)?)?;
+        let PathArguments::AngleBracketed(inner) = &lock.path.segments.last()?.arguments else {
             return None;
         };
         let Some(GenericArgument::Type(state)) = inner.args.first() else {
@@ -1085,10 +1114,10 @@ impl<'a> Walker<'a> {
         if inner.args.len() != 1 || is_unsized(state, &self.names.unsized_aliases) {
             return None;
         }
-        Some(state)
+        Some((kind, state))
     }
 
-    fn constructor(&self, expr: &Expr) -> Option<String> {
+    fn constructor(&self, expr: &Expr) -> Option<(LockKind, String)> {
         let Expr::Call(arc) = expr else {
             return None;
         };
@@ -1102,31 +1131,31 @@ impl<'a> Walker<'a> {
         {
             return None;
         }
-        let Some(Expr::Call(mutex)) = arc.args.first() else {
+        let Some(Expr::Call(lock)) = arc.args.first() else {
             return None;
         };
-        let Expr::Path(mutex_new) = &*mutex.func else {
+        let Expr::Path(lock_new) = &*lock.func else {
             return None;
         };
-        let last = mutex_new.path.segments.last()?;
-        if mutex_new.qself.is_some()
-            || mutex_new
+        let last = lock_new.path.segments.last()?;
+        if lock_new.qself.is_some()
+            || lock_new
                 .path
                 .segments
                 .iter()
                 .any(|segment| !matches!(segment.arguments, PathArguments::None))
-            || !self.is_mutex(self.type_prefix(&mutex_new.path))
         {
             return None;
         }
-        match (last.ident.to_string().as_str(), mutex.args.first()) {
-            ("new", Some(state)) if mutex.args.len() == 1 => Some(format!(
-                "{ACTOR}::new({})",
-                self.text.get(self.text.of(state)?)?
-            )),
-            ("default", None) => Some(format!("{ACTOR}::default()")),
-            _ => None,
-        }
+        let kind = self.lock_kind(self.type_prefix(&lock_new.path)?)?;
+        let replacement = match (last.ident.to_string().as_str(), lock.args.first()) {
+            ("new", Some(state)) if lock.args.len() == 1 => {
+                format!("{ACTOR}::new({})", self.text.get(self.text.of(state)?)?)
+            }
+            ("default", None) => format!("{ACTOR}::default()"),
+            _ => return None,
+        };
+        Some((kind, replacement))
     }
 
     fn clone_of(&self, expr: &Expr) -> Option<(usize, Option<String>)> {
@@ -1136,7 +1165,7 @@ impl<'a> Walker<'a> {
                 if call.method == "clone" && call.args.is_empty() && call.turbofish.is_none() =>
             {
                 self.tracked(&call.receiver)
-                    .filter(|&var| !self.vars.get(var).is_some_and(|var| var.mutex_ref))
+                    .filter(|&var| !self.vars.get(var).is_some_and(|var| var.lock_ref))
                     .map(|var| (var, None))
             }
             Expr::Call(call) => {
@@ -1197,11 +1226,11 @@ impl<'a> Walker<'a> {
             let spelling = ident.ident.to_string();
             let ty_edit = match ty {
                 None => Some(None),
-                Some(ty) => self
-                    .actor_type(ty)
-                    .and_then(|actor| Some(Some(self.edit(self.text.of(ty)?, actor)))),
+                Some(ty) => self.arc_state(ty).and_then(|(_, state)| {
+                    Some(Some(self.edit(self.text.of(ty)?, self.actor_of(state)?)))
+                }),
             };
-            if let Some(constructor) = self.constructor(init)
+            if let Some((kind, constructor)) = self.constructor(init)
                 && let Some(ty_edit) = ty_edit.clone()
                 && let Some(range) = self.text.of(init)
             {
@@ -1209,13 +1238,20 @@ impl<'a> Walker<'a> {
                 let edits = std::iter::once(self.edit(range, constructor))
                     .chain(ty_edit)
                     .collect();
-                self.bind(local, name, spelling, edits);
+                self.bind(local, name, spelling, kind, edits);
                 return;
             }
             if let Some(ty_edit) = ty_edit.clone()
                 && let Some(returned) = self.returned_by(init)
+                && let Some(state) = self.groups.get(returned)
             {
-                let var = self.bind(local, name, spelling, ty_edit.into_iter().collect());
+                let var = self.bind(
+                    local,
+                    name,
+                    spelling,
+                    state.kind,
+                    ty_edit.into_iter().collect(),
+                );
                 if let Some(group) = self.group_of(var) {
                     self.links.push((group, returned));
                 }
@@ -1252,12 +1288,12 @@ impl<'a> Walker<'a> {
                         ),
                     );
                 }
-                let mutex_ref = matches!(init, Expr::Path(_))
-                    && self.vars.get(source).is_some_and(|var| var.mutex_ref);
+                let lock_ref = matches!(init, Expr::Path(_))
+                    && self.vars.get(source).is_some_and(|var| var.lock_ref);
                 let var = self.declare(name, group);
                 if let Some(entry) = self.vars.get_mut(var) {
                     entry.spelling = spelling;
-                    entry.mutex_ref = mutex_ref;
+                    entry.lock_ref = lock_ref;
                 }
                 self.settle(local, Some(var));
                 return;
@@ -1293,10 +1329,16 @@ impl<'a> Walker<'a> {
         local: &'a Local,
         name: String,
         spelling: String,
+        kind: LockKind,
         edits: Vec<Edit>,
     ) -> usize {
         let group = self.groups.len();
-        let mut state = Group::new(name.clone(), self.text.line(local.let_token.span), edits);
+        let mut state = Group::new(
+            name.clone(),
+            self.text.line(local.let_token.span),
+            kind,
+            edits,
+        );
         if !local.attrs.is_empty() {
             state.refuse(Reason::Unfollowed("its declaration has attributes"));
         }
@@ -1414,21 +1456,31 @@ fn is_assignment(op: &BinOp) -> bool {
 }
 
 impl<'a> Walker<'a> {
-    fn guard_var(&self, expr: &Expr) -> Option<usize> {
+    fn guard_access<'e>(&self, expr: &'e Expr) -> Option<(usize, &'e Expr, Option<Mode>)> {
         let Expr::MethodCall(unwrap) = expr else {
             return None;
         };
         let Expr::MethodCall(lock) = &*unwrap.receiver else {
             return None;
         };
-        if !is_unwrap(unwrap)
-            || lock.method != "lock"
-            || !lock.args.is_empty()
-            || lock.turbofish.is_some()
-        {
+        if !is_unwrap(unwrap) || !lock.args.is_empty() || lock.turbofish.is_some() {
             return None;
         }
-        self.tracked(&lock.receiver)
+        let var = self.tracked(&lock.receiver)?;
+        let kind = self.groups.get(self.group_of(var)?)?.kind;
+        let mode = match kind {
+            LockKind::Mutex if lock.method == "lock" => None,
+            LockKind::Mutex => return None,
+            LockKind::RwLock => {
+                let range = self.text.of(&lock.method)?;
+                match self.locks.get(&(range.start, range.end))? {
+                    LockEvidence::Read => Some(Mode::Read),
+                    LockEvidence::Write => Some(Mode::With),
+                    LockEvidence::Type(_) => return None,
+                }
+            }
+        };
+        Some((var, &lock.receiver, mode))
     }
 
     fn unwrapped(&self, expr: &Expr) -> Option<(usize, String)> {
@@ -1680,11 +1732,11 @@ impl<'a> Walker<'a> {
         })
     }
 
-    fn guard(&mut self, var: usize, guard: &'a Expr) {
+    fn guard(&mut self, var: usize, guard: &'a Expr, held: &Expr, access: Option<Mode>) {
         if let Some(entry) = self.vars.get_mut(var) {
             entry.used = true;
         }
-        match self.guard_edit(var, guard) {
+        match self.guard_edit(var, guard, held, access) {
             Ok((edit, runs)) => {
                 self.lock_site(var, runs);
                 self.add_edit(var, edit);
@@ -1697,6 +1749,8 @@ impl<'a> Walker<'a> {
         &mut self,
         var: usize,
         guard: &'a Expr,
+        held: &Expr,
+        access: Option<Mode>,
     ) -> Result<(Edit, BTreeSet<String>), Reason> {
         if self.inside_actor() {
             return Err(Reason::InsideActor);
@@ -1707,7 +1761,6 @@ impl<'a> Walker<'a> {
             .get(var)
             .map(|var| (var.name.clone(), var.spelling.clone()))
             .ok_or(UNLOCATED)?;
-        let held = lock_receiver(guard).ok_or(UNLOCATED)?;
         let holder = self.holder(var, held).ok_or(UNLOCATED)?;
         let base = self.place_base(held);
         let guard_range = self.text.of(guard).ok_or(UNLOCATED)?;
@@ -1719,6 +1772,9 @@ impl<'a> Walker<'a> {
         }
         if scan.locks {
             return Err(Reason::TwoLocks);
+        }
+        if access == Some(Mode::Read) && !copies_guard(full, guard) {
+            return Err(Reason::RwLockRead);
         }
         let inside = match plan.narrow {
             Some(expr) => {
@@ -1763,10 +1819,11 @@ impl<'a> Walker<'a> {
         };
         if let Some(expr) = plan.narrow {
             let range = self.text.of(expr).ok_or(UNLOCATED)?;
-            let replacement = format!("{holder}.read(|{name}| {})", substitute(range.clone())?);
+            let method = access.unwrap_or(Mode::Read).method();
+            let replacement = format!("{holder}.{method}(|{name}| {})", substitute(range.clone())?);
             return Ok((self.edit(range, replacement), runs));
         }
-        let method = plan.mode.method();
+        let method = access.unwrap_or(plan.mode).method();
         let (range, replacement) = match plan.root {
             Root::Statement(full, semi) => {
                 let (range, assignment, attributed) = match full {
@@ -2030,14 +2087,15 @@ fn is_unwrap(call: &syn::ExprMethodCall) -> bool {
         }
 }
 
-fn lock_receiver(guard: &Expr) -> Option<&Expr> {
-    let Expr::MethodCall(unwrap) = guard else {
-        return None;
-    };
-    let Expr::MethodCall(lock) = &*unwrap.receiver else {
-        return None;
-    };
-    Some(&lock.receiver)
+fn copies_guard(full: Full<'_>, guard: &Expr) -> bool {
+    fn unparen(mut expr: &Expr) -> &Expr {
+        while let Expr::Paren(paren) = expr {
+            expr = &paren.expr;
+        }
+        expr
+    }
+    matches!(full, Full::Expr(expr) if matches!(unparen(expr), Expr::Unary(unary)
+        if matches!(unary.op, UnOp::Deref(_)) && is(unparen(&unary.expr), guard)))
 }
 
 fn contains_let(expr: &Expr) -> bool {
@@ -2184,9 +2242,9 @@ impl<'a> Visit<'a> for Walker<'a> {
             self.returned(group, expr);
             return;
         }
-        if let Some(var) = self.guard_var(expr) {
+        if let Some((var, held, access)) = self.guard_access(expr) {
             self.stack.push(Node::Expr(expr));
-            self.guard(var, expr);
+            self.guard(var, expr, held, access);
             self.stack.pop();
             return;
         }
@@ -2527,13 +2585,22 @@ mod tests {
     use super::*;
     use crate::fix::source::prune_imports;
 
+    pub(super) fn mutex_spans(source: &str, mutexes: &[&str]) -> LockSpans {
+        mutexes
+            .iter()
+            .flat_map(|mutex| {
+                source.match_indices(mutex).map(|(start, _)| {
+                    (
+                        (start, start + mutex.len()),
+                        LockEvidence::Type(LockKind::Mutex),
+                    )
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn outcome(source: &str, mutexes: &[&str]) -> Outcome {
-        let mut spans = BTreeSet::new();
-        for mutex in mutexes {
-            for (start, _) in source.match_indices(mutex) {
-                spans.insert((start, start + mutex.len()));
-            }
-        }
+        let spans = mutex_spans(source, mutexes);
         let file = Path::new("lib.rs");
         let mut krate = Crate::default();
         krate.add(file, source);
