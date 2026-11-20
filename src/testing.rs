@@ -522,7 +522,7 @@ where
                 && failure.shrink_message.as_deref() == Some(message)
                 && same_task
                 && schedule_cost(failure.replay()) < cost)
-                .then(|| failure.timeline.replay)
+                .then_some(failure.timeline.replay)
         };
         match reduce_schedule(&best, improve) {
             Some(reduced) => best = reduced,
