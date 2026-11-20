@@ -107,7 +107,7 @@ To evaluate the examples through the built CLI, run `node style/scripts/evaluate
 `--pack concurrency` asks about concurrency bugs that Clippy and the Adamantium lints can't see. It currently ships two rules:
 
 - `split_actor_invariant`: state that must satisfy a joint invariant is kept in separate Actors, locks, or atomics and updated in separate critical sections (for example, a balance and its ledger).
-- `unbounded_collection_growth`: a long-lived in-memory collection accumulates entries without a capacity bound, eviction policy, or reliable removal (including pending-request maps that only remove on the happy path and append-only vectors inside long-running async loops).
+- `unbounded_collection_growth`: a long-lived in-memory collection accumulates entries without a capacity bound, eviction policy, or reliable removal (including pending-request maps that only remove on the happy path and append-only vectors inside long-running async loops). For a cache or table inside an `Actor`, `BoundedMap` caps the entries and evicts the least recently used.
 
 The shipped rules live in [`cli/src/style/concurrency-decisions.json`](../cli/src/style/concurrency-decisions.json). A test keeps each shipped rule byte-identical to its evaluated definition in [`style/rules/concurrency-decisions.json`](../style/rules/concurrency-decisions.json).
 

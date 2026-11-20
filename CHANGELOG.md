@@ -10,6 +10,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `adamantium`: `BoundedMap` holds at most a fixed number of entries and
+  evicts the least recently used one to make room for a new key, so a cache
+  or session table inside an `Actor` stays bounded. `insert` returns the
+  evicted or replaced entry in `Inserted`.
 - `cargo-adamantium`: `check --update-baseline` prunes resolved findings,
   `--fail-on-stale-baseline` requires an up-to-date baseline in CI, and
   `--summary` shows counts by rule and hotspot file.
