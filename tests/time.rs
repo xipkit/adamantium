@@ -70,7 +70,10 @@ async fn interval_fires_immediately_then_periodically() {
         let mut first = pin!(delayed.tick());
         assert!(poll!(&mut first).is_pending());
         tokio::time::advance(Duration::from_secs(3)).await;
-        assert_eq!(poll!(&mut first), Poll::Ready(start + Duration::from_secs(8)));
+        assert_eq!(
+            poll!(&mut first),
+            Poll::Ready(start + Duration::from_secs(8))
+        );
     }
     assert_eq!(delayed.tick().await, start + Duration::from_secs(13));
 }
@@ -91,7 +94,10 @@ async fn interval_is_drift_free_within_a_period() {
         tokio::time::advance(Duration::from_secs(6)).await;
         assert!(poll!(&mut next).is_pending());
         tokio::time::advance(Duration::from_secs(1)).await;
-        assert_eq!(poll!(&mut next), Poll::Ready(start + Duration::from_secs(20)));
+        assert_eq!(
+            poll!(&mut next),
+            Poll::Ready(start + Duration::from_secs(20))
+        );
     }
 }
 
@@ -110,7 +116,10 @@ async fn interval_missed_tick_delay_and_skip() {
     tokio::time::advance(Duration::from_secs(9)).await;
     assert!(poll!(&mut next).is_pending());
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert_eq!(poll!(&mut next), Poll::Ready(start + Duration::from_secs(35)));
+    assert_eq!(
+        poll!(&mut next),
+        Poll::Ready(start + Duration::from_secs(35))
+    );
 
     // Skip: aligns the next tick to the original phase grid without a burst.
     let start = time::now();
@@ -123,7 +132,10 @@ async fn interval_missed_tick_delay_and_skip() {
     tokio::time::advance(Duration::from_secs(4)).await;
     assert!(poll!(&mut next).is_pending());
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert_eq!(poll!(&mut next), Poll::Ready(start + Duration::from_secs(30)));
+    assert_eq!(
+        poll!(&mut next),
+        Poll::Ready(start + Duration::from_secs(30))
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -141,7 +153,10 @@ async fn interval_zero_period_does_not_panic() {
         let mut first = pin!(delayed.tick());
         assert!(poll!(&mut first).is_pending());
         tokio::time::advance(Duration::from_secs(5)).await;
-        assert_eq!(poll!(&mut first), Poll::Ready(start + Duration::from_secs(5)));
+        assert_eq!(
+            poll!(&mut first),
+            Poll::Ready(start + Duration::from_secs(5))
+        );
     }
     assert_eq!(delayed.tick().await, start + Duration::from_secs(5));
 }

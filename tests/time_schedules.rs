@@ -820,7 +820,10 @@ fn virtual_interval_missed_tick_policies_and_zero_period_replay() {
             time::Interval::new(period).with_missed_tick_behavior(time::MissedTickBehavior::Skip);
         assert_eq!(skip.tick().await, origin);
         time::sleep(period * 2 + Duration::from_millis(5)).await;
-        assert_eq!(skip.tick().await, origin + period * 2 + Duration::from_millis(5));
+        assert_eq!(
+            skip.tick().await,
+            origin + period * 2 + Duration::from_millis(5)
+        );
         assert_eq!(skip.tick().await, origin + period * 3);
 
         // Zero period never panics under either policy.
