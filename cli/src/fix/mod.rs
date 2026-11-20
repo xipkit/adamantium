@@ -39,8 +39,7 @@ struct StateSource {
 pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<ExitCode> {
     let root = manifest::root(path)?.canonicalize()?;
     let mut diagnostics = Vec::new();
-    let report =
-        check::check_with_suggestions(&root, args, false, strict, None, Some(&mut diagnostics))?;
+    let report = check::check_with_suggestions(&root, args, false, strict, Some(&mut diagnostics))?;
     if report.status == check::Status::Error {
         for error in report.errors {
             eprintln!("{}", error.message);
@@ -223,7 +222,7 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
         // tell whether the rewritten project still builds. Fix runs only on a
         // project that built, so any error now is the rewrite's, and a
         // rewrite nothing has verified is undone too.
-        match check::check(&root, args, false, strict, None) {
+        match check::check(&root, args, false, strict) {
             Ok(report) if report.status != check::Status::Error => report,
             Ok(report) => {
                 // The lines are those of the rewritten files.

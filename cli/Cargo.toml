@@ -32,7 +32,7 @@ ignore = "0.4"
 proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
 quote = { version = "1", default-features = false }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["unbounded_depth"] }
+serde_json = { version = "1", features = ["preserve_order", "unbounded_depth"] }
 serde_stacker = "0.1"
 sha2 = "0.11"
 syn = { version = "3", default-features = false, features = ["clone-impls", "full", "parsing", "printing", "visit", "visit-mut"] }

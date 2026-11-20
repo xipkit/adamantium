@@ -842,6 +842,25 @@ fn check_with_a_baseline_fails_only_on_new_findings() {
         stderr.contains("adamantium: clean (1 in the baseline)\nadamantium: 1 finding in the baseline no longer occurs"),
         "{stderr}"
     );
+    let (code, stdout, stderr) = check_with(
+        dir.path(),
+        &[
+            "--format",
+            "json",
+            "--baseline",
+            baseline,
+            "--fail-on-stale-baseline",
+        ],
+    )
+    .unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("1 finding in the baseline no longer occurs"),
+        "{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(report["status"], "clean", "{report}");
+    assert_eq!(report["baseline_unmatched"], 1, "{report}");
 
     // Without a baseline, every finding counts and none is matched.
     let (code, stdout, stderr) = check_with(dir.path(), &["--format", "json"]).unwrap();
@@ -853,6 +872,210 @@ fn check_with_a_baseline_fails_only_on_new_findings() {
         serde_json::Value::Null,
         "{report}"
     );
+}
+
+#[test]
+fn check_updates_only_the_selected_baseline_without_absorbing_new_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("src")).unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = 'ratchet'\nversion = '0.0.0'\nedition = '2024'\n",
+    )
+    .unwrap();
+    let lib = dir.path().join("src/lib.rs");
+    fs::write(
+        &lib,
+        "pub fn first(v: Option<i32>) -> i32 {\n    v.unwrap()\n}\n\
+         pub fn second(v: Option<i32>) -> i32 {\n    v.unwrap()\n}\n",
+    )
+    .unwrap();
+    let (code, original, stderr) = check_with(dir.path(), &["--format", "json"]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    let earlier: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    assert_eq!(
+        earlier["findings"].as_array().unwrap().len(),
+        3,
+        "{earlier}"
+    );
+
+    let os = std::env::consts::OS;
+    let other_os = if os == "macos" { "linux" } else { "macos" };
+    let baseline = dir.path().join(format!("baseline-{os}.json"));
+    let other_baseline = dir.path().join(format!("baseline-{other_os}.json"));
+    fs::write(&baseline, &original).unwrap();
+    fs::write(&other_baseline, &original).unwrap();
+    let path = baseline.to_str().unwrap();
+
+    fs::write(
+        &lib,
+        "pub fn first(v: Option<i32>) -> i32 {\n    v.unwrap()\n}\n\
+         pub fn second(v: Option<i32>) -> i32 {\n    v.expect(\"a value\")\n}\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = check_with(
+        dir.path(),
+        &["--format", "json", "--baseline", path, "--update-baseline"],
+    )
+    .unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("removed 1 stale baseline finding"),
+        "{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(report["baseline_unmatched"], 0, "{report}");
+    assert_eq!(report["findings"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(
+        report["findings"][0]["rule"], "clippy::expect_used",
+        "{report}"
+    );
+
+    let updated = fs::read_to_string(&baseline).unwrap();
+    let mut expected = earlier;
+    let findings = expected["findings"].as_array_mut().unwrap();
+    let mut kept_unwrap = false;
+    findings.retain(|finding| {
+        finding["rule"] != "clippy::unwrap_used" || !std::mem::replace(&mut kept_unwrap, true)
+    });
+    assert_eq!(
+        updated,
+        format!("{}\n", serde_json::to_string_pretty(&expected).unwrap())
+    );
+    assert_eq!(fs::read(&other_baseline).unwrap(), original);
+
+    let (code, _, stderr) = check_with(
+        dir.path(),
+        &["--baseline", path, "--update-baseline", "--summary"],
+    )
+    .unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("1 finding (2 in the baseline)\nFindings by rule:\n      1  clippy::expect_used\nTop hotspot files:\n      1  src/lib.rs"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read_to_string(&baseline).unwrap(), updated);
+
+    fs::write(&lib, "pub fn first() -> i32 { 0 }\n").unwrap();
+    let manifest = dir.path().join("Cargo.toml");
+    let content = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        manifest,
+        format!("{content}\n[profile.release]\noverflow-checks = true\n"),
+    )
+    .unwrap();
+    let (code, _, stderr) = check_with(
+        dir.path(),
+        &[
+            "--baseline",
+            path,
+            "--update-baseline",
+            "--fail-on-stale-baseline",
+        ],
+    )
+    .unwrap();
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        stderr.contains("removed 2 stale baseline findings"),
+        "{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(&baseline).unwrap()).unwrap();
+    assert_eq!(report["status"], "clean", "{report}");
+    assert_eq!(report["findings"], serde_json::json!([]), "{report}");
+    assert_eq!(fs::read(&other_baseline).unwrap(), original);
+
+    fs::write(
+        &lib,
+        "pub fn first(v: Option<i32>) -> i32 {\n    v.unwrap()\n}\n",
+    )
+    .unwrap();
+    let (code, _, stderr) = check_with(dir.path(), &["--baseline", path]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("unwrap_used"), "{stderr}");
+}
+
+#[test]
+fn check_keeps_the_baseline_when_the_build_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("src")).unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = 'incomplete'\nversion = '0.0.0'\nedition = '2024'\n\
+         [profile.release]\noverflow-checks = true\n",
+    )
+    .unwrap();
+    let lib = dir.path().join("src/lib.rs");
+    fs::write(&lib, "pub fn value(v: Option<i32>) -> i32 { v.unwrap() }\n").unwrap();
+    let (code, original, stderr) = check_with(dir.path(), &["--format", "json"]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    let baseline = dir.path().join("baseline.json");
+    fs::write(&baseline, &original).unwrap();
+    fs::write(&lib, "pub fn value() -> i32 { missing }\n").unwrap();
+    let (code, _, stderr) = check_with(
+        dir.path(),
+        &[
+            "--baseline",
+            baseline.to_str().unwrap(),
+            "--update-baseline",
+            "--fail-on-stale-baseline",
+        ],
+    )
+    .unwrap();
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("the project did not build"), "{stderr}");
+    assert!(!stderr.contains("no longer occurs"), "{stderr}");
+    assert_eq!(fs::read(baseline).unwrap(), original);
+}
+
+#[test]
+fn check_baseline_maintenance_flags_require_a_baseline() {
+    for flag in ["--update-baseline", "--fail-on-stale-baseline"] {
+        let (code, stdout, stderr) = check_with(&fixture("clean"), &[flag]).unwrap();
+        assert_eq!(code, Some(2), "{stderr}");
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("--baseline <REPORT>"), "{stderr}");
+    }
+}
+
+#[test]
+fn check_summary_ranks_rules_and_limits_hotspot_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    fs::create_dir(&src).unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = 'hotspots'\nversion = '0.0.0'\nedition = '2024'\n",
+    )
+    .unwrap();
+    let mut lib = String::from(
+        "pub fn a(v: Option<i32>) -> i32 { v.unwrap() }\n\
+         pub fn b(v: Option<i32>) -> i32 { v.unwrap() }\n",
+    );
+    for index in 0..10 {
+        use std::fmt::Write as _;
+        let module = format!("file{index:02}");
+        writeln!(lib, "pub mod {module};").unwrap();
+        fs::write(
+            src.join(format!("{module}.rs")),
+            "pub fn value(v: Option<i32>) -> i32 { v.unwrap() }\n",
+        )
+        .unwrap();
+    }
+    fs::write(src.join("lib.rs"), lib).unwrap();
+    let (code, stdout, stderr) = check_with(dir.path(), &["--summary"]).unwrap();
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stdout.is_empty());
+    let (diagnostics, summary) = stderr.split_once("adamantium: 13 findings\n").unwrap();
+    assert!(diagnostics.contains("src/lib.rs"), "{stderr}");
+    let mut expected = String::from(
+        "Findings by rule:\n     12  clippy::unwrap_used\n      1  adamantium::overflow_checks\n\
+         Top hotspot files:\n      2  src/lib.rs\n      1  Cargo.toml\n",
+    );
+    for index in 0..8 {
+        use std::fmt::Write as _;
+        writeln!(expected, "      1  src/file{index:02}.rs").unwrap();
+    }
+    assert_eq!(summary, expected);
 }
 
 #[test]
