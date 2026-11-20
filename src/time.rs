@@ -1,13 +1,21 @@
-//! The clock used for waits and deadlines, available with the `tokio` feature.
+//! The clock used for waits, deadlines and expiry, available with the `tokio`
+//! feature.
 //!
 //! Build deadlines from [`now`], for example
 //! `time::now() + Duration::from_secs(5)`, and wait with [`sleep`] or
 //! [`sleep_until`]. Deadlines remain [`tokio::time::Instant`] values accepted
-//! by the library's `_until` methods. Use [`std::time::Instant::now`] to
-//! measure elapsed wall-clock time instead.
+//! by the library's `_until` methods.
 //!
-//! Outside `adamantium::testing` (with the `deterministic` feature), these functions
-//! delegate to Tokio, including its paused test clock. Inside an execution they
+//! Read [`now`] for every duration that program logic depends on: cache and
+//! token TTLs, expiry, retry and backoff windows, rate limits and timeouts.
+//! Checks built on it run in virtual time in the deterministic harness. Use
+//! [`std::time::Instant::now`] only for metrics and logging, whose values never
+//! decide what the program does. For absolute timestamps from outside the
+//! process, such as a JWT or cookie `exp`, compare against [`wall_now`].
+//!
+//! Outside `adamantium::testing` (with the `deterministic` feature), [`now`],
+//! [`sleep`] and [`sleep_until`] delegate to Tokio, including its paused test
+//! clock, and [`wall_now`] reads the system clock. Inside an execution they
 //! use virtual time: the clock advances to the earliest pending deadline only
 //! when no application task can run. All timers at that instant become ready
 //! together; the scheduler explores the order in which their tasks resume.
@@ -17,6 +25,9 @@
 //! the execution that uses them; `Instant` itself carries no execution identity.
 //! A sleep belongs to the execution where it is first polled and cannot be
 //! polled or dropped in another execution. Dropping it unregisters its timer.
+//! Inside an execution, [`wall_now`] starts at
+//! `adamantium::testing::Config::wall_epoch` and advances in lockstep with
+//! [`now`].
 //!
 //! ```
 //! use adamantium::time;
@@ -28,7 +39,7 @@
 //! # }
 //! ```
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tokio::time::Instant;
 
@@ -43,6 +54,39 @@ pub fn now() -> Instant {
         return crate::runtime::clock::now();
     }
     Instant::now()
+}
+
+/// Returns the current wall-clock time for comparing against absolute
+/// timestamps, such as a JWT or cookie `exp`.
+///
+/// Outside the deterministic harness this is [`SystemTime::now`]; Tokio's
+/// paused test clock does not move it. Inside an execution it starts at
+/// `adamantium::testing::Config::wall_epoch` and advances exactly as [`now`]
+/// does, so a replay sees the same timestamps. Measure durations with [`now`],
+/// not with differences between wall-clock readings, which jump when the system
+/// clock is adjusted.
+///
+/// ```
+/// use adamantium::time;
+/// use std::time::{Duration, UNIX_EPOCH};
+///
+/// fn expired(exp_secs: u64) -> bool {
+///     time::wall_now() >= UNIX_EPOCH + Duration::from_secs(exp_secs)
+/// }
+///
+/// assert!(expired(1_000_000_000)); // 2001-09-09
+/// assert!(!expired(4_102_444_800)); // 2100-01-01
+/// ```
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the wall-clock entry point delegates to the system clock here"
+)]
+pub fn wall_now() -> SystemTime {
+    #[cfg(feature = "deterministic")]
+    if crate::runtime::World::current().is_model() {
+        return crate::runtime::clock::wall_now();
+    }
+    SystemTime::now()
 }
 
 /// Waits for `duration` to elapse without blocking the worker thread.

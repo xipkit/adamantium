@@ -33,6 +33,7 @@ fn config() -> Config {
         seed: 143,
         iterations: 100,
         max_steps: 2_000,
+        ..Config::default()
     }
 }
 
@@ -422,6 +423,16 @@ fn nesting_harnesses_and_zero_bounds_are_errors() {
         ))
         .is_err()
     );
+    assert!(
+        catch_unwind(|| testing::check(
+            Config {
+                wall_epoch: std::time::UNIX_EPOCH - Duration::from_nanos(1),
+                ..config()
+            },
+            || async {}
+        ))
+        .is_err()
+    );
     testing::check(config(), || async {}).unwrap();
 }
 
@@ -455,7 +466,11 @@ fn trace_files_round_trip_without_payloads_and_validate_versions() {
     old.insert("format".into(), 2.into());
     old.remove("scheduler");
     old.remove("iterations");
-    assert_invalid(old.into(), "format is 2, expected 3");
+    assert_invalid(old.into(), "format is 2, expected 4");
+
+    let mut missing_epoch = record.as_object().unwrap().clone();
+    missing_epoch.remove("wall_epoch");
+    assert_invalid(missing_epoch.into(), "missing field `wall_epoch`");
 
     let cases = [
         ("engine", "shuttle=0.0.0".into(), "engine is"),
@@ -523,7 +538,7 @@ fn corpus_replays_saved_failures_and_identifies_the_first_error() {
     std::fs::write(second, "{\"format\":2}").unwrap();
     let error = testing::replay_corpus(&paths, factory).unwrap_err();
     assert!(matches!(error, CorpusError::Load { path, source }
-        if &path == second && source.to_string().contains("format is 2, expected 3")));
+        if &path == second && source.to_string().contains("format is 2, expected 4")));
     assert_eq!(visits.load(Ordering::Relaxed), 1);
     for path in paths {
         std::fs::remove_file(path).unwrap();

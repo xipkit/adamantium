@@ -533,7 +533,9 @@ With the `tokio` feature, use `adamantium::time::sleep(duration)` and `adamantiu
 - Outside the deterministic harness, these functions and `time::now()` use the Tokio clock, including its paused test clock.
 - Inside a deterministic execution, they use virtual time without real timers. Time advances to the earliest pending deadline only when no application task can run. All timers at that instant become ready together.
 - For periodic waits, use `time::Interval` (or `time::Interval::at`), with `tick_until(&cancellation)` for cancellable loops and an explicit `MissedTickBehavior`.
-- To measure elapsed wall-clock time, `std::time::Instant::now()` is still allowed.
+- Read `time::now()` for every duration that program logic depends on: cache and token TTLs, expiry, retry and backoff windows, rate limits and timeouts. The deterministic harness then tests them in virtual time.
+- Compare absolute timestamps from outside the process, such as a JWT or cookie `exp`, with `time::wall_now()`. Outside the harness it is `SystemTime::now()`, and Tokio's paused clock does not move it. Inside an execution it starts at `testing::Config::wall_epoch` and advances with virtual time.
+- Use `std::time::Instant::now()` only for metrics and logging, whose values never decide what the program does.
 
 ## Randomness
 

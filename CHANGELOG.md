@@ -10,6 +10,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `adamantium`: `time::wall_now()` reads the wall clock for comparing absolute
+  timestamps such as a JWT or cookie `exp`. In the deterministic harness it
+  starts at `testing::Config::wall_epoch` and advances with virtual time, and
+  a `Replay` records the epoch, so expiry checks test and replay without real
+  waits.
 - `adamantium`: `SingleFlight::run_until` waits for a shared operation only
   until a `Cancellation` is requested or a deadline passes. A caller that
   stops leaves the operation to the others sharing it, and drops it only if
@@ -103,8 +108,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   instead of repeating the question asked of the model. Reports record their
   rule pack and use schema version 4, so `--cache-from` needs a report from
   this version.
-- `adamantium`: replay records use format 3 to capture the scheduler and its
-  bounds. Regenerate saved records from previous formats.
+- `adamantium`: replay records use format 4 to capture the scheduler, its
+  bounds and the wall-clock epoch. Regenerate saved records from previous
+  formats.
+- `adamantium`: `testing::Config` has a `wall_epoch` field. Struct literals
+  that list every field need `..Config::default()`.
+- `adamantium`: the `time` docs and the `tokio::time::Instant::now` lint
+  message direct TTLs, cache expiry and retry windows to `time::now()`, and
+  `std::time::Instant::now()` only to metrics and logging.
 - `cargo-adamantium`: Default rules report Tokio `oneshot`, Tokio `watch`,
   and `std::sync::mpsc::sync_channel`. Strict rules also report bounded Tokio
   `mpsc`, `Notify`, and `Semaphore`. Broadcast diagnostics recommend

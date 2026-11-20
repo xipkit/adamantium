@@ -18,7 +18,7 @@ use std::{
     pin::{Pin, pin},
     sync::{Arc, Mutex},
     task::Poll,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const TICK: Duration = Duration::from_secs(60 * 60 * 24);
@@ -28,6 +28,7 @@ fn config() -> Config {
         seed: 161,
         iterations: 500,
         max_steps: 10_000,
+        ..Config::default()
     }
 }
 
@@ -56,6 +57,157 @@ fn each_iteration_and_replay_restart_at_the_same_origin() {
     let record = testing::check(config(), factory.clone()).unwrap();
     assert_eq!(testing::check(config(), factory.clone()).unwrap(), record);
     assert_eq!(testing::replay(&record, factory).unwrap(), record);
+}
+
+#[test]
+fn wall_clock_starts_each_execution_at_the_default_epoch_and_follows_virtual_time() {
+    check(|| async {
+        let epoch = Config::default().wall_epoch;
+        assert_eq!(time::wall_now(), epoch);
+        let start = time::now();
+        time::sleep(TICK).await;
+        assert_eq!(time::wall_now(), epoch + TICK);
+        time::sleep_until(start + TICK * 3).await;
+        assert_eq!(time::wall_now(), epoch + TICK * 3);
+        time::sleep(Duration::from_nanos(1)).await;
+        assert_eq!(time::wall_now(), epoch + TICK * 3 + Duration::from_nanos(1));
+    });
+}
+
+#[test]
+fn concurrent_tasks_read_the_wall_clock_in_lockstep_with_virtual_time() {
+    check(|| async {
+        let epoch = Config::default().wall_epoch;
+        let start = time::now();
+        let readings = testing::parallel((1..=3u32).map(|days| async move {
+            time::sleep(TICK * days).await;
+            (time::now() - start, time::wall_now())
+        }))
+        .await;
+        for (days, (elapsed, wall)) in (1..=3u32).zip(readings) {
+            assert_eq!(elapsed, TICK * days);
+            assert_eq!(wall, epoch + TICK * days);
+        }
+    });
+}
+
+#[test]
+fn a_configured_wall_epoch_is_recorded_and_replayed() {
+    let epoch = UNIX_EPOCH + Duration::from_secs(2_000_000_000);
+    let config = Config {
+        wall_epoch: epoch,
+        ..config()
+    };
+    let factory = move || async move {
+        assert_eq!(time::wall_now(), epoch);
+        time::sleep(TICK).await;
+        assert_eq!(time::wall_now(), epoch + TICK);
+    };
+    let record = testing::check(config, factory).unwrap();
+    assert_eq!(record.wall_epoch(), epoch);
+    assert_eq!(testing::check(config, factory).unwrap(), record);
+    // The replay has no Config: it must take the epoch from the record.
+    assert_eq!(testing::replay(&record, factory).unwrap(), record);
+
+    let path =
+        std::env::temp_dir().join(format!("adamantium-wall-epoch-{}.json", std::process::id()));
+    record.save(&path).unwrap();
+    let loaded = testing::Replay::load(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(loaded.wall_epoch(), epoch);
+    assert_eq!(testing::replay(&loaded, factory).unwrap(), record);
+}
+
+/// A bearer token checked against its `exp` claim, with a key set cached for a
+/// TTL measured on the deadline clock.
+struct Verifier {
+    keys_fetched_at: tokio::time::Instant,
+    fetches: u32,
+}
+
+impl Verifier {
+    const KEY_TTL: Duration = Duration::from_secs(60 * 60);
+
+    fn new() -> Self {
+        Self {
+            keys_fetched_at: time::now(),
+            fetches: 1,
+        }
+    }
+
+    fn accepts(&mut self, exp: SystemTime) -> bool {
+        if time::now() >= self.keys_fetched_at + Self::KEY_TTL {
+            self.keys_fetched_at = time::now();
+            self.fetches += 1;
+        }
+        time::wall_now() < exp
+    }
+}
+
+#[test]
+fn token_expiry_and_cache_ttl_are_checked_without_real_waits() {
+    check(|| async {
+        let verifier = Actor::new(Verifier::new());
+        let exp = time::wall_now() + Duration::from_secs(90 * 60);
+        let checks = testing::parallel([0u64, 59, 61, 89, 90].map(|minutes| {
+            let verifier = verifier.clone();
+            async move {
+                time::sleep(Duration::from_secs(minutes * 60)).await;
+                (minutes, verifier.with(|verifier| verifier.accepts(exp)))
+            }
+        }))
+        .await;
+        assert_eq!(
+            checks,
+            [(0, true), (59, true), (61, true), (89, true), (90, false)]
+        );
+        assert_eq!(verifier.read(|verifier| verifier.fetches), 2);
+    });
+}
+
+#[test]
+fn a_failure_decided_by_the_wall_clock_replays_identically() {
+    async fn failure() {
+        let exp = Actor::new(time::wall_now() + TICK);
+        let refresher = exp.clone();
+        // Both timers fire at the token's expiry. Only the schedule decides
+        // whether the refresh lands before the check.
+        testing::parallel([
+            Box::pin(async move {
+                time::sleep(TICK).await;
+                refresher.with(|exp| *exp = time::wall_now() + TICK);
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>,
+            Box::pin(async move {
+                time::sleep(TICK).await;
+                assert!(time::wall_now() < exp.snapshot(), "token expired");
+            }),
+        ])
+        .await;
+    }
+    // Some schedules pass, so the failure comes from the explored order.
+    assert!(
+        testing::check(
+            Config {
+                iterations: 1,
+                ..config()
+            }
+            .with_scheduler(testing::SchedulerMode::Dfs),
+            failure
+        )
+        .is_ok()
+    );
+    let first = testing::check(config(), failure).unwrap_err();
+    assert_eq!(first.kind(), FailureKind::Panic);
+    assert_eq!(
+        testing::check(config(), failure).unwrap_err().replay(),
+        first.replay()
+    );
+    assert_eq!(
+        testing::replay(first.replay(), failure)
+            .unwrap_err()
+            .replay(),
+        first.replay()
+    );
 }
 
 #[test]

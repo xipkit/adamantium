@@ -25,6 +25,7 @@ fn config() -> Config {
         seed: 160,
         iterations: 500,
         max_steps: 30_000,
+        ..Config::default()
     }
 }
 fn check(factory: Scenario) {
