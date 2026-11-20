@@ -108,9 +108,9 @@ future constructed inside limit work and polled after it is allowed.
 on tuple literals when at least one arm is a timer (`time::sleep` or
 `time::sleep_until`), flagging the call unless every arm is on the documented
 drop-safe library operations list (`Channel::receive`, `Receiver::receive`,
-`ReplyReceiver::receive`, `Reply::closed`, `Watcher::receive`,
-`Watcher::wait_for`, `time::sleep`, `time::sleep_until`,
-`Cancellation::cancelled`). Arms may be direct future calls or `async { ... }`
+`ReplyReceiver::receive`, `Reply::closed`, `Feed::receive`,
+`Watcher::receive`, `Watcher::changed`, `Watcher::wait_for`, `time::sleep`,
+`time::sleep_until`, `Cancellation::cancelled`). Arms may be direct future calls or `async { ... }`
 blocks whose awaited calls are all on that list.
 
 Inline closure calls (including locally aliased closures), actor callbacks,

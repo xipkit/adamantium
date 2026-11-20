@@ -1014,7 +1014,8 @@ fn classify_future<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> Futu
             | (Some("adamantium::channel::Receiver"), "receive")
             | (Some("adamantium::reply::ReplyReceiver"), "receive")
             | (Some("adamantium::reply::Reply"), "closed")
-            | (Some("adamantium::watch::Watcher"), "receive" | "wait_for")
+            | (Some("adamantium::fanout::Feed"), "receive")
+            | (Some("adamantium::watch::Watcher"), "receive" | "changed" | "wait_for")
             | (Some("adamantium::tasks::Cancellation"), "cancelled")
     );
     if drop_safe {

@@ -157,12 +157,20 @@ async fn const_arguments() {
 
 async fn custom_work() {}
 
+struct Lookalike;
+impl Lookalike {
+    async fn changed(&mut self) {}
+    async fn receive(&mut self) {}
+}
+
 async fn race_with_timer(
     ch: &metal::Channel<()>,
     rx: &metal::Receiver<()>,
     reply_rx: &metal::ReplyReceiver<()>,
     reply: &metal::Reply<()>,
     watcher: &mut metal::Watcher<u8>,
+    feed: &mut metal::Feed<u8>,
+    lookalike: &mut Lookalike,
     cancel: &metal::Cancellation,
 ) {
     use metal::{Race, race, time};
@@ -177,6 +185,8 @@ async fn race_with_timer(
     race((time::sleep(delay), async { rx.receive().await; }, async { custom_work().await })).await; // race
     race((async { time::sleep(delay).await }, async { rx.receive().await; custom_work().await })).await; // race
     race((time::sleep(delay), async { (async { rx.receive().await; }).await; })).await; // race
+    race((time::sleep(delay), lookalike.changed())).await; // race
+    race((time::sleep(delay), async { lookalike.receive().await; })).await; // race
 
     // Allowed: every arm is on the documented drop-safe list.
     race((time::sleep(delay), async { ch.receive().await; })).await;
@@ -185,6 +195,10 @@ async fn race_with_timer(
     race((time::sleep(delay), reply.closed())).await;
     race((time::sleep(delay), async { watcher.receive().await; })).await;
     race((time::sleep(delay), async { watcher.wait_for(|v| *v > 0).await; })).await;
+    race((time::sleep(delay), async { watcher.changed().await; })).await;
+    race((watcher.changed(), async { time::sleep(delay).await; None })).await;
+    race((time::sleep(delay), async { feed.receive().await; })).await;
+    race((feed.receive(), async { time::sleep(delay).await; Err(metal::Ended::Closed) })).await;
     race((time::sleep(delay), time::sleep(delay))).await;
     race((time::sleep(delay), time::sleep_until(deadline))).await;
     race((time::sleep(delay), cancel.cancelled())).await;
