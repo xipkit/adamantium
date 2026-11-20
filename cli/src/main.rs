@@ -29,26 +29,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run Clippy with adamantium's rules on a Cargo project.
-    Check {
-        /// The project directory, or its Cargo.toml.
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
-        format: ReportFormat,
-        /// Also run the experimental lints from this explicitly built Dylint library.
-        #[arg(long)]
-        dylint_library: Option<PathBuf>,
-        /// Include the strict rules for arithmetic and synchronization.
-        #[arg(long)]
-        strict: bool,
-        /// Leave out the findings in an earlier `--format json` report, so only
-        /// new findings fail the check.
-        #[arg(long, value_name = "REPORT")]
-        baseline: Option<PathBuf>,
-        /// Arguments passed on to `cargo clippy`, such as `--release` or `-p name`.
-        #[arg(last = true)]
-        cargo_args: Vec<String>,
-    },
+    Check(check::Args),
     /// Apply machine-applicable fixes and mechanical migration rewrites.
     Fix {
         #[arg(default_value = ".")]
@@ -196,21 +177,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
-        Command::Check {
-            path,
-            format,
-            strict,
-            baseline,
-            cargo_args,
-            dylint_library,
-        } => check::run(
-            &path,
-            &cargo_args,
-            format,
-            strict,
-            baseline.as_deref(),
-            dylint_library.as_deref(),
-        ),
+        Command::Check(args) => check::run(args),
         Command::Fix {
             path,
             dry_run,
