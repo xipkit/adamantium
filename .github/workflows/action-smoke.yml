@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 # A newer push to a pull request replaces the run for the older one.
 concurrency:
@@ -23,7 +24,7 @@ jobs:
           components: clippy
       - uses: ./
         with:
-          rev: bfa0f78916cebb6c65cfaeefce45ed34339d324f
+          rev: 576dff216296d5e8a960c6972779639e93e40f7c
           working-directory: cli/tests/fixtures/clean
 
   cached:
@@ -36,15 +37,68 @@ jobs:
           components: clippy
       - uses: ./
         with:
-          rev: bfa0f78916cebb6c65cfaeefce45ed34339d324f
+          rev: 576dff216296d5e8a960c6972779639e93e40f7c
           working-directory: cli/tests/fixtures/clean
       - name: Check violations fail
         id: violations
         continue-on-error: true
         uses: ./
         with:
-          rev: bfa0f78916cebb6c65cfaeefce45ed34339d324f
+          rev: 576dff216296d5e8a960c6972779639e93e40f7c
           working-directory: cli/tests/fixtures/violations
+          sarif: 'true'
       - name: Assert violations failed
         if: steps.violations.outcome != 'failure'
+        run: exit 1
+      - name: Verify findings in SARIF
+        run: python3 -c 'import json, os; report = json.load(open(os.environ["RUNNER_TEMP"] + "/adamantium.sarif")); assert report["runs"][0]["results"]'
+      - name: Create dependency baseline
+        working-directory: cli/tests/fixtures/action-smoke
+        run: |
+          "$RUNNER_TEMP/adamantium/bin/cargo-adamantium" adamantium deps --format json > "$RUNNER_TEMP/deps-baseline.json"
+      - name: Exercise optional inputs
+        uses: ./
+        with:
+          rev: 576dff216296d5e8a960c6972779639e93e40f7c
+          working-directory: cli/tests/fixtures/action-smoke
+          sarif: 'true'
+          upload-sarif: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+          sarif-category: adamantium-smoke-one
+          deps: 'true'
+          deps-baseline: ${{ runner.temp }}/deps-baseline.json
+          style: concurrency
+          style-changed: HEAD
+      - name: Upload another SARIF category
+        uses: ./
+        with:
+          rev: 576dff216296d5e8a960c6972779639e93e40f7c
+          working-directory: cli/tests/fixtures/action-smoke
+          sarif: 'true'
+          upload-sarif: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+          sarif-category: adamantium-smoke-two
+      - name: Verify SARIF report
+        run: python3 -c 'import json, os; report = json.load(open(os.environ["RUNNER_TEMP"] + "/adamantium.sarif")); assert report["version"] == "2.1.0"'
+      - name: Check feature-gated dependency is audited
+        id: dependency-feature
+        continue-on-error: true
+        uses: ./
+        with:
+          rev: 576dff216296d5e8a960c6972779639e93e40f7c
+          working-directory: cli/tests/fixtures/action-smoke
+          deps: 'true'
+          deps-args: |
+            --features
+            probe
+      - name: Assert dependency audit failed
+        if: steps.dependency-feature.outcome != 'failure'
+        run: exit 1
+      - name: Reject invalid inputs
+        id: invalid
+        continue-on-error: true
+        uses: ./
+        with:
+          rev: 576dff216296d5e8a960c6972779639e93e40f7c
+          deps: 'yes'
+      - name: Assert invalid input failed
+        if: steps.invalid.outcome != 'failure'
         run: exit 1
