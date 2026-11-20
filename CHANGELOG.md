@@ -10,6 +10,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `adamantium`: `SingleFlight::run_until` waits for a shared operation only
+  until a `Cancellation` is requested or a deadline passes. A caller that
+  stops leaves the operation to the others sharing it, and drops it only if
+  it was the last.
 - `adamantium`: `BoundedMap` holds at most a fixed number of entries and
   evicts the least recently used one to make room for a new key, so a cache
   or session table inside an `Actor` stays bounded. `insert` returns the

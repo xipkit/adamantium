@@ -18,12 +18,15 @@ use std::{
     pin::{Pin, pin},
     sync::{Arc, Mutex},
     task::Poll,
+    time::Duration,
 };
 
 use adamantium::{
-    Actor, Channel, SingleFlight, race,
+    Actor, Cancellation, Channel, ScopeError, SingleFlight, race,
     testing::{self, Config},
+    time,
 };
+use tokio::time::Instant;
 
 type Worker = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -121,6 +124,18 @@ impl Store {
         self.remote
             .with(|remote| remote.pushed = remote.pushed.max(target));
         Ok(target)
+    }
+
+    /// Shares a push until `cancellation` is requested or `deadline`
+    /// passes, and returns the newest commit it covered.
+    async fn sync_until(
+        &self,
+        cancellation: &Cancellation,
+        deadline: Option<Instant>,
+    ) -> Result<u64, ScopeError<String>> {
+        self.sync
+            .run_until("control", cancellation, deadline, || self.clone().push())
+            .await
     }
 
     fn remote(&self) -> Remote {
@@ -421,4 +436,355 @@ fn a_failed_push_reaches_every_caller_and_the_next_acknowledgment_retries() {
         assert_eq!((remote.started, remote.pushed), (2, 2));
         assert!(store.sync.is_empty());
     });
+}
+
+/// How long a caller of `run_until` waits before it stops.
+const TICK: Duration = Duration::from_millis(1);
+
+/// Which of two callers sharing a push stops waiting.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Caller {
+    /// The caller that starts the push.
+    Starter,
+    /// The caller that joins it.
+    Joiner,
+}
+
+/// How a caller stops waiting.
+#[derive(Clone, Copy)]
+enum Stop {
+    Cancel,
+    Deadline,
+}
+
+impl Stop {
+    fn error(self) -> ScopeError<String> {
+        match self {
+            Self::Cancel => ScopeError::Cancelled,
+            Self::Deadline => ScopeError::DeadlineExceeded,
+        }
+    }
+}
+
+/// A caller that stops at `at`, by `stop`: one of `run_until`'s two
+/// arguments, and a worker that requests the cancellation at `at` when that
+/// is how it stops.
+fn stopping_at(stop: Stop, at: Instant) -> (Cancellation, Option<Instant>, Worker) {
+    let cancellation = Cancellation::new();
+    match stop {
+        Stop::Deadline => (cancellation, Some(at), Box::pin(async {})),
+        Stop::Cancel => {
+            let canceller = cancellation.clone();
+            let worker = Box::pin(async move {
+                time::sleep_until(at).await;
+                canceller.cancel();
+            });
+            (cancellation, None, worker)
+        }
+    }
+}
+
+/// Two callers share a push, and `leaver` stops just as the network
+/// answers. The other caller finishes the push, whether or not the one that
+/// stopped had been woken to poll it.
+fn one_caller_stops_and_the_other_finishes_the_push(leaver: Caller, stop: Stop) {
+    let left = Seen::default();
+    let handed_on = Seen::default();
+    let observed = (left.clone(), handed_on.clone());
+    check(move || {
+        let (left, handed_on) = observed.clone();
+        async move {
+            let store = Store::new();
+            let commit = store.commit();
+            let at = time::now() + TICK;
+            let (cancellation, deadline, canceller) = stopping_at(stop, at);
+            let answered = Actor::new(false);
+            let (started, joined) = (Channel::bounded(1), Channel::bounded(1));
+            let call = |caller: Caller| -> Worker {
+                let (store, started, joined) = (store.clone(), started.clone(), joined.clone());
+                let (cancellation, answered) = (cancellation.clone(), answered.clone());
+                let (left, handed_on) = (left.clone(), handed_on.clone());
+                Box::pin(async move {
+                    let signal = match caller {
+                        Caller::Starter => &started,
+                        Caller::Joiner => {
+                            started.receive().await;
+                            &joined
+                        }
+                    };
+                    if caller != leaver {
+                        let open = Cancellation::new();
+                        let covered = joining(store.sync_until(&open, None), signal).await;
+                        assert_eq!(covered, Ok(commit));
+                        return;
+                    }
+                    let result = joining(store.sync_until(&cancellation, deadline), signal).await;
+                    if result == Ok(commit) {
+                        return;
+                    }
+                    assert_eq!(result, Err(stop.error()));
+                    left.record(true);
+                    // The network had answered, so the push was woken, but
+                    // it had not finished: the other caller must poll it.
+                    handed_on.record(answered.snapshot() && store.remote().pushed == 0);
+                })
+            };
+            let network: Worker = Box::pin({
+                let (store, joined, answered) = (store.clone(), joined.clone(), answered.clone());
+                async move {
+                    joined.receive().await;
+                    time::sleep_until(at).await;
+                    store.answer(Ok(()));
+                    answered.with(|answered| *answered = true);
+                }
+            });
+            let starter = call(Caller::Starter);
+            let joiner = call(Caller::Joiner);
+            testing::parallel([starter, joiner, network, canceller]).await;
+            let remote = store.remote();
+            assert_eq!((remote.started, remote.cancelled, remote.pushed), (1, 0, 1));
+            assert!(store.sync.is_empty());
+        }
+    });
+    assert!(left.count() > 0, "the caller never stopped");
+    assert!(
+        handed_on.count() > 0,
+        "the caller never stopped with an answered push unfinished"
+    );
+}
+
+#[test]
+fn a_cancelled_starter_leaves_the_push_to_the_joiner() {
+    one_caller_stops_and_the_other_finishes_the_push(Caller::Starter, Stop::Cancel);
+}
+
+#[test]
+fn a_starter_past_its_deadline_leaves_the_push_to_the_joiner() {
+    one_caller_stops_and_the_other_finishes_the_push(Caller::Starter, Stop::Deadline);
+}
+
+#[test]
+fn a_cancelled_joiner_leaves_the_push_to_the_starter() {
+    one_caller_stops_and_the_other_finishes_the_push(Caller::Joiner, Stop::Cancel);
+}
+
+#[test]
+fn a_joiner_past_its_deadline_leaves_the_push_to_the_starter() {
+    one_caller_stops_and_the_other_finishes_the_push(Caller::Joiner, Stop::Deadline);
+}
+
+/// Both callers sharing a push stop before the network answers, `first`
+/// before the other. The push outlives the first and is dropped with the
+/// last, and the next call starts a new one.
+fn the_last_caller_to_stop_drops_the_push(first: Caller, stops: [Stop; 2]) {
+    check(move || async move {
+        let store = Store::new();
+        let commit = store.commit();
+        let start = time::now();
+        let (started, joined) = (Channel::bounded(1), Channel::bounded(1));
+        let mut workers = Vec::<Worker>::new();
+        for (caller, stop) in [Caller::Starter, Caller::Joiner].into_iter().zip(stops) {
+            let last = caller != first;
+            let at = start + if last { TICK * 2 } else { TICK };
+            let (cancellation, deadline, canceller) = stopping_at(stop, at);
+            workers.push(canceller);
+            let (store, started, joined) = (store.clone(), started.clone(), joined.clone());
+            workers.push(Box::pin(async move {
+                let signal = match caller {
+                    Caller::Starter => &started,
+                    Caller::Joiner => {
+                        started.receive().await;
+                        &joined
+                    }
+                };
+                let result = joining(store.sync_until(&cancellation, deadline), signal).await;
+                assert_eq!(result, Err(stop.error()));
+                assert_eq!(time::now(), at);
+                let remote = store.remote();
+                if last {
+                    assert_eq!((remote.started, remote.cancelled), (1, 1));
+                    assert!(store.sync.is_empty(), "the entry was removed");
+                } else {
+                    assert_eq!((remote.started, remote.cancelled), (1, 0));
+                    assert_eq!(store.sync.len(), 1, "the other caller still waits");
+                }
+            }));
+        }
+        workers.push(Box::pin(async move {
+            joined.receive().await;
+        }));
+        testing::parallel(workers).await;
+
+        store.answer(Ok(()));
+        let covered = store.sync_until(&Cancellation::new(), None).await;
+        assert_eq!(covered, Ok(commit));
+        let remote = store.remote();
+        assert_eq!((remote.started, remote.cancelled, remote.pushed), (2, 1, 1));
+        assert!(store.sync.is_empty());
+    });
+}
+
+#[test]
+fn a_joiner_cancelled_after_the_starter_drops_the_push() {
+    the_last_caller_to_stop_drops_the_push(Caller::Starter, [Stop::Deadline, Stop::Cancel]);
+}
+
+#[test]
+fn a_starter_past_its_deadline_after_the_joiner_drops_the_push() {
+    the_last_caller_to_stop_drops_the_push(Caller::Joiner, [Stop::Deadline, Stop::Cancel]);
+}
+
+#[test]
+fn a_starter_cancelled_after_the_joiner_drops_the_push() {
+    the_last_caller_to_stop_drops_the_push(Caller::Joiner, [Stop::Cancel, Stop::Deadline]);
+}
+
+#[test]
+fn a_joiner_past_its_deadline_after_the_starter_drops_the_push() {
+    the_last_caller_to_stop_drops_the_push(Caller::Starter, [Stop::Cancel, Stop::Deadline]);
+}
+
+#[test]
+fn a_call_already_cancelled_neither_starts_nor_joins_a_push() {
+    let joined_first = Seen::default();
+    let observed = joined_first.clone();
+    check(move || {
+        let joined_first = observed.clone();
+        async move {
+            let store = Store::new();
+            let commit = store.commit();
+            let cancelled = Cancellation::new();
+            cancelled.cancel();
+            let joined = Channel::bounded(1);
+            let caller: Worker = Box::pin({
+                let (store, joined) = (store.clone(), joined.clone());
+                async move {
+                    let open = Cancellation::new();
+                    let covered = joining(store.sync_until(&open, None), &joined).await;
+                    assert_eq!(covered, Ok(commit));
+                }
+            });
+            let refused: Worker = Box::pin({
+                let store = store.clone();
+                async move {
+                    joined_first.record(!store.sync.is_empty());
+                    let result = store.sync_until(&cancelled, None).await;
+                    assert_eq!(result, Err(ScopeError::Cancelled));
+                }
+            });
+            let network: Worker = Box::pin({
+                let store = store.clone();
+                async move {
+                    joined.receive().await;
+                    store.answer(Ok(()));
+                }
+            });
+            testing::parallel([caller, refused, network]).await;
+            let remote = store.remote();
+            assert_eq!((remote.started, remote.cancelled, remote.pushed), (1, 0, 1));
+            assert!(store.sync.is_empty());
+        }
+    });
+    assert!(joined_first.count() > 0, "no push was in flight to join");
+}
+
+/// How many steps the operation's first poll takes after it finds its
+/// answer missing.
+const LINGERING_STEPS: usize = 64;
+
+/// Two callers share an operation, and `leaver` is cancelled while the
+/// starter is still in the operation's first poll. The joiner joins and the
+/// answer arrives during that poll too, so the starter can leave the
+/// operation woken but unpolled, before it ever listened for a wake: the
+/// joiner, which looked while the operation was being polled, must still be
+/// told to take it.
+fn a_caller_cancelled_during_the_first_poll_hands_the_operation_on(leaver: Caller) {
+    let left = Seen::default();
+    let observed = left.clone();
+    check(move || {
+        let left = observed.clone();
+        async move {
+            let flights = SingleFlight::<&str, Result<u32, String>>::new();
+            let answers = Channel::<u32>::bounded(1);
+            // Told, from inside the first poll, that the operation waits
+            // for its answer. That poll then takes several more steps.
+            let waiting = Channel::<()>::bounded(1);
+            let operation = {
+                let (answers, waiting) = (answers.clone(), waiting.clone());
+                move || {
+                    let (answers, waiting) = (answers.clone(), waiting.clone());
+                    let lingering = Actor::new(());
+                    async move {
+                        let mut answer = pin!(answers.receive());
+                        let mut told = false;
+                        let answer = poll_fn(|cx| {
+                            let polled = answer.as_mut().poll(cx);
+                            if polled.is_pending() && !std::mem::replace(&mut told, true) {
+                                waiting.try_send(()).unwrap();
+                                for _ in 0..LINGERING_STEPS {
+                                    lingering.read(|()| ());
+                                }
+                            }
+                            polled
+                        })
+                        .await;
+                        answer.ok_or_else(|| "closed".to_string())
+                    }
+                }
+            };
+            let cancellation = Cancellation::new();
+            let joined = Channel::bounded(1);
+            let call = |caller: Caller| -> Worker {
+                let (flights, waiting, joined) = (flights.clone(), waiting.clone(), joined.clone());
+                let (cancellation, left, operation) =
+                    (cancellation.clone(), left.clone(), operation.clone());
+                Box::pin(async move {
+                    let open = Cancellation::new();
+                    let stop = if caller == leaver {
+                        &cancellation
+                    } else {
+                        &open
+                    };
+                    let call = flights.run_until("op", stop, None, operation);
+                    let result = match caller {
+                        Caller::Starter => call.await,
+                        Caller::Joiner => {
+                            waiting.receive().await;
+                            joining(call, &joined).await
+                        }
+                    };
+                    match result {
+                        Ok(answer) => assert_eq!(answer, 1),
+                        Err(error) => {
+                            assert!(caller == leaver);
+                            assert_eq!(error, ScopeError::Cancelled);
+                            left.record(true);
+                        }
+                    }
+                })
+            };
+            let driver: Worker = Box::pin({
+                let (answers, cancellation, joined) =
+                    (answers.clone(), cancellation.clone(), joined.clone());
+                async move {
+                    joined.receive().await;
+                    cancellation.cancel();
+                    answers.try_send(1).unwrap();
+                }
+            });
+            testing::parallel([call(Caller::Starter), call(Caller::Joiner), driver]).await;
+            assert!(flights.is_empty());
+        }
+    });
+    assert!(left.count() > 0, "the caller was never cancelled");
+}
+
+#[test]
+fn a_starter_cancelled_during_its_first_poll_hands_the_operation_to_the_joiner() {
+    a_caller_cancelled_during_the_first_poll_hands_the_operation_on(Caller::Starter);
+}
+
+#[test]
+fn a_joiner_cancelled_during_the_first_poll_leaves_the_operation_to_the_starter() {
+    a_caller_cancelled_during_the_first_poll_hands_the_operation_on(Caller::Joiner);
 }

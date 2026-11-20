@@ -17,6 +17,10 @@ use crate::runtime::{
     Guard, Lock, World,
     wait::{WaitQueue, Waiter},
 };
+#[cfg(feature = "tokio")]
+use crate::{Cancellation, ScopeError, race, tasks::shutdown};
+#[cfg(feature = "tokio")]
+use tokio::time::Instant;
 
 /// Lets concurrent calls for the same key share one operation and its
 /// output.
@@ -230,6 +234,55 @@ where
             polling: true,
             done: false,
         }
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl<K, T, E> SingleFlight<K, Result<T, E>>
+where
+    K: Hash + Eq + Clone,
+    T: Clone + Send + 'static,
+    E: Clone + Send + 'static,
+{
+    /// Runs like [`run`](Self::run), but waits only until `cancellation` is
+    /// requested or `deadline` passes. Pass `None` for no deadline. A
+    /// deadline uses [`crate::time`].
+    ///
+    /// Returns `ScopeError::Failed` with the operation's error, or
+    /// `Cancelled` or `DeadlineExceeded`. A call that stops leaves the
+    /// operation to the other calls sharing it, and drops it only if it was
+    /// the last. A request already present at a poll wins, so a call that
+    /// finds one at its first poll neither starts nor joins an operation,
+    /// and cancellation wins over an equally ready deadline. A request also
+    /// wins over an operation that finished but whose output this call has
+    /// yet to take.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operation for `key` makes this call itself, or if the
+    /// operation panics.
+    #[allow(
+        clippy::future_not_send,
+        reason = "the future is Send when the key and the operation are"
+    )]
+    pub async fn run_until<F, Fut>(
+        &self,
+        key: K,
+        cancellation: &Cancellation,
+        deadline: Option<Instant>,
+        operation: F,
+    ) -> Result<T, ScopeError<E>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+    {
+        // The race drops the losing call before it returns, so a call that
+        // stops has left the flight by the time it does.
+        race((
+            async { Err(shutdown(cancellation, deadline).await.scope_error()) },
+            async { self.run(key, operation).await.map_err(ScopeError::Failed) },
+        ))
+        .await
     }
 }
 
