@@ -262,7 +262,7 @@ pub const DISALLOWED_TYPES: &[(&str, &[&str])] = &[
 /// The path a disallowed-macro, -method or -type finding names. Clippy quotes
 /// the path as the configuration lists it, as in "use of a disallowed method
 /// `tokio::spawn`".
-fn quoted_path(message: &str) -> Option<&str> {
+pub(crate) fn quoted_path(message: &str) -> Option<&str> {
     message.split('`').nth(1)
 }
 
@@ -353,6 +353,20 @@ fn capitalize(text: &str) -> String {
 
 /// The Clippy configuration bundled with the CLI and used by this repository.
 pub const CLIPPY_TOML: &str = include_str!("../clippy.toml");
+
+pub(crate) const RWLOCK_READ: &str = "std::sync::RwLock::read";
+pub(crate) const RWLOCK_WRITE: &str = "std::sync::RwLock::write";
+
+/// Adds method resolution probes that `fix` consumes without reporting them.
+pub(crate) fn fix_clippy_toml(toml: &str) -> Result<String> {
+    let mut config: DocumentMut = toml.parse().context("parsing fixer Clippy configuration")?;
+    let methods = config
+        .get_mut("disallowed-methods")
+        .and_then(Item::as_array_mut)
+        .context("fixer Clippy configuration has no disallowed-methods array")?;
+    methods.extend([RWLOCK_READ, RWLOCK_WRITE]);
+    Ok(config.to_string())
+}
 
 /// The Clippy configuration for the selected tier. Strict mode adds entries
 /// to the same Clippy lists, which are enabled by both tiers.

@@ -1,5 +1,5 @@
-//! Shared-state rewrites: local `Arc<Mutex<T>>` bindings and private struct
-//! fields become `Actor<T>`.
+//! Shared-state rewrites: local bindings and private fields holding
+//! `Arc<Mutex<T>>` or `Arc<RwLock<T>>` become `Actor<T>`.
 //!
 //! A binding is rewritten only when every use of it, and of every clone of
 //! it, has one of the forms the migration guide marks as mechanical: the
@@ -52,6 +52,8 @@ pub(super) enum Reason {
     /// a value other than the state, which might call an actor and would
     /// then panic inside the callback.
     Calls,
+    /// A shared reader must be proved to run no code under its guard.
+    RwLockRead,
     /// Code that locks a field might run inside an actor's callback, where
     /// the field's own actor would then panic.
     Nested(&'static str),
@@ -67,6 +69,7 @@ impl Reason {
         match self {
             Self::AcrossStatements => "a-guard-held-across-statements",
             Self::AcrossAwait => "a-lock-held-across-an-await",
+            Self::RwLockRead => "rwlock",
             Self::TwoLocks | Self::InsideActor | Self::Calls | Self::Nested(_) => {
                 "two-locks-at-once"
             }
@@ -84,6 +87,9 @@ impl Reason {
             Self::Calls => {
                 "a statement holding its guard calls a function or another value's method, which might use an actor"
             }
+            Self::RwLockRead => {
+                "its read guard does more than copy the state, so fix can't prove that serializing its readers is safe"
+            }
             Self::Nested(detail) | Self::Unfollowed(detail) => detail,
             Self::Poll => "its future polling context is unproved; the rewrite remains manual",
         }
@@ -94,6 +100,7 @@ impl Reason {
 pub(super) struct Refusal {
     pub(super) line: usize,
     pub(super) name: String,
+    pub(super) kind: LockKind,
     pub(super) reason: Reason,
     pub(super) boundary: Option<String>,
 }
@@ -118,14 +125,40 @@ pub(super) struct Draft {
 
 const ACTOR: &str = "::adamantium::Actor";
 
-/// The imports the rewrite can leave unused: the module and the two types it
-/// replaces.
+/// The standard-library lock Clippy found inside an `Arc`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LockKind {
+    Mutex,
+    RwLock,
+}
+
+impl LockKind {
+    pub(super) fn description(self) -> &'static str {
+        match self {
+            Self::Mutex => "Arc<Mutex<_>>",
+            Self::RwLock => "Arc<RwLock<_>>",
+        }
+    }
+}
+
+/// Types and access methods resolved by Clippy before any edits are made.
+#[derive(Clone, Copy)]
+pub(super) enum LockEvidence {
+    Type(LockKind),
+    Read,
+    Write,
+}
+
+pub(super) type LockSpans = BTreeMap<(usize, usize), LockEvidence>;
+
+/// The imports the rewrite can leave unused.
 pub(super) const IMPORTS: &[&[&str]] = &[
     &["std", "sync"],
     &["alloc", "sync"],
     &["std", "sync", "Arc"],
     &["alloc", "sync", "Arc"],
     &["std", "sync", "Mutex"],
+    &["std", "sync", "RwLock"],
 ];
 
 /// A node whose text fix couldn't find, which only a parser bug would cause.
@@ -154,14 +187,8 @@ const LOCKS: &[&str] = &[
     "snapshot",
 ];
 
-/// Plans the shared-state rewrites for one file. `mutexes` holds the byte
-/// ranges that Clippy resolved to `std::sync::Mutex`.
-pub(super) fn plan(
-    file: &Path,
-    source: &str,
-    mutexes: &BTreeSet<(usize, usize)>,
-    krate: &Crate,
-) -> Draft {
+/// Plans the shared-state rewrites for one file using Clippy's resolved lock spans.
+pub(super) fn plan(file: &Path, source: &str, locks: &LockSpans, krate: &Crate) -> Draft {
     let mut draft = Draft {
         file: file.to_path_buf(),
         groups: Vec::new(),
@@ -185,7 +212,7 @@ pub(super) fn plan(
         text: &text,
         krate,
         file,
-        mutexes,
+        locks,
         names: &names,
         macros: &macros,
         vars: Vec::new(),
@@ -443,6 +470,7 @@ impl Draft {
                 Some(reason) => outcome.refusals.push(Refusal {
                     line: group.line,
                     name: group.name,
+                    kind: group.kind,
                     reason,
                     boundary: group.boundary,
                 }),
@@ -806,18 +834,19 @@ struct Var {
     /// Whether this stands for a struct field rather than a local. Its name
     /// is the field's, and an access through a traced receiver uses it.
     field: bool,
-    /// Whether this is a `&Mutex<T>` parameter or a copy of one, whose
+    /// Whether this is a reference to the lock itself, whose
     /// `clone` copies the reference where an actor's copies the actor.
-    mutex_ref: bool,
+    lock_ref: bool,
     /// The struct with candidate fields that this variable holds or points
     /// to, by its declared type or a struct literal.
     record: Option<String>,
 }
 
-/// One `Arc<Mutex<T>>` and every variable that holds a clone of it.
+/// One shared lock and every variable that holds a clone of it.
 struct Group {
     name: String,
     line: usize,
+    kind: LockKind,
     refusal: Option<Reason>,
     edits: Vec<Edit>,
     /// The field's name, for a struct field.
@@ -834,10 +863,11 @@ struct Group {
 }
 
 impl Group {
-    fn new(name: String, line: usize, edits: Vec<Edit>) -> Self {
+    fn new(name: String, line: usize, kind: LockKind, edits: Vec<Edit>) -> Self {
         Self {
             name,
             line,
+            kind,
             refusal: None,
             edits,
             member: None,
@@ -927,7 +957,7 @@ struct Walker<'a> {
     krate: &'a Crate,
     text: &'a Text<'a>,
     file: &'a Path,
-    mutexes: &'a BTreeSet<(usize, usize)>,
+    locks: &'a LockSpans,
     names: &'a Names,
     macros: &'a HashMap<usize, MacroArgs>,
     vars: Vec<Var>,
@@ -1005,7 +1035,7 @@ impl<'a> Walker<'a> {
             group,
             used: false,
             field: false,
-            mutex_ref: false,
+            lock_ref: false,
             record: None,
         });
         if let Some(scope) = self.scopes.last_mut() {
@@ -1172,13 +1202,15 @@ impl<'a> Walker<'a> {
         .then_some(resolved)
     }
 
-    /// Whether Clippy resolved the text at `range` to `std::sync::Mutex`.
-    fn is_mutex(&self, range: Option<Range<usize>>) -> bool {
-        range.is_some_and(|range| self.mutexes.contains(&(range.start, range.end)))
+    /// The lock type Clippy resolved at `range`.
+    fn lock_kind(&self, range: Range<usize>) -> Option<LockKind> {
+        match self.locks.get(&(range.start, range.end))? {
+            LockEvidence::Type(kind) => Some(*kind),
+            _ => None,
+        }
     }
 
-    /// The text of `Mutex` in a path such as `Mutex::new`: every segment but
-    /// the last.
+    /// The text of the lock type in a path such as `Mutex::new`.
     fn type_prefix(&self, path: &syn::Path) -> Option<Range<usize>> {
         let count = path.segments.len().checked_sub(1)?;
         let first = match &path.leading_colon {
@@ -1195,18 +1227,13 @@ impl<'a> Walker<'a> {
         Some(first.start..last.end)
     }
 
-    /// `Arc<Mutex<T>>`, as `::adamantium::Actor<T>`.
-    fn actor_type(&self, ty: &Type) -> Option<String> {
-        self.actor_of(self.arc_state(ty)?)
-    }
-
     /// `::adamantium::Actor<T>` for the state `T`.
     fn actor_of(&self, state: &Type) -> Option<String> {
         Some(format!("{ACTOR}<{}>", self.text.get(self.text.of(state)?)?))
     }
 
-    /// `T` in `Arc<Mutex<T>>`.
-    fn arc_state<'t>(&self, ty: &'t Type) -> Option<&'t Type> {
+    /// The lock kind and its state type in `Arc<Lock<T>>`.
+    fn arc_state<'t>(&self, ty: &'t Type) -> Option<(LockKind, &'t Type)> {
         let Type::Path(arc) = ty else {
             return None;
         };
@@ -1221,36 +1248,36 @@ impl<'a> Walker<'a> {
         if args.args.len() != 1 || !self.is_arc(&prefix, 0) {
             return None;
         }
-        let Some(GenericArgument::Type(mutex)) = args.args.first() else {
+        let Some(GenericArgument::Type(lock)) = args.args.first() else {
             return None;
         };
-        self.mutex_state(mutex)
+        self.lock_state(lock)
     }
 
-    /// `T` in a `Mutex<T>` that Clippy resolved to `std::sync::Mutex`.
-    fn mutex_state<'t>(&self, ty: &'t Type) -> Option<&'t Type> {
-        let Type::Path(mutex) = ty else {
+    /// The lock kind and its state type in `Lock<T>`.
+    fn lock_state<'t>(&self, ty: &'t Type) -> Option<(LockKind, &'t Type)> {
+        let Type::Path(lock) = ty else {
             return None;
         };
-        if mutex.qself.is_some() || !self.is_mutex(self.text.of(mutex)) {
+        if lock.qself.is_some() {
             return None;
         }
-        let PathArguments::AngleBracketed(inner) = &mutex.path.segments.last()?.arguments else {
+        let kind = self.lock_kind(self.text.of(lock)?)?;
+        let PathArguments::AngleBracketed(inner) = &lock.path.segments.last()?.arguments else {
             return None;
         };
         let Some(GenericArgument::Type(state)) = inner.args.first() else {
             return None;
         };
-        // A mutex can hold a slice or trait object; an actor can't.
+        // These locks can hold a slice or trait object; an actor can't.
         if inner.args.len() != 1 || is_unsized(state, &self.names.unsized_aliases) {
             return None;
         }
-        Some(state)
+        Some((kind, state))
     }
 
-    /// `Arc::new(Mutex::new(x))` or `Arc::new(Mutex::default())`, as an
-    /// `Actor` constructor.
-    fn constructor(&self, expr: &Expr) -> Option<String> {
+    /// A shared lock's kind and its `Actor` constructor.
+    fn constructor(&self, expr: &Expr) -> Option<(LockKind, String)> {
         let Expr::Call(arc) = expr else {
             return None;
         };
@@ -1264,31 +1291,31 @@ impl<'a> Walker<'a> {
         {
             return None;
         }
-        let Some(Expr::Call(mutex)) = arc.args.first() else {
+        let Some(Expr::Call(lock)) = arc.args.first() else {
             return None;
         };
-        let Expr::Path(mutex_new) = &*mutex.func else {
+        let Expr::Path(lock_new) = &*lock.func else {
             return None;
         };
-        let last = mutex_new.path.segments.last()?;
-        if mutex_new.qself.is_some()
-            || mutex_new
+        let last = lock_new.path.segments.last()?;
+        if lock_new.qself.is_some()
+            || lock_new
                 .path
                 .segments
                 .iter()
                 .any(|segment| !matches!(segment.arguments, PathArguments::None))
-            || !self.is_mutex(self.type_prefix(&mutex_new.path))
         {
             return None;
         }
-        match (last.ident.to_string().as_str(), mutex.args.first()) {
-            ("new", Some(state)) if mutex.args.len() == 1 => Some(format!(
-                "{ACTOR}::new({})",
-                self.text.get(self.text.of(state)?)?
-            )),
-            ("default", None) => Some(format!("{ACTOR}::default()")),
-            _ => None,
-        }
+        let kind = self.lock_kind(self.type_prefix(&lock_new.path)?)?;
+        let replacement = match (last.ident.to_string().as_str(), lock.args.first()) {
+            ("new", Some(state)) if lock.args.len() == 1 => {
+                format!("{ACTOR}::new({})", self.text.get(self.text.of(state)?)?)
+            }
+            ("default", None) => format!("{ACTOR}::default()"),
+            _ => return None,
+        };
+        Some((kind, replacement))
     }
 
     /// The variable cloned or moved by `Arc::clone(&m)`, `Arc::clone(r)`
@@ -1301,7 +1328,7 @@ impl<'a> Walker<'a> {
                 if call.method == "clone" && call.args.is_empty() && call.turbofish.is_none() =>
             {
                 self.tracked(&call.receiver)
-                    .filter(|&var| !self.vars.get(var).is_some_and(|var| var.mutex_ref))
+                    .filter(|&var| !self.vars.get(var).is_some_and(|var| var.lock_ref))
                     .map(|var| (var, None))
             }
             Expr::Call(call) => {
@@ -1366,11 +1393,11 @@ impl<'a> Walker<'a> {
             let spelling = ident.ident.to_string();
             let ty_edit = match ty {
                 None => Some(None),
-                Some(ty) => self
-                    .actor_type(ty)
-                    .and_then(|actor| Some(Some(self.edit(self.text.of(ty)?, actor)))),
+                Some(ty) => self.arc_state(ty).and_then(|(_, state)| {
+                    Some(Some(self.edit(self.text.of(ty)?, self.actor_of(state)?)))
+                }),
             };
-            if let Some(constructor) = self.constructor(init)
+            if let Some((kind, constructor)) = self.constructor(init)
                 && let Some(ty_edit) = ty_edit.clone()
                 && let Some(range) = self.text.of(init)
             {
@@ -1378,13 +1405,20 @@ impl<'a> Walker<'a> {
                 let edits = std::iter::once(self.edit(range, constructor))
                     .chain(ty_edit)
                     .collect();
-                self.bind(local, name, spelling, edits);
+                self.bind(local, name, spelling, kind, edits);
                 return;
             }
             if let Some(ty_edit) = ty_edit.clone()
                 && let Some(returned) = self.returned_by(init)
+                && let Some(state) = self.groups.get(returned)
             {
-                let var = self.bind(local, name, spelling, ty_edit.into_iter().collect());
+                let var = self.bind(
+                    local,
+                    name,
+                    spelling,
+                    state.kind,
+                    ty_edit.into_iter().collect(),
+                );
                 if let Some(group) = self.group_of(var) {
                     self.links.push((group, returned));
                 }
@@ -1421,13 +1455,12 @@ impl<'a> Walker<'a> {
                         ),
                     );
                 }
-                // A copy of a `&Mutex<T>` is one too.
-                let mutex_ref = matches!(init, Expr::Path(_))
-                    && self.vars.get(source).is_some_and(|var| var.mutex_ref);
+                let lock_ref = matches!(init, Expr::Path(_))
+                    && self.vars.get(source).is_some_and(|var| var.lock_ref);
                 let var = self.declare(name, group);
                 if let Some(entry) = self.vars.get_mut(var) {
                     entry.spelling = spelling;
-                    entry.mutex_ref = mutex_ref;
+                    entry.lock_ref = lock_ref;
                 }
                 self.settle(local, Some(var));
                 return;
@@ -1464,10 +1497,16 @@ impl<'a> Walker<'a> {
         local: &'a Local,
         name: String,
         spelling: String,
+        kind: LockKind,
         edits: Vec<Edit>,
     ) -> usize {
         let group = self.groups.len();
-        let mut state = Group::new(name.clone(), self.text.line(local.let_token.span), edits);
+        let mut state = Group::new(
+            name.clone(),
+            self.text.line(local.let_token.span),
+            kind,
+            edits,
+        );
         if !local.attrs.is_empty() {
             state.refuse(Reason::Unfollowed("its declaration has attributes"));
         }
@@ -1596,23 +1635,35 @@ fn is_assignment(op: &BinOp) -> bool {
 }
 
 impl<'a> Walker<'a> {
-    /// The variable whose guard `expr` is: `m.lock().unwrap()` or
-    /// `m.lock().expect("...")`.
-    fn guard_var(&self, expr: &Expr) -> Option<usize> {
+    /// The tracked variable and guard access in `m.lock().unwrap()` and
+    /// the corresponding `read`, `write` and `expect` forms.
+    fn guard_access<'e>(&self, expr: &'e Expr) -> Option<(usize, &'e Expr, Option<Mode>)> {
         let Expr::MethodCall(unwrap) = expr else {
             return None;
         };
         let Expr::MethodCall(lock) = &*unwrap.receiver else {
             return None;
         };
-        if !is_unwrap(unwrap)
-            || lock.method != "lock"
-            || !lock.args.is_empty()
-            || lock.turbofish.is_some()
-        {
+        if !is_unwrap(unwrap) || !lock.args.is_empty() || lock.turbofish.is_some() {
             return None;
         }
-        self.tracked(&lock.receiver)
+        let var = self.tracked(&lock.receiver)?;
+        let kind = self.groups.get(self.group_of(var)?)?.kind;
+        let mode = match kind {
+            LockKind::Mutex if lock.method == "lock" => None,
+            LockKind::Mutex => return None,
+            LockKind::RwLock => {
+                // An extension trait on the `Arc` can take precedence over
+                // the `RwLock` method picked up through Deref.
+                let range = self.text.of(&lock.method)?;
+                match self.locks.get(&(range.start, range.end))? {
+                    LockEvidence::Read => Some(Mode::Read),
+                    LockEvidence::Write => Some(Mode::With),
+                    LockEvidence::Type(_) => return None,
+                }
+            }
+        };
+        Some((var, &lock.receiver, mode))
     }
 
     /// `Arc::try_unwrap(m).unwrap().into_inner().unwrap()`, or the same with
@@ -1884,11 +1935,11 @@ impl<'a> Walker<'a> {
         })
     }
 
-    fn guard(&mut self, var: usize, guard: &'a Expr) {
+    fn guard(&mut self, var: usize, guard: &'a Expr, held: &Expr, access: Option<Mode>) {
         if let Some(entry) = self.vars.get_mut(var) {
             entry.used = true;
         }
-        match self.guard_edit(var, guard) {
+        match self.guard_edit(var, guard, held, access) {
             Ok((edit, runs)) => {
                 self.lock_site(var, runs);
                 self.add_edit(var, edit);
@@ -1903,6 +1954,8 @@ impl<'a> Walker<'a> {
         &mut self,
         var: usize,
         guard: &'a Expr,
+        held: &Expr,
+        access: Option<Mode>,
     ) -> Result<(Edit, BTreeSet<String>), Reason> {
         if self.inside_actor() {
             return Err(Reason::InsideActor);
@@ -1913,7 +1966,6 @@ impl<'a> Walker<'a> {
             .get(var)
             .map(|var| (var.name.clone(), var.spelling.clone()))
             .ok_or(UNLOCATED)?;
-        let held = lock_receiver(guard).ok_or(UNLOCATED)?;
         let holder = self.holder(var, held).ok_or(UNLOCATED)?;
         // A field's receiver stays outside the closure, so the code moving
         // into it must not use the receiver either.
@@ -1927,6 +1979,12 @@ impl<'a> Walker<'a> {
         }
         if scan.locks {
             return Err(Reason::TwoLocks);
+        }
+        // Serializing readers is safe for a direct copy. Even methods on
+        // the state and implicit calls through Deref or operators could
+        // wait for another reader, so leave those reads for review.
+        if access == Some(Mode::Read) && !copies_guard(full, guard) {
+            return Err(Reason::RwLockRead);
         }
         let inside = match plan.narrow {
             Some(expr) => {
@@ -1977,10 +2035,11 @@ impl<'a> Walker<'a> {
         };
         if let Some(expr) = plan.narrow {
             let range = self.text.of(expr).ok_or(UNLOCATED)?;
-            let replacement = format!("{holder}.read(|{name}| {})", substitute(range.clone())?);
+            let method = access.unwrap_or(Mode::Read).method();
+            let replacement = format!("{holder}.{method}(|{name}| {})", substitute(range.clone())?);
             return Ok((self.edit(range, replacement), runs));
         }
-        let method = plan.mode.method();
+        let method = access.unwrap_or(plan.mode).method();
         let (range, replacement) = match plan.root {
             Root::Statement(full, semi) => {
                 let (range, assignment, attributed) = match full {
@@ -2257,15 +2316,16 @@ fn is_unwrap(call: &syn::ExprMethodCall) -> bool {
         }
 }
 
-/// `m` in the guard `m.lock().unwrap()`.
-fn lock_receiver(guard: &Expr) -> Option<&Expr> {
-    let Expr::MethodCall(unwrap) = guard else {
-        return None;
-    };
-    let Expr::MethodCall(lock) = &*unwrap.receiver else {
-        return None;
-    };
-    Some(&lock.receiver)
+/// Whether the only operation under a read guard is its own dereference.
+fn copies_guard(full: Full<'_>, guard: &Expr) -> bool {
+    fn unparen(mut expr: &Expr) -> &Expr {
+        while let Expr::Paren(paren) = expr {
+            expr = &paren.expr;
+        }
+        expr
+    }
+    matches!(full, Full::Expr(expr) if matches!(unparen(expr), Expr::Unary(unary)
+        if matches!(unary.op, UnOp::Deref(_)) && is(unparen(&unary.expr), guard)))
 }
 
 fn contains_let(expr: &Expr) -> bool {
@@ -2416,9 +2476,9 @@ impl<'a> Visit<'a> for Walker<'a> {
             self.returned(group, expr);
             return;
         }
-        if let Some(var) = self.guard_var(expr) {
+        if let Some((var, held, access)) = self.guard_access(expr) {
             self.stack.push(Node::Expr(expr));
-            self.guard(var, expr);
+            self.guard(var, expr, held, access);
             self.stack.pop();
             return;
         }
@@ -2788,16 +2848,24 @@ mod tests {
     use super::*;
     use crate::fix::source::prune_imports;
 
-    /// Plans `source` as the only file of its package, as Clippy would see
-    /// it with every occurrence of each of `mutexes` resolved to
-    /// `std::sync::Mutex`.
+    /// Marks the text that stands in for Clippy's resolved `Mutex` spans.
+    pub(super) fn mutex_spans(source: &str, mutexes: &[&str]) -> LockSpans {
+        mutexes
+            .iter()
+            .flat_map(|mutex| {
+                source.match_indices(mutex).map(|(start, _)| {
+                    (
+                        (start, start + mutex.len()),
+                        LockEvidence::Type(LockKind::Mutex),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Plans `source` as the only file of its package.
     pub(super) fn outcome(source: &str, mutexes: &[&str]) -> Outcome {
-        let mut spans = BTreeSet::new();
-        for mutex in mutexes {
-            for (start, _) in source.match_indices(mutex) {
-                spans.insert((start, start + mutex.len()));
-            }
-        }
+        let spans = mutex_spans(source, mutexes);
         let file = Path::new("lib.rs");
         let mut krate = Crate::default();
         krate.add(file, source);

@@ -28,6 +28,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `--summary` shows counts by rule and hotspot file.
 - `cargo-adamantium` reads strict and baseline defaults for `check` and a
   dependency baseline for `deps --deny-new` from `Cargo.toml` metadata.
+- `cargo-adamantium`: `fix` rewrites immediately awaited `sleep_until` calls,
+  clock reads that supply a proved deadline, tracked `Arc<RwLock<T>>` state
+  with direct-copy reads, and simple `u64` draws from `rand` and `fastrand`.
 - `cargo-adamantium`: `style check --pack concurrency` reviews files for
   state with a joint invariant split across separate Actors, locks or
   atomics (`split_actor_invariant`) and unbounded in-memory collection growth

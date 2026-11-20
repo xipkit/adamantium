@@ -20,7 +20,7 @@ changes behavior in a way to check.
 | `lock().unwrap().clone()` | `snapshot()` | Yes |
 | `Arc::try_unwrap(m)` then `into_inner()` | `into_inner()` | Yes |
 | A guard held across statements | A method on the state | No |
-| `RwLock<T>` | `Actor<T>`, often holding a copy-on-write value | No |
+| `Arc<RwLock<T>>` | `Actor<T>`, often holding a copy-on-write value | Mostly |
 | A lock held across an await | Read, await, then record | No |
 | Blocking I/O while a lock is held | The I/O, then record | No |
 | Two locks held at once | One actor, or one after the other | No |
@@ -202,6 +202,11 @@ While another handle shares the state, `into_inner` returns the actor back as
 its error, as `Arc::try_unwrap` returned the `Arc`.
 
 ### `RwLock`
+
+`fix` can migrate a tracked `Arc<std::sync::RwLock<T>>` when each read guard
+copies the state directly and each write guard meets the usual shared-state
+checks. Reads that borrow the state, hold another lock, or call code while
+holding the guard require review.
 
 `Actor::read` takes the same lock as `with`, so readers wait for each other.
 For state that many tasks read and few write, keep a copy-on-write value in

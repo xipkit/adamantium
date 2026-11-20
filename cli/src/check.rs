@@ -525,12 +525,16 @@ fn print_json(value: &impl Serialize) -> Result<()> {
 fn write_clippy_config(
     dir: &Path,
     strict: bool,
+    fix: bool,
 ) -> Result<(PathBuf, std::borrow::Cow<'static, str>)> {
     let dir = dir
         .canonicalize()
         .with_context(|| format!("resolving {}", dir.display()))?;
     let path = dir.join("clippy.toml");
-    let toml = lints::clippy_toml(strict)?;
+    let mut toml = lints::clippy_toml(strict)?;
+    if fix {
+        toml = lints::fix_clippy_toml(&toml)?.into();
+    }
     fs::write(&path, toml.as_bytes()).with_context(|| format!("writing {}", path.display()))?;
     Ok((path, toml))
 }
@@ -545,7 +549,7 @@ pub(crate) fn check(
     check_with_suggestions(root, cargo_args, echo, strict, None)
 }
 
-/// Checks a project and collects raw diagnostics for the findings when requested.
+/// Checks a project and collects raw diagnostics for findings and fixer probes when requested.
 pub(crate) fn check_with_suggestions(
     root: &Path,
     cargo_args: &[String],
@@ -590,7 +594,8 @@ fn check_selected(
         dylint_library,
     } = options;
     let conf = tempfile::tempdir().context("creating a directory for clippy.toml")?;
-    let (clippy_config, clippy_toml) = write_clippy_config(conf.path(), strict)?;
+    let (clippy_config, clippy_toml) =
+        write_clippy_config(conf.path(), strict, diagnostics.is_some())?;
 
     let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -673,9 +678,20 @@ fn check_selected(
             match parsed.reason.as_str() {
                 "compiler-message" => {
                     if let Some(diagnostic) = parsed.message {
+                        let probe = diagnostics.is_some()
+                            && diagnostic
+                                .code
+                                .as_ref()
+                                .is_some_and(|code| code.code == "clippy::disallowed_methods")
+                            && matches!(
+                                lints::quoted_path(&diagnostic.message),
+                                Some(lints::RWLOCK_READ | lints::RWLOCK_WRITE)
+                            );
                         let before = sorted.findings.len();
-                        classify(diagnostic, &setting, &mut sorted);
-                        if sorted.findings.len() > before
+                        if !probe {
+                            classify(diagnostic, &setting, &mut sorted);
+                        }
+                        if (probe || sorted.findings.len() > before)
                         && let Some(diagnostics) = diagnostics.as_mut()
                         // Deep macro diagnostics are still reported by check,
                         // but are never candidates for source fixes.
@@ -1410,7 +1426,7 @@ mod tests {
         let links = tempfile::tempdir().unwrap();
         let link = links.path().join("conf");
         std::os::unix::fs::symlink(real.path(), &link).unwrap();
-        let (path, toml) = write_clippy_config(&link, false).unwrap();
+        let (path, toml) = write_clippy_config(&link, false, false).unwrap();
         assert_eq!(
             path,
             real.path().canonicalize().unwrap().join("clippy.toml")

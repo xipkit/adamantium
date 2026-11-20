@@ -382,6 +382,151 @@ fn binary(main: &str) -> tempfile::TempDir {
     dir
 }
 
+fn add_random_dependencies(dir: &Path) -> std::io::Result<()> {
+    let manifest = dir.join("Cargo.toml");
+    let text = fs::read_to_string(&manifest)?;
+    let text = text
+        .replace(" }\ntokio", ", default-features = false }\ntokio")
+        .replace(
+            "[profile.release]",
+            "fastrand = \"2\"\nrand = \"0.10\"\nrand_08 = { package = \"rand\", version = \"0.8\" }\n\n[profile.release]",
+        );
+    fs::write(manifest, text)
+}
+
+#[test]
+fn timer_random_and_rwlock_rewrites_keep_behavior_and_are_idempotent() {
+    for (source, draws, output, rewrites) in [
+        (
+            include_str!("fixtures/expression-rewrites/time.rs"),
+            false,
+            "timers completed\n",
+            &[
+                "::adamantium::time::sleep_until(::adamantium::time::now()).await;",
+                "let deadline = ::adamantium::time::now() + Duration::from_millis(1);",
+                "::adamantium::time::sleep_until(deadline).await;",
+                "    adamantium::time::sleep_until(::adamantium::time::now()).await;",
+            ][..],
+        ),
+        (
+            include_str!("fixtures/expression-rewrites/random.rs"),
+            true,
+            "true\n",
+            &[
+                "::adamantium::random::u64()",
+                "::adamantium::random::up_to( /* lower bound */ limit)",
+                "::adamantium::random::up_to(7_u64)",
+                "::adamantium::random::up_to(limit)",
+            ],
+        ),
+        (
+            include_str!("fixtures/shared-state/rwlock.rs"),
+            false,
+            "42 2\n",
+            &[
+                "value: ::adamantium::Actor<u32>",
+                "self.value.with(|value| *value += 1)",
+                "fn fresh() -> ::adamantium::Actor<u32>",
+                "fn read_value(lock: &::adamantium::Actor<u32>)",
+                "lock.read(|lock| *lock)",
+            ],
+        ),
+    ] {
+        let dir = binary(source);
+        if draws {
+            add_random_dependencies(dir.path()).unwrap();
+        }
+        let file = dir.path().join("src/main.rs");
+        assert_eq!(execute(dir.path()), output.as_bytes());
+
+        let preview = run(&["fix", "--dry-run"], dir.path());
+        let stderr = String::from_utf8_lossy(&preview.stderr);
+        assert_eq!(preview.status.code(), Some(1), "{stderr}");
+        assert!(!stderr.contains("std::sync::RwLock::read"), "{stderr}");
+        assert!(!stderr.contains("std::sync::RwLock::write"), "{stderr}");
+        assert!(!preview.stdout.is_empty(), "{stderr}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), source);
+
+        let fixed = run(&["fix"], dir.path());
+        let stderr = String::from_utf8_lossy(&fixed.stderr);
+        assert!(fixed.status.success(), "{stderr}");
+        let after = fs::read_to_string(&file).unwrap();
+        for snippet in rewrites {
+            assert!(after.contains(snippet), "missing {snippet}\n{after}");
+        }
+        assert_eq!(execute(dir.path()), output.as_bytes());
+        let again = run(&["fix", "--dry-run"], dir.path());
+        assert!(again.status.success(), "{after}");
+        assert!(again.stdout.is_empty(), "{after}");
+    }
+}
+
+#[test]
+fn timer_and_random_rewrites_leave_unproved_calls_unchanged() {
+    for (source, draws) in [
+        (
+            include_str!("fixtures/expression-rewrites/time-review.rs"),
+            false,
+        ),
+        (
+            include_str!("fixtures/expression-rewrites/random-review.rs"),
+            true,
+        ),
+        (
+            "pub fn seeded() -> u64 { fastrand::seed(42); fastrand::u64(..) }\n",
+            true,
+        ),
+    ] {
+        let dir = project(source);
+        if draws {
+            add_random_dependencies(dir.path()).unwrap();
+        }
+        let output = run(&["fix"], dir.path());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+            source
+        );
+    }
+}
+
+#[test]
+fn rwlock_rewrites_refuse_guards_with_unproved_reader_behavior() {
+    let source = include_str!("fixtures/shared-state/rwlock-review.rs");
+    let dir = binary(source);
+    let output = run(&["fix"], dir.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        source
+    );
+    for (name, reason) in [
+        ("held", "a guard of it lives beyond one statement"),
+        ("nested", "a statement holding its guard takes another lock"),
+        ("borrowed", "its read guard does more than copy the state"),
+        ("calls", "its read guard does more than copy the state"),
+        (
+            "state_method",
+            "its read guard does more than copy the state",
+        ),
+        (
+            "try_read",
+            "it is passed, returned or stored where fix can't follow it",
+        ),
+        (
+            "shadowed",
+            "it is passed, returned or stored where fix can't follow it",
+        ),
+    ] {
+        assert!(
+            stderr.contains(&format!("`{name}` stays an `Arc<RwLock<_>>`: {reason}")),
+            "{stderr}"
+        );
+    }
+}
+
 #[test]
 fn shared_state_fields_and_parameters_build_pass_check_and_keep_behavior() {
     for name in ["fields", "params"] {

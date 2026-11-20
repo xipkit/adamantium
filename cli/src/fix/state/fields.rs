@@ -71,22 +71,21 @@ impl<'a> Walker<'a> {
             let Some(ident) = &field.ident else {
                 continue;
             };
-            let Some(actor) = self.actor_type(&field.ty) else {
+            let Some((kind, state)) = self.arc_state(&field.ty) else {
                 continue;
             };
-            let Some(range) = self.text.of(&field.ty) else {
+            let (Some(range), Some(actor)) = (self.text.of(&field.ty), self.actor_of(state)) else {
                 continue;
             };
             let member = bare(ident);
             let mut group = Group::new(
                 format!("{name}.{member}"),
                 self.text.line(ident.span()),
+                kind,
                 vec![self.edit(range, actor)],
             );
             group.member = Some(member.clone());
-            // A struct's visibility doesn't matter: an actor is `Send`,
-            // `Sync`, `Unpin` and unwind safe exactly when the `Arc<Mutex<T>>`
-            // was, so code outside the module can't tell the difference.
+            // The field's visibility controls whether outside code can access it.
             if !matches!(field.vis, syn::Visibility::Inherited) {
                 group.refuse(Reason::Unfollowed(
                     "code outside its module might use it, since it is visible there",
@@ -100,8 +99,7 @@ impl<'a> Walker<'a> {
                     "its struct has an attribute or a derive other than `Clone` and `Default`",
                 ));
             }
-            if state_type(&field.ty).is_none_or(|state| may_be_unsized(state, &structure.generics))
-            {
+            if may_be_unsized(state, &structure.generics) {
                 group.refuse(Reason::Unfollowed(
                     "its state might be unsized, which an actor can't hold",
                 ));
@@ -120,7 +118,7 @@ impl<'a> Walker<'a> {
                 group: Some(index),
                 used: true,
                 field: true,
-                mutex_ref: false,
+                lock_ref: false,
                 record: None,
             });
             // A second candidate of the same name is refused once the
@@ -278,7 +276,7 @@ impl<'a> Walker<'a> {
     }
 
     fn initializer(&mut self, var: usize, expr: &'a Expr) {
-        if let Some(constructor) = self.constructor(expr)
+        if let Some((_, constructor)) = self.constructor(expr)
             && let Some(range) = self.text.of(expr)
         {
             self.visit_expr(expr);
@@ -428,23 +426,6 @@ impl<'a> Walker<'a> {
     }
 }
 
-/// `T` in `Arc<Mutex<T>>`.
-fn state_type(ty: &Type) -> Option<&Type> {
-    fn inner(ty: &Type) -> Option<&Type> {
-        let Type::Path(path) = ty else {
-            return None;
-        };
-        let syn::PathArguments::AngleBracketed(args) = &path.path.segments.last()?.arguments else {
-            return None;
-        };
-        match args.args.first()? {
-            syn::GenericArgument::Type(ty) => Some(ty),
-            _ => None,
-        }
-    }
-    inner(inner(ty)?)
-}
-
 /// Whether `state` might be unsized given the struct's generics: a
 /// parameter declared `?Sized`, or an associated type, which may be too.
 pub(super) fn may_be_unsized(state: &Type, generics: &syn::Generics) -> bool {
@@ -500,7 +481,10 @@ pub(super) fn may_be_unsized(state: &Type, generics: &syn::Generics) -> bool {
 mod tests {
     use std::{fs, path::Path};
 
-    use super::super::{Reason, plan, settle, tests::fix};
+    use super::super::{
+        Reason, plan, settle,
+        tests::{fix, mutex_spans},
+    };
     use crate::fix::scan::Crate;
 
     const MUTEXES: &[&str] = &["Mutex", "Mutex<u64>", "Mutex<Vec<u8>>"];
@@ -804,14 +788,7 @@ mod tests {
     #[test]
     fn another_file_naming_the_field_refuses_it() {
         let source = format!("{COUNTER}fn f(c: &Counter) {{ *c.hits.lock().unwrap() += 1; }}\n");
-        let spans = MUTEXES
-            .iter()
-            .flat_map(|mutex| {
-                source
-                    .match_indices(mutex)
-                    .map(|(start, _)| (start, start + mutex.len()))
-            })
-            .collect();
+        let spans = mutex_spans(&source, MUTEXES);
         for (other, refused) in [
             ("fn g(x: (u8,)) -> u8 { let hits = x.0; hits }\n", false),
             ("fn g(x: &super::Thing) -> u8 { x.hits }\n", true),
@@ -838,14 +815,7 @@ mod tests {
         let source = format!(
             "{COUNTER}pub fn hit() {{\n    let c = Counter {{ hits: Arc::new(Mutex::new(0)), name: String::new() }};\n    *c.hits.lock().unwrap() += 1;\n}}\n"
         );
-        let spans = MUTEXES
-            .iter()
-            .flat_map(|mutex| {
-                source
-                    .match_indices(mutex)
-                    .map(|(start, _)| (start, start + mutex.len()))
-            })
-            .collect();
+        let spans = mutex_spans(&source, MUTEXES);
         for (file, refused) in [("src/main.rs", false), ("src/lib.rs", true)] {
             let dir = tempfile::tempdir().unwrap();
             fs::create_dir(dir.path().join("src")).unwrap();
