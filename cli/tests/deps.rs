@@ -538,6 +538,54 @@ fn policy_report(output: &Output, code: i32) -> TestResult<Value> {
 }
 
 #[test]
+fn deps_policy_uses_the_manifest_baseline_unless_the_cli_overrides_it() -> TestResult<()> {
+    let fixture = PolicyFixture::new()?;
+    let caller = tempfile::tempdir()?;
+    let manifest = fixture.dir.path().join("Cargo.toml");
+    let ci = fixture.dir.path().join("ci");
+    fs::create_dir(&ci)?;
+    let original = fs::read_to_string(&manifest)?;
+    fs::write(
+        &manifest,
+        format!(
+            "{original}\n[workspace]\nexclude = ['vendor']\n\
+             [workspace.metadata.adamantium.deps]\nbaseline = 'ci/deps-baseline.json'\n"
+        ),
+    )?;
+
+    fixture.install("0.1.0", "pub fn safe() {}\n")?;
+    fixture.save_baseline()?;
+    fs::copy(&fixture.baseline, caller.path().join("override.json"))?;
+    fixture.install("0.2.0", "pub unsafe fn probe() {}\n")?;
+    fixture.save_baseline()?;
+    let baseline = ci.join("deps-baseline.json");
+    fs::rename(&fixture.baseline, &baseline)?;
+
+    let audit = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_cargo-adamantium"))
+            .current_dir(caller.path())
+            .args(["adamantium", "deps", "--format", "json"])
+            .arg(&manifest)
+            .args(args)
+            .args(["--", "--locked", "--offline"])
+            .output()
+    };
+
+    let configured = policy_report(&audit(&["--deny-new"])?, 0)?;
+    assert_eq!(configured["policy"]["status"], "clean");
+    let overridden = policy_report(&audit(&["--deny-new", "--baseline", "override.json"])?, 1)?;
+    assert_eq!(overridden["policy"]["status"], "findings");
+
+    fs::remove_file(baseline)?;
+    let output = audit(&["--deny-new"])?;
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("deps-baseline.json"));
+    let report = policy_report(&audit(&[])?, 0)?;
+    assert!(report.get("policy").is_none());
+    Ok(())
+}
+
+#[test]
 fn deps_policy_compares_an_unchanged_lockfile_and_dependency_updates() -> TestResult<()> {
     let fixture = PolicyFixture::new()?;
     fixture.install(

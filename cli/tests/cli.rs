@@ -697,6 +697,72 @@ fn check_with(dir: &Path, args: &[&str]) -> io::Result<(Option<i32>, Vec<u8>, St
 }
 
 #[test]
+fn check_uses_manifest_defaults_and_explicit_overrides() -> TestResult<()> {
+    let project = strict_project(false)?;
+    let caller = tempfile::tempdir()?;
+    let manifest = project.path().join("Cargo.toml");
+    let original = fs::read_to_string(&manifest)?;
+    let ci = project.path().join("ci");
+    fs::create_dir(&ci)?;
+
+    let check = |args: &[&str], code| -> TestResult<serde_json::Value> {
+        let output = adamantium()
+            .current_dir(caller.path())
+            .args(["adamantium", "check", "--format", "json"])
+            .arg(&manifest)
+            .args(args)
+            .output()?;
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+
+    let metadata = "[package.metadata.adamantium]";
+    fs::write(
+        &manifest,
+        format!("{original}\n{metadata}\nstrict = false\n"),
+    )?;
+    let empty = check(&[], 0)?;
+    fs::write(
+        caller.path().join("override.json"),
+        serde_json::to_vec(&empty)?,
+    )?;
+    let strict = check(&["--strict"], 1)?;
+    let baseline = ci.join("check-baseline.json");
+    fs::write(&baseline, serde_json::to_vec(&strict)?)?;
+    fs::write(
+        &manifest,
+        format!("{original}\n{metadata}\nstrict = true\nbaseline = 'ci/check-baseline.json'\n"),
+    )?;
+
+    let configured = check(&[], 0)?;
+    assert_eq!(
+        configured["baselined"]["clippy::arithmetic_side_effects"],
+        3
+    );
+    assert_eq!(configured["baseline_unmatched"], 0);
+
+    let report = check(&["--baseline", "override.json"], 1)?;
+    assert_eq!(report["findings"], strict["findings"]);
+    let report = check(&["--no-strict"], 0)?;
+    assert_eq!(report["baseline_unmatched"], 3);
+
+    fs::write(project.path().join("src/lib.rs"), "")?;
+    let stale = check(&["--fail-on-stale-baseline"], 1)?;
+    assert_eq!(stale["baseline_unmatched"], 3);
+    let pruned = check(&["--update-baseline"], 0)?;
+    assert_eq!(pruned["baseline_unmatched"], 0);
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(baseline)?)?;
+    assert_eq!(saved["findings"], serde_json::json!([]));
+    Ok(())
+}
+
+#[test]
 fn check_reports_recursive_macros_at_each_caller() {
     let fixture = fixture("macros");
     let (code, stdout, stderr) = check_with(&fixture, &["--format", "json"]).unwrap();

@@ -27,7 +27,7 @@ use self::{
     metadata::Kind,
     scan::{Crate, Site, UnsafeCounts, Unscanned},
 };
-use crate::manifest;
+use crate::{config::Config, manifest};
 
 const SCHEMA_VERSION: u32 = 2;
 
@@ -94,8 +94,16 @@ pub fn run(
     deny_new: bool,
     baseline: Option<&Path>,
 ) -> Result<ExitCode> {
-    let baseline = baseline.map(policy::Baseline::load).transpose()?;
     let root = manifest::root(path)?;
+    let config = Config::load(&root)?;
+    let baseline = if deny_new {
+        baseline
+            .or(config.deps_baseline.as_deref())
+            .map(policy::Baseline::load)
+            .transpose()?
+    } else {
+        None
+    };
     let report = audit(&root, cargo_args)?;
     let policy = deny_new
         .then(|| policy::evaluate(&report, baseline.as_ref()))
