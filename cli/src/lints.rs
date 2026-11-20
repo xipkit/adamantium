@@ -46,6 +46,7 @@ pub struct Example {
 /// Names registered by the opt-in Dylint library, excluded from `init`.
 pub const EXPERIMENTAL_LINTS: &[&str] = &[
     "adamantium_blocking_in_async",
+    "adamantium_blocking_in_actor",
     "adamantium_nested_actor_access",
     "adamantium_nested_limit",
     "adamantium_race_with_timer",
@@ -79,6 +80,7 @@ impl<'a> Hint<'a> {
             "clippy::disallowed_methods" => disallowed(message, DISALLOWED_METHODS),
             "clippy::disallowed_types" => disallowed(message, DISALLOWED_TYPES),
             "adamantium_blocking_in_async" => Some("blocking-work"),
+            "adamantium_blocking_in_actor" => Some("blocking-work-inside-a-callback"),
             "adamantium_nested_actor_access" => Some("two-locks-at-once"),
             "adamantium_nested_limit" => Some("two-limits-at-once"),
             "adamantium_race_with_timer" => Some("the-first-event"),
@@ -309,6 +311,9 @@ fn rule_replacement(rule: &str) -> Option<&'static str> {
         "adamantium_blocking_in_async" => {
             Some("Use adamantium::blocking or Tasks::spawn_blocking for blocking work.")
         }
+        "adamantium_blocking_in_actor" => Some(
+            "Do the blocking work before or after the callback, and record its result in the actor.",
+        ),
         "adamantium_nested_actor_access" => {
             Some("Access the second actor after the outer callback returns.")
         }
