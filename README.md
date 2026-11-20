@@ -147,6 +147,7 @@ After checkout and installing Rust with Clippy, use `xipkit/adamantium` with an 
 | `sarif` | Set to `true` to write the check report to `runner.temp/adamantium.sarif`. Findings still fail the check. |
 | `upload-sarif` | Set to `true` with `sarif: 'true'` to upload to GitHub code scanning; grant `security-events: write`. |
 | `sarif-category` | Code scanning category, default `adamantium`; choose a distinct category for each analysis in a workflow. |
+| `deep` | Set to `true` with a published CLI `version` to run crate-wide Dylint checks on Linux x86-64 (GNU) or macOS arm64. |
 | `deps` | Set to `true` to run `deps --deny-new`. Without a baseline it checks against zero findings. |
 | `deps-baseline` | Optional dependency report path, relative to `working-directory`; requires `deps: 'true'`. |
 | `deps-args` | Cargo metadata/tree arguments for the audit, one per line. Set feature flags to match `cargo-args`; they are not copied automatically. Requires `deps: 'true'`. Use the same flags when creating the baseline. |
