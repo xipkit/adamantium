@@ -14,7 +14,9 @@ use std::{
     time::Duration,
 };
 
-use adamantium::{Actor, Backoff, Cancellation, Reply, Restarts, ScopeError, Tasks, time};
+use adamantium::{
+    Actor, AsyncActor, Backoff, Cancellation, Reply, Restarts, ScopeError, Tasks, time,
+};
 use tracing::{
     Event, Subscriber,
     field::{Field, Visit},
@@ -544,4 +546,92 @@ async fn a_named_handled_task_runs_its_handler_in_its_span_and_is_reported_until
     assert_eq!(messages, ["connection failed", "scope deadline exceeded"]);
     assert_eq!(events[0].0["in task"], "failed");
     assert_eq!(events[1].0["running_tasks"], r#"["stuck"]"#);
+}
+
+#[tokio::test]
+async fn a_named_async_actor_runs_its_handler_in_a_child_task_span() {
+    use tracing::Instrument;
+
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    async {
+        Tasks::<&str>::run(async |tasks| {
+            async {
+                let actor = AsyncActor::new_named(
+                    tasks,
+                    "db-conn",
+                    (),
+                    2,
+                    |(), (label, reply): (&'static str, Reply<&'static str>)| {
+                        Box::pin(async move {
+                            tracing::info!(label, "handling actor message");
+                            tokio::task::yield_now().await;
+                            assert_eq!(
+                                tracing::Span::current().metadata().unwrap().name(),
+                                "adamantium.task"
+                            );
+                            reply.send(label).unwrap();
+                            Ok(())
+                        })
+                    },
+                );
+                assert_eq!(actor.call(|reply| ("ping", reply)).await, Some("ping"));
+                actor.close();
+                Ok(())
+            }
+            .instrument(tracing::info_span!("request"))
+            .await
+        })
+        .await
+        .unwrap();
+    }
+    .with_subscriber(subscriber)
+    .await;
+
+    let entered = capture.entered.lock().unwrap();
+    assert!(!entered.is_empty());
+    assert!(entered.iter().all(|span| {
+        span.fields.0.get("task.name").map(String::as_str) == Some("db-conn")
+            && span.parent == Some("request")
+    }));
+    let events = capture.events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].0["message"], "handling actor message");
+    assert_eq!(events[0].0["in task"], "db-conn");
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[tokio::test(start_paused = true)]
+async fn a_named_async_actor_is_reported_at_deadline_until_closed() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    let deadline = time::now() + Duration::from_secs(10);
+    let result = async {
+        Tasks::<&str>::run_until(Cancellation::new(), Some(deadline), async |tasks| {
+            let done = AsyncActor::new_named(tasks, "finished-actor", (), 1, |(), r: Reply<()>| {
+                Box::pin(async move {
+                    r.send(()).unwrap();
+                    Ok(())
+                })
+            });
+            let stuck = AsyncActor::new_named(tasks, "stuck-actor", (), 1, |(), (): ()| {
+                Box::pin(async move { forever().await })
+            });
+            done.call(|r| r).await.unwrap();
+            done.close();
+            stuck.send(()).await.unwrap();
+            forever().await
+        })
+        .await
+    }
+    .with_subscriber(subscriber)
+    .await;
+    assert_eq!(result, Err(ScopeError::DeadlineExceeded));
+
+    let events = capture.events.lock().unwrap();
+    let [report] = events.as_slice() else {
+        panic!("expected one deadline report, got {events:?}");
+    };
+    assert_eq!(report.0["message"], "scope deadline exceeded");
+    assert_eq!(report.0["running_tasks"], r#"["stuck-actor"]"#);
 }

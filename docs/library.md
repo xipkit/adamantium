@@ -278,8 +278,10 @@ The mailbox:
 - The capacity limits the queued messages, plus the one that is being handled. It does not limit the producers that wait. A capacity of zero means one.
 - Concurrent senders are ordered only by the order in which their messages enter the queue.
 - A successful `send` means that the mailbox accepted the message. It does not mean that the message was processed or durably committed.
-- A send to a closed mailbox returns the original message.
-- A message type can have a reply channel as a field. The mailbox has no receive operation.
+- A send to a closed mailbox returns the original message. `try_send` returns `TrySendError::Full(message)` or `TrySendError::Closed(message)` without waiting, and `send_until(&cancellation, deadline, message)` matches `Channel::send_until`, handing the message back in `SendError`.
+- `new_named(tasks, name, state, capacity, handler)` starts the worker through `Tasks::spawn_named`, so it carries `name` in `tracing` spans, deadline reports, and `adamantium::testing::explain` timelines.
+- `call(|reply| ...)` and `call_until(&cancellation, deadline, |reply| ...)` create a one-shot `Reply::pair()`, send the request, and wait for the answer. `call` returns `Option<R>` (`None` if closed or unanswered) and `call_until` returns `Result<R, ReceiveError>`. If the caller gives up after the message was accepted, the reply receiver is dropped so the handler observes `reply.is_closed()`, `reply.closed()`, and `Err(Closed(_))` from `reply.send` without stopping the worker.
+- A message type can also carry an explicit `Reply` field with `send` when pipelining multiple requests. The mailbox itself has no receive operation.
 
 Close and failure:
 
@@ -547,7 +549,7 @@ Use `adamantium::random::u64()` for a random number, and `random::up_to(max)` fo
 
 ## Task names and tracing
 
-Use the optional `tracing` feature to find work that does not finish. Start tasks with `tasks.spawn_named("fetch", future)`, `tasks.spawn_blocking_named("parse", closure)`, or `tasks.spawn_handled_named("connection", future, on_error)`.
+Use the optional `tracing` feature to find work that does not finish. Start tasks with `tasks.spawn_named("fetch", future)`, `tasks.spawn_blocking_named("parse", closure)`, `tasks.spawn_handled_named("connection", future, on_error)`, or `AsyncActor::new_named(tasks, "db", state, capacity, handler)`.
 
 - Each named task runs inside an `adamantium.task` tracing span. The span has a `task.name` field, and its parent is the current span.
 - When the deadline expires, the scope emits a warning with `running_tasks`. This is a snapshot of the unfinished named tasks in spawn order. The scope emits it before it requests cancellation or waits for cleanup.
