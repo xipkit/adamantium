@@ -10,8 +10,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
-- `cargo-adamantium` reads strict and baseline defaults for `check` and a
-  dependency baseline for `deps --deny-new` from `Cargo.toml` metadata.
+- `adamantium`: `SingleFlight::run_until` waits for a shared operation only
+  until a `Cancellation` is requested or a deadline passes. A caller that
+  stops leaves the operation to the others sharing it, and drops it only if
+  it was the last.
 - `adamantium`: `BoundedMap` holds at most a fixed number of entries and
   evicts the least recently used one to make room for a new key, so a cache
   or session table inside an `Actor` stays bounded. `insert` returns the
@@ -19,6 +21,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `cargo-adamantium`: `check --update-baseline` prunes resolved findings,
   `--fail-on-stale-baseline` requires an up-to-date baseline in CI, and
   `--summary` shows counts by rule and hotspot file.
+- `cargo-adamantium` reads strict and baseline defaults for `check` and a
+  dependency baseline for `deps --deny-new` from `Cargo.toml` metadata.
 - `cargo-adamantium`: `style check --pack concurrency` reviews files for
   state with a joint invariant split across separate Actors, locks or
   atomics (`split_actor_invariant`) and unbounded in-memory collection growth
@@ -81,12 +85,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   new section on bounded queues compares the two.
 - In `adamantium`, `Bytes::slice` checks byte ranges and shares storage.
   Editing a window through `make_mut` copies only the selected bytes.
+- In `adamantium`, `Str::slice` checks UTF-8 byte ranges and shares storage.
+  Editing a window through `make_mut` copies only the selected text.
 - `cargo-adamantium`: `check --format json` and `check --format sarif` include
   an optional `remediation` for each finding, combining the replacement for its
   rule or disallowed path with the migration guide section or `cargo adamantium
   explain` command.
+- `adamantium`: `testing::Config::from_env()` applies `ADAMANTIUM_SEED` and
+  `ADAMANTIUM_ITERATIONS` overrides to the deterministic testing defaults.
 
 ### Changed
+
+- `adamantium`: deterministic test failures print the named task timeline
+  alongside the replay JSON.
 
 - `cargo-adamantium`: a style finding's `guidance` says what goes wrong
   instead of repeating the question asked of the model. Reports record their

@@ -875,9 +875,9 @@ fn explain_reconstructs_named_task_timeline_without_payloads_or_perturbation() {
         let failure = testing::check(exploration, deadlocking_pipeline).unwrap_err();
         assert_eq!(failure.kind(), FailureKind::Deadlock);
 
-        let untraced = testing::replay(failure.replay(), deadlocking_pipeline).unwrap_err();
-        assert_eq!(untraced.kind(), FailureKind::Deadlock);
-        assert_eq!(untraced.replay(), failure.replay());
+        let replayed = testing::replay(failure.replay(), deadlocking_pipeline).unwrap_err();
+        assert_eq!(replayed.kind(), FailureKind::Deadlock);
+        assert_eq!(replayed.replay(), failure.replay());
 
         let timeline = testing::explain(failure.replay(), deadlocking_pipeline);
         assert_eq!(timeline.failure(), Some(FailureKind::Deadlock));
@@ -964,6 +964,59 @@ fn explain_reconstructs_named_task_timeline_without_payloads_or_perturbation() {
 }
 
 #[test]
+fn failure_displays_the_failing_execution_timeline_and_replay() {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&executions);
+    let failure = testing::check(
+        Config {
+            iterations: 2,
+            ..config()
+        },
+        move || {
+            let index = executions.fetch_add(1, Ordering::Relaxed);
+            async move {
+                let mut tasks = Tasks::<()>::new();
+                tasks.spawn_named(
+                    if index == 0 {
+                        "passing-worker"
+                    } else {
+                        "failing-worker"
+                    },
+                    async move {
+                        time::sleep(Duration::from_millis(5)).await;
+                        assert_eq!(index, 0, "sensitive-panic-payload");
+                        Ok(())
+                    },
+                );
+                tasks.join(Ok(())).await.unwrap();
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(observed.load(Ordering::Relaxed), 2);
+    let report = failure.to_string();
+    let replay_line = report.lines().next().unwrap();
+    let (_, json) = replay_line.split_once(": ").unwrap();
+    assert_eq!(
+        serde_json::from_str::<Replay>(json).unwrap(),
+        *failure.replay()
+    );
+    assert_eq!(failure.replay().iteration(), 2);
+    assert!(report.contains("Timeline:"), "{report}");
+    assert!(
+        report.lines().any(|line| {
+            line.starts_with("  5ms task#")
+                && line.contains(" \"failing-worker\" resumed from time.sleep")
+        }),
+        "{report}"
+    );
+    assert!(report.contains("5ms failed (Panic)"), "{report}");
+    assert!(!report.contains("passing-worker"), "{report}");
+    assert!(!report.contains("sensitive-panic-payload"), "{report}");
+}
+
+#[test]
 fn explain_preserves_panic_schedule_and_omits_panic_payload() {
     async fn panicking_worker() {
         Tasks::<()>::run(async |tasks| {
@@ -980,12 +1033,12 @@ fn explain_preserves_panic_schedule_and_omits_panic_payload() {
     let failure = testing::check(config(), panicking_worker).unwrap_err();
     assert_eq!(failure.kind(), FailureKind::Panic);
 
-    let untraced = testing::replay(failure.replay(), panicking_worker).unwrap_err();
+    let replayed = testing::replay(failure.replay(), panicking_worker).unwrap_err();
     let timeline = testing::explain(failure.replay(), panicking_worker);
 
     assert_eq!(timeline.failure(), Some(FailureKind::Panic));
     assert_eq!(timeline.replay(), failure.replay());
-    assert_eq!(timeline.replay(), untraced.replay());
+    assert_eq!(timeline.replay(), replayed.replay());
 
     let report = timeline.to_string();
     assert!(report.contains("\"secret-panicker\""), "{report}");

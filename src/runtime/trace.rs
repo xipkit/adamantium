@@ -1,4 +1,4 @@
-//! Deterministic execution timeline collector for [`crate::testing::explain`].
+//! Timeline collector for the deterministic testing harness.
 //!
 //! Records task names, virtual timestamps, wait operations and wakeups without
 //! calling into Shuttle or altering scheduling decisions.
@@ -120,9 +120,12 @@ pub(crate) struct Guard {
 
 impl Guard {
     pub(crate) fn enter() -> Self {
-        COLLECTOR.set(Some(Collector::new()));
         ACTIVE.set(true);
         Self { _private: () }
+    }
+
+    pub(crate) fn reset() {
+        COLLECTOR.set(Some(Collector::new()));
     }
 
     pub(crate) fn finish(self) -> Option<Collector> {

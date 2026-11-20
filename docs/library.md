@@ -532,7 +532,7 @@ With the `tokio` feature, use `adamantium::time::sleep(duration)` and `adamantiu
 
 - Outside the deterministic harness, these functions and `time::now()` use the Tokio clock, including its paused test clock.
 - Inside a deterministic execution, they use virtual time without real timers. Time advances to the earliest pending deadline only when no application task can run. All timers at that instant become ready together.
-- For periodic waits, use a loop over `time::sleep_until`.
+- For periodic waits, use `time::Interval` (or `time::Interval::at`), with `tick_until(&cancellation)` for cancellable loops and an explicit `MissedTickBehavior`.
 - To measure elapsed wall-clock time, `std::time::Instant::now()` is still allowed.
 
 ## Randomness
@@ -608,6 +608,7 @@ let profile = profiles.run(user, || fetch(user)).await;
 - Return errors in a `Result`. Every caller that shares the operation gets the error, and the next call starts a new operation. Nothing is kept once an operation ends.
 - No caller owns the operation. Whichever caller is waiting polls it, so the caller that started it can be dropped and the others still finish it.
 - When the last caller is dropped, the operation is dropped, and its entry is removed. The next call starts a new operation.
+- With Tokio, `run_until(key, &cancellation, deadline, operation)` stops waiting when `cancellation` is requested or `deadline` passes, and returns `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExceeded`. The output must be a `Result`. A caller that stops leaves the operation to the others, as a dropped caller does, and drops it only if it was the last. A request already present when the call is first polled wins, so the call neither starts nor joins an operation.
 - `len()` returns the number of keys with an operation in flight.
 
 If the operation panics, the caller that was polling it panics with the same payload, and every other caller panics too. The operation must not call `run` for its own key, because that call would wait for itself; it panics instead. The check sees only a call that the operation makes itself.

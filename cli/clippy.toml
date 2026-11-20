@@ -68,8 +68,8 @@ disallowed-methods = [
   { path = "tokio::task::block_in_place", reason = "blocks a worker thread; use adamantium::blocking", allow-invalid = true },
   { path = "tokio::time::sleep", reason = "use adamantium::time::sleep so waits go through Adamantium's clock", allow-invalid = true },
   { path = "tokio::time::sleep_until", reason = "use adamantium::time::sleep_until so waits go through Adamantium's clock", allow-invalid = true },
-  { path = "tokio::time::interval", reason = "use a loop over adamantium::time::sleep_until with deadlines from adamantium::time::now", allow-invalid = true },
-  { path = "tokio::time::interval_at", reason = "use a loop over adamantium::time::sleep_until with deadlines from adamantium::time::now", allow-invalid = true },
+  { path = "tokio::time::interval", reason = "use adamantium::time::Interval so periodic waits go through Adamantium's clock", allow-invalid = true },
+  { path = "tokio::time::interval_at", reason = "use adamantium::time::Interval::at so periodic waits go through Adamantium's clock", allow-invalid = true },
   { path = "tokio::time::Instant::now", reason = "build deadlines from adamantium::time::now; std::time::Instant::now is allowed for measuring elapsed time", allow-invalid = true },
   # Thread-local generators and constructors that obtain their own seed.
   { path = "rand::random", reason = "use adamantium::random for draws that the deterministic harness can seed and replay", allow-invalid = true },

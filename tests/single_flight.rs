@@ -529,3 +529,242 @@ fn many_callers_share_one_operation_whatever_order_they_poll_in() {
     }
     assert_eq!(counts.started(), 1);
 }
+
+#[cfg(feature = "tokio")]
+mod until {
+    use super::*;
+    use adamantium::{Cancellation, ScopeError, time};
+    use std::time::Duration;
+
+    fn cancelled() -> Cancellation {
+        let cancellation = Cancellation::new();
+        cancellation.cancel();
+        cancellation
+    }
+
+    #[tokio::test]
+    async fn a_request_already_present_starts_no_operation() {
+        let flights = SingleFlight::<&str, Result<u32, String>>::new();
+        let mut called = false;
+        let result = flights
+            .run_until("db", &cancelled(), None, || {
+                called = true;
+                ready(Ok(1))
+            })
+            .await;
+        assert_eq!(result, Err(ScopeError::Cancelled));
+        assert!(!called);
+        assert!(flights.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_request_already_present_joins_no_operation() {
+        let flights = SingleFlight::new();
+        let counts = Counts::default();
+        let answers = Channel::bounded(1);
+        {
+            let mut first = pin!(flights.run("db", || counts.operation(&answers)));
+            assert_eq!(poll_once(first.as_mut()), Poll::Pending);
+            let result = flights
+                .run_until("db", &cancelled(), None, || counts.operation(&answers))
+                .await;
+            assert_eq!(result, Err(ScopeError::Cancelled));
+            assert_eq!(counts.started(), 1);
+        }
+        // Had the cancelled call joined, the operation would outlive the
+        // only caller left in it.
+        assert_eq!(counts.dropped(), 1);
+        assert!(flights.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_expired_deadline_starts_no_operation() {
+        let flights = SingleFlight::<&str, Result<u32, String>>::new();
+        let result = flights
+            .run_until("db", &Cancellation::new(), Some(time::now()), || {
+                ready(Ok(1))
+            })
+            .await;
+        assert_eq!(result, Err(ScopeError::DeadlineExceeded));
+        assert!(flights.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_wins_over_an_equally_ready_deadline() {
+        let flights = SingleFlight::<&str, Result<u32, String>>::new();
+        let result = flights
+            .run_until("db", &cancelled(), Some(time::now()), || ready(Ok(1)))
+            .await;
+        assert_eq!(result, Err(ScopeError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn a_request_wins_over_an_output_not_yet_taken() {
+        let flights = SingleFlight::new();
+        let counts = Counts::default();
+        let answers = Channel::bounded(1);
+        let cancellation = Cancellation::new();
+        let mut first = pin!(flights.run("db", || counts.operation(&answers)));
+        let mut second =
+            pin!(flights.run_until("db", &cancellation, None, || { counts.operation(&answers) }));
+        assert_eq!(poll_once(first.as_mut()), Poll::Pending);
+        assert_eq!(poll_once(second.as_mut()), Poll::Pending);
+        answers.try_send(Ok(2)).unwrap();
+        assert_eq!(poll_once(first.as_mut()), Poll::Ready(Ok(2)));
+        cancellation.cancel();
+        assert_eq!(
+            poll_once(second.as_mut()),
+            Poll::Ready(Err(ScopeError::Cancelled))
+        );
+        assert!(flights.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_error_of_the_operation_reaches_every_caller_as_failed() {
+        let flights = SingleFlight::new();
+        let counts = Counts::default();
+        let answers = Channel::bounded(1);
+        let (first_stop, second_stop) = (Cancellation::new(), Cancellation::new());
+        let mut first =
+            pin!(flights.run_until("db", &first_stop, None, || { counts.operation(&answers) }));
+        let mut second =
+            pin!(flights.run_until("db", &second_stop, None, || { counts.operation(&answers) }));
+        assert_eq!(poll_once(first.as_mut()), Poll::Pending);
+        assert_eq!(poll_once(second.as_mut()), Poll::Pending);
+        answers.try_send(Err("down".into())).unwrap();
+        let failed = Poll::Ready(Err(ScopeError::Failed("down".to_string())));
+        assert_eq!(poll_once(second.as_mut()), failed);
+        assert_eq!(poll_once(first.as_mut()), failed);
+        assert_eq!(counts.started(), 1);
+        assert!(flights.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_first_caller_leaves_the_operation_to_the_others() {
+        let flights = SingleFlight::new();
+        let counts = Counts::default();
+        let answers = Channel::bounded(1);
+        let cancellation = Cancellation::new();
+        let mut second = pin!(flights.run("db", || counts.operation(&answers)));
+        let mut first =
+            pin!(flights.run_until("db", &cancellation, None, || { counts.operation(&answers) }));
+        assert_eq!(poll_once(first.as_mut()), Poll::Pending);
+        assert_eq!(poll_once(second.as_mut()), Poll::Pending);
+        cancellation.cancel();
+        assert_eq!(
+            poll_once(first.as_mut()),
+            Poll::Ready(Err(ScopeError::Cancelled))
+        );
+        assert_eq!((counts.started(), counts.dropped()), (1, 0));
+        assert_eq!(flights.len(), 1);
+
+        answers.try_send(Ok(3)).unwrap();
+        assert_eq!(poll_once(second.as_mut()), Poll::Ready(Ok(3)));
+        assert_eq!((counts.started(), counts.dropped()), (1, 1));
+        assert!(flights.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_joining_caller_past_its_deadline_leaves_the_operation_to_the_first() {
+        let flights = SingleFlight::new();
+        let counts = Counts::default();
+        let answers = Channel::bounded(1);
+        let deadline = time::now() + Duration::from_millis(20);
+        let cancellation = Cancellation::new();
+        let mut first = pin!(flights.run("db", || counts.operation(&answers)));
+        let mut second = pin!(flights.run_until("db", &cancellation, Some(deadline), || {
+            counts.operation(&answers)
+        }));
+        assert_eq!(poll_once(first.as_mut()), Poll::Pending);
+        assert_eq!(poll_once(second.as_mut()), Poll::Pending);
+        let result = second.as_mut().await;
+        assert_eq!(result, Err(ScopeError::DeadlineExceeded));
+        assert_eq!((counts.started(), counts.dropped()), (1, 0));
+
+        answers.try_send(Ok(4)).unwrap();
+        assert_eq!(poll_once(first.as_mut()), Poll::Ready(Ok(4)));
+        assert!(flights.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_caller_woken_to_poll_the_operation_hands_it_on() {
+        let flights = SingleFlight::new();
+        let counts = Counts::default();
+        let answers = Channel::bounded(1);
+        let cancellation = Cancellation::new();
+        let wakes = Arc::new(Wakes::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut second = pin!(flights.run("db", || counts.operation(&answers)));
+        {
+            let mut first = pin!(
+                flights.run_until("db", &cancellation, None, || { counts.operation(&answers) })
+            );
+            assert_eq!(poll_once(first.as_mut()), Poll::Pending);
+            let polled = second.as_mut().poll(&mut Context::from_waker(&waker));
+            assert_eq!(polled, Poll::Pending);
+            // The operation is woken, then its caller is cancelled before
+            // it polls it again.
+            let looked = wakes.0.load(Ordering::SeqCst);
+            answers.try_send(Ok(5)).unwrap();
+            cancellation.cancel();
+            assert_eq!(
+                poll_once(first.as_mut()),
+                Poll::Ready(Err(ScopeError::Cancelled))
+            );
+            assert!(
+                wakes.0.load(Ordering::SeqCst) > looked,
+                "the second caller was woken to take the operation"
+            );
+            assert_eq!(answers.len(), 1, "the first caller left it unpolled");
+        }
+        assert_eq!(poll_once(second.as_mut()), Poll::Ready(Ok(5)));
+        assert_eq!((counts.started(), counts.dropped()), (1, 1));
+        assert!(flights.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_last_caller_to_stop_drops_the_operation_and_its_entry() {
+        let flights = SingleFlight::new();
+        let counts = Counts::default();
+        let answers = Channel::bounded(1);
+        let (first_stop, second_stop) = (Cancellation::new(), Cancellation::new());
+        let deadline = time::now() + Duration::from_millis(20);
+        {
+            let mut first =
+                pin!(flights.run_until("db", &first_stop, None, || { counts.operation(&answers) }));
+            let mut second = pin!(flights.run_until("db", &second_stop, Some(deadline), || {
+                counts.operation(&answers)
+            }));
+            assert_eq!(poll_once(first.as_mut()), Poll::Pending);
+            assert_eq!(poll_once(second.as_mut()), Poll::Pending);
+            first_stop.cancel();
+            assert_eq!(
+                poll_once(first.as_mut()),
+                Poll::Ready(Err(ScopeError::Cancelled))
+            );
+            assert_eq!(counts.dropped(), 0, "the second caller still waits");
+            assert_eq!(second.await, Err(ScopeError::DeadlineExceeded));
+            assert_eq!((counts.started(), counts.dropped()), (1, 1));
+            assert!(flights.is_empty());
+        }
+
+        // The next call starts a new operation.
+        answers.try_send(Ok(6)).unwrap();
+        let result = flights
+            .run_until("db", &Cancellation::new(), None, || {
+                counts.operation(&answers)
+            })
+            .await;
+        assert_eq!(result, Ok(6));
+        assert_eq!(counts.started(), 2);
+    }
+
+    #[test]
+    fn a_call_with_a_send_operation_is_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        let flights = SingleFlight::<String, Result<u32, String>>::new();
+        let cancellation = Cancellation::new();
+        let call = flights.run_until("key".into(), &cancellation, None, || ready(Ok(1)));
+        assert_send(&call);
+    }
+}

@@ -138,6 +138,23 @@ Add `--update-baseline` after fixing findings, or use `--fail-on-stale-baseline`
 in CI to require that the baseline stays current. Add `--summary` to see
 counts by rule and the files with the most findings.
 
+## GitHub Action
+
+After checkout and installing Rust with Clippy, use `xipkit/adamantium` with an immutable `rev` (or an exact crates.io `version`). See the [action setup](docs/cli.md#github-action).
+
+| Input | Purpose |
+| --- | --- |
+| `sarif` | Set to `true` to write the check report to `runner.temp/adamantium.sarif`. Findings still fail the check. |
+| `upload-sarif` | Set to `true` with `sarif: 'true'` to upload to GitHub code scanning; grant `security-events: write`. |
+| `sarif-category` | Code scanning category, default `adamantium`; choose a distinct category for each analysis in a workflow. |
+| `deps` | Set to `true` to run `deps --deny-new`. Without a baseline it checks against zero findings. |
+| `deps-baseline` | Optional dependency report path, relative to `working-directory`; requires `deps: 'true'`. |
+| `deps-args` | Cargo metadata/tree arguments for the audit, one per line. Set feature flags to match `cargo-args`; they are not copied automatically. Requires `deps: 'true'`. Use the same flags when creating the baseline. |
+| `style` | Set to `google` or `concurrency` for an advisory style review. It sends source to OpenAI and requires `OPENAI_API_KEY` in the step environment; requests are billable. |
+| `style-changed` | Optional Git base for the style review. Fetch enough history for the base and merge base to be available. |
+
+Style findings and incomplete reviews produce a warning rather than failing the action; inspect the output. See [style review](docs/style-review.md) for its limitations and privacy details. To roll back these optional checks, remove their inputs from the workflow.
+
 ## The rules
 
 Code that follows the rules has these properties:

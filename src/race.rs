@@ -158,8 +158,8 @@ impl std::error::Error for UntilError {}
 /// is not safe to drop because dropping the future drops the unsent value;
 /// use `send_until` instead. Operations with their own `_until` methods
 /// (`receive_until`, `send_until`, `Tasks::run_until`, `Limit::run_until`,
-/// `RateLimit::run_until`) already accept a `Cancellation` and deadline
-/// directly.
+/// `KeyedLimit::run_until`, `RateLimit::run_until`, `SingleFlight::run_until`)
+/// already accept a `Cancellation` and deadline directly.
 ///
 /// ```
 /// use adamantium::{Cancellation, Reply, UntilError, time, until};
