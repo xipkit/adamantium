@@ -1210,3 +1210,99 @@ fn explain_records_wakeup_handoff_when_notified_waiter_is_cancelled() {
         "{timeline}"
     );
 }
+
+#[test]
+fn shrink_shortens_random_and_pct_replays_and_preserves_corpus_format() {
+    async fn scenario() {
+        let target = shuttle::future::spawn(async {
+            for _ in 0..120 {
+                shuttle::future::yield_now().await;
+            }
+            panic!("original failure");
+        });
+        let _noise = shuttle::future::spawn(async {
+            for _ in 0..200 {
+                shuttle::future::yield_now().await;
+            }
+        });
+        target.await.unwrap();
+    }
+
+    for mode in [SchedulerMode::Random, SchedulerMode::Pct { depth: 3 }] {
+        let original = testing::check(config().with_scheduler(mode), scenario).unwrap_err();
+        let shrunk = testing::shrink(original.replay(), scenario).unwrap();
+        let step_count = |record: &Replay| {
+            serde_json::to_value(record).unwrap()["steps"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+        assert!(step_count(original.replay()) >= 150, "{mode:?}");
+        assert!(
+            step_count(&shrunk) < step_count(original.replay()),
+            "{mode:?}"
+        );
+        assert_eq!(shrunk.scheduler(), mode);
+        assert_eq!(shrunk.seed(), original.replay().seed());
+        assert_eq!(shrunk.max_steps(), original.replay().max_steps());
+        let original_timeline = testing::explain(original.replay(), scenario);
+        let path = replay_path("shrunk");
+        shrunk.save(&path).unwrap();
+        let decoded = Replay::load(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(decoded, shrunk);
+        let timeline = testing::explain(&decoded, scenario);
+        assert!(
+            timeline.events().len() < original_timeline.events().len(),
+            "{mode:?}"
+        );
+        for _ in 0..2 {
+            let failure = testing::replay(&decoded, scenario).unwrap_err();
+            assert_eq!(failure.kind(), FailureKind::Panic);
+            assert_eq!(failure.replay(), &decoded);
+        }
+        assert_eq!(testing::shrink(&decoded, scenario), Some(decoded));
+    }
+}
+
+#[test]
+fn shrink_rejects_a_shorter_schedule_with_a_different_panic_in_the_same_task() {
+    let observed = Arc::new(AtomicUsize::new(0));
+    let observation = Arc::clone(&observed);
+    let factory = move || {
+        let observation = Arc::clone(&observation);
+        async move {
+            let noise_started = Arc::new(AtomicUsize::new(0));
+            let started = Arc::clone(&noise_started);
+            let target = shuttle::future::spawn(async move {
+                for _ in 0..20 {
+                    shuttle::future::yield_now().await;
+                }
+                let started = started.load(Ordering::Relaxed);
+                observation.fetch_or(started + 1, Ordering::Relaxed);
+                if started == 0 {
+                    panic!("different failure");
+                }
+                panic!("original failure");
+            });
+            let _noise = shuttle::future::spawn(async move {
+                noise_started.store(1, Ordering::Relaxed);
+                for _ in 0..200 {
+                    shuttle::future::yield_now().await;
+                }
+            });
+            target.await.unwrap();
+        }
+    };
+
+    let original = testing::check(config(), factory.clone()).unwrap_err();
+    assert_eq!(observed.load(Ordering::Relaxed), 2);
+    let shrunk = testing::shrink(original.replay(), factory.clone()).unwrap();
+    assert_ne!(&shrunk, original.replay());
+    assert_eq!(observed.load(Ordering::Relaxed), 3);
+
+    observed.store(0, Ordering::Relaxed);
+    let failure = testing::replay(&shrunk, factory).unwrap_err();
+    assert_eq!(failure.kind(), FailureKind::Panic);
+    assert_eq!(observed.load(Ordering::Relaxed), 2);
+}

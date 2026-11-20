@@ -45,8 +45,8 @@
 //! A failure returns and prints a named task timeline and a payload-free [`Replay`]
 //! with the scheduler, bounds, engine versions and exact schedule. Save records
 //! with [`Replay::save`] and use [`replay_corpus`] to exercise them against one
-//! scenario. Replay requires compatible dependencies, scheduling behavior and
-//! fixture inputs.
+//! scenario. Use [`shrink`] to minimize a failing schedule before saving it. Replay
+//! requires compatible dependencies, scheduling behavior and fixture inputs.
 //!
 //! [`crate::random`] draws from the scheduler, so a seed decides the draws and a
 //! replay repeats them. Real I/O, native threads, other clocks (such as
@@ -391,6 +391,7 @@ pub enum FailureKind {
 pub struct Failure {
     kind: FailureKind,
     timeline: Box<Timeline>,
+    shrink_message: Option<String>,
 }
 
 impl Failure {
@@ -495,6 +496,114 @@ where
     let validation = record.validate();
     assert!(validation.is_ok(), "{validation:?}");
     play(record, ReplayPolicy::Exact, factory).map(|(record, _)| record)
+}
+
+/// Minimizes a failing schedule by removing chunks of steps and simplifying
+/// task switches. It prefers fewer steps, then fewer switches, and stops when
+/// no tried chunk, single-step deletion or switch edit improves the schedule.
+///
+/// Each attempt runs a fresh factory with the original data seed and step
+/// limit. Reductions must reproduce the original failure category and message.
+/// Panics must also end in the same last scheduled task. Failures with opaque panic
+/// payloads are returned unchanged because their identity cannot be compared.
+///
+/// Returns `None` if the record passes or diverges under the factory. Panics
+/// on incompatible metadata, like [`replay`]. The returned record uses the
+/// ordinary replay format and can be passed to [`explain`] or [`Replay::save`].
+pub fn shrink<F, Fut>(record: &Replay, factory: F) -> Option<Replay>
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()>,
+{
+    let validation = record.validate();
+    assert!(validation.is_ok(), "{validation:?}");
+
+    let factory = Arc::new(factory);
+    let probe = |candidate: &Replay| {
+        let factory = Arc::clone(&factory);
+        play(candidate, ReplayPolicy::Shrink, move || factory()).err()
+    };
+    let baseline = probe(record)?;
+    if baseline.kind == FailureKind::ReplayMismatch || baseline.replay() != record {
+        return None;
+    }
+    let Some(message) = baseline.shrink_message.as_deref() else {
+        return Some(record.clone());
+    };
+
+    let mut best = record.clone();
+    loop {
+        let cost = schedule_cost(&best);
+        let improve = |candidate: &Replay| {
+            let failure = probe(candidate)?;
+            let same_task = baseline.kind != FailureKind::Panic
+                || failure.timeline.events.last().map(TimelineEvent::kind)
+                    == baseline.timeline.events.last().map(TimelineEvent::kind);
+            (failure.kind == baseline.kind
+                && failure.shrink_message.as_deref() == Some(message)
+                && same_task
+                && schedule_cost(failure.replay()) < cost)
+                .then_some(failure.timeline.replay)
+        };
+        match reduce_schedule(&best, improve) {
+            Some(reduced) => best = reduced,
+            None => return Some(best),
+        }
+    }
+}
+
+fn schedule_cost(record: &Replay) -> (usize, usize) {
+    let mut previous = None;
+    let switches = record
+        .steps
+        .iter()
+        .flatten()
+        .filter(|&&task| {
+            previous
+                .replace(task)
+                .is_some_and(|previous| previous != task)
+        })
+        .count();
+    (record.steps.len(), switches)
+}
+
+fn reduce_schedule(record: &Replay, improve: impl Fn(&Replay) -> Option<Replay>) -> Option<Replay> {
+    let mut candidate = record.clone();
+    let len = record.steps.len();
+    let mut chunk = len;
+    loop {
+        for start in (0..len).step_by(chunk) {
+            candidate.steps.clone_from(&record.steps);
+            candidate.steps.drain(start..len.min(start + chunk));
+            if let Some(reduced) = improve(&candidate) {
+                return Some(reduced);
+            }
+        }
+        if chunk == 1 {
+            break;
+        }
+        chunk = chunk.div_ceil(2);
+    }
+
+    // Keep the previous task running across a recorded switch when possible.
+    let mut previous = None;
+    for (index, task) in record.steps.iter().enumerate() {
+        let Some(task) = *task else { continue };
+        let Some(previous) = previous.replace(task) else {
+            continue;
+        };
+        if previous == task {
+            continue;
+        }
+        candidate.steps.clone_from(&record.steps);
+        if let Some(choice) = candidate.steps.get_mut(index) {
+            *choice = Some(previous);
+        }
+        if let Some(reduced) = improve(&candidate) {
+            return Some(reduced);
+        }
+    }
+    None
 }
 
 /// A task observed during [`explain`].
@@ -1064,6 +1173,7 @@ where
 enum ReplayPolicy {
     Exact,
     Prefix,
+    Shrink,
 }
 
 fn play<F, Fut>(
@@ -1095,7 +1205,7 @@ impl Playback {
     fn next_step(&mut self) -> Option<Option<usize>> {
         let step = self.steps.next();
         assert!(
-            step.is_some() || matches!(self.policy, ReplayPolicy::Prefix),
+            step.is_some() || !matches!(self.policy, ReplayPolicy::Exact),
             "schedule ended early"
         );
         step
@@ -1124,6 +1234,12 @@ impl Scheduler for Playback {
                 "scheduled task is not runnable: {task:?}"
             );
             return Some(task);
+        }
+        if matches!(self.policy, ReplayPolicy::Shrink)
+            && let Some(current) = current
+            && runnable.iter().any(|task| task.id() == current)
+        {
+            return Some(current);
         }
         // Prefer the next higher task ID, wrapping to the lowest runnable ID.
         runnable
@@ -1286,30 +1402,41 @@ where
     let kind = if original.is_some_and(|(original, policy)| match policy {
         ReplayPolicy::Exact => original.steps != record.steps,
         ReplayPolicy::Prefix => !record.steps.starts_with(&original.steps),
+        // The candidate may fail before consuming all of its proposed steps.
+        ReplayPolicy::Shrink => false,
     }) {
         FailureKind::ReplayMismatch
     } else {
-        match result {
+        match &result {
             Ok(_) => return Ok((record, collector)),
-            Err(payload) => classify(&*payload, original.is_some()),
+            Err(payload) => classify(&**payload, original.is_some()),
         }
+    };
+    let shrinking = matches!(original, Some((_, ReplayPolicy::Shrink)));
+    let shrink_message = if shrinking {
+        result
+            .as_ref()
+            .err()
+            .and_then(|payload| panic_message(&**payload))
+            .map(str::to_owned)
+    } else {
+        None
     };
     let failure = Failure {
         kind,
+        shrink_message,
         timeline: Box::new(build_timeline(record, Some(kind), collector)),
     };
-    eprintln!("{failure}");
+    if !shrinking {
+        eprintln!("{failure}");
+    }
     Err(failure)
 }
 
 // Shuttle exposes engine failures as panic strings. Keep the prefixes covered by
 // integration tests and version pins. Never serialize payloads.
 fn classify(payload: &(dyn Any + Send), replaying: bool) -> FailureKind {
-    let message = payload
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("");
+    let message = panic_message(payload).unwrap_or("");
     if message.starts_with("exceeded max_steps bound ") {
         FailureKind::StepLimit
     } else if message.starts_with("deadlock! blocked tasks:") {
@@ -1324,6 +1451,13 @@ fn classify(payload: &(dyn Any + Send), replaying: bool) -> FailureKind {
     } else {
         FailureKind::Panic
     }
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> Option<&str> {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
 }
 
 #[cfg(test)]
