@@ -89,8 +89,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   an optional `remediation` for each finding, combining the replacement for its
   rule or disallowed path with the migration guide section or `cargo adamantium
   explain` command.
+- `adamantium`: `testing::Config::from_env()` applies `ADAMANTIUM_SEED` and
+  `ADAMANTIUM_ITERATIONS` overrides to the deterministic testing defaults.
 
 ### Changed
+
+- `adamantium`: deterministic test failures print the named task timeline
+  alongside the replay JSON.
 
 - `cargo-adamantium`: a style finding's `guidance` says what goes wrong
   instead of repeating the question asked of the model. Reports record their
