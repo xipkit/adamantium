@@ -656,7 +656,7 @@ impl<E: Send + 'static> Spawner<E> {
                     return Err(SpawnError);
                 }
                 registering.admitted = true;
-                set.reap_successes();
+                set.reap_finished();
             }
             submit(&mut set, Arc::clone(&retained));
         }
@@ -1952,7 +1952,8 @@ mod retention_tests {
                 while !tasks.is_empty() {
                     yield_now().await;
                 }
-                assert_eq!(lock(&tasks.set).len(), 1);
+                // One task entry and at most one coalesced completion.
+                assert!(lock(&tasks.set).len() <= 2);
             }
         })
         .await
@@ -1986,6 +1987,66 @@ mod retention_tests {
         })
         .await
         .unwrap();
+    }
+
+    async fn reaped_error_during_join() {
+        let mut tasks = Tasks::<&str>::new();
+        let spawner = tasks.spawner();
+        let set = Arc::clone(&tasks.set);
+        let (release, released) = Reply::pair();
+        let failed = tasks.spawn(async move {
+            released.receive().await.unwrap();
+            Err::<(), _>("child failed")
+        });
+
+        let mut join = pin!(tasks.join(Ok(())));
+        poll_fn(|cx| {
+            assert!(join.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        release.send(()).unwrap();
+        while lock(&set).unfinished() != 0 {
+            yield_now().await;
+        }
+
+        let dropped = crate::Actor::new(false);
+        let guard = Dropped(dropped.clone());
+        spawner
+            .spawn_handled(
+                async move {
+                    let _guard = guard;
+                    std::future::pending::<Result<(), ()>>().await
+                },
+                |()| {},
+            )
+            .unwrap();
+        assert_eq!(join.await, Err("child failed"));
+        assert!(dropped.snapshot());
+        drop(failed);
+    }
+
+    #[tokio::test]
+    async fn join_observes_a_child_error_even_when_a_spawner_reaps_its_completion() {
+        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
+        tokio::time::timeout(Duration::from_secs(30), reaped_error_during_join())
+            .await
+            .unwrap();
+    }
+
+    #[cfg(feature = "deterministic")]
+    #[test]
+    fn join_observes_a_reaped_completion_under_replay() {
+        let config = crate::testing::Config {
+            seed: 224,
+            iterations: 100,
+            max_steps: 10_000,
+        };
+        let replay = crate::testing::check(config, reaped_error_during_join).unwrap();
+        assert_eq!(
+            crate::testing::replay(&replay, reaped_error_during_join).unwrap(),
+            replay
+        );
     }
 
     /// Spawns connections that finish at once, then waits without spawning

@@ -42,7 +42,7 @@ fn production_error(error: tokio::task::JoinError) -> JoinError {
 
 pub(crate) struct JoinSet {
     inner: Set,
-    deferred_error: Option<JoinError>,
+    reaped_completion: Option<Result<(), JoinError>>,
     world: World,
     /// Shared admission closes under the same lock as registration and abort.
     closed: bool,
@@ -120,7 +120,7 @@ impl JoinSet {
                     changed: std::sync::Arc::new(super::wait::WaitQueue::named("task.join")),
                     waiter: None,
                 },
-                deferred_error: None,
+                reaped_completion: None,
                 idle: None,
                 closed: false,
                 registering: 0,
@@ -132,7 +132,7 @@ impl JoinSet {
                 tasks: tokio::task::JoinSet::new(),
                 unfinished: Arc::new(AtomicUsize::new(0)),
             },
-            deferred_error: None,
+            reaped_completion: None,
             idle: None,
             closed: false,
             registering: 0,
@@ -219,7 +219,7 @@ impl JoinSet {
             #[cfg(feature = "deterministic")]
             Set::Model { tasks, .. } => tasks.len(),
         };
-        tasks + usize::from(self.deferred_error.is_some())
+        tasks + usize::from(self.reaped_completion.is_some())
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -249,25 +249,31 @@ impl JoinSet {
         }
     }
 
-    /// Releases finished entries during submission. Leave an error for the
-    /// owner, which can stop the body or drain the scope as appropriate.
-    pub(crate) fn reap_successes(&mut self) {
-        if self.deferred_error.is_some() {
+    /// Releases finished entries during submission. Coalesce successes into
+    /// one completion so a joiner still wakes up to check the scope's error
+    /// ledger. Stop at the first join error so the owner can handle it.
+    pub(crate) fn reap_finished(&mut self) {
+        if matches!(self.reaped_completion, Some(Err(_))) {
             return;
         }
-        while let Some(result) = self.try_join_next() {
-            if let Err(error) = result {
-                self.deferred_error = Some(error);
+        while let Some(result) = self.take_finished() {
+            let failed = result.is_err();
+            self.reaped_completion = Some(result);
+            if failed {
                 return;
             }
         }
     }
 
     pub(crate) fn try_join_next(&mut self) -> Option<Result<(), JoinError>> {
+        self.world.check();
+        self.reaped_completion
+            .take()
+            .or_else(|| self.take_finished())
+    }
+
+    fn take_finished(&mut self) -> Option<Result<(), JoinError>> {
         self.world.step();
-        if let Some(error) = self.deferred_error.take() {
-            return Some(Err(error));
-        }
         match &mut self.inner {
             Set::Production { tasks, .. } => {
                 tasks.try_join_next().map(|r| r.map_err(production_error))
@@ -298,8 +304,8 @@ impl JoinSet {
     ) -> Poll<Option<Result<(), JoinError>>> {
         self.world.check();
         self.idle = None;
-        if let Some(error) = self.deferred_error.take() {
-            return Poll::Ready(Some(Err(error)));
+        if let Some(result) = self.reaped_completion.take() {
+            return Poll::Ready(Some(result));
         }
         let polled = match &mut self.inner {
             Set::Production { tasks, .. } => tasks
