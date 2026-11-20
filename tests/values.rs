@@ -157,4 +157,13 @@ fn values_round_trip_through_json() {
     let json = serde_json::to_string(&bytes).unwrap();
     assert_eq!(json, "[1,2]");
     assert_eq!(serde_json::from_str::<Bytes>(&json).unwrap(), bytes);
+
+    let full = Str::from("prefixé€🦀suffix");
+    let window = full.slice(6..15).unwrap();
+    assert_eq!(window.as_str(), "é€🦀");
+    let json = serde_json::to_string(&window).unwrap();
+    assert_eq!(json, "\"é€🦀\"");
+    assert_eq!(serde_json::from_str::<Str>(&json).unwrap(), window);
+    let cbor = cbor4ii::serde::to_vec(Vec::new(), &window).unwrap();
+    assert_eq!(cbor4ii::serde::from_slice::<Str>(&cbor).unwrap(), window);
 }
