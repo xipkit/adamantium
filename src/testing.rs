@@ -85,10 +85,12 @@ use crate::runtime::{
 };
 
 mod duplex;
+mod fault;
 pub use duplex::{
     DuplexConfig, DuplexControl, DuplexStream, LinkConfig, TransportFault, duplex,
     duplex_controlled, duplex_with,
 };
+pub use fault::{FaultInjector, FaultRule, FaultStep, Latency};
 
 const ENGINE: &str = "shuttle=0.9.10;engine=0.1.8;std=0.1.5;schedulers=0.1.1";
 const FORMAT: u32 = 4;
