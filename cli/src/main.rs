@@ -1,5 +1,6 @@
 mod check;
 mod config;
+mod deep;
 mod deps;
 mod fix;
 mod lints;
@@ -11,8 +12,17 @@ use std::{io::Write, path::PathBuf, process::ExitCode};
 
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
+use sha2::{Digest, Sha256};
 
 use crate::lints::{OVERFLOW_EXAMPLE, OVERFLOW_RULE, OVERFLOW_WHY, lints_toml};
+
+/// The lowercase hexadecimal SHA-256 digest of `bytes`.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 #[derive(Parser)]
 #[command(

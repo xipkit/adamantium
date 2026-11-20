@@ -8,7 +8,28 @@ that pair a timer with a future that may not be drop-safe.
 Ordinary `cargo adamantium check`, `init`, and library builds do not install or
 load it. Actor-cycle detection is outside its scope. Keep the runtime nesting guard.
 
-## Setup
+## Run a published library
+
+With a release of cargo-adamantium that includes prebuilt libraries, run:
+
+```sh
+cargo adamantium check --deep
+```
+
+On Linux x86-64 (GNU) and macOS arm64, the CLI downloads its matching GitHub
+release asset. It verifies the size and SHA-256 embedded in the installed CLI
+on every use, including cache hits under `$CARGO_HOME/adamantium/<version>`
+(Cargo home defaults to `~/.cargo`). If a cached file fails verification, the
+error identifies the file to remove before retrying.
+
+Use a rustup-managed Rust installation with Clippy. On first use, deep checking
+installs the pinned nightly and its compiler components and, if needed,
+cargo-dylint 6.4.0 under Cargo home. Allow network access for this setup and
+Dylint's first driver build. Ordinary checks keep using the project's compiler.
+Git and source builds have no embedded release pin. Use the source setup below
+for those builds or for other hosts.
+
+## Build from source
 
 Use a rustup-managed Cargo. Check out a **reviewed full commit SHA** of this
 repository before building the library; record that SHA alongside your consumer's
