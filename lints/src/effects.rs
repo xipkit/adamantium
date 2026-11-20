@@ -64,22 +64,21 @@ pub(crate) enum Effect {
 impl Effect {
     pub(crate) const ALL: [Self; 4] = [Self::Blocking, Self::Actor, Self::Limit, Self::KeyedLimit];
 
-    /// Whether the effect is a violation in `context`. Limit work may enter
-    /// a `KeyedLimit`; keyed work may enter no limit at all.
-    pub(crate) fn conflicts(self, context: Context) -> bool {
+    /// The lint `self` violates in `context`, if any. Limit work may enter
+    /// a `KeyedLimit`; keyed work may enter no limit at all. Blocking inside
+    /// an actor callback holds the actor's lock while it waits, and the
+    /// callback is synchronous, so it is reported as such even when the
+    /// callback runs in async code: the work has to move out of the callback
+    /// either way.
+    pub(crate) fn violation(self, context: Context) -> Option<LintKind> {
         match self {
-            Self::Blocking => context.asynchronous,
-            Self::Actor => context.actor,
-            Self::Limit => context.limit.is_some(),
-            Self::KeyedLimit => context.limit == Some(LimitKind::Keyed),
-        }
-    }
-
-    pub(crate) fn lint(self) -> LintKind {
-        match self {
-            Self::Blocking => LintKind::Blocking,
-            Self::Actor => LintKind::NestedActor,
-            Self::Limit | Self::KeyedLimit => LintKind::NestedLimit,
+            Self::Blocking if context.actor => Some(LintKind::BlockingInActor),
+            Self::Blocking => context.asynchronous.then_some(LintKind::BlockingInAsync),
+            Self::Actor => context.actor.then_some(LintKind::NestedActor),
+            Self::Limit => context.limit.is_some().then_some(LintKind::NestedLimit),
+            Self::KeyedLimit => {
+                (context.limit == Some(LimitKind::Keyed)).then_some(LintKind::NestedLimit)
+            }
         }
     }
 

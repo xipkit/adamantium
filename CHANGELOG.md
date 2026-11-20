@@ -22,6 +22,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   including recursive ones, and report blocking, nested actor access and the
   new `adamantium_nested_limit` where async code or a callback calls the
   helper or awaits its future.
+- `cargo-adamantium`: the experimental `adamantium_blocking_in_actor` lint
+  reports file, network, process and thread-blocking operations inside an
+  actor's `with` or `read` callback, directly or through local helpers, where
+  they hold the actor's lock while they wait.
+- `cargo-adamantium`: the experimental `adamantium_race_with_timer` lint
+  accepts `Feed::receive` and `Watcher::changed` as drop-safe arms, since
+  dropping either loses nothing.
 - `adamantium`: `Tasks::spawner()` returns a cloneable `Spawner` so children
   can add siblings to their scope, with the same joining and error rules.
   Spawning after the scope closes returns `SpawnError` without starting work.

@@ -22,6 +22,7 @@ changes behavior in a way to check.
 | A guard held across statements | A method on the state | No |
 | `RwLock<T>` | `Actor<T>`, often holding a copy-on-write value | No |
 | A lock held across an await | Read, await, then record | No |
+| Blocking I/O while a lock is held | The I/O, then record | No |
 | Two locks held at once | One actor, or one after the other | No |
 | Two semaphore permits held at once | A `KeyedLimit` inside a `Limit`, or one after the other | No |
 | `tokio::task::spawn_blocking(f).await.unwrap()` | `blocking(f).await` | Yes |
@@ -308,6 +309,56 @@ Here two tasks that miss the cache at once both fetch, and `or_insert` keeps
 whichever result is recorded first. Decide what each such race should do.
 Where the work must happen only once, give it to one task that receives
 requests on a channel, as in [a detached worker](#a-detached-worker).
+
+### Blocking work inside a callback
+
+A guard held while a file is read becomes a `with` closure that reads the
+file, and then every caller of the actor waits on the disk. Do file, network
+and process I/O before the closure, and record its result inside it. To save
+the state, take a snapshot and write it after the closure returns.
+
+Before:
+
+```rust
+use std::{fs, io, path::Path, sync::Mutex};
+
+fn reload(settings: &Mutex<String>, path: &Path) -> io::Result<()> {
+    let mut settings = settings.lock().unwrap();
+    *settings = fs::read_to_string(path)?;
+    Ok(())
+}
+
+fn main() -> io::Result<()> {
+    let path = std::env::temp_dir().join("adamantium-guide-reload-before");
+    fs::write(&path, "verbose")?;
+    let settings = Mutex::new(String::new());
+    reload(&settings, &path)?;
+    assert_eq!(*settings.lock().unwrap(), "verbose");
+    Ok(())
+}
+```
+
+After:
+
+```rust
+use std::{fs, io, path::Path};
+use adamantium::Actor;
+
+fn reload(settings: &Actor<String>, path: &Path) -> io::Result<()> {
+    let text = fs::read_to_string(path)?;
+    settings.with(|s| *s = text);
+    Ok(())
+}
+
+fn main() -> io::Result<()> {
+    let path = std::env::temp_dir().join("adamantium-guide-reload-after");
+    fs::write(&path, "verbose")?;
+    let settings = Actor::new(String::new());
+    reload(&settings, &path)?;
+    assert_eq!(settings.snapshot(), "verbose");
+    Ok(())
+}
+```
 
 ### Two locks at once
 
