@@ -10,6 +10,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `cargo-adamantium` reads strict and baseline defaults for `check` and a
+  dependency baseline for `deps --deny-new` from `Cargo.toml` metadata.
 - `cargo-adamantium`: `check --update-baseline` prunes resolved findings,
   `--fail-on-stale-baseline` requires an up-to-date baseline in CI, and
   `--summary` shows counts by rule and hotspot file.

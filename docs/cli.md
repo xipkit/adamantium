@@ -277,6 +277,31 @@ A second run makes no changes. `init` does not replace a different `clippy.toml`
 - `--format json` prints an object with `schema_version: 1`, `rule` (the qualified name), `why`, `replacement`, `before`, and `after`.
 - The exit status is `0` for a known rule. For an unknown rule name, the exit status is `2` and an error goes to stderr.
 
+## Project defaults
+
+Set the strict tier and baseline paths in `Cargo.toml` to share the same
+settings across local runs and CI.
+
+```toml
+[workspace.metadata.adamantium]
+strict = true
+baseline = "ci/check-baseline.json"
+
+[workspace.metadata.adamantium.deps]
+baseline = "ci/deps-baseline.json"
+```
+
+For a standalone package, use `[package.metadata.adamantium]` and
+`[package.metadata.adamantium.deps]`. If the manifest contains both Adamantium
+tables, the workspace table takes precedence. Relative baseline paths in
+the metadata start at the directory containing that manifest. Relative paths
+passed to `--baseline` start at the current directory and override the
+configured paths.
+
+`check` uses the strict tier when `strict = true`. Pass `--strict` to enable
+it or `--no-strict` to disable it for a single run. `deps` reads its baseline
+file when you pass `--deny-new`.
+
 ## Skip list
 
 A skip list turns off rules by path or by name. Use it to adopt the rules in steps.
@@ -306,14 +331,16 @@ A project with a skip list must run `cargo adamantium check` in CI. A `[lints]` 
 
 A baseline accepts the findings that exist today and fails only on new ones. Use it to adopt every rule at once without fixing every finding first.
 
-Save a report, then check against it:
+Save a report before configuring a baseline, then check against it:
 
 ```sh
 cargo adamantium check --format json > adamantium-baseline.json
 cargo adamantium check --baseline adamantium-baseline.json
 ```
 
-With `--baseline`, `check` leaves out the findings that the baseline already has.
+With a configured baseline or `--baseline`, `check` leaves out the findings
+that the baseline already has. Temporarily remove the `baseline` setting to
+generate a fresh report with all findings.
 
 - The findings in the JSON and SARIF reports cover only new findings.
 - Text output shows diagnostics only for new findings.
@@ -343,9 +370,10 @@ A stale baseline exits with status `1` even when the JSON report's `status`
 is `clean`. If you pass both flags, `check` prunes the file before evaluating
 whether it is stale.
 
-Both flags require `--baseline`. For projects with OS-specific findings, keep
-one baseline file per OS and pass the file for the OS being checked. For
-example, a POSIX shell can select `"adamantium-baseline-$(uname -s).json"`.
+Both flags require a baseline from `Cargo.toml` or `--baseline`. For projects
+with OS-specific findings, keep one baseline file per OS and pass the file
+for the OS being checked. For example, a POSIX shell can select
+`"adamantium-baseline-$(uname -s).json"`.
 Use the same package, target, feature, and lint selections as when the
 baseline was created so the check can still see the same set of findings.
 
@@ -377,7 +405,7 @@ To state the behavior that you intend, use methods such as `checked_add`, `check
 Clippy recognizes some safe operations. It cannot prove the arithmetic bounds of every application, so this tier is optional.
 
 - `init --strict` adds the strict lint levels to `Cargo.toml` and strict paths to `clippy.toml`. It can upgrade the bundled default configuration directly. Use `--force` to replace a custom Clippy configuration.
-- Continue to pass `--strict` to `check` in CI. The Adamantium reports then include the strict rules.
+- To include the strict rules in `check` reports, set `strict = true` in the Adamantium metadata or pass `--strict`.
 - A second `init --strict` makes no changes. A later `init` keeps the installed strict configuration and lint levels.
 - The same skip list applies to both tiers.
 
@@ -512,7 +540,7 @@ cargo adamantium deps --format json -- --locked > deps-baseline.json
 cargo adamantium deps --deny-new --baseline deps-baseline.json -- --locked
 ```
 
-`--deny-new` checks the report's unsafe counts and disallowed paths that start unscoped tasks or threads, such as `tokio::spawn`, `smol::Executor::spawn`, and `std::thread::spawn`. Other disallowed calls remain visible in the audit. Run `--deny-new` without a baseline to check against zero findings. `--baseline` requires `--deny-new`.
+`--deny-new` checks the report's unsafe counts and disallowed paths that start unscoped tasks or threads, such as `tokio::spawn`, `smol::Executor::spawn`, and `std::thread::spawn`. Other disallowed calls remain visible in the audit. Set `deps.baseline` in the Adamantium metadata to use the report whenever you pass `--deny-new`. With neither a configured nor an explicit baseline, `--deny-new` checks against zero findings. `--baseline` requires `--deny-new`.
 
 A dependency is identified by its Cargo package name and source. Registry dependencies use the registry source. Git dependencies use the Git source and requested ref, ignoring the resolved commit. Path dependencies use the reported `path`. Versions of the same name and source share counts, including when several versions are present at once.
 
