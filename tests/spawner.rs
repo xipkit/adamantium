@@ -57,6 +57,106 @@ macro_rules! scenario {
     };
 }
 
+scenario!(spawn_variants_share_scope_results_and_admission, {
+    let mut scope = Tasks::<&str>::new();
+    let spawner = scope.spawner();
+    let handled = Actor::new(0);
+    let first = handled.clone();
+    let second = handled.clone();
+    spawner
+        .spawn_handled(async { Err(2) }, move |error| {
+            first.with(|sum| *sum += error)
+        })
+        .unwrap();
+    spawner
+        .spawn_handled_named("handled async", async { Err(3) }, move |error| {
+            second.with(|sum| *sum += error);
+        })
+        .unwrap();
+
+    let named = spawner
+        .spawn_named("named async", async { Err::<(), _>("claimed") })
+        .unwrap();
+    let blocking = spawner.spawn_blocking(|| Ok(7)).unwrap();
+    let named_blocking = spawner
+        .spawn_blocking_named("named blocking", || Ok(42))
+        .unwrap();
+    assert_eq!(scope.value(named).await, Err("claimed"));
+    assert_eq!(scope.value(blocking).await, Ok(7));
+    assert_eq!(scope.value(named_blocking).await, Ok(42));
+    assert_eq!(scope.join(Ok(())).await, Ok(()));
+    assert_eq!(handled.snapshot(), 5);
+
+    assert!(
+        spawner
+            .spawn_named::<(), _>("closed", async { panic!("polled after closure") })
+            .is_err()
+    );
+    assert!(
+        spawner
+            .spawn_handled(async { Err(()) }, |()| panic!("ran after closure"))
+            .is_err()
+    );
+    assert!(
+        spawner
+            .spawn_handled_named("closed", async { Err(()) }, |()| panic!(
+                "ran after closure"
+            ))
+            .is_err()
+    );
+    assert!(
+        spawner
+            .spawn_blocking::<(), _>(|| panic!("started after closure"))
+            .is_err()
+    );
+    assert!(
+        spawner
+            .spawn_blocking_named::<(), _>("closed", || panic!("started after closure"))
+            .is_err()
+    );
+});
+
+#[cfg(feature = "deterministic")]
+#[test]
+fn explain_includes_all_spawner_task_names() {
+    async fn scenario() {
+        let scope = Tasks::<()>::new();
+        let spawner = scope.spawner();
+        spawner
+            .spawn_named("named async", async { Ok(()) })
+            .unwrap();
+        spawner
+            .spawn_handled_named("handled async", async { Ok::<_, ()>(()) }, |()| {})
+            .unwrap();
+        spawner
+            .spawn_blocking_named("named blocking", || Ok(()))
+            .unwrap();
+        scope.join(Ok(())).await.unwrap();
+    }
+
+    let replay = adamantium::testing::check(
+        adamantium::testing::Config {
+            seed: 224,
+            iterations: 20,
+            max_steps: 10_000,
+        },
+        scenario,
+    )
+    .unwrap();
+    let timeline = adamantium::testing::explain(&replay, scenario);
+    assert_eq!(timeline.replay(), &replay);
+    assert_eq!(timeline.failure(), None);
+    for name in ["named async", "handled async", "named blocking"] {
+        assert!(
+            timeline
+                .tasks()
+                .iter()
+                .any(|task| task.name() == Some(name)),
+            "{timeline}"
+        );
+    }
+}
+
 scenario!(children_discover_after_the_body_returns, {
     let completed = Actor::new(0);
     let (release, released) = Reply::pair();
@@ -344,28 +444,47 @@ scenario!(
 scenario!(
     started_blocking_work_observes_closed_admission_before_shutdown,
     {
-        let mut scope = Tasks::new();
-        let spawner = scope.spawner();
-        let signal = Cancellation::new();
-        let blocking_signal = signal.clone();
-        let (started, running) = Reply::pair();
-        let finished = Actor::new(false);
-        let completed = finished.clone();
-        scope.spawn_blocking(move || {
-            started.send(()).unwrap();
-            while !blocking_signal.is_cancelled() {
-                std::thread::yield_now();
+        for named in [false, true] {
+            let scope = Tasks::new();
+            let spawner = scope.spawner();
+            let signal = Cancellation::new();
+            let blocking_signal = signal.clone();
+            let (started, running) = Reply::pair();
+            let finished = Actor::new(false);
+            let completed = finished.clone();
+            let release = Actor::new(false);
+            let may_finish = release.clone();
+            let sibling = spawner.clone();
+            let work = move || {
+                started.send(()).unwrap();
+                while !blocking_signal.is_cancelled() {
+                    std::thread::yield_now();
+                }
+                assert!(sibling.spawn(async { Ok(()) }).is_err());
+                while !may_finish.snapshot() {
+                    std::thread::yield_now();
+                }
+                completed.with(|done| *done = true);
+                Err::<(), _>("blocking child")
+            };
+            if named {
+                spawner
+                    .spawn_blocking_named("drained closure", work)
+                    .unwrap();
+            } else {
+                spawner.spawn_blocking(work).unwrap();
             }
-            assert!(spawner.spawn(async { Ok(()) }).is_err());
-            completed.with(|done| *done = true);
-            Err::<(), _>("blocking child")
-        });
-        running.receive().await.unwrap();
-        assert_eq!(
-            scope.join_until(signal, None, Err::<(), _>("body")).await,
-            Err(ScopeError::Failed("body"))
-        );
-        assert!(finished.snapshot());
+            running.receive().await.unwrap();
+            let mut join = std::pin::pin!(scope.join_until(signal, None, Err::<(), _>("body")));
+            let first_poll = std::future::poll_fn(|cx| Poll::Ready(join.as_mut().poll(cx))).await;
+            release.with(|ready| *ready = true);
+            assert!(
+                first_poll.is_pending(),
+                "join returned with blocking work still running"
+            );
+            assert_eq!(join.await, Err(ScopeError::Failed("body")));
+            assert!(finished.snapshot());
+        }
     }
 );
 
