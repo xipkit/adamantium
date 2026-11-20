@@ -1,0 +1,14 @@
+[workspace]
+exclude = ["probe"]
+
+[package]
+name = "action-smoke"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+probe = { path = "probe", optional = true }
+
+[profile.release]
+overflow-checks = true

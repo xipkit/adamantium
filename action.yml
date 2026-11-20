@@ -21,9 +21,67 @@ inputs:
   cargo-args:
     description: Use a YAML literal block with one Cargo argument per line. Blank lines are ignored.
     required: false
+  sarif:
+    description: Write check findings as SARIF to runner.temp/adamantium.sarif (true or false)
+    default: 'false'
+  upload-sarif:
+    description: Upload the SARIF report to GitHub code scanning (requires sarif and security-events write)
+    default: 'false'
+  sarif-category:
+    description: Code scanning category; use a distinct value for each analysis in a workflow
+    default: adamantium
+  deps:
+    description: Run the dependency audit with --deny-new (true or false)
+    default: 'false'
+  deps-baseline:
+    description: Dependency baseline path relative to the working directory (requires deps)
+  deps-args:
+    description: Cargo metadata/tree arguments for the dependency audit, one per line (requires deps)
+  style:
+    description: Advisory style review pack (google or concurrency); empty disables it
+  style-changed:
+    description: Git base for style review; empty reviews all files
 runs:
   using: composite
   steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        STRICT: ${{ inputs.strict }}
+        SARIF: ${{ inputs.sarif }}
+        UPLOAD_SARIF: ${{ inputs.upload-sarif }}
+        DEPS: ${{ inputs.deps }}
+        DEPS_BASELINE: ${{ inputs.deps-baseline }}
+        DEPS_ARGS: ${{ inputs.deps-args }}
+        CARGO_ARGS: ${{ inputs.cargo-args }}
+        STYLE: ${{ inputs.style }}
+        STYLE_CHANGED: ${{ inputs.style-changed }}
+      run: |
+        for name in STRICT SARIF UPLOAD_SARIF DEPS; do
+          case "${!name}" in
+            true|false) ;;
+            *) echo "$name must be true or false" >&2; exit 1 ;;
+          esac
+        done
+        if [[ "$UPLOAD_SARIF" == true && "$SARIF" != true ]]; then
+          echo 'upload-sarif requires sarif' >&2; exit 1
+        fi
+        if [[ -n "$DEPS_BASELINE" && "$DEPS" != true ]]; then
+          echo 'deps-baseline requires deps' >&2; exit 1
+        fi
+        if [[ -n "$DEPS_ARGS" && "$DEPS" != true ]]; then
+          echo 'deps-args requires deps' >&2; exit 1
+        fi
+        if [[ "$DEPS" == true && -n "$CARGO_ARGS" && -z "$DEPS_ARGS" ]]; then
+          echo '::warning::deps-args is empty; ensure the dependency audit uses the intended feature selection.'
+        fi
+        case "$STYLE" in
+          ''|google|concurrency) ;;
+          *) echo 'style must be google, concurrency, or empty' >&2; exit 1 ;;
+        esac
+        if [[ -n "$STYLE_CHANGED" && -z "$STYLE" ]]; then
+          echo 'style-changed requires style' >&2; exit 1
+        fi
     - name: Identify binary cache
       id: cache-key
       shell: bash
@@ -70,12 +128,14 @@ runs:
         fi
         cargo install --locked "${source_args[@]}" --root "$RUNNER_TEMP/adamantium" cargo-adamantium
     - name: Run adamantium check
+      id: check
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
         ADAMANTIUM_BASELINE: ${{ inputs.baseline }}
         ADAMANTIUM_STRICT: ${{ inputs.strict }}
         ADAMANTIUM_CARGO_ARGS: ${{ inputs.cargo-args }}
+        ADAMANTIUM_SARIF: ${{ inputs.sarif }}
       run: |
         export PATH="$RUNNER_TEMP/adamantium/bin:$PATH"
         args=(adamantium check)
@@ -87,6 +147,9 @@ runs:
           false|'') ;;
           *) echo 'strict must be true or false' >&2; exit 1 ;;
         esac
+        if [[ "$ADAMANTIUM_SARIF" == true ]]; then
+          args+=(--format sarif)
+        fi
         cargo_args=()
         while IFS= read -r arg; do
           arg=${arg%$'\r'}
@@ -97,4 +160,54 @@ runs:
         if [[ ${#cargo_args[@]} -gt 0 ]]; then
           args+=(-- "${cargo_args[@]}")
         fi
-        cargo "${args[@]}"
+        if [[ "$ADAMANTIUM_SARIF" == true ]]; then
+          report="$RUNNER_TEMP/adamantium.sarif"
+          rm -f "$report"
+          "$RUNNER_TEMP/adamantium/bin/cargo-adamantium" "${args[@]}" > "$report"
+        else
+          "$RUNNER_TEMP/adamantium/bin/cargo-adamantium" "${args[@]}"
+        fi
+    - name: Upload SARIF
+      if: ${{ !cancelled() && inputs.upload-sarif == 'true' && (steps.check.outcome == 'success' || steps.check.outcome == 'failure') }}
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ runner.temp }}/adamantium.sarif
+        category: ${{ inputs.sarif-category }}
+    - name: Audit dependencies
+      if: ${{ inputs.deps == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ADAMANTIUM_DEPS_BASELINE: ${{ inputs.deps-baseline }}
+        ADAMANTIUM_DEPS_ARGS: ${{ inputs.deps-args }}
+      run: |
+        export PATH="$RUNNER_TEMP/adamantium/bin:$PATH"
+        args=(adamantium deps --deny-new)
+        if [[ -n "$ADAMANTIUM_DEPS_BASELINE" ]]; then
+          args+=(--baseline "$ADAMANTIUM_DEPS_BASELINE")
+        fi
+        cargo_args=()
+        while IFS= read -r arg; do
+          arg=${arg%$'\r'}
+          if [[ -n "$arg" ]]; then
+            cargo_args+=("$arg")
+          fi
+        done <<< "$ADAMANTIUM_DEPS_ARGS"
+        if [[ ${#cargo_args[@]} -gt 0 ]]; then
+          args+=(-- "${cargo_args[@]}")
+        fi
+        "$RUNNER_TEMP/adamantium/bin/cargo-adamantium" "${args[@]}"
+    - name: Review style
+      if: ${{ inputs.style != '' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ADAMANTIUM_STYLE: ${{ inputs.style }}
+        ADAMANTIUM_STYLE_CHANGED: ${{ inputs.style-changed }}
+      run: |
+        export PATH="$RUNNER_TEMP/adamantium/bin:$PATH"
+        args=(adamantium style check --pack "$ADAMANTIUM_STYLE" --format text)
+        if [[ -n "$ADAMANTIUM_STYLE_CHANGED" ]]; then
+          args+=("--changed=$ADAMANTIUM_STYLE_CHANGED")
+        fi
+        "$RUNNER_TEMP/adamantium/bin/cargo-adamantium" "${args[@]}" || echo '::warning::Style review reported findings or was incomplete; inspect the output.'
