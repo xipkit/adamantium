@@ -106,7 +106,7 @@ cargo adamantium explain unwrap_used   # show why a rule exists and how to fix a
 cargo adamantium deps           # show which dependencies use unsafe code or spawn tasks
 ```
 
-- `check` runs Clippy with the Adamantium rules on every workspace member. It prints text, JSON, or SARIF. The exit status is `0` for no findings, `1` for findings, and `2` if the project did not build.
+- `check` runs Clippy with the Adamantium rules on every workspace member. It prints text, JSON, or SARIF. It exits with `1` for findings or when `--fail-on-stale-baseline` detects a stale baseline, and `2` if the project did not build or the command failed.
 - `fix` applies the rewrites that are safe to automate. It reports the others with a link to the section of the [migration guide](docs/migrating.md) that covers them, or, for a rule the guide doesn't cover, the `cargo adamantium explain` command for it. If the fixed project does not build, `fix` restores every file that it changed.
 - `init` adds the rules to the project. After that, `cargo clippy` applies them without the command.
 
@@ -133,6 +133,10 @@ A baseline accepts the findings that exist today and fails only on new ones:
 cargo adamantium check --format json > adamantium-baseline.json
 cargo adamantium check --baseline adamantium-baseline.json
 ```
+
+Add `--update-baseline` after fixing findings, or use `--fail-on-stale-baseline`
+in CI to require that the baseline stays current. Add `--summary` to see
+counts by rule and the files with the most findings.
 
 ## The rules
 
