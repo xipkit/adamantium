@@ -163,6 +163,7 @@ pub const DISALLOWED_METHODS: &[(&str, &[&str])] = &[
             "tokio::time::Instant::now",
         ],
     ),
+    ("the-wall-clock", &["std::time::SystemTime::now"]),
     (
         "the-first-to-succeed",
         &["tokio::macros::support::poll_budget_available"],

@@ -116,6 +116,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `adamantium`: the `time` docs and the `tokio::time::Instant::now` lint
   message direct TTLs, cache expiry and retry windows to `time::now()`, and
   `std::time::Instant::now()` only to metrics and logging.
+- `cargo-adamantium`: Default rules report `std::time::SystemTime::now` and
+  recommend `adamantium::time::wall_now` for comparing absolute timestamps
+  such as a JWT or cookie `exp`. A timestamp only for logging can keep it
+  under an `#[expect]` with a reason.
 - `cargo-adamantium`: Default rules report Tokio `oneshot`, Tokio `watch`,
   and `std::sync::mpsc::sync_channel`. Strict rules also report bounded Tokio
   `mpsc`, `Notify`, and `Semaphore`. Broadcast diagnostics recommend

@@ -2,8 +2,8 @@
 
 Most of what `cargo adamantium check` reports in an existing async crate is
 shared state behind `Arc<Mutex<T>>` and tasks started with `tokio::spawn`.
-This guide covers the common rewrites for those patterns, timers, and random
-draws. Every code block runs as a doctest of the library, so the rewrites
+This guide covers the common rewrites for those patterns, timers, the wall
+clock, and random draws. Every code block runs as a doctest of the library, so the rewrites
 track the current API.
 
 To adopt the rules one module at a time, skip the paths you haven't migrated
@@ -41,6 +41,7 @@ changes behavior in a way to check.
 | `tokio::spawn` inside a task | A scope inside the task | No |
 | `tokio::time::sleep` | `time::sleep` | Yes |
 | `tokio::time::interval` | `time::Interval` | Mostly |
+| `SystemTime::now()` compared with an expiry | `time::wall_now()` | Yes |
 | `rand::random::<u64>()`, `fastrand::u64(..)` | `random::u64()` | Yes |
 | `fastrand::u64(0..=max)`, `rand::random_range(0..=max)` for a `u64` range | `random::up_to(max)` | Yes |
 
@@ -1410,6 +1411,49 @@ async fn main() {
     assert_eq!(lines, ["a", "b"]);
 }
 ```
+
+## The wall clock
+
+The default rules report `std::time::SystemTime::now()`. Code that compares
+an absolute timestamp from outside the process, such as a JWT or cookie
+`exp`, against the real clock can't be tested without waiting for the real
+expiry, and a replay of a failure reads a different time.
+
+Read the wall clock with `time::wall_now()` instead. Outside the
+deterministic harness it is `SystemTime::now()`. Inside an execution it
+starts at `testing::Config::wall_epoch` and advances with virtual time, so
+an expiry check passes and fails at the same step in every run and replay.
+
+Before:
+
+```rust
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+fn expired(exp_secs: u64) -> bool {
+    SystemTime::now() >= UNIX_EPOCH + Duration::from_secs(exp_secs)
+}
+
+assert!(expired(1_000_000_000));
+```
+
+After:
+
+```rust
+use adamantium::time;
+use std::time::{Duration, UNIX_EPOCH};
+
+fn expired(exp_secs: u64) -> bool {
+    time::wall_now() >= UNIX_EPOCH + Duration::from_secs(exp_secs)
+}
+
+assert!(expired(1_000_000_000));
+```
+
+Measure durations with `time::now()`, since the wall clock jumps when the
+system clock is adjusted. A timestamp that only goes into a log line can keep
+`SystemTime::now()` under
+`#[expect(clippy::disallowed_methods, reason = "...")]`. `std::time::Instant::now()`
+stays allowed for metrics and logging.
 
 ## Randomness
 
