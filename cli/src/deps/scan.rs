@@ -1,22 +1,3 @@
-//! Reading one dependency's library with syn: its `unsafe` code, and its
-//! uses of the paths `clippy.toml` disallows.
-//!
-//! The scan walks the module tree from the library's root, as the compiler
-//! does, so tests, examples, benches and files no module declares are left
-//! out. syn sees syntax, not resolved names, so paths are resolved as far as
-//! the crate's source shows them: through each module's `use` and `extern
-//! crate` items, `crate`, `self` and `super`, re-exports between the crate's
-//! modules, its dependencies' names and the standard prelude. A module-level
-//! call of the crate's own `macro_rules!`, as `crate_root!();` or Tokio's
-//! `feature! { #![unix] ... }`, is read as its expansion where its rules can
-//! be matched without compiling the crate, and so is a call of a dependency's
-//! `#[macro_export]` macro that a `#[macro_use] extern crate` brings in, as
-//! stacker's `psm_stack_manipulation!`, or that names it by path, as
-//! `psm::psm_stack_manipulation!` or `$crate::inner!` in another crate's
-//! macro, as is a call of the crate's own macro by path. A call that this
-//! can't tie to a path, such as a method call on a value, is counted as
-//! unresolved under its name rather than guessed at.
-
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry},
@@ -50,20 +31,11 @@ use super::{
 
 /// The library to scan.
 pub struct Crate<'a> {
-    /// The crate name its code calls itself by, after `crate::`.
     pub name: &'a str,
-    /// The package directory, which reported file names are relative to.
     pub root: &'a Path,
-    /// The library's root source file.
     pub src: &'a Path,
-    /// Whether the crate uses the 2015 edition, where `use` paths start at
-    /// the crate root.
     pub edition_2015: bool,
-    /// The crate's dependencies by the name its code uses, mapped to their
-    /// library names.
     pub externs: &'a BTreeMap<String, String>,
-    /// The dependencies whose source the scan can read, by the name the
-    /// crate's code uses, mapped to their indices in the shared crate table.
     pub dependencies: BTreeMap<String, usize>,
     pub cfg: Cfg<'a>,
 }
@@ -71,34 +43,18 @@ pub struct Crate<'a> {
 /// The kinds of `unsafe` code, counted where they are written.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct UnsafeCounts {
-    /// `unsafe fn`, free or in a trait or impl.
     pub functions: usize,
-    /// `unsafe { ... }` blocks.
     pub blocks: usize,
-    /// `unsafe impl`.
     pub impls: usize,
-    /// `unsafe trait`.
     pub traits: usize,
-    /// `unsafe extern` blocks. A plain `extern` block, which editions before
-    /// 2024 allow, isn't counted: its functions can only be called in
-    /// `unsafe` blocks, which are.
     pub extern_blocks: usize,
-    /// Attributes that `unsafe_code` reports, such as `#[no_mangle]`, with
-    /// or without the `unsafe(...)` the 2024 edition requires, including
-    /// those a `cfg_attr` adds.
     pub attributes: usize,
-    /// `global_asm!` calls, which `unsafe_code` reports, through any path or
-    /// `use` that leads to `core::arch::global_asm`.
     pub global_asm: usize,
-    /// `unsafe` in macro bodies that syn can't parse as code, such as the
-    /// `macro_rules!` definitions the scan doesn't expand where they are
-    /// called, and the attributes `unsafe_code` reports
-    /// that are written there without `unsafe(...)`, and `global_asm!`
-    /// calls there.
     pub in_macros: usize,
 }
 
 impl UnsafeCounts {
+    /// Counts all unsafe sites in the scan.
     pub fn total(&self) -> usize {
         self.by_category().into_iter().map(|(_, count)| count).sum()
     }
@@ -137,14 +93,9 @@ pub struct Unscanned {
 /// What a scan found.
 #[derive(Debug, Default)]
 pub struct Scan {
-    /// The library declares `#![forbid(unsafe_code)]`, or its manifest
-    /// forbids `unsafe_code`.
     pub forbids_unsafe: bool,
     pub unsafe_code: UnsafeCounts,
-    /// The sites of each disallowed path it uses, by entry index.
     pub calls: BTreeMap<usize, Vec<Site>>,
-    /// Calls that might reach a disallowed path but couldn't be resolved,
-    /// counted by name.
     pub unresolved: BTreeMap<String, usize>,
     pub unscanned: Vec<Unscanned>,
 }
@@ -154,12 +105,9 @@ pub fn scan(crates: &[Crate], entry: usize, disallowed: &Disallowed) -> Scan {
     let Some(krate) = crates.get(entry) else {
         return Scan::default();
     };
-    // Every module's names are bound before any code is read, so a path can
-    // be followed through another module's `use` items.
     let mut scanner = Scanner::read(crates, entry, krate, disallowed, false);
     scanner.scan.forbids_unsafe |= manifest_forbids_unsafe(krate.root);
     scanner.definitions = scanner.definitions();
-    // Visiting can load more files: modules declared inside functions.
     let mut visited = Vec::new();
     while !scanner.files.is_empty() {
         let files = mem::take(&mut scanner.files);
@@ -183,9 +131,6 @@ pub fn scan(crates: &[Crate], entry: usize, disallowed: &Disallowed) -> Scan {
         }
         visited.extend(files);
     }
-    // A macro expanded where some calls are may have calls the scan can't
-    // expand, such as in functions, whose code it can't otherwise see: its
-    // body is read as tokens then, as a macro's that isn't expanded is.
     loop {
         let ready: Vec<_> = scanner
             .deferred
@@ -214,13 +159,10 @@ pub fn scan(crates: &[Crate], entry: usize, disallowed: &Disallowed) -> Scan {
         }
     }
     drop(visited);
-    // Spans keep every parsed file's text; nothing refers to them now.
     proc_macro2::extra::invalidate_current_thread_spans();
     scanner.scan
 }
 
-/// Whether a package's `Cargo.toml` sets `unsafe_code = "forbid"` in its
-/// `[lints.rust]` table.
 fn manifest_forbids_unsafe(root: &Path) -> bool {
     let Ok(text) = fs::read_to_string(root.join("Cargo.toml")) else {
         return false;
@@ -241,24 +183,15 @@ fn manifest_forbids_unsafe(root: &Path) -> bool {
         == Some("forbid")
 }
 
-/// What a name is bound to in a scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Binding {
-    /// An item with a known path, optionally in a specific crate of the shared
-    /// table.
     Item(Option<usize>, Vec<String>),
-    /// A `use` path, resolved in the module that has it, or directly in a
-    /// crate of the shared table when it started with `$crate`.
     Use {
         krate: Option<usize>,
         path: Vec<String>,
         leading: bool,
     },
-    /// An item local to a block, which has no path.
     Opaque,
-    /// Bindings of one name that any build may have, such as two `use`
-    /// items behind `cfg`s the audit can't know: a path through the name may
-    /// mean any of them.
     Either(Vec<Binding>),
 }
 
@@ -271,10 +204,6 @@ impl Binding {
     }
 }
 
-/// The namespaces a name can be bound in. Modules and types share one,
-/// functions, constants and statics another, so `mod spawn;` and `pub use
-/// self::spawn::spawn;` bind different things, and macros named by path
-/// have their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Namespace {
     Types,
@@ -282,16 +211,13 @@ enum Namespace {
     Macros,
 }
 
-/// A name's binding in one namespace of a scope.
 #[derive(Debug, PartialEq, Eq)]
 struct Bound {
     binding: Binding,
-    /// Whether every build has it: the `cfg`s on it are known to hold.
     certain: bool,
 }
 
 impl Bound {
-    /// Adds another binding the name may have.
     fn add(&mut self, binding: Binding) {
         self.certain = false;
         let mut alternatives = match mem::replace(&mut self.binding, Binding::Opaque) {
@@ -310,7 +236,6 @@ impl Bound {
     }
 }
 
-/// The names one module or block binds.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Scope {
     types: HashMap<String, Bound>,
@@ -341,8 +266,6 @@ impl Scope {
         self.bound(namespace, name).map(|bound| &bound.binding)
     }
 
-    /// Binds a local variable or a generic parameter, which hides what the
-    /// scope bound to its name before.
     fn shadow(&mut self, namespace: Namespace, name: String) {
         self.map(namespace).insert(
             name,
@@ -353,9 +276,6 @@ impl Scope {
         );
     }
 
-    /// Binds an item defined here. `certain` is whether every build has
-    /// it. Two items of one name can't both be in a build, so where one of
-    /// them depends on a `cfg` the audit can't know, either may be.
     fn define(&mut self, namespace: Namespace, name: String, binding: Binding, certain: bool) {
         let map = self.map(namespace);
         match map.get_mut(&name) {
@@ -366,11 +286,6 @@ impl Scope {
         }
     }
 
-    /// Binds a `use` in every namespace, since the audit can't tell which
-    /// its target is in. Where every build defines an item of the same name,
-    /// the `use` must be in another namespace. Two `use` items of one name
-    /// that every build has are in different namespaces, so either may be
-    /// the one a path means.
     fn import(&mut self, name: String, binding: Binding, certain: bool) {
         for map in [&mut self.types, &mut self.values, &mut self.macros] {
             match map.get_mut(&name) {
@@ -392,9 +307,6 @@ impl Scope {
         }
     }
 
-    /// Binds `name` in the macro namespace to `item`, the macro that the
-    /// `use` the name is bound to, `used`, brings in. With `keep`, a build
-    /// may not define the macro, and the `use` may mean something else.
     fn bring_in(&mut self, name: &str, used: &Binding, item: &Binding, keep: bool) {
         let Some(bound) = self.macros.get_mut(name) else {
             return;
@@ -417,8 +329,6 @@ impl Scope {
         };
     }
 
-    /// Adds the names another scope of the same module binds, as where two
-    /// modules of one path are each behind a `cfg`: either may be built.
     fn merge(&mut self, other: Self) {
         for (namespace, map) in [
             (Namespace::Types, other.types),
@@ -433,8 +343,6 @@ impl Scope {
     }
 }
 
-/// The namespace of a path's segment: the last one is in `last`, and the
-/// ones before it name modules or types.
 fn namespace(path: &[String], index: usize, last: Namespace) -> Namespace {
     if index + 1 == path.len() {
         last
@@ -443,25 +351,18 @@ fn namespace(path: &[String], index: usize, last: Namespace) -> Namespace {
     }
 }
 
-/// What a path resolved to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Resolved {
     Path {
-        /// The crate in the shared table the path starts in, when known.
         krate: Option<usize>,
         path: Vec<String>,
     },
-    /// A local variable or an item local to a block.
     Local,
     Unknown,
-    /// What a path through a name with more than one binding may mean. With
-    /// no alternatives, it is a way to a `use` that leads back to it, which
-    /// means nothing.
     Either(Vec<Resolved>),
 }
 
 impl Resolved {
-    /// What a path may mean when it may mean any of `alternatives`.
     fn either(alternatives: impl IntoIterator<Item = Self>) -> Self {
         let mut flat = Vec::new();
         for alternative in alternatives {
@@ -491,7 +392,6 @@ impl Resolved {
         }
     }
 
-    /// Applies `f` to each path the resolution may be.
     fn map_paths(self, mut f: impl FnMut(Option<usize>, Vec<String>) -> Self) -> Self {
         Self::either(
             self.into_alternatives()
@@ -511,10 +411,8 @@ impl Resolved {
     }
 }
 
-/// How many `use` items resolution follows before it gives up.
 const MAX_DEPTH: usize = 16;
 
-/// The standard prelude's names that a path can start with.
 const PRELUDE: [(&str, &str); 37] = [
     ("Box", "std::boxed::Box"),
     ("Vec", "std::vec::Vec"),
@@ -555,42 +453,25 @@ const PRELUDE: [(&str, &str); 37] = [
     ("FromIterator", "std::iter::FromIterator"),
 ];
 
-/// The crates every crate can name without declaring them.
 const SYSROOT: [&str; 5] = ["std", "core", "alloc", "proc_macro", "test"];
 
-/// A parsed file of the module tree, or the items a `macro_rules!` call
-/// expands to. The calls of the crate's `macro_rules!` that are expanded
-/// aren't among its items.
 struct Loaded {
-    /// The file's inner attributes; an expansion has none.
     attrs: Vec<Attribute>,
     items: Vec<Item>,
-    /// Its name relative to the package. An expansion's is the name of the
-    /// file its macro is written in; its spans may be in the call's file
-    /// too.
     rel: String,
     module: Vec<String>,
-    /// Where its child modules' files are.
     mod_dir: PathBuf,
-    /// What its `#[path]` attributes are relative to.
     path_dir: PathBuf,
 }
 
-/// A file a module's code may be in.
 struct ModuleFile {
     path: PathBuf,
     mod_rs: bool,
-    /// The predicate of the `cfg`s that make a build take the module from
-    /// this file, where it may be in another.
     condition: Option<TokenStream>,
 }
 
-/// Where a module's code is.
 enum Location {
-    Inline {
-        dir: PathBuf,
-    },
-    /// The files a build may take it from.
+    Inline { dir: PathBuf },
     Files(Vec<ModuleFile>),
     Unscannable(String),
 }
@@ -603,208 +484,103 @@ struct Scanner<'a> {
     scan: Scan,
     visited: HashSet<PathBuf>,
     files: Vec<Loaded>,
-    /// The names each module binds, by module path.
     modules: HashMap<Vec<String>, Scope>,
-    /// Where the disallowed paths into this crate are defined.
     definitions: HashMap<Vec<String>, usize>,
-    /// The `macro_rules!` expanded where they are called, by file and where
-    /// their names are written.
     expanded: HashSet<(String, usize, usize)>,
-    /// The names of the macros called where the scan doesn't expand them.
     unexpanded: HashSet<String>,
-    /// The bodies of the expanded `macro_rules!` that are read as tokens
-    /// only if a call of their name isn't expanded, by file and where their
-    /// names are written.
     deferred: BTreeMap<(String, usize, usize), Deferred>,
-    /// The files read, relative to the package, by the source their spans
-    /// are in, as [`Span::file`] names it. A macro's expansion has tokens
-    /// from the call and from the macro, which may be in different files.
     sources: HashMap<String, String>,
-    /// How many calls of `macro_rules!` have been expanded.
     expansions: usize,
-    /// The macros that `#[macro_use] extern crate` items bring in from
-    /// other crates, which a call names where no other macro of its name is
-    /// in scope.
     prelude: Vec<Imported>,
-    /// The dependencies read for the macros they export, by their indices
-    /// in `crates`.
     libraries: HashMap<usize, Scanner<'a>>,
-    /// The modules around the one being indexed, outermost first, with the
-    /// names bound in them so far, which `modules` doesn't have yet.
     around: Vec<(Vec<String>, Scope)>,
-    /// The sources, as [`Span::file`] names them, of the files read for
-    /// other crates' macros. Code written there counts for the crate that
-    /// wrote it, not for this one, where the macros are called.
     foreign: HashSet<String>,
-    /// Where `$crate` is written in other crates' macros, by source, as
-    /// [`Span::file`] names it, line and column, mapped to the crate's index
-    /// in `crates`.
     dollar_crates: HashMap<(String, usize, usize), usize>,
-    /// The `#[macro_export]` macros defined so far, where the crate is read
-    /// for another crate that calls them.
     exports: Option<Vec<Export>>,
-    /// Where `$crate` is written in the crate's macros, where the crate is
-    /// read for another crate that brings them in.
     crate_spans: Vec<Span>,
-    /// The crate's own `macro_rules!` that paths name, by the path: the
-    /// `#[macro_export]` ones at the crate root, and those a `use` brings in
-    /// from textual scope where it is. Each path has the definitions a build
-    /// may have. The last reading of the module tree's are kept, for a path
-    /// to a macro the crate defines after the call.
     macro_paths: HashMap<Vec<String>, Vec<MacroRules>>,
-    /// The names each module bound in the last reading of the module tree,
-    /// by module path, which paths are resolved through while the scan
-    /// reads it again.
     last_pass: HashMap<Vec<String>, Scope>,
-    /// The calls by path, or by a name a `use` may bind, read so far in
-    /// this reading of the module tree, with the macros each was read as.
     path_calls: Vec<PathCall>,
-    /// The numbers of the crate's own `macro_rules!` definitions, by where
-    /// each is written and how many were read there before it in its
-    /// reading of the module tree, kept from one reading to the next, so
-    /// that a definition read again has the number it had.
     instances: HashMap<(String, usize, usize, usize), usize>,
-    /// How many definitions were read at each place in this reading of the
-    /// module tree.
     read_at: HashMap<(String, usize, usize), usize>,
-    /// The names that a `macro_rules!` in textual scope, which every build
-    /// has, hides at each macro call or definition left among a module's
-    /// items, by [`call_site`]: those it hides everywhere the item is read,
-    /// as in each expansion of a macro it is written in.
     hidden: HashMap<(String, usize, usize), HashSet<String>>,
 }
 
-/// A call of a macro by path, or by a bare name a `use` may bind, as the
-/// scan read it.
 struct PathCall {
-    /// The module it is in.
     module: Vec<String>,
     path: syn::Path,
-    /// What its path was resolved to name: `None` where it doesn't lead to
-    /// macros the scan can read.
     found: Option<Vec<Found>>,
 }
 
-/// A `#[macro_export]` macro of a crate, as another crate calls it.
 struct Export {
     name: String,
     rules: Option<Rules>,
-    /// The file it is written in, relative to the package of the scanner
-    /// that has it.
     rel: String,
-    /// Where its name is written.
     span: Span,
-    /// Whether the crate's build defines and exports it, by the `cfg`s of
-    /// that build.
     defined: Truth,
 }
 
-/// The body of an expanded `macro_rules!`, and the module it is written in.
 struct Deferred {
     name: String,
     module: Vec<String>,
     mod_dir: PathBuf,
     path_dir: PathBuf,
     tokens: TokenStream,
-    /// The names a `macro_rules!` in textual scope hides where it is written.
     hidden: HashSet<String>,
 }
 
-/// A `macro_rules!` in textual scope.
 #[derive(Clone)]
 struct MacroRules {
     name: String,
-    /// Its rules, if the scan can read them. A macro whose rules it can't
-    /// read isn't expanded, nor is any call it may shadow.
     rules: Option<Rules>,
-    /// The file it is written in.
     rel: String,
-    /// Where its name is written.
     span: Span,
-    /// The predicates of the `cfg`s it is defined under: its own, and those
-    /// of the modules around it.
     condition: Vec<TokenStream>,
-    /// Whether every build defines it.
     certain: bool,
-    /// Whether a build that `condition` holds for defines it: not known
-    /// where it is defined in the expansion of another crate's macro.
     defined: Truth,
-    /// Which of the crate's definitions it is, as [`Scanner::instance`]
-    /// numbers them.
     instance: usize,
 }
 
-/// Another crate's `#[macro_export]` macro that a `#[macro_use] extern
-/// crate` item brings into the prelude.
 struct Imported {
     name: String,
-    /// The library it is read from, by its index in `crates`.
     library: usize,
-    /// Which of the library's exports it is.
     export: usize,
-    /// The predicates of the `cfg`s the `extern crate` item is under.
     condition: Vec<TokenStream>,
-    /// Whether every build brings it in.
     certain: bool,
-    /// Whether a build that `condition` holds for brings it in, which the
-    /// library's build decides too.
     defined: Truth,
-    /// Which of the crate root's `#[macro_use] extern crate` items brings
-    /// it in, by their order: the last that brings in a name hides the ones
-    /// before it.
     import: usize,
 }
 
-/// Where a definition a call may name comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Origin {
-    /// The crate's own `macro_rules!`, in textual scope.
     Local,
-    /// Another crate's, that the `#[macro_use] extern crate` item of this
-    /// index among the crate root's items brings in.
     MacroUse(usize),
-    /// One named by a path or brought in by a `use`.
     Path,
 }
 
-/// A macro that a macro path may name.
 #[derive(Clone, PartialEq, Eq)]
 enum Found {
-    /// Another crate's `#[macro_export]` macro.
     Export {
-        /// The library it is read from, by its index in `crates`.
         library: usize,
-        /// Which of the library's exports it is.
         export: usize,
     },
-    /// One of the crate's own `macro_rules!`: the definition of this index
-    /// among those `path` names.
     Own {
         path: Vec<String>,
         definition: usize,
     },
 }
 
-/// A definition a call may name, as [`Scanner::expand`] reads it.
 struct Candidate<'t> {
     rules: &'t Rules,
-    /// The file it is written in.
     rel: &'t str,
-    /// Where its name is written.
     span: Span,
-    /// The predicates of the `cfg`s it is defined under.
     condition: Cow<'t, [TokenStream]>,
-    /// Whether a build that `condition` holds for defines it.
     defined: Truth,
     origin: Origin,
-    /// Which of the crate's own definitions it is, or `None` for another
-    /// crate's.
     instance: Option<usize>,
 }
 
 impl Candidate<'_> {
-    /// Reads this definition where `other`, a way to the same one, holds
-    /// too.
     fn either(&mut self, other: Self) {
         let text = |condition: &[TokenStream]| {
             condition
@@ -828,33 +604,21 @@ impl Candidate<'_> {
     }
 }
 
-/// The `macro_rules!` a call can name by its bare name at a place in the
-/// module tree, as rustc's textual scope has them: the ones defined before
-/// it in its module and the modules around it, and in the `#[macro_use]`
-/// modules declared before it in those, in order.
 #[derive(Default)]
 struct Textual {
     macros: Vec<MacroRules>,
-    /// The predicates of the `cfg`s on the modules around the place.
     conditions: Vec<TokenStream>,
-    /// How many expansions the place is inside.
     depth: usize,
-    /// Whether a build may not have the place for a reason its conditions
-    /// don't show: it is in the expansion of another crate's macro, which
-    /// that crate's build may not define.
     uncertain: bool,
 }
 
 impl Textual {
-    /// Whether every build has a macro named `name` here, which hides any
-    /// other a call of the name may mean.
     fn hides(&self, name: &str) -> bool {
         self.macros
             .iter()
             .any(|definition| definition.name == name && definition.certain)
     }
 
-    /// The names every build has a macro of here, which [`Textual::hides`].
     fn hidden(&self) -> HashSet<String> {
         self.macros
             .iter()
@@ -864,31 +628,18 @@ impl Textual {
     }
 }
 
-/// Where items being indexed are.
 #[derive(Clone, Copy)]
 struct Place<'p> {
-    /// The module they are in.
     module: &'p [String],
-    /// Where the module's `mod name;` files are.
     mod_dir: &'p Path,
-    /// What the module's `#[path]` attributes are relative to.
     path_dir: &'p Path,
-    /// The file they are written in, relative to the package.
     rel: &'p str,
 }
 
-/// How many `macro_rules!` expansions deep the scan follows calls, so that a
-/// macro that calls itself can't keep it going: rustc's default
-/// `recursion_limit`.
 const MAX_EXPANSIONS: usize = 128;
 
-/// How many calls of `macro_rules!` the scan expands in one crate, so that
-/// a macro whose expansion calls it more than once can't keep it going.
 const MAX_EXPANDED_CALLS: usize = 10_000;
 
-/// How many times the scan reads a crate's module tree, each time resolving
-/// macro paths through the names the last reading bound, before it settles
-/// for what it has.
 const MAX_PASSES: usize = 8;
 
 impl<'a> Scanner<'a> {
@@ -929,16 +680,6 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// Reads the module tree of `krate`: binds every module's names and
-    /// expands the calls of macros it can follow. While the tree is read, a
-    /// call by path can't see the names bound after it, as through a module
-    /// declared later, or a macro defined later. So once it is read, each
-    /// call by path is resolved again in the whole tree, and where one would
-    /// name other macros, the tree is read again, resolving paths through the
-    /// names the last reading bound, until every call names what the tree it
-    /// is in does, as rustc expands calls until nothing changes. `krate` is
-    /// the crate at `id` in `crates`, and `exports` is whether it is read
-    /// for another crate that calls its macros.
     fn read(
         crates: &'a [Crate<'a>],
         id: usize,
@@ -958,8 +699,6 @@ impl<'a> Scanner<'a> {
                 break;
             }
             let mut next = Self::new(crates, id, krate, disallowed);
-            // The last reading's macros keep their spans, so the names of
-            // the files they are in stay known.
             next.libraries = mem::take(&mut scanner.libraries);
             next.sources = mem::take(&mut scanner.sources);
             next.foreign = mem::take(&mut scanner.foreign);
@@ -972,8 +711,6 @@ impl<'a> Scanner<'a> {
         scanner
     }
 
-    /// Whether each call by path in the module tree just read names the
-    /// macros it was read as, resolved in the whole tree.
     fn calls_settled(&mut self) -> bool {
         let calls = mem::take(&mut self.path_calls);
         calls
@@ -981,11 +718,6 @@ impl<'a> Scanner<'a> {
             .all(|call| self.call_macros(&call.module, &call.path, None).0 == call.found)
     }
 
-    /// The macros a call by `path` in `module` may name: by the path, or by
-    /// a `use` that binds its bare name, with whether every build has the
-    /// `use`. A bare name nothing binds names none. `None` where the path
-    /// doesn't lead to macros the scan can read. `indexing` has the names
-    /// the module binds so far, if it is being indexed.
     fn call_macros(
         &mut self,
         module: &[String],
@@ -1014,9 +746,6 @@ impl<'a> Scanner<'a> {
         (self.path_macros(&resolved), certain)
     }
 
-    /// Notes that `path` names `definition`, among the definitions a build
-    /// may have. Where the last reading of the module tree found it, it
-    /// replaces what that reading found.
     fn name_macro(&mut self, path: Vec<String>, definition: MacroRules) {
         let definitions = self.macro_paths.entry(path).or_default();
         let same = definitions
@@ -1028,11 +757,6 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// The number of the definition whose name is written at `span` in
-    /// `rel`: the one it had in the last reading of the module tree, if it
-    /// was read then. Calls of a macro that writes a definition give one
-    /// for each call, all written in one place, and each reading reads them
-    /// in order.
     fn instance(&mut self, rel: &str, span: Span) -> usize {
         let start = span.start();
         let place = (rel.to_owned(), start.line, start.column);
@@ -1043,12 +767,6 @@ impl<'a> Scanner<'a> {
         *self.instances.entry(key).or_insert(next)
     }
 
-    /// Loads the file of the module at `module`, and the modules it declares.
-    /// A mod-rs file, such as the crate root, a `mod.rs` or a file named by
-    /// `#[path]`, keeps its child modules' files beside it; any other
-    /// `name.rs` keeps them in `name/`. `from` is the declaration that names
-    /// the file, and `textual` the macros in scope there. Returns the file's
-    /// inner attributes, which are its module's, or none if it isn't read.
     fn load(
         &mut self,
         path: &Path,
@@ -1136,12 +854,6 @@ impl<'a> Scanner<'a> {
         attrs
     }
 
-    /// Binds the names `items` define in the module at `place` into
-    /// `scope`, and reads what they bring into the module tree, in the order
-    /// they are written: the modules they declare, and the expansions of
-    /// their calls of `macro_rules!` in `textual`, which their own
-    /// `macro_rules!` join. A call that is expanded is taken out of the
-    /// items, so a call left among them isn't.
     fn index(
         &mut self,
         items: &mut Vec<Item>,
@@ -1154,8 +866,6 @@ impl<'a> Scanner<'a> {
         for mut item in mem::take(items) {
             match &mut item {
                 Item::Mod(item) => {
-                    // Paths in the module it declares may lead through its
-                    // names, which `modules` has only once it is indexed.
                     self.around.push((place.module.to_vec(), mem::take(scope)));
                     self.child(item, place, textual);
                     if let Some((_, around)) = self.around.pop() {
@@ -1189,7 +899,6 @@ impl<'a> Scanner<'a> {
         *items = indexed;
     }
 
-    /// Adds the names a module binds to those already bound for its path.
     fn add_scope(&mut self, module: &[String], scope: Scope) {
         match self.modules.get_mut(module) {
             Some(existing) => existing.merge(scope),
@@ -1199,9 +908,6 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// Reads a module that the module at `place` declares. Its
-    /// `macro_rules!` stay in textual scope after it if it is
-    /// `#[macro_use]`, by an outer attribute or an inner one.
     fn child(&mut self, item: &mut ItemMod, place: Place, textual: &mut Textual) {
         if self.krate.cfg.enabled(&item.attrs) == Truth::False {
             return;
@@ -1212,7 +918,6 @@ impl<'a> Scanner<'a> {
         let conditions = textual.conditions.len();
         textual.conditions.extend(cfg_predicates(&item.attrs));
         match self.locate(item, place.mod_dir, place.path_dir) {
-            // syn gives an inline module's inner attributes with its outer ones.
             Location::Inline { dir } => {
                 if let Some((_, items)) = &mut item.content {
                     let mut scope = Scope::default();
@@ -1227,7 +932,6 @@ impl<'a> Scanner<'a> {
                 }
                 self.keep_macros(&item.attrs, macros, textual);
             }
-            // Each file may have its own `#![macro_use]`.
             Location::Files(files) => {
                 let declared = self.file_of(item.ident.span(), place.rel);
                 for file in files {
@@ -1250,14 +954,9 @@ impl<'a> Scanner<'a> {
         textual.conditions.truncate(conditions);
     }
 
-    /// Keeps the `macro_rules!` a module defined, those in `textual` from
-    /// `start` on, in textual scope after it if its attributes, outer and
-    /// inner, make it `#[macro_use]`.
     fn keep_macros(&self, attrs: &[Attribute], start: usize, textual: &mut Textual) {
         match self.macro_use(attrs) {
             Truth::True => {}
-            // Where the module may not be `#[macro_use]`, a call its macros
-            // may shadow can't be expanded.
             Truth::Unknown => {
                 for definition in textual.macros.iter_mut().skip(start) {
                     definition.rules = None;
@@ -1267,7 +966,6 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// Whether a module's attributes make it `#[macro_use]`.
     fn macro_use(&self, attrs: &[Attribute]) -> Truth {
         self.krate
             .cfg
@@ -1277,26 +975,18 @@ impl<'a> Scanner<'a> {
             .fold(Truth::False, |truth, (applies, _)| truth.or(*applies))
     }
 
-    /// Lists source the scan couldn't read, once: a call in a macro may be
-    /// expanded many times.
     fn unscanned(&mut self, unscanned: Unscanned) {
         if !self.scan.unscanned.contains(&unscanned) {
             self.scan.unscanned.push(unscanned);
         }
     }
 
-    /// The file, relative to the package, that the token at `span` is
-    /// written in, or `fallback` if it isn't in a file the scan read.
     fn file_of(&self, span: Span, fallback: &str) -> String {
         self.sources
             .get(&span.file())
             .map_or_else(|| fallback.to_owned(), Clone::clone)
     }
 
-    /// Brings a `macro_rules!` named `name`, written among the items at
-    /// `place`, into textual scope. If it is `#[macro_export]`, binds it at
-    /// the crate root too, whose names `scope` has if the place is there,
-    /// and notes it if the crate is read for its exports.
     fn define(
         &mut self,
         item: &ItemMacro,
@@ -1334,8 +1024,6 @@ impl<'a> Scanner<'a> {
             instance,
         };
         if self.exports.is_some() {
-            // A `$crate` the crate's macros write may end up in an exported
-            // macro another one defines, as `crate`.
             self.crate_spans
                 .extend(definition.rules.iter().flat_map(Rules::crate_spans));
         }
@@ -1347,8 +1035,6 @@ impl<'a> Scanner<'a> {
             .clone()
             .fold(Truth::False, |truth, (applies, _)| truth.or(*applies));
         if exported != Truth::False {
-            // Where it may be, the calls its rules write by bare names are
-            // read as calls of the crate's macros.
             let local_inner_macros = export.clone().any(|(_, meta)| {
                 matches!(meta, Meta::List(list) if list
                     .parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)
@@ -1374,8 +1060,6 @@ impl<'a> Scanner<'a> {
             let crate_root = [self.krate.name.to_owned()];
             let path = vec![self.krate.name.to_owned(), unraw.clone()];
             let certain = definition.certain && exported == Truth::True;
-            // The root is being indexed, or around the module that is, or,
-            // for a module declared in a function, indexed.
             let root = if place.module.len() == 1 {
                 Some(scope)
             } else {
@@ -1405,12 +1089,6 @@ impl<'a> Scanner<'a> {
         textual.macros.push(definition);
     }
 
-    /// Binds the `macro_rules!` that a `use` among the items at `place`
-    /// brings in from textual scope by a bare name, as `macro_rules! m {
-    /// ... } pub(crate) use m;` does since the 2018 edition, at the path of
-    /// the name the `use` binds there, in `scope`: those in textual scope
-    /// back to the first that every build defines. Where a build may define
-    /// none of them, the `use` may mean something else.
     fn use_macros(
         &mut self,
         item: &syn::ItemUse,
@@ -1469,12 +1147,6 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// Brings into the prelude the macros that the `#[macro_use] extern
-    /// crate` items among the crate root's `items` bring in from the
-    /// dependencies whose source can be read: their `#[macro_export]`
-    /// macros, or the ones a `#[macro_use(...)]` names. rustc takes such an
-    /// item only at the crate root, and its macros for the whole crate,
-    /// before and after it. `textual` has the root's conditions.
     fn import_macros(&mut self, items: &[Item], textual: &Textual) {
         for (import, item) in items.iter().enumerate() {
             let Item::ExternCrate(item) = item else {
@@ -1530,9 +1202,6 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// Whether an `extern crate` item with these attributes brings in the
-    /// macro `name`: whether it is `#[macro_use]`, or a `#[macro_use(...)]`
-    /// that names it.
     fn imported(&self, attrs: &[Attribute], name: &str) -> Truth {
         self.krate
             .cfg
@@ -1551,12 +1220,6 @@ impl<'a> Scanner<'a> {
             .fold(Truth::False, |truth, (applies, _)| truth.or(*applies))
     }
 
-    /// The crate at `id` in `crates`, if its source can be read. It is read
-    /// for the macros it exports the first time they are needed: its module
-    /// tree with the `cfg`s of its own build, and its `#[macro_export]`
-    /// macros bound at its root, where paths name them. Its files are noted as
-    /// other crates', and the `$crate` its macros write as `id`. A procedural
-    /// macro crate can't export any.
     fn library(&mut self, id: usize) -> Option<&Scanner<'a>> {
         if !self.libraries.contains_key(&id) {
             let krate = self.crates.get(id)?;
@@ -1567,7 +1230,6 @@ impl<'a> Scanner<'a> {
             } else {
                 Scanner::read(self.crates, id, krate, self.disallowed, true)
             };
-            // Only the names are needed.
             reader.files.clear();
             for (source, rel) in mem::take(&mut reader.sources) {
                 self.foreign.insert(source.clone());
@@ -1591,20 +1253,10 @@ impl<'a> Scanner<'a> {
         self.libraries.get(&id)
     }
 
-    /// The export of the library at `library` that has the index `export`.
     fn export(&self, library: usize, export: usize) -> Option<&Export> {
         self.libraries.get(&library)?.exports.as_ref()?.get(export)
     }
 
-    /// The macros that a macro path that resolves to `resolved` may name:
-    /// the crate's own that the path names, or other crates'
-    /// `#[macro_export]` macros, following the `use` items of the crate
-    /// that has them, as `pub use crate::m as renamed;`, to its root, where
-    /// they are. A way that leads to a module of another crate that has no
-    /// macro of the name, as to a function a `use` of the name brings in,
-    /// names none. `None` if a way it may resolve doesn't lead to a macro
-    /// the scan can read, as into a crate that isn't a dependency, or to an
-    /// item of this crate that isn't one of its macros.
     fn path_macros(&mut self, resolved: &Resolved) -> Option<Vec<Found>> {
         let mut found = Vec::new();
         let mut seen = HashSet::new();
@@ -1669,13 +1321,9 @@ impl<'a> Scanner<'a> {
             if module.first().map(String::as_str) != Some(reader.krate.name) {
                 return None;
             }
-            // A `use` binds its name in each namespace that has it, so
-            // a way that leads to no macro, in a module whose names are
-            // all known, isn't one the call can mean.
             let scope = reader.modules.get(module)?;
             match scope.get(Namespace::Macros, name) {
                 None if !scope.globs => continue,
-                // Only the crate's exports are bound at its root.
                 Some(_) if module.len() == 1 => {}
                 _ => return None,
             }
@@ -1687,8 +1335,6 @@ impl<'a> Scanner<'a> {
                 .filter(|(_, export)| export.name == *name)
             {
                 any = true;
-                // Ways that reach one macro, as a name and a re-export
-                // of it, name it once.
                 let export = Found::Export {
                     library: id,
                     export,
@@ -1704,17 +1350,6 @@ impl<'a> Scanner<'a> {
         Some(())
     }
 
-    /// The definitions a call of `name` may expand, the latest first: those
-    /// in textual scope back to the first that every build defines, then,
-    /// where a build may define none of them, those of another crate that a
-    /// `use` in the calling module brings in, `imported`, with whether every
-    /// build has the `use`, then, where a build may not, those in the
-    /// prelude, by the `extern crate` items that bring them in, back to the
-    /// first that every build brings in. One crate's definitions of a name
-    /// don't hide each other, since its build has at most one. A glob import
-    /// may bring in a macro that would come before the prelude's, so a call
-    /// in a module that has one isn't given them. `None` if there is no
-    /// definition, or the rules of one of them can't be read.
     fn candidates<'t>(
         &'t self,
         textual: &'t Textual,
@@ -1742,8 +1377,6 @@ impl<'a> Scanner<'a> {
         }
         let used = imported.map_or(&[][..], |(found, _)| found);
         if let Some((found, certain)) = imported {
-            // A `use` may bring in a macro textual scope has too, as `use m;`
-            // after `macro_rules! m`, which is read once, as that.
             let found: Vec<_> = self
                 .found_candidates(found, certain)?
                 .into_iter()
@@ -1773,7 +1406,6 @@ impl<'a> Scanner<'a> {
                 if hidden.is_some_and(|import| imported.import != import) {
                     break;
                 }
-                // A macro the `use` brings in too is read once, as that.
                 let read = used.iter().any(|found| {
                     matches!(found, Found::Export { library, export }
                         if *library == imported.library && *export == imported.export)
@@ -1798,11 +1430,6 @@ impl<'a> Scanner<'a> {
         (!candidates.is_empty()).then_some(candidates)
     }
 
-    /// The definitions a call of a macro by path, or by a name a `use`
-    /// binds, may name, as `found` has them, the latest first. Where the
-    /// path may name macros of more than one place, or a build may not have
-    /// the `use`, as `certain` says, a build may have any of them or none.
-    /// `None` if the rules of one of them can't be read.
     fn found_candidates(&self, found: &[Found], certain: bool) -> Option<Vec<Candidate<'_>>> {
         let mut places = HashSet::new();
         let mut definitions = Vec::new();
@@ -1835,8 +1462,6 @@ impl<'a> Scanner<'a> {
                     }
                 }
             };
-            // A definition the path names more than one way, as through two
-            // re-exports, is read once, where any of the ways holds.
             let same = definitions.iter_mut().find(|known: &&mut Candidate| {
                 definition.instance.is_some() && known.instance == definition.instance
             });
@@ -1861,15 +1486,6 @@ impl<'a> Scanner<'a> {
         Some(candidates)
     }
 
-    /// Expands a call of a `macro_rules!` in textual scope where it is
-    /// written, as `crate_root!();` or `feature! { #![unix] mod symlink; }`,
-    /// of another crate's that the prelude has, or of one a path names, and
-    /// returns whether it did. Each definition the call may name expands
-    /// under the `cfg`s that select it: its own, and none of the later
-    /// ones'. A call that one of them can't be matched to or doesn't expand
-    /// to items, or that is past a limit, isn't expanded. The expansion is
-    /// part of the calling module, but it is read as its own [`Loaded`], so
-    /// that its code counts for each call.
     fn expand(
         &mut self,
         call: &ItemMacro,
@@ -1886,11 +1502,6 @@ impl<'a> Scanner<'a> {
         }
         let bare = is_bare(path);
         let unraw = name.unraw().to_string();
-        // The macros that the path names, or that a `use` in the module
-        // brings in by the bare name where textual scope doesn't hide it,
-        // with whether every build has the `use`. The call is noted, so that
-        // once the module tree is read, it can be resolved again in the
-        // whole of it.
         let found = if bare && textual.hides(&unraw) {
             None
         } else {
@@ -1903,8 +1514,6 @@ impl<'a> Scanner<'a> {
             let Some(found) = found else {
                 return false;
             };
-            // A `use` that brings in no macro doesn't hide any; a path
-            // that leads to none names none.
             if found.is_empty() {
                 if !bare {
                     return false;
@@ -1927,7 +1536,6 @@ impl<'a> Scanner<'a> {
         };
         let file = self.file_of(name.span(), place.rel);
         let start = name.span().start();
-        // A call past a limit is read as tokens.
         let limit = if textual.depth == MAX_EXPANSIONS {
             Some(format!(
                 "`{name}!` expands to more than {MAX_EXPANSIONS} nested macro calls"
@@ -1948,16 +1556,10 @@ impl<'a> Scanner<'a> {
             return false;
         }
         let call_condition = cfg_predicates(&call.attrs);
-        // The predicates under which a later definition is defined, and,
-        // for the `extern crate` item whose definitions are being read, its
-        // own: they don't hide each other, only the earlier items'.
         let mut later = Vec::new();
         let mut group: Option<(Origin, Option<TokenStream>)> = None;
         let mut expansions = Vec::new();
         for candidate in candidates {
-            // The expansion is visited apart from other files, and no
-            // attribute starts at a macro's name, so the `cfg` it is given
-            // is told apart from those written in it.
             let span = candidate.span;
             if candidate.origin == Origin::Local
                 || group
@@ -1975,8 +1577,6 @@ impl<'a> Scanner<'a> {
                     span,
                 ));
             }
-            // A definition hides the earlier ones only where its condition
-            // shows it is defined.
             let hides = (candidate.defined == Truth::True)
                 .then(|| cfg_call("all", candidate.condition.to_vec(), span));
             match candidate.origin {
@@ -2018,7 +1618,6 @@ impl<'a> Scanner<'a> {
         self.expansions += 1;
         for (mut items, at, foreign, defined) in expansions {
             let rel = at.0.clone();
-            // Another crate's macro isn't read as tokens here in any case.
             if !foreign {
                 self.expanded.insert(at);
             }
@@ -2041,16 +1640,9 @@ impl<'a> Scanner<'a> {
         true
     }
 
-    /// Where a module's code is. Where its `#[path]` depends on a `cfg` the
-    /// scan can't know, a module declared with `mod name;` may be in the
-    /// file the path names or where it would be without it: each of those
-    /// that has a file may be the one built, and one that has none can't be.
     fn locate(&self, item: &ItemMod, mod_dir: &Path, path_dir: &Path) -> Location {
         let name = item.ident.unraw().to_string();
         let span = item.ident.span();
-        // Each place a build may take the module from, `None` for where it
-        // is without a `#[path]`, with the predicate that selects it: of
-        // the `#[path]`s that apply, the last is the one taken.
         let mut places = Vec::new();
         let mut later = Vec::new();
         for (conditions, meta) in conditional(&item.attrs).into_iter().rev() {
@@ -2135,9 +1727,6 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// A file's name relative to the package, with `/` between components,
-    /// or its full path if it is outside the package. A `#[path]` with `..`
-    /// is resolved first, so the name is the file the compiler reads.
     fn relative(&self, path: &Path) -> String {
         let mut normal = PathBuf::new();
         for component in path.components() {
@@ -2175,9 +1764,6 @@ impl<'a> Scanner<'a> {
             })
     }
 
-    /// Binds the names that `items` define in `scope`. Items of a module
-    /// have paths under `module`; items of a block have none. `uncertain` is
-    /// whether a build may not have the items whatever their `cfg`s say.
     fn bind<'i>(
         &self,
         scope: &mut Scope,
@@ -2221,7 +1807,6 @@ impl<'a> Scanner<'a> {
                 Item::Fn(item) => (&item.sig.ident, &[Namespace::Values][..]),
                 Item::Mod(item) => (&item.ident, &[Namespace::Types][..]),
                 Item::Static(item) => (&item.ident, &[Namespace::Values][..]),
-                // A tuple or unit struct is a value too.
                 Item::Struct(item) => (&item.ident, &[Namespace::Types, Namespace::Values][..]),
                 Item::Trait(item) => (&item.ident, &[Namespace::Types][..]),
                 Item::TraitAlias(item) => (&item.ident, &[Namespace::Types][..]),
@@ -2245,8 +1830,6 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// The crate index (when readable) and library name of a crate this crate
-    /// can name without a `use`.
     fn extern_crate(&self, name: &str) -> Option<(Option<usize>, String)> {
         if let Some(lib) = self.krate.externs.get(name) {
             let id = self.krate.dependencies.get(name).copied();
@@ -2255,8 +1838,6 @@ impl<'a> Scanner<'a> {
         SYSROOT.contains(&name).then(|| (None, name.to_owned()))
     }
 
-    /// The crate in `crates` that `ident` stands for, if it is another
-    /// crate's `$crate`.
     fn dollar_crate(&self, ident: &Ident) -> Option<usize> {
         if ident != "crate" {
             return None;
@@ -2268,8 +1849,6 @@ impl<'a> Scanner<'a> {
             .copied()
     }
 
-    /// The path that a leading `crate`, `self` or `super` leads to, with the
-    /// rest of `path` appended, or `None` if `path` starts elsewhere.
     fn relative_path(&self, module: &[String], path: &[String]) -> Option<Vec<String>> {
         let mut base: Option<Vec<String>> = None;
         let mut rest = path;
@@ -2293,9 +1872,6 @@ impl<'a> Scanner<'a> {
         })
     }
 
-    /// Where the disallowed paths into this crate are defined, mapped to
-    /// their entries, so that a path reaching the definition another way
-    /// matches too, as Clippy's resolved paths do.
     fn definitions(&self) -> HashMap<Vec<String>, usize> {
         let mut resolver = Resolver::new(self, &[]);
         let mut definitions = HashMap::new();
@@ -2319,7 +1895,6 @@ impl<'a> Scanner<'a> {
         definitions
     }
 
-    /// The entry a resolved path names.
     fn entry(&self, path: &[String]) -> Option<usize> {
         self.disallowed
             .entry(path)
@@ -2327,40 +1902,16 @@ impl<'a> Scanner<'a> {
     }
 }
 
-/// The resolution of one path, or of the disallowed paths into the crate.
-///
-/// Where names have more than one binding, a path can reach one `use` path,
-/// or one path into the crate, many ways: through a chain of names with two
-/// bindings each, as many as two to the power of its length. Each is
-/// resolved once and remembered, so the work grows with the number of them,
-/// not of the ways to them.
-///
-/// A `use` can't be resolved through itself, so a way to it that leads
-/// back to it means nothing, as where `mod statx;` and `pub use
-/// statx::statx;` both bind `statx` and either may be built: the `use`
-/// means `self::statx::statx`, and the way through the `use` to that, which
-/// would mean `self::statx::statx::statx`, is not one. What a resolution
-/// found while it cut such a way short holds only within the `use` it
-/// reached, so it is remembered only once that `use` is resolved.
 struct Resolver<'s, 'a> {
     scanner: &'s Scanner<'a>,
-    /// A module being indexed, whose names the scanner's `modules` don't
-    /// have yet, and the names bound in it so far.
     indexing: Option<(&'s [String], &'s Scope)>,
-    /// The blocks around the place of the path, innermost last. A `use` in
-    /// one of them resolves within the ones around it, which come first, so
-    /// a count of them names the blocks it resolves in.
     blocks: &'s [Scope],
     uses: HashMap<UseKey, Resolved>,
     walks: HashMap<WalkKey, Resolved>,
-    /// The `use` paths being resolved, outermost first.
     active: Vec<UseSite>,
-    /// The outermost of `active` that a way cut short reached, since the
-    /// resolution that is under way started.
     circular: Option<usize>,
 }
 
-/// A `use` path and the place it is resolved in.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct UseSite {
     module: Vec<String>,
@@ -2370,14 +1921,12 @@ struct UseSite {
     leading: bool,
 }
 
-/// A `use` path to resolve, as `Resolver::use_path` takes it.
 #[derive(PartialEq, Eq, Hash)]
 struct UseKey {
     site: UseSite,
     depth: usize,
 }
 
-/// A path into the crate to follow, as `Resolver::walk` takes it.
 #[derive(PartialEq, Eq, Hash)]
 struct WalkKey {
     path: Vec<String>,
@@ -2399,17 +1948,11 @@ impl<'s, 'a> Resolver<'s, 'a> {
         }
     }
 
-    /// Resolves within the module at `module`, which is being indexed, with
-    /// the names `scope` binds in it so far.
     fn indexing(mut self, module: &'s [String], scope: &'s Scope) -> Self {
         self.indexing = Some((module, scope));
         self
     }
 
-    /// The names a module binds: those the last reading of the module tree
-    /// found, while the scan reads it again, so that a path can lead
-    /// through names bound after it; or so far, where it is being indexed or
-    /// is around the one that is.
     fn module(&self, module: &[String]) -> Option<&'s Scope> {
         if let Some(scope) = self.scanner.last_pass.get(module) {
             return Some(scope);
@@ -2429,9 +1972,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
         }
     }
 
-    /// Runs `resolve`, and says whether what it resolves holds anywhere: not
-    /// where it cut short a way to one of the first `outside` of `active`,
-    /// which it runs within.
     fn guarded(
         &mut self,
         outside: usize,
@@ -2444,9 +1984,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
         (resolved, reached.is_none())
     }
 
-    /// Resolves a `syn::Path` written in `module` within the blocks, for its
-    /// last segment in `namespace`. If the path starts with another crate's
-    /// `$crate`, it resolves directly in that crate.
     fn syn_path(&mut self, module: &[String], namespace: Namespace, path: &syn::Path) -> Resolved {
         let names = segments(path);
         let leading = path.leading_colon.is_some();
@@ -2462,10 +1999,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
         self.path(module, namespace, &names, leading)
     }
 
-    /// Resolves a path written in `module` within the blocks, for its last
-    /// segment in `namespace`: values for a path in an expression, types
-    /// for the type of a qualified path. A path whose every way leads back
-    /// to a `use` on it can't be resolved.
     fn path(
         &mut self,
         module: &[String],
@@ -2489,7 +2022,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
         let Some((first, rest)) = path.split_first() else {
             return Resolved::Unknown;
         };
-        // On its own, `self` is a method's receiver, not the module.
         if first == "self" && rest.is_empty() {
             return Resolved::Local;
         }
@@ -2526,9 +2058,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
             }
             .join(rest);
         }
-        // A glob import shadows the prelude and may provide any name. It
-        // could shadow a crate name too, but no crate exports an item named
-        // like another crate, while a `Vec` or `Box` of its own is common.
         let globs = self
             .blocks
             .iter()
@@ -2544,10 +2073,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
         Resolved::Unknown
     }
 
-    /// The binding of `name` in `namespace`, in the first `blocks` of the
-    /// blocks around a place in `module` or in the module itself, with the
-    /// count of blocks around the scope that binds it: a `use` resolves
-    /// there, not where its name is used.
     fn lookup(
         &self,
         module: &[String],
@@ -2566,8 +2091,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
             .map(|binding| (binding, 0))
     }
 
-    /// Resolves a binding in `namespace`, found in `module` within the first
-    /// `blocks` of the blocks.
     fn binding(
         &mut self,
         module: &[String],
@@ -2603,8 +2126,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
         }
     }
 
-    /// Resolves a `use` path written in `module` within the first `blocks`
-    /// of the blocks, for its target in `namespace`.
     fn use_path(
         &mut self,
         module: &[String],
@@ -2682,11 +2203,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
         unbound(self)
     }
 
-    /// Resolves a `use` path written in `module`, whose first segment is
-    /// bound to `binding` within the first `blocks` of the blocks. A `use`
-    /// can't refer to itself: in `use tokio;`, `tokio` is the crate. So where
-    /// the binding is the `use` of the path, the path resolves as `unbound`
-    /// says a path whose first segment isn't bound does.
     #[expect(
         clippy::too_many_arguments,
         reason = "each is a part of the place being resolved"
@@ -2721,7 +2237,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
         Resolved::either(alternatives)
     }
 
-    /// Resolves a 2015 `use` path, which starts at the crate root.
     fn root_path(&mut self, path: &[String], namespace: Namespace, depth: usize) -> Resolved {
         let Some((first, rest)) = path.split_first() else {
             return Resolved::Unknown;
@@ -2751,10 +2266,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
         resolved.map_paths(|krate, path| self.follow(krate, path, namespace, depth))
     }
 
-    /// Follows a path into this crate through the `use` items of the modules
-    /// it passes, as `crate::sync::Mutex` reaches `std::sync::Mutex` through
-    /// `mod sync { pub use std::sync::Mutex; }`. It stops at a disallowed
-    /// path, which names a re-export as often as a definition.
     fn follow(
         &mut self,
         krate: Option<usize>,
@@ -2775,7 +2286,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
         self.walk(path, 1, namespace, depth)
     }
 
-    /// Follows a path into this crate from its segment at `start`.
     fn walk(
         &mut self,
         path: Vec<String>,
@@ -2820,7 +2330,6 @@ impl<'s, 'a> Resolver<'s, 'a> {
                 break;
             };
             let Some(scope) = self.module(module) else {
-                // A type or a function, whose items are its own.
                 break;
             };
             let name_namespace = self::namespace(path, end, namespace);
@@ -2850,16 +2359,11 @@ impl<'s, 'a> Resolver<'s, 'a> {
     }
 }
 
-/// Whether `binding` is the `use` of `path`, which the path itself can't
-/// refer to: in `use tokio;`, `tokio` is the crate.
 fn is_use_of(binding: &Binding, path: &[String]) -> bool {
     matches!(binding, Binding::Use { krate: None, path: used, .. } if used == path)
 }
 
 impl Scanner<'_> {
-    /// Records the names a `use` tree binds, under the path `prefix` leads
-    /// to. `certain` is whether every build has the `use`. If a branch starts
-    /// with another crate's `$crate`, it binds directly to that crate.
     fn bind_use(
         &self,
         tree: &UseTree,
@@ -2944,9 +2448,6 @@ impl Scanner<'_> {
     }
 }
 
-/// Whether a macro path is a bare name, which textual scope may have.
-/// Where a macro call is written, by its `!`: the source, as [`Span::file`]
-/// names it, line and column.
 fn call_site(mac: &Macro) -> (String, usize, usize) {
     let span = mac.bang_token.span;
     let start = span.start();
@@ -2957,8 +2458,6 @@ fn is_bare(path: &syn::Path) -> bool {
     path.leading_colon.is_none() && path.segments.len() == 1
 }
 
-/// The names a `use` tree brings in by a bare name, as `use m;` or `use {m
-/// as n};`, each with the name it binds.
 fn bare_names(tree: &UseTree, names: &mut Vec<(String, String)>) {
     match tree {
         UseTree::Name(name) if name.ident != "self" => {
@@ -2980,9 +2479,6 @@ fn bare_names(tree: &UseTree, names: &mut Vec<(String, String)>) {
     }
 }
 
-/// Finds the span of an identifier in a file, which names the source that
-/// every span in the file is in. A file with no identifier has no site the
-/// scan reports.
 struct FirstSpan(Option<Span>);
 
 impl<'ast> Visit<'ast> for FirstSpan {
@@ -3003,24 +2499,9 @@ impl<'ast> Visit<'ast> for FirstSpan {
     }
 }
 
-/// Replaces each item macro whose body parses as items with those items, as
-/// macros such as Tokio's `cfg_rt! { ... }` expand to their input, and each
-/// `cfg_if!` or `cfg_select!` with the items of its branches, under the
-/// `cfg` it gives them.
-/// The macro's own attributes carry over to each item, so a `cfg` on it still
-/// applies. A call with an empty body, such as `crate_root!();`, is left
-/// for [`Scanner::index`] to expand, since it can only be read through the
-/// macro's definition.
-///
-/// The call stays before its items, since its path may name a macro that
-/// doesn't expand to its input: `global_asm!` takes a template, and
-/// `global_asm!(concat! { ... })` parses as items. [`reads_input`] tells
-/// such a call apart from one that is read as its expansion or as tokens.
 struct Expand;
 
 impl Expand {
-    /// Expands the items of a module, as in a file, and those of the modules
-    /// and functions among them.
     fn fragment(&mut self, items: &mut Vec<Item>) {
         self.items(items);
         for item in items {
@@ -3060,9 +2541,6 @@ impl Expand {
     }
 }
 
-/// The items a call is read as by [`Expand`]: its input, where it parses as
-/// items, or the branches of a `cfg_if!` or `cfg_select!`. A call with an
-/// empty body, or of `include!`, has none.
 fn input_items(mac: &Macro) -> Option<Vec<Item>> {
     if is_include(mac) || mac.tokens.is_empty() {
         return None;
@@ -3077,9 +2555,6 @@ fn input_items(mac: &Macro) -> Option<Vec<Item>> {
     parsed.ok()
 }
 
-/// Whether [`Expand`] reads a call as its input, which follows it among the
-/// items. It decides by the call's tokens alone, so each copy of a call that
-/// a macro writes more than once is read the same way.
 fn reads_input(mac: &Macro) -> bool {
     input_items(mac).is_some()
 }
@@ -3098,9 +2573,6 @@ impl VisitMut for Expand {
     }
 }
 
-/// The attributes as they apply after `cfg_attr` is expanded, each with the
-/// predicates, as written, of the `cfg_attr`s it is in. A `cfg_attr` that
-/// doesn't parse adds none.
 fn conditional(attrs: &[Attribute]) -> Vec<(Vec<TokenStream>, Meta)> {
     let mut metas = Vec::new();
     for attr in attrs {
@@ -3141,8 +2613,6 @@ fn flatten(
     conditions.pop();
 }
 
-/// The predicates of the `cfg`s that attributes put on code, as written. A
-/// `cfg` that `#[cfg_attr(q, cfg(p))]` adds is `any(not(all(q)), p)`.
 fn cfg_predicates(attrs: &[Attribute]) -> Vec<TokenStream> {
     let span = Span::call_site();
     conditional(attrs)
@@ -3171,11 +2641,6 @@ fn parse_items(input: ParseStream) -> syn::Result<Vec<Item>> {
     Ok(items)
 }
 
-/// Parses the body of a `cfg_if!`, `if #[cfg(a)] { ... } else if #[cfg(b)]
-/// { ... } else { ... }`, into the items of its branches, as the `cfg_if`
-/// crate expands it: each branch's items get
-/// `#[cfg(all(<own>, not(any(<earlier>, ...))))]`, and the `else` branch's
-/// `#[cfg(not(any(<earlier>, ...)))]`.
 fn parse_cfg_if(input: ParseStream) -> syn::Result<Vec<Item>> {
     let mut earlier = Vec::new();
     let mut items = Vec::new();
@@ -3215,10 +2680,6 @@ fn parse_cfg_if(input: ParseStream) -> syn::Result<Vec<Item>> {
     }
 }
 
-/// What a `cfg_if!` branch's `#[cfg(...)]` holds, as written, and where the
-/// attribute is written. The `cfg_if` crate splices it into other
-/// predicates as it is, so `#[cfg(a, b)]` is `all(a, b, ...)` for its own
-/// branch and `any(a, b, ...)` for the branches after it.
 fn cfg_if_condition(input: ParseStream) -> syn::Result<(Span, TokenStream)> {
     let attrs = input.call(Attribute::parse_outer)?;
     let [attr] = &attrs[..] else {
@@ -3233,9 +2694,6 @@ fn cfg_if_condition(input: ParseStream) -> syn::Result<(Span, TokenStream)> {
     }
 }
 
-/// Parses item-position `cfg_select!` arms, giving each item the predicate
-/// that selects its arm and excludes every earlier arm. The trailing `_`
-/// arm only excludes earlier predicates.
 fn parse_cfg_select(input: ParseStream) -> syn::Result<Vec<Item>> {
     let mut earlier = Vec::new();
     let mut items = Vec::new();
@@ -3278,7 +2736,6 @@ fn parse_cfg_select(input: ParseStream) -> syn::Result<Vec<Item>> {
     }
 }
 
-/// The predicate `name(args, ...)`.
 fn cfg_call(name: &str, args: impl IntoIterator<Item = TokenStream>, span: Span) -> TokenStream {
     let mut list = TokenStream::new();
     for arg in args {
@@ -3295,9 +2752,6 @@ fn cfg_call(name: &str, args: impl IntoIterator<Item = TokenStream>, span: Span)
     ])
 }
 
-/// The attribute `#[cfg(predicate)]`, written at `span`. Attributes are
-/// told apart by where they are written, so `span` must be a place no other
-/// attribute starts at.
 fn cfg_attribute(predicate: TokenStream, span: Span) -> Attribute {
     Attribute {
         pound_token: Token![#](span),
@@ -3311,9 +2765,6 @@ fn cfg_attribute(predicate: TokenStream, span: Span) -> Attribute {
     }
 }
 
-/// Whether a macro is `cfg_if!`, by its name. Crates such as `libc` define
-/// their own copy rather than depend on the `cfg_if` crate, so the name is
-/// what they share. A body that isn't `cfg_if!`'s syntax stays a macro.
 fn is_cfg_if(mac: &Macro) -> bool {
     mac.path
         .segments
@@ -3424,9 +2875,6 @@ fn expr_attrs(expr: &Expr) -> &[Attribute] {
     }
 }
 
-/// The attributes that the `unsafe_code` lint reports when they are written
-/// without `unsafe(...)`, as editions before 2024 allow: rustc's unsafe
-/// attributes, stable and unstable, and `allow_internal_unsafe`.
 const UNSAFE_ATTRIBUTES: [&str; 8] = [
     "no_mangle",
     "export_name",
@@ -3438,33 +2886,21 @@ const UNSAFE_ATTRIBUTES: [&str; 8] = [
     "allow_internal_unsafe",
 ];
 
-/// `core::arch::global_asm`, as [`canonical`] names it.
 const GLOBAL_ASM: [&str; 3] = ["std", "arch", "global_asm"];
 
-/// Whether `unsafe_code` reports an attribute. rustc accepts `unsafe(...)`
-/// only around an unsafe attribute, so any attribute written that way is
-/// one.
 fn is_unsafe_attribute(meta: &Meta) -> bool {
     let path = meta.path();
     path.is_ident("unsafe") || UNSAFE_ATTRIBUTES.iter().any(|name| path.is_ident(name))
 }
 
-/// Walks one module's syntax tree.
 struct FileVisitor<'s, 'a> {
     scanner: &'s mut Scanner<'a>,
-    /// The file's name relative to the package.
     file: String,
     module: Vec<String>,
-    /// Where the current module's `mod name;` files are.
     mod_dir: PathBuf,
-    /// What the current module's `#[path]` attributes are relative to.
     path_dir: PathBuf,
-    /// The names bound by the blocks around the current place.
     blocks: Vec<Scope>,
-    /// Where the attributes already visited are written.
     attributes: HashSet<Site>,
-    /// The names a `macro_rules!` in textual scope hides where the macro
-    /// body being read as tokens is, as [`Scanner::hidden`] has them.
     hidden: HashSet<String>,
 }
 
@@ -3473,8 +2909,6 @@ impl FileVisitor<'_, '_> {
         self.scanner.krate.cfg.enabled(attrs) != Truth::False
     }
 
-    /// Where the token at `span` is written: in the file being visited,
-    /// or, in a macro's expansion, in the call's file or the macro's.
     fn site(&self, span: Span) -> Site {
         let start = span.start();
         Site {
@@ -3484,20 +2918,14 @@ impl FileVisitor<'_, '_> {
         }
     }
 
-    /// Whether the token at `span` is written in this crate, not in another
-    /// crate's macro that it calls. Code counts for the crate that writes
-    /// it, as rustc's `unsafe_code` lint leaves out what another crate's
-    /// macro writes.
     fn here(&self, span: Span) -> bool {
         !self.scanner.foreign.contains(&span.file())
     }
 
-    /// Whether `unsafe` is written here, if it is written at all.
     fn writes(&self, unsafety: Option<&Token![unsafe]>) -> bool {
         unsafety.is_some_and(|token| self.here(token.span))
     }
 
-    /// Whether an item is `unsafe` here.
     fn writes_unsafe(&self, safety: &Safety) -> bool {
         match safety {
             Safety::Unsafe(token) => self.writes(Some(token)),
@@ -3514,8 +2942,6 @@ impl FileVisitor<'_, '_> {
         });
     }
 
-    /// The attributes that `unsafe_code` reports among those one attribute,
-    /// written as `meta`, stands for once `cfg_attr` is expanded.
     fn unsafe_attributes(&self, meta: Meta) -> Vec<Meta> {
         self.scanner
             .krate
@@ -3527,7 +2953,6 @@ impl FileVisitor<'_, '_> {
             .collect()
     }
 
-    /// Notes a call of a macro that isn't read as its expansion.
     fn unexpanded(&mut self, mac: &Macro) {
         if let Some(segment) = mac.path.segments.last() {
             self.scanner
@@ -3536,12 +2961,6 @@ impl FileVisitor<'_, '_> {
         }
     }
 
-    /// Whether a call of a macro by `path` here may be `global_asm!`: the
-    /// path leads to `core::arch::global_asm`, or it is named `global_asm`
-    /// and can't be resolved. A bare name that nothing binds names a
-    /// `macro_rules!` unless a glob import may provide it, and with
-    /// a `macro_rules!` in textual scope hides any other, where its name is
-    /// among `hidden`.
     fn calls_global_asm(&self, path: &[String], leading: bool, hidden: &HashSet<String>) -> bool {
         let bare = !leading && path.len() == 1;
         if bare && path.first().is_some_and(|name| hidden.contains(name)) {
@@ -3562,13 +2981,10 @@ impl FileVisitor<'_, '_> {
             .any(|resolved| match resolved {
                 Resolved::Path { krate: None, path } => canonical(path.clone()) == GLOBAL_ASM,
                 Resolved::Unknown => named && (!bare || globs()),
-                // Alternatives are never nested, so `Either` isn't one.
                 Resolved::Path { .. } | Resolved::Local | Resolved::Either(_) => false,
             })
     }
 
-    /// Counts a call among the items as `global_asm!` if it may be one and
-    /// is written here.
     fn item_call(&mut self, mac: &Macro, hidden: &HashSet<String>) {
         if self.here(mac.bang_token.span)
             && self.calls_global_asm(
@@ -3594,7 +3010,6 @@ impl FileVisitor<'_, '_> {
         let mut resolver = Resolver::new(self.scanner, &self.blocks);
         let names = segments(&expr.path);
         let resolved = match &expr.qself {
-            // `<[T]>::split_at` and `<Vec<T>>::insert` name the type's items.
             Some(qself) if qself.position == 0 => {
                 let base = match &*qself.ty {
                     Type::Slice(_) => Resolved::Path {
@@ -3608,7 +3023,6 @@ impl FileVisitor<'_, '_> {
                 };
                 base.join(&names)
             }
-            // `<T as Trait>::method` names the trait's item.
             _ => resolver.syn_path(&self.module, Namespace::Values, &expr.path),
         };
         resolved.map_paths(|krate, path| Resolved::Path {
@@ -3631,11 +3045,6 @@ impl FileVisitor<'_, '_> {
             .map_or_else(Span::call_site, |segment| segment.ident.span())
     }
 
-    /// Counts what can be seen in tokens syn can't parse as code: `unsafe`,
-    /// the attributes and `global_asm!` calls `unsafe_code` reports, and
-    /// calls to a name some disallowed path has. A `mod name;` there names a
-    /// file the scan doesn't load, so it is listed as unscanned. The macros
-    /// called there aren't expanded.
     fn tokens(&mut self, stream: TokenStream) {
         let trees: Vec<TokenTree> = stream.into_iter().collect();
         for (index, tree) in trees.iter().enumerate() {
@@ -3705,12 +3114,6 @@ impl FileVisitor<'_, '_> {
         }
     }
 
-    /// The attributes that `unsafe_code` reports, written without
-    /// `unsafe(...)`, among those an attribute in a macro body stands for
-    /// once `cfg_attr` is expanded. One written as `unsafe(...)` counts as
-    /// the `unsafe` in it. The attribute is read as tokens, not parsed, since
-    /// its value may be a metavariable, as in `#[export_name = $name]`, and a
-    /// `cfg_attr` predicate that doesn't parse is unknown.
     fn bare_unsafe_attributes(&self, attribute: TokenStream) -> usize {
         let mut trees = attribute.into_iter();
         let Some(TokenTree::Ident(name)) = trees.next() else {
@@ -3763,12 +3166,8 @@ impl FileVisitor<'_, '_> {
                 self.path_dir = path_dir;
                 self.blocks = blocks;
             }
-            // A module of a module was loaded with the module tree; one
-            // declared inside a function is loaded now.
             (None, _) if self.blocks.is_empty() => {}
             (None, Location::Files(files)) => {
-                // The scan doesn't keep the macros in textual scope inside
-                // functions, so none of its calls are expanded.
                 let textual = &mut Textual::default();
                 for file in files {
                     let declared = self.site(item.ident.span()).file;
@@ -3782,7 +3181,6 @@ impl FileVisitor<'_, '_> {
         }
     }
 
-    /// Visits statements with the items among them in scope.
     fn stmts(&mut self, stmts: &[Stmt]) {
         let items = stmts.iter().filter_map(|stmt| match stmt {
             Stmt::Item(item) => Some(item),
@@ -3793,7 +3191,6 @@ impl FileVisitor<'_, '_> {
         self.blocks.push(scope);
         for stmt in stmts {
             self.visit_stmt(stmt);
-            // A `let` binds its names for the statements after it.
             if let Stmt::Local(local) = stmt
                 && self.enabled(&local.attrs)
                 && let Some(block) = self.blocks.last_mut()
@@ -3806,9 +3203,6 @@ impl FileVisitor<'_, '_> {
         self.blocks.pop();
     }
 
-    /// Visits an `if` or `while` condition from left to right, binding each
-    /// `let`'s names in the innermost block after its initializer, so that in
-    /// `if let Some(x) = y && let Ok(z) = x` the second `let` sees `x`.
     fn condition(&mut self, condition: &Expr) {
         match condition {
             Expr::Let(expr) if self.enabled(&expr.attrs) => {
@@ -3829,8 +3223,6 @@ impl FileVisitor<'_, '_> {
         }
     }
 
-    /// Visits code with an item's generic parameters in scope: a type
-    /// parameter named `Vec` is not the prelude's.
     fn with_generics(&mut self, generics: &Generics, visit: impl FnOnce(&mut Self)) {
         let mut scope = Scope::default();
         for param in &generics.params {
@@ -3849,8 +3241,6 @@ impl FileVisitor<'_, '_> {
         self.blocks.pop();
     }
 
-    /// Visits code with the names some patterns bind in scope, such as a
-    /// function's parameters or a match arm's pattern.
     fn with_patterns<'p>(
         &mut self,
         patterns: impl IntoIterator<Item = &'p Pat>,
@@ -3866,14 +3256,10 @@ impl FileVisitor<'_, '_> {
     }
 }
 
-/// The path that ends `trees`, as the tokens before a macro call's `!` do,
-/// with whether it has a leading `::`. A `macro_rules!` body's
-/// `$crate::name` reads as `crate::name`, which it means there.
 fn trailing_path(mut trees: &[TokenTree]) -> Option<(Vec<String>, bool)> {
     let mut path = Vec::new();
     let leading = loop {
         let [rest @ .., TokenTree::Ident(ident)] = trees else {
-            // A `::` that no segment comes before.
             if path.is_empty() {
                 return None;
             }
@@ -3895,14 +3281,10 @@ fn trailing_path(mut trees: &[TokenTree]) -> Option<(Vec<String>, bool)> {
     Some((path, leading))
 }
 
-/// Whether a bracketed group that follows these tokens is an attribute:
-/// `#[...]` or `#![...]`.
 fn is_attribute(previous: Option<&TokenTree>, before: Option<&TokenTree>) -> bool {
     is_punct(previous, '#') || (is_punct(previous, '!') && is_punct(before, '#'))
 }
 
-/// The comma-separated parts of a token stream, without empty ones, as a
-/// trailing comma leaves.
 fn split_commas(stream: TokenStream) -> Vec<TokenStream> {
     let mut parts = vec![TokenStream::new()];
     for tree in stream {
@@ -3920,7 +3302,6 @@ fn is_punct(tree: Option<&TokenTree>, char: char) -> bool {
     matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == char)
 }
 
-/// The names that patterns bind.
 fn pattern_names<'p>(patterns: impl IntoIterator<Item = &'p Pat>) -> Vec<String> {
     struct Names(Vec<String>);
     impl<'ast> Visit<'ast> for Names {
@@ -3936,7 +3317,6 @@ fn pattern_names<'p>(patterns: impl IntoIterator<Item = &'p Pat>) -> Vec<String>
     names.0
 }
 
-/// The patterns of a signature's parameters.
 fn parameters(sig: &Signature) -> impl Iterator<Item = &Pat> {
     sig.inputs.iter().filter_map(|input| match input {
         FnArg::Typed(typed) => Some(&*typed.pat),
@@ -3979,7 +3359,6 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
             .unwrap_or_default();
         if item.ident.is_none() {
             self.item_call(&item.mac, &hidden);
-            // Its input is among the items after it, with its attributes.
             if reads_input(&item.mac) {
                 return;
             }
@@ -3988,8 +3367,6 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
             self.visit_attribute(attr);
         }
         match &item.ident {
-            // A `macro_rules!` that was expanded is read where it is called,
-            // and as tokens only if some call of it isn't expanded.
             Some(name) => {
                 let site = self.site(name.span());
                 let at = (site.file, site.line, name.span().start().column);
@@ -4006,11 +3383,8 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
                     return;
                 }
             }
-            // The calls that are expanded aren't among the items.
             None => self.unexpanded(&item.mac),
         }
-        // A `macro_rules!` definition, or an invocation whose body isn't
-        // items.
         let outer = mem::replace(&mut self.hidden, hidden);
         self.tokens(item.mac.tokens.clone());
         self.hidden = outer;
@@ -4096,9 +3470,6 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         });
     }
 
-    /// `Expand` gives each item a macro invocation expands to a copy of the
-    /// invocation's attributes, so an attribute counts only the first time
-    /// it is seen where it is written.
     fn visit_attribute(&mut self, attr: &'ast Attribute) {
         if self.here(attr.pound_token.span)
             && self.attributes.insert(self.site(attr.pound_token.span))
@@ -4114,7 +3485,6 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
     }
 
     fn visit_stmt(&mut self, stmt: &'ast Stmt) {
-        // Items and expressions check their own attributes.
         let attrs = match stmt {
             Stmt::Local(local) => &local.attrs[..],
             Stmt::Macro(mac) => &mac.attrs,
@@ -4125,8 +3495,6 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         }
     }
 
-    /// Any expression can carry a `cfg`, such as an array element or a
-    /// call's argument.
     fn visit_expr(&mut self, expr: &'ast Expr) {
         if self.enabled(expr_attrs(expr)) {
             visit::visit_expr(self, expr);
@@ -4139,8 +3507,6 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         }
     }
 
-    /// A variant's discriminant and a field's type can hold expressions,
-    /// such as `X = unsafe { 0 }` or an array length.
     fn visit_variant(&mut self, variant: &'ast Variant) {
         if self.enabled(&variant.attrs) {
             visit::visit_variant(self, variant);
@@ -4201,8 +3567,6 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         visit::visit_expr_unsafe(self, expr);
     }
 
-    /// A path that may mean any of several items counts for each of them
-    /// that is disallowed.
     fn visit_expr_path(&mut self, expr: &'ast ExprPath) {
         let entries: BTreeSet<usize> = self
             .resolve(expr)
@@ -4239,9 +3603,6 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
                 .alternatives()
                 .iter()
                 .any(|resolved| match resolved {
-                    // A path into a crate no entry names may be a re-export of
-                    // a disallowed item, as `smol::Executor` is
-                    // `async_executor::Executor`.
                     Resolved::Path { path, .. } => {
                         self.scanner.entry(path).is_none()
                             && path
@@ -4249,7 +3610,6 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
                                 .is_none_or(|krate| !disallowed.names_crate(krate))
                     }
                     Resolved::Local => false,
-                    // Alternatives are never nested, so `Either` isn't one.
                     Resolved::Unknown | Resolved::Either(_) => true,
                 });
             if unresolved {
@@ -4267,8 +3627,6 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         visit::visit_expr_method_call(self, expr);
     }
 
-    /// Macros in expressions and statements, whose bodies are often
-    /// expressions, as in `println!` or `vec!`, or statements.
     fn visit_macro(&mut self, mac: &'ast Macro) {
         if is_include(mac) {
             self.unscanned(
@@ -4299,8 +3657,6 @@ mod tests {
         *,
     };
 
-    /// Each `cfg_if!` branch's items are built only where its predicate
-    /// holds and no earlier one does, as the `cfg_if` crate expands it.
     #[test]
     fn cfg_if_gives_each_branch_the_cfg_that_selects_it() {
         let target = Target::parse("unix\ntarget_os=\"linux\"\n");
@@ -4337,7 +3693,6 @@ mod tests {
         )
         .unwrap();
         Expand.visit_file_mut(&mut file);
-        // Each call read as its input stays before its items.
         let built: Vec<(String, Truth)> = file
             .items
             .iter()
@@ -4372,8 +3727,6 @@ mod tests {
         assert_eq!(built, expected);
     }
 
-    /// A body that isn't `cfg_if!`'s syntax, or one with that syntax in a
-    /// macro of another name, is left as a macro.
     #[test]
     fn only_cfg_if_bodies_are_read_as_branches() {
         for source in [
@@ -4445,7 +3798,6 @@ mod tests {
         )
         .unwrap();
         Expand.visit_file_mut(&mut file);
-        // Each call read as its input stays before its items.
         let built: Vec<_> = file
             .items
             .iter()
@@ -4511,7 +3863,6 @@ mod tests {
         }
     }
 
-    /// The path that ends some tokens, as before a macro call's `!`.
     #[test]
     fn trailing_path_reads_a_path_back_from_its_end() {
         for (source, path) in [
@@ -4545,7 +3896,6 @@ mod tests {
         }
     }
 
-    /// Whether `unsafe_code` reports each attribute, as rustc 1.100 does.
     #[test]
     fn unsafe_attributes_are_the_ones_unsafe_code_reports() {
         for (source, reported) in [
@@ -4574,24 +3924,17 @@ mod tests {
         }
     }
 
-    /// Scans a crate named `demo`, built for Linux with no features, whose
-    /// files under `src/` are `files`.
     fn scan_files(files: &[(&str, &str)]) -> Scan {
         scan_with(files, false, &[])
     }
 
-    /// A library a test crate depends on.
     #[derive(Clone, Copy)]
     struct Library<'t> {
-        /// Its crate name, which the crate that depends on it calls it by.
         name: &'t str,
-        /// The features its build has.
         features: &'t [&'t str],
-        /// Its files under `src/`.
         files: &'t [(&'t str, &'t str)],
     }
 
-    /// A new directory with `files` under `src/`.
     fn package(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         for (name, text) in files {
@@ -4602,9 +3945,6 @@ mod tests {
         dir
     }
 
-    /// Scans a crate named `demo`, built for Linux with no features, whose
-    /// files under `src/` are `files`, in the 2015 edition if
-    /// `edition_2015`, and which depends on `libraries`.
     fn scan_with(files: &[(&str, &str)], edition_2015: bool, libraries: &[Library]) -> Scan {
         let target = Target::parse("unix\ntarget_os=\"linux\"\n");
         let no_externs = BTreeMap::new();
@@ -4678,10 +4018,6 @@ mod tests {
         }
     }
 
-    /// A call of the crate's own `macro_rules!` with one rule and an empty
-    /// matcher, as serde's `crate_root!();`, is read as its expansion: its
-    /// modules are the calling module's, its code counts once, and its sites
-    /// are in the macro's file.
     #[test]
     fn calls_of_crate_macros_without_input_are_expanded() {
         let scan = scan_files(&[
@@ -4720,8 +4056,6 @@ mod tests {
         assert_eq!(sites, [&site]);
     }
 
-    /// A module's file, or an inline module, can make it `#[macro_use]`
-    /// with an inner attribute.
     #[test]
     fn inner_macro_use_keeps_a_modules_macros_in_scope() {
         let scan = scan_files(&[
@@ -4749,8 +4083,6 @@ other!();
         assert_eq!(scan.unsafe_code.functions, 2);
     }
 
-    /// A macro some of whose calls aren't expanded, as in a function, is
-    /// read as tokens too, so what those calls may reach still counts.
     #[test]
     fn macros_with_calls_that_are_not_expanded_are_read_as_tokens() {
         let scan = scan_files(&[(
@@ -4774,9 +4106,6 @@ pub fn outer() {
         assert_eq!(scan.calls, BTreeMap::new());
     }
 
-    /// A call expands only a macro in textual scope: one defined before it
-    /// in its module or a module around it, or in a `#[macro_use]` module
-    /// declared before it. A macro no call expands is read as tokens.
     #[test]
     fn only_macros_in_textual_scope_are_expanded() {
         let scan = scan_files(&[
@@ -4800,9 +4129,6 @@ mod outer {
         assert_eq!(scan.unsafe_code.functions, 1);
     }
 
-    /// Each definition a call may name expands under the `cfg`s that select
-    /// it, and one every build has hides the ones before it. Those it hides,
-    /// and those out of scope, are read as tokens.
     #[test]
     fn calls_expand_each_definition_a_build_may_have() {
         let scan = scan_files(&[
@@ -4832,8 +4158,6 @@ pick!();
         assert_eq!(scan.unsafe_code.functions, 2);
     }
 
-    /// Stands in for psm, whose `psm_stack_manipulation!` has two
-    /// definitions, under a `cfg` its build script sets.
     const PSM: Library = Library {
         name: "psm",
         features: &[],
@@ -4854,12 +4178,6 @@ macro_rules! psm_stack_manipulation {
         )],
     };
 
-    /// A call of a macro that a `#[macro_use] extern crate` brings in, as
-    /// stacker's `psm_stack_manipulation!`, is read as each definition the
-    /// other crate's build may have: psm defines the macro twice, under a
-    /// `cfg` its build script sets, so both arms are scanned, and the names
-    /// each binds may be either. The macros are the whole crate's, before
-    /// the item too.
     #[test]
     fn calls_of_macros_another_crate_exports_are_expanded() {
         let scan = scan_with(
@@ -4902,8 +4220,6 @@ pub fn run() {
         assert_eq!(sites, [&site]);
     }
 
-    /// Which of another crate's definitions a call may name is decided by
-    /// the `cfg`s of that crate's build, not of the calling crate's.
     #[test]
     fn other_crates_macros_are_defined_by_their_builds() {
         let fast = Library {
@@ -4944,9 +4260,6 @@ mod windows {
         assert_eq!(scan.unsafe_code.functions, 1);
     }
 
-    /// `$crate` in another crate's macro names that crate. What the macro
-    /// writes itself counts for that crate, as rustc's `unsafe_code` lint
-    /// leaves it out; what the call passes it counts here.
     #[test]
     fn other_crates_macros_name_and_count_for_their_crate() {
         let tokio = Library {
@@ -5007,9 +4320,6 @@ macro_rules! runtime {
         }
     }
 
-    /// The prelude a `#[macro_use] extern crate` adds comes after textual
-    /// scope. A `#[macro_use(...)]` brings in only the macros it names, and
-    /// an `extern crate` without it none.
     #[test]
     fn other_crates_macros_come_after_textual_scope() {
         let picks = Library {
@@ -5062,8 +4372,6 @@ extern crate plain;
         assert_eq!(scan.unsafe_code.functions, 2);
     }
 
-    /// A macro that a module's `use` items bring in, or its glob imports
-    /// may, hides the prelude's, so a call there isn't expanded with it.
     #[test]
     fn other_crates_macros_are_hidden_by_imports() {
         let picks = Library {
@@ -5094,10 +4402,6 @@ extern crate plain;
         assert_eq!(scan.unsafe_code.functions, 1);
     }
 
-    /// Of two `#[macro_use] extern crate` items that bring in a macro of
-    /// one name, the last hides the first, as in rustc, unless a build may
-    /// not have it. A macro it hides isn't read, even where its rules
-    /// can't be.
     #[test]
     fn later_macro_use_imports_hide_earlier_ones() {
         let unreadable = Library {
@@ -5155,8 +4459,6 @@ extern crate plain;
         assert_eq!(scan.unsafe_code.functions, 1);
     }
 
-    /// Macros that each of another crate's definitions of a macro defines
-    /// may each be the one a build has, so one doesn't hide the other.
     #[test]
     fn macros_other_crates_macros_define_do_not_hide_each_other() {
         let configure = Library {
@@ -5194,10 +4496,6 @@ macro_rules! configure {
         assert_eq!(scan.unsafe_code.functions, 2);
     }
 
-    /// `$crate` passed on to another macro is one identifier, as in rustc,
-    /// and still names its crate once the expansion is read, also in a
-    /// `use` group. What the macro writes itself, as its own `begin()`,
-    /// counts for its crate.
     #[test]
     fn crate_passed_on_names_its_crate() {
         let tokio = Library {
@@ -5250,9 +4548,6 @@ macro_rules! inner {
         assert_eq!(paths, [("tokio::spawn".to_owned(), vec![7, 8])]);
     }
 
-    /// In a `#[macro_export(local_inner_macros)]` macro, a call by a bare
-    /// name is a call of its crate's macro, by path, rather than of a macro
-    /// of that name here.
     #[test]
     fn local_inner_macros_call_their_crates_macros() {
         let outer = Library {
@@ -5280,16 +4575,11 @@ macro_rules! helper { () => { mod theirs; }; }
             false,
             &[outer],
         );
-        // The crate's own `helper!` is called nowhere, so it is read as tokens.
         let reason = "module `mine` is declared in a macro body the scan can't read";
         assert_eq!(scan.unscanned, [unscanned("src/lib.rs", 4, reason)]);
         assert_eq!(scan.unsafe_code.functions, 1);
     }
 
-    /// A call of another crate's `#[macro_export]` macro by path, as
-    /// `psm::psm_stack_manipulation! { ... }`, is read as each definition
-    /// that crate's build may have, also where the path starts with `::` or
-    /// a name an `extern crate` item gives the crate, in either edition.
     #[test]
     fn calls_of_other_crates_macros_by_path_are_expanded() {
         let lib = r"psm::psm_stack_manipulation! {
@@ -5320,8 +4610,6 @@ stack::psm_stack_manipulation! {
             ("renamed.rs", "pub unsafe fn e() {}\n"),
             ("renamed_fallback.rs", "pub unsafe fn f() {}\n"),
         ];
-        // In 2015, `::psm` and `stack` are bound at the crate root, by the
-        // `extern crate` item.
         for edition_2015 in [false, true] {
             let scan = scan_with(&files, edition_2015, &[PSM]);
             assert_eq!(scan.unscanned, [], "2015: {edition_2015}");
@@ -5329,9 +4617,6 @@ stack::psm_stack_manipulation! {
         }
     }
 
-    /// A call by a name that a `use` binds to another crate's macro, as
-    /// `use psm::psm_stack_manipulation;`, is read as that macro, under the
-    /// name or a rename.
     #[test]
     fn calls_of_other_crates_macros_a_use_brings_in_are_expanded() {
         let scan = scan_with(
@@ -5357,10 +4642,6 @@ stack::psm_stack_manipulation! {
         assert_eq!(scan.unsafe_code.functions, 4);
     }
 
-    /// A macro that a `use` brings in comes after textual scope and before
-    /// the prelude a `#[macro_use] extern crate` adds, which it hides where
-    /// every build has the `use`. Textual scope hides even a `use` the scan
-    /// can't follow.
     #[test]
     fn macros_a_use_brings_in_come_between_textual_scope_and_the_prelude() {
         let library = |name, files| Library {
@@ -5438,9 +4719,6 @@ stack::psm_stack_manipulation! {
         );
     }
 
-    /// A path to another crate's macro is followed through that crate's
-    /// `use` items to its root, where `#[macro_export]` puts the macro, in
-    /// the namespace of macros: a function of the same name isn't one.
     #[test]
     fn paths_to_other_crates_macros_follow_their_reexports() {
         let picks = Library {
@@ -5481,9 +4759,6 @@ pub use functions::pick;
         assert_eq!(scan.unsafe_code.functions, 2);
     }
 
-    /// A macro path that doesn't lead to a macro the scan can read isn't
-    /// expanded: into a crate that isn't a dependency, or to an item that
-    /// isn't a macro, in another crate or this one.
     #[test]
     fn macro_paths_the_scan_cannot_follow_are_not_expanded() {
         let picks = Library {
@@ -5520,8 +4795,6 @@ crate::own! { yes { mod own; } }
         assert_eq!(scan.unscanned, listed);
     }
 
-    /// A macro that a `use` under an unknown `cfg` brings in, and a
-    /// `#[macro_use] extern crate` brings in too, is read once.
     #[test]
     fn macros_a_use_and_the_prelude_both_bring_in_are_read_once() {
         let picks = Library {
@@ -5544,8 +4817,6 @@ crate::own! { yes { mod own; } }
         assert_eq!(scan.unsafe_code.functions, 1);
     }
 
-    /// A module's `use` of another crate's macro can be followed from the
-    /// modules it declares, as `use super::pick;`, before it is indexed.
     #[test]
     fn macros_a_parent_module_brings_in_are_followed() {
         let picks = Library {
@@ -5576,9 +4847,6 @@ crate::own! { yes { mod own; } }
         assert_eq!(scan.unsafe_code.functions, 2);
     }
 
-    /// Of the `use` items of one name, those that bring in no macro, as one
-    /// of a function, don't keep a call of the name from the macro another
-    /// brings in, nor, where none does, from the prelude's.
     #[test]
     fn uses_of_other_items_do_not_hide_macros() {
         let picks = Library {
@@ -5621,9 +4889,6 @@ crate::own! { yes { mod own; } }
         assert_eq!(scan.unsafe_code.functions, 2);
     }
 
-    /// A macro that a call may reach two ways, by its name and by a
-    /// re-export, as `use`s under unknown `cfg`s may name either, is read
-    /// once, so the code the call passes in counts once.
     #[test]
     fn macros_reached_two_ways_are_read_once() {
         let picks = Library {
@@ -5658,8 +4923,6 @@ pick! { yes { pub unsafe fn f() {} } }
         assert_eq!(scan.unsafe_code.functions, 1);
     }
 
-    /// A dependency named like a keyword, as `r#async`, has its macros
-    /// called, and `$crate` in them names it.
     #[test]
     fn macros_of_dependencies_named_like_keywords_are_expanded() {
         let keyword = Library {
@@ -5695,8 +4958,6 @@ macro_rules! inner {
         assert_eq!(scan.unsafe_code.functions, 2);
     }
 
-    /// `$crate::inner!` in another crate's macro calls that crate's
-    /// `inner!`, whose code counts for that crate too.
     #[test]
     fn crate_paths_in_other_crates_macros_call_their_macros() {
         let runtime = Library {
@@ -5728,8 +4989,6 @@ macro_rules! inner {
         assert_eq!(scan.unsafe_code.functions, 1);
     }
 
-    /// An exported macro that another of its crate's macros defines names
-    /// that crate with the `$crate` the other one wrote.
     #[test]
     fn crate_in_generated_exports_names_its_crate() {
         let tokio = Library {
@@ -5770,11 +5029,6 @@ define!();
         assert_eq!(paths, [("tokio::spawn".to_owned(), vec![7])]);
     }
 
-    /// A call of the crate's own `macro_rules!` with input, as Tokio's
-    /// `feature! { #![unix] mod symlink; }`, is read as the rule it matches:
-    /// the modules it declares are scanned under the `cfg` the rule gives
-    /// them, its code counts for each call, and its sites are where their
-    /// tokens are written, in the call's file or the macro's.
     #[test]
     fn calls_of_crate_macros_with_input_are_expanded() {
         let scan = scan_files(&[
@@ -5845,9 +5099,6 @@ feature! {
         );
     }
 
-    /// A call the scan can't match to a rule as rustc would is read as
-    /// tokens, as is one that may name a macro whose rules it can't read or
-    /// that a module that may be `#[macro_use]` defines.
     #[test]
     fn calls_the_scan_cannot_match_are_not_expanded() {
         let scan = scan_files(&[(
@@ -5873,8 +5124,6 @@ maybe!();
         assert_eq!(scan.unscanned, listed);
     }
 
-    /// A macro that calls itself is followed only as deep as rustc follows
-    /// it, and the call past that is read as tokens, with its input.
     #[test]
     fn expansion_stops_at_a_macro_that_calls_itself() {
         let scan = scan_files(&[(
@@ -5886,9 +5135,6 @@ maybe!();
         assert_eq!(scan.unsafe_code.in_macros, 1);
     }
 
-    /// A macro whose expansion calls it more than once is followed only for
-    /// so many calls in all, after its first calls reach the depth limit.
-    /// Each call past a limit is listed once.
     #[test]
     fn expansion_stops_at_a_macro_that_calls_itself_twice() {
         let scan = scan_files(&[(
@@ -5906,9 +5152,6 @@ maybe!();
         );
     }
 
-    /// A module whose `#[path]` depends on an unknown `cfg` is read from
-    /// each place a build may take it from that has a file, as rustix's
-    /// `backend` and the modules serde's `crate_root!` declares are.
     #[test]
     fn modules_are_read_from_each_place_a_cfg_dependent_path_may_name() {
         let scan = scan_files(&[
@@ -5942,8 +5185,6 @@ mod inline {}
         assert_eq!(scan.unsafe_code.functions, 4);
     }
 
-    /// The `macro_rules!` of each file a `#[macro_use]` module may be in
-    /// may be the ones a later call names.
     #[test]
     fn macros_of_alternative_module_files_do_not_hide_each_other() {
         let scan = scan_files(&[
@@ -5960,11 +5201,6 @@ mod inline {}
         assert_eq!(scan.unsafe_code.functions, 2);
     }
 
-    /// The crate's own macros are read where a path names them: its
-    /// `#[macro_export]` ones at its root, as `crate::m!`, `self::m!` or
-    /// `$crate::m!` in another of its macros, and those a `use` brings in
-    /// from textual scope where the `use` is, as `pub(crate) use m;` does,
-    /// by path or by the name a `use` of the path binds.
     #[test]
     fn calls_of_the_crates_own_macros_by_path_are_expanded() {
         let mut files = vec![
@@ -6026,9 +5262,6 @@ macro_rules! backend {
         assert_eq!(scan.unsafe_code.functions, modules.len());
     }
 
-    /// A macro path through a module declared after the call, or to a
-    /// macro the crate defines after it, is followed once the module tree
-    /// is read: to another crate's macro, or to the crate's own.
     #[test]
     fn macro_paths_through_names_bound_later_are_followed() {
         let picks = Library {
@@ -6080,10 +5313,6 @@ macro_rules! declare {
         assert_eq!(scan.unsafe_code.functions, 3);
     }
 
-    /// A call by path of the crate's own macro is read as each definition a
-    /// build may have, under the `cfg`s that select it, and a call by the
-    /// bare name that textual scope and the crate root both have reads each
-    /// once.
     #[test]
     fn the_crates_own_macros_by_path_are_read_as_each_definition() {
         let scan = scan_files(&[(
@@ -6122,9 +5351,6 @@ pick!(by_name);
         );
     }
 
-    /// Calls of a macro that write one `#[macro_export]` macro under
-    /// different `cfg`s give it a definition for each, though their names
-    /// are written in one place.
     #[test]
     fn macros_one_macro_writes_by_each_call_are_each_a_definition() {
         let scan = scan_files(&[(
@@ -6154,8 +5380,6 @@ mod user {
         assert_eq!(scan.unsafe_code.functions, 1);
     }
 
-    /// A call by path of the crate's own macro is read as each definition
-    /// of it, also those the crate defines after the call.
     #[test]
     fn the_crates_own_macros_by_path_include_later_definitions() {
         let scan = scan_files(&[(
@@ -6189,9 +5413,6 @@ mod second {
         assert_eq!(scan.unsafe_code.functions, 2);
     }
 
-    /// A call by path through a module that a build may take from either
-    /// of two places reads the macro each one re-exports, also where the
-    /// call comes between them.
     #[test]
     fn calls_through_modules_of_one_path_read_each_reexport() {
         let scan = scan_files(&[(
@@ -6233,9 +5454,6 @@ mod second {
         assert_eq!(scan.unsafe_code.functions, 2);
     }
 
-    /// A call by a bare name reads a definition in textual scope once, but
-    /// another one a call of the same macro wrote at the same place, out of
-    /// textual scope, too.
     #[test]
     fn definitions_written_at_one_place_are_told_apart() {
         let scan = scan_files(&[(
@@ -6270,9 +5488,6 @@ mod user {
         assert_eq!(scan.unsafe_code.functions, 2);
     }
 
-    /// A definition that paths name more than one way, as through two
-    /// re-exports that each build may take, is read once for a call, under
-    /// the `cfg`s of any of the ways.
     #[test]
     fn definitions_named_more_than_one_way_are_read_once() {
         let scan = scan_files(&[(
@@ -6303,9 +5518,6 @@ chosen!();
         assert_eq!(scan.unsafe_code.functions, 1);
     }
 
-    /// A definition keeps its identity when the scan reads the module tree
-    /// again, so a call that names it one way the last reading found and
-    /// another this one reads it once.
     #[test]
     fn definitions_keep_their_identity_across_readings() {
         let scan = scan_files(&[(
@@ -6342,9 +5554,6 @@ mod b {
         files: &'a [(&'a str, &'a str)],
     }
 
-    /// Scans `demo` against `others`, where each entry's `deps` maps its
-    /// local extern name to an index in `others`. `demo` depends on the
-    /// crates in `demo_deps` by their library names.
     fn scan_graph(files: &[(&str, &str)], demo_deps: &[usize], others: &[GraphCrate]) -> Scan {
         let target = Target::parse("unix\ntarget_os=\"linux\"\n");
         let dirs: Vec<_> = others.iter().map(|krate| package(krate.files)).collect();

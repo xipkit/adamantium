@@ -28,80 +28,88 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run Clippy with adamantium's rules on a Cargo project.
+    #[command(about = "Run Clippy with adamantium's rules on a Cargo project")]
     Check(check::Args),
-    /// Apply machine-applicable fixes and mechanical migration rewrites.
+    #[command(about = "Apply machine-applicable fixes and mechanical migration rewrites")]
     Fix {
         #[arg(default_value = ".")]
         path: PathBuf,
-        /// Print a unified diff without changing source files.
-        #[arg(long)]
+        #[arg(long, help = "Print a unified diff without changing source files")]
         dry_run: bool,
         #[arg(long)]
         strict: bool,
         #[arg(last = true)]
         cargo_args: Vec<String>,
     },
-    /// Write the rules into a project, so that plain `cargo clippy` applies them.
+    #[command(about = "Write the rules into a project, so that plain `cargo clippy` applies them")]
     Init {
-        /// The project directory, or its Cargo.toml.
-        #[arg(default_value = ".")]
+        #[arg(default_value = ".", help = "The project directory, or its Cargo.toml")]
         path: PathBuf,
-        /// Replace a clippy.toml that differs from adamantium's.
-        #[arg(long)]
+        #[arg(long, help = "Replace a clippy.toml that differs from adamantium's")]
         force: bool,
-        /// Include the strict rules for arithmetic and synchronization.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Include the strict rules for arithmetic and synchronization"
+        )]
         strict: bool,
     },
-    /// Report which dependencies use unsafe code or call the paths that
-    /// clippy.toml disallows, such as task spawns.
+    #[command(
+        about = "Report which dependencies use unsafe code or call the paths that clippy.toml disallows, such as task spawns"
+    )]
     Deps {
-        /// The project directory, or its Cargo.toml.
-        #[arg(default_value = ".")]
+        #[arg(default_value = ".", help = "The project directory, or its Cargo.toml")]
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = deps::Format::Text)]
         format: deps::Format,
-        /// Fail on new unsafe code or unscoped task starts, or on scan gaps.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Fail on new unsafe code or unscoped task starts, or on scan gaps"
+        )]
         deny_new: bool,
-        /// Compare against an earlier `deps --format json` report.
-        #[arg(long, value_name = "REPORT", requires = "deny_new")]
+        #[arg(
+            long,
+            value_name = "REPORT",
+            requires = "deny_new",
+            help = "Compare against an earlier `deps --format json` report"
+        )]
         baseline: Option<PathBuf>,
-        /// Arguments passed on to `cargo metadata` and `cargo tree`, such as `--features` or
-        /// `--all-features`.
-        #[arg(last = true)]
+        #[arg(
+            last = true,
+            help = "Arguments passed on to `cargo metadata` and `cargo tree`, such as `--features` or `--all-features`"
+        )]
         cargo_args: Vec<String>,
     },
-    /// Print the rules.
+    #[command(about = "Print the rules")]
     Rules {
         #[arg(long, value_enum, default_value_t = RulesFormat::Text)]
         format: RulesFormat,
-        /// Include the strict rules for arithmetic and synchronization.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Include the strict rules for arithmetic and synchronization"
+        )]
         strict: bool,
     },
-    /// Explain a rule with a before-and-after example and its replacement.
+    #[command(about = "Explain a rule with a before-and-after example and its replacement")]
     Explain {
-        /// A bare or qualified rule name, such as unwrap_used or clippy::unwrap_used.
+        #[arg(help = "A bare or qualified rule name, such as unwrap_used or clippy::unwrap_used")]
         rule: String,
         #[arg(long, value_enum, default_value_t = ExplainFormat::Text)]
         format: ExplainFormat,
     },
-    /// Review Rust files against the judgment-based parts of the Google Rust
-    /// style guide, through a model provider (the OpenAI Decisions API by
-    /// default).
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        about = "Review Rust files against the judgment-based parts of the Google Rust style guide, through a model provider (the OpenAI Decisions API by default)"
+    )]
     Style(style::Command),
 }
 
 #[derive(Clone, Copy, ValueEnum)]
 enum ReportFormat {
-    /// Clippy's own output, then a summary, on stderr.
+    #[value(help = "Clippy's own output, then a summary, on stderr")]
     Text,
-    /// A report on stdout.
+    #[value(help = "A report on stdout")]
     Json,
-    /// A SARIF 2.1.0 log on stdout, for GitHub code scanning.
+    #[value(help = "A SARIF 2.1.0 log on stdout, for GitHub code scanning")]
     Sarif,
 }
 
@@ -109,7 +117,7 @@ enum ReportFormat {
 enum RulesFormat {
     Text,
     Json,
-    /// The `[lints]` tables as `cargo adamantium init` writes them into a workspace.
+    #[value(help = "The `[lints]` tables as `cargo adamantium init` writes them into a workspace")]
     Toml,
 }
 
@@ -160,7 +168,6 @@ struct Rules<'a> {
 }
 
 fn main() -> ExitCode {
-    // Cargo runs `cargo-adamantium adamantium ...`; drop the repeated name.
     let mut args = std::env::args_os().peekable();
     let program = args.next();
     if args.peek().is_some_and(|arg| arg == "adamantium") {

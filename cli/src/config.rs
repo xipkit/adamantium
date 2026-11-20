@@ -1,24 +1,3 @@
-//! The defaults and skip list a project keeps in its `Cargo.toml`.
-//!
-//! ```toml
-//! [workspace.metadata.adamantium]
-//! strict = true
-//! baseline = "ci/check-baseline.json"
-//! skip = ["tests/", "examples/"]              # nothing is checked here
-//! allow = ["indexing_slicing", "unwrap_used"] # these rules are off, for now
-//!
-//! [workspace.metadata.adamantium.deps]
-//! baseline = "ci/deps-baseline.json"
-//!
-//! [workspace.metadata.adamantium.exceptions]
-//! future_not_send = ["src/syntax/", "src/bytecode.rs"] # this rule is off here
-//! ```
-//!
-//! A single package uses `[package.metadata.adamantium]`. Baseline paths and
-//! skip globs are relative to the directory holding `Cargo.toml`. A skip
-//! path without wildcards also names everything under it. Rules go by their
-//! bare name or by the qualified one `cargo adamantium rules` prints.
-
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
@@ -34,13 +13,9 @@ use crate::lints::{self, EXPERIMENTAL_LINTS, OVERFLOW_RULE};
 /// A project's command defaults and skip list.
 #[derive(Debug)]
 pub struct Config {
-    /// The table the settings came from, such as `workspace.metadata.adamantium`.
     pub table: Option<String>,
-    /// Whether `check` uses the strict tier by default.
     pub strict: bool,
-    /// The default `check` baseline, resolved relative to the manifest.
     pub baseline: Option<PathBuf>,
-    /// The default `deps --deny-new` baseline, resolved relative to the manifest.
     pub deps_baseline: Option<PathBuf>,
     skip: GlobSet,
     allow: HashSet<String>,
@@ -181,7 +156,6 @@ fn baseline_path(item: Option<&Item>, root: &Path, key: &str) -> Result<Option<P
     Ok(Some(root.join(path)))
 }
 
-/// The strings in an array item, or none when the item is absent.
 fn strings(item: Option<&Item>, key: &str) -> Result<Vec<String>> {
     let Some(item) = item else {
         return Ok(Vec::new());
@@ -194,9 +168,6 @@ fn strings(item: Option<&Item>, key: &str) -> Result<Vec<String>> {
         .collect()
 }
 
-/// Globs for the paths in an array item. A path without wildcards also names
-/// everything under it, so `tests/`, `tests` and `tests/**` all cover the
-/// directory.
 fn globs(item: Option<&Item>, key: &str) -> Result<GlobSet> {
     let mut set = GlobSetBuilder::new();
     for path in strings(item, key)? {
@@ -220,7 +191,6 @@ fn glob(pattern: &str, key: &str) -> Result<Glob> {
         .with_context(|| format!("`{key}` in Cargo.toml has an invalid glob {pattern:?}"))
 }
 
-/// The qualified name of a rule given by either of its names.
 fn qualify(name: &str, table: &str) -> Result<String> {
     if name == OVERFLOW_RULE || Some(name) == OVERFLOW_RULE.strip_prefix("adamantium::") {
         return Ok(OVERFLOW_RULE.to_owned());

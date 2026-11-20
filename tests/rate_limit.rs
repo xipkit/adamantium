@@ -1,4 +1,3 @@
-// Every test here pauses the clock, which Tokio cannot do on WASI.
 #![cfg(all(feature = "tokio", not(target_os = "wasi")))]
 
 use adamantium::time::{self, sleep, sleep_until};
@@ -16,20 +15,17 @@ fn secs(secs: u64) -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Requests shutdown at `at`, from a future polled alongside the combinator.
 async fn cancel_at(cancellation: &Cancellation, at: Instant) {
     sleep_until(at).await;
     cancellation.cancel();
 }
 
-/// Runs a call under `limit` that does nothing but succeed.
 async fn call(limit: &RateLimit, cancellation: &Cancellation) -> Result<(), ScopeError<()>> {
     limit
         .run_until(cancellation, None, || async { Ok(()) })
         .await
 }
 
-/// Sets its flag when dropped, to show the work's future was dropped.
 struct Dropped(Arc<AtomicBool>);
 
 impl Drop for Dropped {

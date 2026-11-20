@@ -37,7 +37,6 @@ fn check(factory: fn() -> Pin<Box<dyn Future<Output = ()>>>) {
     assert_eq!(testing::replay(&record, factory).unwrap(), record);
 }
 
-/// Receives until the feed ends, and returns the events and the end.
 async fn read_all(mut feed: Feed<(u32, u32)>) -> (Vec<(u32, u32)>, Ended) {
     let mut events = Vec::new();
     loop {
@@ -52,8 +51,6 @@ async fn read_all(mut feed: Feed<(u32, u32)>) -> (Vec<(u32, u32)>, Ended) {
 fn concurrent_publishers_readers_and_a_dropped_feed_replay() {
     check(|| {
         Box::pin(async {
-            // Room for every event, so no feed overflows, even one that
-            // reads only at the end.
             let fanout = Fanout::new(4);
             let first = fanout.subscribe();
             let second = fanout.subscribe();
@@ -127,9 +124,6 @@ fn an_overflow_racing_a_reader_cuts_off_only_a_full_feed_replay() {
                             Err(end) => break end,
                         }
                     };
-                    // Either the read made room in time and the feed got
-                    // both events, or the send found it full and cut it off
-                    // after the first. Never a gap.
                     match end {
                         Ended::Closed => assert_eq!(events, [0, 1]),
                         Ended::Overflowed => assert_eq!(events, [0]),
@@ -174,8 +168,6 @@ fn close_racing_send_returns_exactly_the_unsent_event_replay() {
 
 #[test]
 fn fanouts_support_the_model_and_reject_foreign_handles() {
-    /// Runs `body` once in the harness with a value made outside it, and
-    /// returns how the execution failed.
     fn carried_in<V: Send + 'static>(value: V, body: fn(V)) -> FailureKind {
         let value = Mutex::new(Some(value));
         testing::check(
@@ -219,7 +211,6 @@ fn fanouts_support_the_model_and_reject_foreign_handles() {
     )
     .unwrap_err();
     assert_eq!(failure.kind(), FailureKind::Panic);
-    // Unwinding drops the carried fanout without panicking a second time.
     assert_eq!(
         carried_in(fanout.clone(), |fanout| {
             let _held = fanout;
@@ -233,7 +224,5 @@ fn fanouts_support_the_model_and_reject_foreign_handles() {
         "the rejected drop left the count alone"
     );
     assert!(receiving.lock().unwrap().is_none());
-    // The carried feed unsubscribed as it unwound, and the harness added
-    // none.
     assert_eq!(fanout.subscriber_count(), 0);
 }

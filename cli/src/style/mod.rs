@@ -1,8 +1,3 @@
-//! Judgment-based review of Rust files against the Google Rust style guide,
-//! through a model provider, the OpenAI Decisions API by default. Formerly
-//! the standalone `cargo rustoleum`; the rules, labeled cases and evaluation
-//! scripts live under `style/` in the repository.
-
 mod changed;
 mod decisions;
 #[cfg(test)]
@@ -29,44 +24,42 @@ use self::{
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Review a Rust file or directory without modifying it. Sends each file
-    /// to the provider, which needs credentials: for the default Decisions
-    /// API, OPENAI_API_KEY or, on macOS, an `openai-api-key` Keychain item.
+    #[command(
+        about = "Review a Rust file or directory without modifying it. Sends each file to the provider, which needs credentials: for the default Decisions API, OPENAI_API_KEY or, on macOS, an `openai-api-key` Keychain item"
+    )]
     Check(CheckArgs),
-    /// List the rules of a pack.
+    #[command(about = "List the rules of a pack")]
     Rules {
-        /// The rules to list.
-        #[arg(long, value_enum, default_value_t = Pack::Google)]
+        #[arg(long, value_enum, default_value_t = Pack::Google, help = "The rules to list")]
         pack: Pack,
         #[arg(long, value_enum, default_value_t = Format::Json)]
         format: Format,
     },
 }
 
+/// Arguments for `cargo adamantium style check`.
 #[derive(Args)]
 pub struct CheckArgs {
-    /// Rust source file or directory to review.
-    #[arg(default_value = ".")]
+    #[arg(default_value = ".", help = "Rust source file or directory to review")]
     path: PathBuf,
-    /// The rules to review against.
-    #[arg(long, value_enum, default_value_t = Pack::Google)]
+    #[arg(long, value_enum, default_value_t = Pack::Google, help = "The rules to review against")]
     pack: Pack,
-    /// Evaluate only this rule of the pack; may be repeated.
-    #[arg(long = "rule")]
-    rules: Vec<String>,
-    /// The service that answers the rules for each file.
-    #[arg(long, value_enum, default_value_t = ProviderKind::Decisions)]
-    provider: ProviderKind,
-    /// Project context shared with the provider for each file.
-    #[arg(long)]
-    context: Option<String>,
-    /// Show the files and rules that would be checked without an API call.
-    #[arg(long)]
-    dry_run: bool,
-    /// Review only the Rust files that differ from BASE, or from HEAD without
-    /// one: committed since the branch left BASE, staged, unstaged or
-    /// untracked.
     #[arg(
+        long = "rule",
+        help = "Evaluate only this rule of the pack; may be repeated"
+    )]
+    rules: Vec<String>,
+    #[arg(long, value_enum, default_value_t = ProviderKind::Decisions, help = "The service that answers the rules for each file")]
+    provider: ProviderKind,
+    #[arg(long, help = "Project context shared with the provider for each file")]
+    context: Option<String>,
+    #[arg(
+        long,
+        help = "Show the files and rules that would be checked without an API call"
+    )]
+    dry_run: bool,
+    #[arg(
+        help = "Review only the Rust files that differ from BASE, or from HEAD without one: committed since the branch left BASE, staged, unstaged or untracked",
         long,
         value_name = "BASE",
         num_args = 0..=1,
@@ -74,12 +67,13 @@ pub struct CheckArgs {
         default_missing_value = "HEAD"
     )]
     changed: Option<String>,
-    /// Reuse results from a previous JSON report for files whose source,
-    /// provider, pack, model, rules and context are unchanged.
-    #[arg(long, value_name = "REPORT")]
+    #[arg(
+        long,
+        value_name = "REPORT",
+        help = "Reuse results from a previous JSON report for files whose source, provider, pack, model, rules and context are unchanged"
+    )]
     cache_from: Option<PathBuf>,
-    /// Retry files that failed or were not checked in a previous JSON report.
-    #[arg(long, conflicts_with_all = ["changed", "cache_from"])]
+    #[arg(long, conflicts_with_all = ["changed", "cache_from"], help = "Retry files that failed or were not checked in a previous JSON report")]
     retry_from: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = Format::Json)]
     format: Format,
@@ -121,9 +115,6 @@ pub fn run(command: Command) -> Result<ExitCode> {
     }
 }
 
-/// Plans the review `args` describe and, unless it is a dry run, sends each
-/// planned file to the provider that `connect` builds. `connect` is called
-/// only when some file needs a provider.
 fn check(args: &CheckArgs, connect: impl FnOnce() -> Result<Box<dyn Provider>>) -> Result<Report> {
     let rules = RuleSet::load(args.pack)?;
     let questions = rules.select(&args.rules)?;
@@ -215,15 +206,12 @@ mod tests {
         report::{FileStatus, Finding},
     };
 
-    /// `style check` as the command line parses it.
     #[derive(Parser)]
     struct Cli {
         #[command(flatten)]
         args: CheckArgs,
     }
 
-    /// The JSON and the text after its header line that `style check` prints
-    /// for `dir` with `options`, answered by `provider`, and its exit status.
     fn review(
         dir: &std::path::Path,
         options: &[&str],
@@ -247,7 +235,6 @@ mod tests {
         ))
     }
 
-    /// Two balances that should move together, in separate Actors.
     const SPLIT_STATE: &str = "struct Pair {\n    a: Actor<u64>,\n    b: Actor<u64>,\n}\n";
 
     #[test]

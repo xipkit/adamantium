@@ -1,61 +1,3 @@
-//! Channel rewrites: a local Tokio oneshot channel becomes a `Reply` pair, a
-//! local Tokio watch channel becomes a `Watch` and a `Watcher`, and a local
-//! bounded Tokio mpsc channel becomes a split `Channel`.
-//!
-//! A channel is rewritten only when its halves are bound by one
-//! `let (sender, receiver) = ...` statement and every use of each half, and
-//! of every half moved or cloned into another local, is one whose meaning is
-//! the same before and after. Any other use leaves the channel unchanged,
-//! and the caller reports why with a link to the guide.
-//!
-//! Oneshot: Tokio's receiver is a future of `Result<T, RecvError>`, where
-//! `ReplyReceiver::receive` gives `Option<T>`. Both end with nothing when the
-//! sender is dropped unsent, both let a value sent before `close` be
-//! received, and both hand a value sent to a dropped or closed receiver back
-//! to the sender. So `rx.await` becomes `rx.receive().await` wherever its
-//! result is consumed in a way that reads the same for an `Option`, as in
-//! `is_ok` becoming `is_some` and `Ok(v)` becoming `Some(v)`. A send's error
-//! type changes, so its result may only be discarded or tested. `unwrap` and
-//! `expect` print the error they panic with, so they are rewritten only on
-//! `try_recv`, whose errors print the same as `try_receive`'s.
-//!
-//! Watch: a Tokio receiver made by `channel` and a `Watcher` made by
-//! `subscribe` have both seen the initial value, clones of either keep the
-//! seen state of the original, and both wait for an unseen value before
-//! reporting that the last sender is gone. `changed().await` stays as it is:
-//! `Watcher::changed` also marks the newest value seen without copying it,
-//! and gives `Option<()>` where Tokio's gave `Result<(), RecvError>`, so its
-//! result is rewritten as a oneshot receive's is. Two differences need care.
-//! Tokio's `send` fails and drops the value when no receiver is alive, where
-//! `Watch::send` keeps it, which the value's destructor can show. So a watch
-//! that sends is rewritten only when every send runs in the channel's own
-//! block, outside any closure or async block, and the receiver the
-//! constructor made stays in that block until it ends, so a receiver is
-//! alive at every send. Reading or subscribing to the sender, and testing a
-//! send's result, are refused too. And `borrow` reads without marking the
-//! value seen, where `Watcher::get` marks it; that is unseen unless the
-//! receiver also waits for changes, which is refused. `get` copies the value
-//! with `Clone`, as `borrow_and_update().clone()` does, and for `Copy` values
-//! `Clone` is the copy that `*rx.borrow()` makes. That copy happens only
-//! where the dereference's value is moved out, as into a `let` binding, an
-//! argument or an arithmetic operand, so a dereference read in place, as in
-//! a comparison, is refused.
-//!
-//! Mpsc: `Channel::bounded(n).split()` holds `n` values, closes when the last
-//! sender drops, and, like Tokio's receiver, drops what is queued when its
-//! receiver drops. `recv().await` and `receive().await` both give
-//! `Option<T>` and drain queued values after a close, so a receive's result
-//! may be used anywhere. Tokio panics on a capacity of zero, which `Channel`
-//! rounds up to one, so only a positive integer literal is rewritten. Tokio
-//! admits waiting sends in the order they arrived, and `Channel` lets a send
-//! that arrives while another waits take freed room first. So the sender may
-//! not be cloned, and each send must be awaited where it is called, outside
-//! closures and async blocks that borrow the sender, so at most one send
-//! ever waits. Send errors change type and print differently, so, as for a
-//! oneshot send, a send's or a `try_recv`'s result may only be discarded or
-//! tested. `close` returns `()` in Tokio and `bool` in `Channel`, so only a
-//! statement reads the same.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
@@ -75,7 +17,6 @@ use super::{
     state::pattern_names,
 };
 
-/// The Tokio channels fix rewrites.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Kind {
     Oneshot,
@@ -84,7 +25,6 @@ pub(super) enum Kind {
 }
 
 impl Kind {
-    /// The migration guide's section for this channel.
     pub(super) fn section(self) -> &'static str {
         match self {
             Self::Oneshot => "a-single-reply",
@@ -102,7 +42,6 @@ impl Kind {
     }
 }
 
-/// A channel left as it was.
 pub(super) struct Refusal {
     pub(super) line: usize,
     pub(super) name: String,
@@ -110,7 +49,6 @@ pub(super) struct Refusal {
     pub(super) reason: &'static str,
 }
 
-/// The edits for one file, applied together, and the channels left alone.
 pub(super) struct Outcome {
     pub(super) edits: Vec<Edit>,
     pub(super) refusals: Vec<Refusal>,
@@ -120,7 +58,6 @@ const REPLY: &str = "::adamantium::Reply";
 const WATCH: &str = "::adamantium::Watch";
 const CHANNEL: &str = "::adamantium::Channel";
 
-/// The imports the rewrites can leave unused.
 pub(super) const IMPORTS: &[&[&str]] = &[
     &["tokio", "sync"],
     &["tokio", "sync", "oneshot"],
@@ -159,9 +96,6 @@ const MPSC_METHOD: &str = "a half calls a method that `Channel` lacks or that me
 const READ_IN_PLACE: &str = "`*rx.borrow()` reads the value where it is, as in a comparison, without the copy that `Watcher::get` would make with `Clone`";
 const BORROW_CAPTURED: &str = "`borrow` would become `Watcher::get`, which needs the receiver mutably, inside a closure or async block";
 
-/// Plans the channel rewrites for one file. `constructors` maps the start of
-/// each callee that Clippy resolved to `tokio::sync::oneshot::channel` or
-/// `tokio::sync::watch::channel` to its end and the channel it makes.
 pub(super) fn plan(
     file: &Path,
     source: &str,
@@ -220,7 +154,6 @@ pub(super) fn plan(
     outcome
 }
 
-/// One channel's edits, which apply together, or why it is left alone.
 struct Group {
     line: usize,
     name: String,
@@ -229,8 +162,6 @@ struct Group {
     refusal: Option<&'static str>,
 }
 
-/// Rewrites in one file must not touch the same text: a channel made inside
-/// a closure that also uses another channel, say. Both are left alone.
 fn refuse_overlaps(groups: &mut [Group]) {
     let mut overlapping = BTreeSet::new();
     for (index, group) in groups.iter().enumerate() {
@@ -257,28 +188,22 @@ fn refuse_overlaps(groups: &mut [Group]) {
     }
 }
 
-/// A `let (sender, receiver) = constructor(..);` statement and the
-/// statements after it in its block, where its names are in scope.
 struct Found<'a> {
     start: usize,
     kind: Kind,
     local: &'a Local,
     rest: &'a [Stmt],
-    /// Why the statement can't be rewritten, found before following uses.
     refusal: Option<&'static str>,
 }
 
-/// Finds every constructor that `constructors` names in a `let` statement.
 struct Finder<'t, 'c> {
     text: &'t Text<'t>,
     constructors: &'c BTreeMap<usize, (usize, Kind)>,
-    /// Enclosing items with an attribute macro, which can rewrite them.
     hazards: usize,
     found: Vec<Found<'t>>,
 }
 
 impl<'t> Finder<'t, '_> {
-    /// The start and kind of a constructor that `expr` calls.
     fn constructor(&self, expr: &Expr) -> Option<(usize, Kind)> {
         let Expr::Call(call) = expr else {
             return None;
@@ -288,8 +213,6 @@ impl<'t> Finder<'t, '_> {
         (end == range.end).then_some((range.start, kind))
     }
 
-    /// Counts an item with an attribute macro, returning what to subtract
-    /// once its body is visited.
     fn enter(&mut self, attrs: &[Attribute]) -> usize {
         let hazard = usize::from(
             attrs
@@ -301,8 +224,6 @@ impl<'t> Finder<'t, '_> {
     }
 }
 
-/// Whether `attr` is `#[tokio::main]` or `#[tokio::test]`, which run the
-/// function's body unchanged inside a runtime.
 fn runtime_entry(attr: &Attribute) -> bool {
     let segments: Vec<String> = attr
         .path()
@@ -381,7 +302,6 @@ impl<'t> Visit<'t> for Finder<'t, '_> {
     }
 }
 
-/// The halves a `let` pattern binds: two plain names.
 fn halves(pat: &Pat) -> Result<[&syn::PatIdent; 2], &'static str> {
     let Pat::Tuple(tuple) = pat else {
         return Err(if matches!(pat, Pat::Type(_)) {
@@ -408,7 +328,6 @@ fn halves(pat: &Pat) -> Result<[&syn::PatIdent; 2], &'static str> {
     }
 }
 
-/// Follows one channel's uses and plans its rewrite.
 fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
     let pat_text = text
         .of(&found.local.pat)
@@ -488,10 +407,6 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
     if analysis.borrows && analysis.waits {
         analysis.refuse(BORROW_SEEN);
     }
-    // Tokio drops a value sent while no receiver is alive, and `Watch`
-    // keeps it, which its destructor can show. A send is proved to run while
-    // the constructor's receiver is alive when it runs in the block itself
-    // and that receiver stays there until the block ends.
     if found.kind == Kind::Watch
         && analysis.sends
         && (analysis.sends_nested || analysis.receiver_moved)
@@ -530,13 +445,10 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
     let mut edits = constructor;
     edits.append(&mut analysis.edits);
     for (index, var) in analysis.vars.iter().enumerate() {
-        // The watch's own halves are written out with the statement.
         if found.kind == Kind::Watch && index < 2 {
             continue;
         }
         match (found.kind, var.role, &var.mutable) {
-            // No method of a `Reply`, a `ReplyReceiver` or a `Channel`'s
-            // halves takes `&mut self`.
             (Kind::Oneshot | Kind::Mpsc, _, Some(mutable)) => {
                 edits.push(analysis.edit(mutable.clone(), String::new()));
             }
@@ -550,8 +462,6 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
     group
 }
 
-/// Whether `capacity` is a positive `usize` literal that Tokio accepts on
-/// every target.
 fn positive_capacity(capacity: &Expr) -> bool {
     let Expr::Lit(literal) = capacity else {
         return false;
@@ -566,11 +476,8 @@ fn positive_capacity(capacity: &Expr) -> bool {
             .is_ok_and(|capacity| (1..=MAX_CAPACITY).contains(&capacity))
 }
 
-/// The largest capacity Tokio accepts where `usize` is 32 bits: it panics
-/// above `usize::MAX >> 3`.
 const MAX_CAPACITY: u32 = u32::MAX >> 3;
 
-/// The `::<T>` of a constructor's callee, if it has generics only there.
 fn turbofish(text: &Text<'_>, func: &Expr) -> Option<String> {
     let Expr::Path(path) = func else {
         return None;
@@ -603,7 +510,6 @@ fn turbofish(text: &Text<'_>, func: &Expr) -> Option<String> {
     }
 }
 
-/// The two statements a watch channel's `let` becomes.
 fn watch_statement(
     text: &Text<'_>,
     local: &Local,
@@ -655,35 +561,21 @@ enum Role {
     Receiver,
 }
 
-/// A local holding one half: the constructor's, or one it was moved or
-/// cloned into.
 struct Var {
     role: Role,
     ident: Range<usize>,
-    /// From `mut` to the name, when the binding is mutable.
     mutable: Option<Range<usize>>,
-    /// Whether the rewritten code calls a `&mut self` method on it.
     needs_mut: bool,
 }
 
-/// How the result of a send or receive changes type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shape {
-    /// A `Result` whose error changes type but prints the same, as
-    /// `try_recv`'s does.
     Result,
-    /// A `Result` whose error changes type and prints differently, as a
-    /// oneshot send's `T` becomes `Closed<T>`, so a panic that prints it would
-    /// too.
     Sent,
-    /// `Result<T, RecvError>` becomes `Option<T>`.
     Option,
-    /// Tokio's watch `send` fails where `Watch::send` doesn't, so its result
-    /// can only be discarded.
     Discard,
 }
 
-/// A send or receive on a tracked half.
 struct Op<'a> {
     var: usize,
     shape: Shape,
@@ -691,15 +583,10 @@ struct Op<'a> {
 }
 
 enum OpKind<'a> {
-    /// `tx.send(value)`, or an mpsc `tx.try_send(value)`.
     Send(&'a Expr),
-    /// An mpsc `tx.send(value).await`.
     AwaitedSend(&'a Expr),
-    /// A oneshot `rx.await`, with the path to `rx`.
     Await(&'a Expr),
-    /// A oneshot or mpsc `rx.try_recv()`.
     TryRecv(&'a syn::Ident),
-    /// A watch `rx.changed().await`, which keeps its text.
     Changed,
 }
 
@@ -708,26 +595,15 @@ struct Analysis<'t> {
     file: &'t Path,
     kind: Kind,
     vars: Vec<Var>,
-    /// The names in scope, innermost last; `None` when a name shadows a
-    /// tracked half.
     scopes: Vec<Vec<(String, Option<usize>)>>,
     edits: Vec<Edit>,
     refusal: Option<&'static str>,
-    /// Closures and borrowing async blocks around the current expression.
     captured: usize,
-    /// Closures and async blocks of any kind around the current expression.
     nested: usize,
-    /// Whether a watch sends.
     sends: bool,
-    /// Whether a watch sends inside a closure or async block, which might
-    /// run after the receiver is gone.
     sends_nested: bool,
-    /// Whether the constructor's receiver is moved, dropped or captured, so
-    /// it might be gone before the end of its block.
     receiver_moved: bool,
-    /// Whether a receiver waits for changes.
     waits: bool,
-    /// Whether a receiver reads with `borrow`.
     borrows: bool,
 }
 
@@ -774,7 +650,6 @@ impl<'t> Analysis<'t> {
         self.vars.len() - 1
     }
 
-    /// The tracked half that `expr` names, if it is a plain local name.
     fn tracked(&self, expr: &Expr) -> Option<usize> {
         let Expr::Path(path) = expr else {
             return None;
@@ -806,7 +681,6 @@ impl<'t> Analysis<'t> {
         self.vars.get(var).map(|var| var.role)
     }
 
-    /// The tracked half that receives a method call with no arguments.
     fn method(&self, expr: &Expr, name: &str, role: Role) -> Option<usize> {
         let Expr::MethodCall(call) = expr else {
             return None;
@@ -819,7 +693,6 @@ impl<'t> Analysis<'t> {
         .then_some(var)
     }
 
-    /// Hides tracked halves behind the names a pattern binds.
     fn declare(&mut self, pat: &Pat) {
         let mut names = Vec::new();
         pattern_names(pat, &mut names);
@@ -834,7 +707,6 @@ impl<'t> Analysis<'t> {
         self.scopes.pop();
     }
 
-    /// The sender and value of a `sender.name(value)` call.
     fn sent<'e>(&self, expr: &'e Expr, name: &str) -> Option<(usize, &'e Expr)> {
         let Expr::MethodCall(call) = expr else {
             return None;
@@ -853,7 +725,6 @@ impl<'t> Analysis<'t> {
                 let (send, sent) = match self.kind {
                     Kind::Oneshot => ("send", Shape::Sent),
                     Kind::Watch => ("send", Shape::Discard),
-                    // An mpsc send is followed only where it is awaited.
                     Kind::Mpsc => ("try_send", Shape::Sent),
                 };
                 if let Some((var, value)) = self.sent(expr, send) {
@@ -863,8 +734,6 @@ impl<'t> Analysis<'t> {
                         kind: OpKind::Send(value),
                     });
                 }
-                // Tokio's oneshot `TryRecvError` prints as `TryReceiveError`
-                // does, and its mpsc one doesn't.
                 let received = match self.kind {
                     Kind::Oneshot => Shape::Result,
                     Kind::Mpsc => Shape::Sent,
@@ -908,8 +777,6 @@ impl<'t> Analysis<'t> {
         }
     }
 
-    /// Rewrites an operation whose result is consumed in a way already
-    /// checked, and follows its arguments.
     fn take(&mut self, op: &Op<'t>) {
         match op.kind {
             OpKind::Send(value) => {
@@ -919,13 +786,8 @@ impl<'t> Analysis<'t> {
                 }
                 self.visit_expr(value);
             }
-            // A send in a closure or a borrowing async block might wait
-            // while another does.
             OpKind::AwaitedSend(_) if self.captured > 0 => self.refuse(SEND_SHARED),
             OpKind::AwaitedSend(value) => self.visit_expr(value),
-            // Awaiting Tokio's receiver moves it into a block that captures
-            // it, and `receive` borrows it, which a block that outlives the
-            // function can't.
             OpKind::Await(_) if self.captured > 0 => self.refuse(AWAIT_CAPTURED),
             OpKind::Await(path) => match self.text.of(path) {
                 Some(range) => {
@@ -944,8 +806,6 @@ impl<'t> Analysis<'t> {
         }
     }
 
-    /// Follows a statement whose value is discarded, returning whether it
-    /// had one of the forms that may only be discarded.
     fn statement(&mut self, expr: &'t Expr) -> bool {
         if let Some(op) = self.op(expr) {
             self.take(&op);
@@ -955,9 +815,6 @@ impl<'t> Analysis<'t> {
             Expr::MethodCall(call) if call.attrs.is_empty() && call.turbofish.is_none() => {
                 if self.kind != Kind::Watch && self.method(expr, "close", Role::Receiver).is_some()
                 {
-                    // Tokio's `close` returns nothing, and `ReplyReceiver`'s
-                    // and `Receiver`'s a `bool`, so only a statement reads
-                    // the same.
                     return true;
                 }
                 let Some(op) = self.op(&call.receiver) else {
@@ -982,7 +839,6 @@ impl<'t> Analysis<'t> {
         }
     }
 
-    /// Rewrites `map_err(|_| error)` on a result that becomes an `Option`.
     fn ok_or_else(&mut self, call: &ExprMethodCall) {
         self.replace(&call.method, "ok_or_else");
         self.closure_without_argument(call);
@@ -1003,8 +859,6 @@ impl<'t> Analysis<'t> {
         }
     }
 
-    /// Follows a method called on the result of an operation, returning
-    /// whether it reads the same once the result changes type.
     fn consumer(&mut self, call: &'t ExprMethodCall) -> bool {
         let Some(op) = self.op(&call.receiver) else {
             return false;
@@ -1014,8 +868,6 @@ impl<'t> Analysis<'t> {
         }
         let method = call.method.to_string();
         let arguments = call.args.len();
-        // `unwrap` and `expect` print the error, so they are kept only where
-        // it prints the same.
         match (op.shape, method.as_str(), arguments) {
             (Shape::Result | Shape::Sent, "is_ok" | "is_err" | "ok" | "unwrap_or_default", 0)
             | (Shape::Result | Shape::Sent | Shape::Option, "unwrap_or", 1)
@@ -1058,7 +910,6 @@ impl<'t> Analysis<'t> {
                         self.closure_without_argument(call);
                     }
                 }
-                // As a closure, so a `move` handler's captures count.
                 self.visit_expr(handler);
             }
             _ => return false,
@@ -1066,8 +917,6 @@ impl<'t> Analysis<'t> {
         true
     }
 
-    /// Follows `let`, `if let`, `while let` and match patterns on the result
-    /// of an operation, returning whether every pattern reads the same.
     fn patterns(&mut self, op: &Op<'t>, pats: &[&Pat]) -> bool {
         let mut edits = Vec::new();
         for pat in pats {
@@ -1081,8 +930,6 @@ impl<'t> Analysis<'t> {
         true
     }
 
-    /// The edits that make `pat` match the rewritten result as it matched
-    /// the original.
     fn pattern(&self, shape: Shape, pat: &Pat) -> Option<Vec<Edit>> {
         if shape == Shape::Discard {
             return None;
@@ -1114,8 +961,6 @@ impl<'t> Analysis<'t> {
         }
     }
 
-    /// Whether `tokens` name a tracked half, as an identifier or a variable
-    /// a format string captures.
     fn mentions(&self, tokens: TokenStream) -> bool {
         tokens.into_iter().any(|token| match token {
             TokenTree::Group(group) => self.mentions(group.stream()),
@@ -1132,7 +977,6 @@ impl<'t> Analysis<'t> {
         })
     }
 
-    /// Follows a `let` statement.
     fn local(&mut self, local: &'t Local) {
         if local.attrs.iter().any(|attr| !lint_attribute(attr))
             && self.mentions(quote::ToTokens::to_token_stream(local))
@@ -1143,7 +987,6 @@ impl<'t> Analysis<'t> {
             self.declare(&local.pat);
             return;
         };
-        // A half moved or cloned into another local.
         if let Pat::Ident(binding) = &local.pat
             && binding.by_ref.is_none()
             && binding.subpat.is_none()
@@ -1193,7 +1036,6 @@ impl<'t> Analysis<'t> {
     }
 }
 
-/// Whether `call` is `drop(value)`, through `std::mem` or not.
 fn is_drop(call: &syn::ExprCall) -> bool {
     let Expr::Path(path) = &*call.func else {
         return false;
@@ -1218,7 +1060,6 @@ fn is_drop(call: &syn::ExprCall) -> bool {
                 && segments.get(2).is_some_and(|name| name == "drop")))
 }
 
-/// The closure argument `|_| body`, which ignores the error.
 fn ignored_error(call: &ExprMethodCall) -> Option<&Expr> {
     let mut args = call.args.iter();
     let (Some(argument @ Expr::Closure(closure)), None) = (args.next(), args.next()) else {
@@ -1236,7 +1077,6 @@ fn ignored_error(call: &ExprMethodCall) -> Option<&Expr> {
     .then_some(argument)
 }
 
-/// Whether `pat` binds the whole value to one name, which moves it there.
 fn binds_whole(pat: &Pat) -> bool {
     match pat {
         Pat::Ident(ident) => ident.by_ref.is_none() && ident.subpat.is_none(),
@@ -1245,7 +1085,6 @@ fn binds_whole(pat: &Pat) -> bool {
     }
 }
 
-/// Whether `attr` only sets lint levels.
 fn lint_attribute(attr: &Attribute) -> bool {
     ["allow", "expect", "warn", "deny", "forbid"]
         .iter()
@@ -1279,7 +1118,6 @@ impl<'t> Visit<'t> for Analysis<'t> {
         }
     }
 
-    /// Items can't name a function's locals, except a `macro_rules!` body.
     fn visit_item(&mut self, item: &'t Item) {
         if let Item::Macro(mac) = item
             && self.mentions(mac.mac.tokens.clone())
@@ -1294,7 +1132,6 @@ impl<'t> Visit<'t> for Analysis<'t> {
         }
     }
 
-    /// Patterns bind names, which `declare` follows, and read no locals.
     fn visit_pat(&mut self, _: &'t Pat) {}
 
     fn visit_arm(&mut self, arm: &'t syn::Arm) {
@@ -1322,7 +1159,6 @@ impl<'t> Visit<'t> for Analysis<'t> {
             return;
         }
         if let Some(op) = self.op(expr) {
-            // An operation whose result reaches anything not checked above.
             self.refuse(if op.shape == Shape::Discard {
                 WATCH_SEND
             } else {
@@ -1359,8 +1195,6 @@ impl<'t> Visit<'t> for Analysis<'t> {
                 }
             }
             Expr::Await(awaited) => {
-                // An mpsc `recv().await`, whose `Option` reads the same
-                // wherever it goes.
                 if self.kind == Kind::Mpsc
                     && awaited.attrs.is_empty()
                     && self.method(&awaited.base, "recv", Role::Receiver).is_some()
@@ -1369,7 +1203,6 @@ impl<'t> Visit<'t> for Analysis<'t> {
                     self.replace(&call.method, "receive");
                     return;
                 }
-                // A oneshot sender's `closed().await`.
                 if self.kind == Kind::Oneshot
                     && awaited.attrs.is_empty()
                     && self.method(&awaited.base, "closed", Role::Sender).is_some()
@@ -1378,8 +1211,6 @@ impl<'t> Visit<'t> for Analysis<'t> {
                 }
                 syn::visit::visit_expr_await(self, awaited);
             }
-            // A dereference outside the places `value` follows reads the
-            // value where it is, and copies nothing.
             Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
                 if self.borrowed(&unary.expr).is_some() {
                     self.refuse(READ_IN_PLACE);
@@ -1387,7 +1218,6 @@ impl<'t> Visit<'t> for Analysis<'t> {
                     syn::visit::visit_expr_unary(self, unary);
                 }
             }
-            // Dropping a half, or the result of a send or receive.
             Expr::Call(call) if is_drop(call) => {
                 let Some(arg) = call.args.first() else {
                     return;
@@ -1429,8 +1259,6 @@ impl<'t> Visit<'t> for Analysis<'t> {
             Expr::Binary(binary) if binary.attrs.is_empty() => {
                 use syn::BinOp;
                 match binary.op {
-                    // Arithmetic, bitwise and logical operators take both
-                    // operands by value.
                     BinOp::Add(_)
                     | BinOp::Sub(_)
                     | BinOp::Mul(_)
@@ -1446,7 +1274,6 @@ impl<'t> Visit<'t> for Analysis<'t> {
                         self.value(&binary.left);
                         self.value(&binary.right);
                     }
-                    // A compound assignment takes its right operand by value.
                     BinOp::AddAssign(_)
                     | BinOp::SubAssign(_)
                     | BinOp::MulAssign(_)
@@ -1460,7 +1287,6 @@ impl<'t> Visit<'t> for Analysis<'t> {
                         self.visit_expr(&binary.left);
                         self.value(&binary.right);
                     }
-                    // Comparisons take their operands by reference.
                     _ => syn::visit::visit_expr_binary(self, binary),
                 }
             }
@@ -1539,14 +1365,9 @@ impl<'t> Visit<'t> for Analysis<'t> {
     }
 }
 
-/// The constructor's receiver, the second local `Analysis` tracks.
 const RECEIVER: usize = 1;
 
 impl<'t> Analysis<'t> {
-    /// Notes a `move` closure or async block that names the constructor's
-    /// receiver, which moves it there, where it might be dropped before the
-    /// end of its block. One without `move` borrows it, and a use that moves
-    /// it out of the block is followed on its own.
     fn capture(&mut self, tokens: TokenStream) {
         fn names(analysis: &Analysis<'_>, tokens: TokenStream) -> bool {
             tokens.into_iter().any(|token| match token {
@@ -1558,8 +1379,6 @@ impl<'t> Analysis<'t> {
         self.receiver_moved |= names(self, tokens);
     }
 
-    /// Follows a method on a half other than a send or receive, returning
-    /// whether it was one.
     fn half_method(&mut self, call: &'t ExprMethodCall) -> bool {
         let Some(var) = self.tracked(&call.receiver) else {
             return false;
@@ -1587,9 +1406,6 @@ impl<'t> Analysis<'t> {
         true
     }
 
-    /// The call, receiver and whether it marks the value seen, when
-    /// `borrowed` is `rx.borrow()` or `rx.borrow_and_update()` on a watch
-    /// receiver.
     fn borrowed<'e>(&self, borrowed: &'e Expr) -> Option<(&'e ExprMethodCall, usize, bool)> {
         if self.kind != Kind::Watch {
             return None;
@@ -1605,10 +1421,6 @@ impl<'t> Analysis<'t> {
         }
     }
 
-    /// Follows an expression whose value is moved or copied out, where
-    /// `*rx.borrow()` must copy the value, as `Watcher::get` does. Tokio
-    /// can't move it out from behind the borrow, so the value is `Copy`, and
-    /// for `Copy` values `Clone` is that copy.
     fn value(&mut self, expr: &'t Expr) {
         if let Expr::Unary(unary) = expr
             && matches!(unary.op, syn::UnOp::Deref(_))
@@ -1620,9 +1432,6 @@ impl<'t> Analysis<'t> {
         self.visit_expr(expr);
     }
 
-    /// Follows `*rx.borrow()` and `rx.borrow().clone()` on a watch receiver,
-    /// and their `borrow_and_update` forms, which become `rx.get()`. Returns
-    /// whether `whole` was one.
     fn read(&mut self, whole: &'t Expr, borrowed: &'t Expr) -> bool {
         let Some((call, var, marks)) = self.borrowed(borrowed) else {
             return false;
@@ -1656,9 +1465,6 @@ mod tests {
     use super::*;
     use crate::fix::source::prune_imports;
 
-    /// Plans `source` as Clippy would see it, with every `oneshot::channel`,
-    /// `watch::channel` and `mpsc::channel` callee, turbofish included,
-    /// resolved to Tokio's, and applies the edits.
     fn fix(source: &str) -> (String, Vec<(usize, String, &'static str)>) {
         let mut constructors = BTreeMap::new();
         for (callee, kind) in [
@@ -1668,7 +1474,6 @@ mod tests {
         ] {
             for (start, _) in source.match_indices(callee) {
                 let mut end = start + callee.len();
-                // The whole path, as in `tokio::sync::oneshot::channel`.
                 let start = source
                     .get(..start)
                     .and_then(|before| {
@@ -1842,7 +1647,6 @@ mod tests {
             "fn f() -> (u8, u8) {\n    let (tx, rx) = watch::channel(1u8);\n    let other = tx.clone();\n    drop(other.send(2));\n    let copy = rx.clone();\n    let first = *rx.borrow();\n    (first, copy.borrow().clone())\n}\n",
             "fn f() -> (u8, u8) {\n    let tx = ::adamantium::Watch::new(1u8);\n    let mut rx = tx.subscribe();\n    let other = tx.clone();\n    drop(other.send(2));\n    let mut copy = rx.clone();\n    let first = rx.get();\n    (first, copy.get())\n}\n",
         );
-        // On one line, the two statements stay on it.
         rewrites(
             "fn f() -> u8 { let (tx, rx) = watch::channel(1u8); let v = *rx.borrow(); drop(tx); v }\n",
             "fn f() -> u8 { let tx = ::adamantium::Watch::new(1u8); let mut rx = tx.subscribe(); let v = rx.get(); drop(tx); v }\n",
@@ -1982,8 +1786,6 @@ mod tests {
     #[test]
     fn uses_whose_meaning_would_change_are_refused() {
         for (body, reason) in [
-            // Sends that might run once no receiver is alive, when Tokio
-            // drops the value and `Watch` keeps it.
             (
                 "let (tx, rx) = watch::channel(None); drop(rx); tx.send(Some(String::new())).ok(); drop(tx);",
                 WATCH_UNWATCHED,
@@ -2004,7 +1806,6 @@ mod tests {
                 "let (tx, mut rx) = watch::channel(0u8); rx.changed().await.map_err(move |_| { let copy = rx.clone(); drop(copy); }).ok(); tx.send(1).ok();",
                 WATCH_UNWATCHED,
             ),
-            // A panic would print another error.
             (
                 "let (tx, mut rx) = watch::channel(0u8); rx.changed().await.unwrap(); drop(tx);",
                 RESULT,
@@ -2099,7 +1900,6 @@ mod tests {
                 "let (tx, rx) = watch::channel(0u8); let _ = rx.borrow().len(); drop(tx);",
                 USE,
             ),
-            // Reads in place, which copy nothing in Tokio.
             (
                 "let (tx, rx) = watch::channel(0u8); let _ = *rx.borrow() == 1; drop(tx);",
                 READ_IN_PLACE,
@@ -2124,7 +1924,6 @@ mod tests {
                 "let (tx, rx) = oneshot::channel::<u8>(); drop(tx); let waiter = async { rx.await.ok() }; let _ = waiter.await;",
                 AWAIT_CAPTURED,
             ),
-            // A capacity Tokio might panic on.
             (
                 "let (tx, rx) = mpsc::channel::<u8>(0); drop((tx, rx));",
                 CAPACITY,
@@ -2141,7 +1940,6 @@ mod tests {
                 "let (tx, rx) = mpsc::channel::<u8>(4u8); drop((tx, rx));",
                 CAPACITY,
             ),
-            // Two sends that might wait at once.
             (
                 "let (tx, rx) = mpsc::channel::<u8>(1); let other = tx.clone(); drop(other); drop(tx); drop(rx);",
                 SENDER_CLONED,
@@ -2178,7 +1976,6 @@ mod tests {
                 "let (tx, mut rx) = mpsc::channel::<u8>(1); drop(tx); let _ = rx.blocking_recv();",
                 MPSC_METHOD,
             ),
-            // A send's or a `try_recv`'s error prints otherwise.
             (
                 "let (tx, rx) = mpsc::channel::<u8>(1); tx.send(1).await.unwrap(); drop(rx);",
                 RESULT,

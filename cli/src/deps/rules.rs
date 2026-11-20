@@ -1,16 +1,3 @@
-//! Expanding a call of a `macro_rules!` without compiling the crate: the
-//! call's input is matched against the macro's rules in order, and the
-//! first rule that matches is transcribed with what its metavariables bound.
-//!
-//! rustc parses fragments with its own parser; this parses them with syn,
-//! so it matches only the kinds whose syn parsers take the tokens rustc's
-//! do: `tt`, `ident`, `lifetime`, `literal`, `vis`, `meta`, `path`, `ty`,
-//! `block` and `item`. A call that reaches any other kind, a fragment syn
-//! can't parse, more than one way to match a rule, or no rule that matches
-//! is one this can't decide, so it isn't expanded. A crate that builds has
-//! none of the last three, so they mean this doesn't read the rule as rustc
-//! does.
-
 use std::collections::HashMap;
 
 use proc_macro2::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
@@ -29,60 +16,38 @@ struct Rule {
     transcriber: Vec<Transcribed>,
 }
 
-/// A part of a rule's matcher.
 #[derive(Debug, Clone)]
 enum Matcher {
-    /// A token the input must have there.
     Token(Token),
     Group(Delimiter, Vec<Matcher>),
-    /// `$name:kind`.
-    Fragment {
-        name: String,
-        kind: Kind,
-    },
+    Fragment { name: String, kind: Kind },
     Repetition(Repetition<Matcher>),
 }
 
-/// A part of a rule's transcriber.
 #[derive(Debug, Clone)]
 enum Transcribed {
-    /// A token other than a group, copied as it is.
     Token(TokenTree),
     Group(Group, Vec<Transcribed>),
-    /// `$name`, which is copied as it is if no metavariable has the name.
-    Variable {
-        dollar: TokenTree,
-        name: Ident,
-    },
-    /// `$crate`, written as `crate` where `$crate` is. It is one token, as
-    /// in rustc, so a macro it is passed to matches it as an identifier. For
-    /// another crate's macro, the scan reads it as that crate by where it is
-    /// written.
+    Variable { dollar: TokenTree, name: Ident },
     Crate(Span),
     Repetition(Repetition<Transcribed>),
 }
 
-/// `$( ... ) separator? operator`.
 #[derive(Debug, Clone)]
 struct Repetition<T> {
     body: Vec<T>,
     separator: Option<Vec<TokenTree>>,
     operator: Operator,
-    /// The metavariables the body declares or uses, at any depth.
     names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Operator {
-    /// `*`
     Any,
-    /// `+`
     AtLeastOne,
-    /// `?`
     AtMostOne,
 }
 
-/// A fragment specifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Tt,
@@ -95,8 +60,6 @@ enum Kind {
     Ty,
     Block,
     Item,
-    /// A kind rustc knows whose syn parser takes other tokens than rustc's,
-    /// such as `expr`, whose tokens differ by edition.
     Unmatched,
 }
 
@@ -118,16 +81,11 @@ impl Kind {
         })
     }
 
-    /// Whether rustc passes a fragment of this kind on as its tokens. It
-    /// passes any other kind on as one opaque token, which a later matcher
-    /// can't look into, as tokens in an invisible group.
     fn is_transparent(self) -> bool {
         matches!(self, Self::Tt | Self::Ident | Self::Lifetime)
     }
 }
 
-/// A token as rustc sees it: an identifier, a literal, a lifetime or an
-/// operator, which may be more than one [`proc_macro2::Punct`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Token {
     Ident(String),
@@ -136,14 +94,11 @@ enum Token {
     Punct(String),
 }
 
-/// The operators rustc lexes as one token, which proc_macro2 gives as joint
-/// [`proc_macro2::Punct`]s.
 const OPERATORS: [&str; 25] = [
     "<<=", ">>=", "...", "..=", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=",
     "^=", "&=", "|=", "<<", ">>", "..", "::", "->", "=>", "<-",
 ];
 
-/// The token at `at`, which is not a group, and how many trees it takes.
 fn token(trees: &[TokenTree], at: usize) -> Option<(Token, usize)> {
     match trees.get(at)? {
         TokenTree::Group(_) => None,
@@ -175,7 +130,6 @@ fn token(trees: &[TokenTree], at: usize) -> Option<(Token, usize)> {
     }
 }
 
-/// How many trees the token or group at `at` takes, as one `tt`.
 fn tree_len(trees: &[TokenTree], at: usize) -> usize {
     token(trees, at).map_or(1, |(_, len)| len)
 }
@@ -354,7 +308,6 @@ fn parse_matcher(trees: &[TokenTree]) -> Option<Vec<Matcher>> {
             continue;
         }
         match tree {
-            // An invisible group is a fragment another macro passed on.
             TokenTree::Group(group) if group.delimiter() == Delimiter::None => return None,
             TokenTree::Group(group) => {
                 let inner = parse_matcher(&self::trees(group.stream()))?;
@@ -371,8 +324,6 @@ fn parse_matcher(trees: &[TokenTree]) -> Option<Vec<Matcher>> {
     Some(matcher)
 }
 
-/// Reads the separator and operator after a repetition's group, at `at`,
-/// and how many trees they take.
 fn parse_operator(
     trees: &[TokenTree],
     at: usize,
@@ -441,7 +392,6 @@ fn parse_transcriber(trees: &[TokenTree]) -> Option<Vec<Transcribed>> {
                     }));
                     at += 2 + len;
                 }
-                // `${...}` and `$$` are unstable metavariable expressions.
                 _ => return None,
             }
             continue;
@@ -451,8 +401,6 @@ fn parse_transcriber(trees: &[TokenTree]) -> Option<Vec<Transcribed>> {
                 let inner = parse_transcriber(&self::trees(group.stream()))?;
                 transcriber.push(Transcribed::Group(group.clone(), inner));
             }
-            // rustc doesn't join an operator to what a metavariable after it
-            // stands for, which proc_macro2 would, as its `$` is a `Punct`.
             tree if is_punct(trees.get(at + 1), '$') => {
                 transcriber.push(Transcribed::Token(alone(tree)));
             }
@@ -463,7 +411,6 @@ fn parse_transcriber(trees: &[TokenTree]) -> Option<Vec<Transcribed>> {
     Some(transcriber)
 }
 
-/// A copy of the tree that a `Punct` after it isn't joined to.
 fn alone(tree: &TokenTree) -> TokenTree {
     match tree {
         TokenTree::Punct(punct) => {
@@ -486,21 +433,14 @@ fn used(transcriber: &[Transcribed], names: &mut Vec<String>) {
     }
 }
 
-/// What metavariables bound, by name.
 type Bindings = HashMap<String, Bound>;
 
-/// What a metavariable bound, in [`Matching`].
 #[derive(Debug, Clone, Copy)]
 enum Bound {
-    /// The index of a fragment.
     Fragment(usize),
-    /// What the repetition it is declared in bound in each of its passes:
-    /// the index of its last pass, `None` if it made none.
     Repeated(Option<usize>),
 }
 
-/// A pass a repetition made: what it bound, and the pass before it, which
-/// the ways to make one more pass share.
 #[derive(Debug)]
 struct Pass {
     bound: Bindings,
@@ -508,24 +448,17 @@ struct Pass {
     count: usize,
 }
 
-/// One way to have matched part of a rule: where in the input it is, and
-/// what it bound so far.
 #[derive(Debug, Clone)]
 struct State {
     at: usize,
     bound: Bindings,
 }
 
-/// The input can't be matched as rustc would match it.
 #[derive(Debug)]
 struct Undecided;
 
-/// How many steps matching one call may take, so that a rule whose
-/// repetitions can each match in many ways can't keep it going.
 const STEPS: usize = 100_000;
 
-/// The fragments and passes matching one call bound, which [`Bound`]s
-/// refer to by index, and the steps it may still take.
 #[derive(Debug, Default)]
 struct Matching {
     fragments: Vec<(Kind, Vec<TokenTree>)>,
@@ -539,8 +472,6 @@ impl Matching {
         Ok(())
     }
 
-    /// Every state `matcher` can take each of `states` to in `input`, as
-    /// rustc follows every way to match a rule at once.
     fn all(
         &mut self,
         matcher: &[Matcher],
@@ -603,8 +534,6 @@ impl Matching {
         })
     }
 
-    /// The states after each number of passes a repetition can make from
-    /// `state`, with what its metavariables bound in each pass.
     fn repeat(
         &mut self,
         repetition: &Repetition<Matcher>,
@@ -635,13 +564,11 @@ impl Matching {
                     _ => continue,
                 }
             }
-            // A pass starts with no bindings of its own.
             let pass = State {
                 at: start,
                 bound: Bindings::new(),
             };
             for end in self.all(&repetition.body, input, vec![pass])? {
-                // rustc rejects a repetition that can match nothing.
                 if end.at == at {
                     return Err(Undecided);
                 }
@@ -661,7 +588,6 @@ impl Matching {
             .map_or(0, |pass| pass.count)
     }
 
-    /// What each pass up to `last` bound, from the first.
     fn each_pass(&self, mut last: Option<usize>) -> Option<Vec<&Bindings>> {
         let mut each = Vec::new();
         while let Some(index) = last {
@@ -673,8 +599,6 @@ impl Matching {
         Some(each)
     }
 
-    /// Writes `transcriber` to `out` with what the metavariables bound in
-    /// the passes of the repetitions around it.
     fn transcribe(
         &self,
         transcriber: &[Transcribed],
@@ -703,8 +627,6 @@ impl Matching {
                             out.push(TokenTree::Group(Group::new(Delimiter::None, stream)));
                         }
                     }
-                    // rustc rejects a metavariable used at less depth than it
-                    // repeats at.
                     Some(Bound::Repeated(_)) => return None,
                 },
                 Transcribed::Repetition(repetition) => {
@@ -715,9 +637,6 @@ impl Matching {
         Some(())
     }
 
-    /// Writes a repetition once for each pass the repetitions in the matcher
-    /// that declare its metavariables made. Those must have made as many,
-    /// and a metavariable declared at less depth is the same in each pass.
     fn transcribe_repetition(
         &self,
         repetition: &Repetition<Transcribed>,
@@ -730,8 +649,6 @@ impl Matching {
                 repeated.push((name, self.each_pass(*last)?));
             }
         }
-        // rustc rejects a repetition with no metavariable that repeats at
-        // its depth.
         let passes = repeated.first().map(|(_, each)| each.len())?;
         if repeated.iter().any(|(_, each)| each.len() != passes) {
             return None;
@@ -751,9 +668,6 @@ impl Matching {
     }
 }
 
-/// How many trees a fragment of `kind` at `at` takes: `None` if rustc
-/// wouldn't try to parse one there, and undecided if it would but this
-/// can't parse it as rustc does.
 fn fragment(kind: Kind, input: &[TokenTree], at: usize) -> Result<Option<usize>, Undecided> {
     let Some(first) = input.get(at) else {
         return Ok(None);
@@ -771,7 +685,6 @@ fn fragment(kind: Kind, input: &[TokenTree], at: usize) -> Result<Option<usize>,
     let lifetime = matches!(token(input, at), Some((Token::Lifetime(_), _)));
     let path_start =
         ident || opaque || matches!(token(input, at), Some((Token::Punct(op), _)) if op == "::");
-    // The tokens rustc's `can_begin_type` takes, as far as they matter here.
     let type_start = ident
         || matches!(
             group,
@@ -808,7 +721,6 @@ fn fragment(kind: Kind, input: &[TokenTree], at: usize) -> Result<Option<usize>,
     })
 }
 
-/// How many trees from `at` syn parses as a `T`.
 fn parse<T: Parse>(input: &[TokenTree], at: usize) -> Result<usize, Undecided> {
     let rest = input.get(at..).ok_or(Undecided)?;
     let left = (|stream: ParseStream| {
@@ -819,9 +731,6 @@ fn parse<T: Parse>(input: &[TokenTree], at: usize) -> Result<usize, Undecided> {
     .map_err(|_| Undecided)?;
     let left = trees(left);
     let taken = rest.len().checked_sub(left.len()).ok_or(Undecided)?;
-    // syn reads into an invisible group as if it weren't there, where rustc
-    // takes it whole, so a parse may stop inside one and leave the rest of
-    // it loose.
     let whole = rest
         .get(taken..)
         .is_some_and(|after| after.iter().zip(&left).all(|(a, b)| same_tree(a, b)));
@@ -848,14 +757,12 @@ mod tests {
         Rules::parse(body.parse().unwrap()).unwrap()
     }
 
-    /// The expansion of `input` with the rules `body`, flattened to text.
     fn expand(body: &str, input: &str) -> Option<String> {
         rules(body)
             .expand(input.parse().unwrap())
             .map(|tokens| flatten(tokens).to_string())
     }
 
-    /// The tokens with each invisible group replaced by its tokens.
     fn flatten(tokens: TokenStream) -> TokenStream {
         tokens
             .into_iter()
@@ -877,7 +784,6 @@ mod tests {
         source.parse::<TokenStream>().unwrap().to_string()
     }
 
-    /// Tokio's `feature!`, which puts a `cfg` on each item it is given.
     #[test]
     fn items_after_an_inner_attribute_are_each_given_its_cfg() {
         let feature = r"(
@@ -902,8 +808,6 @@ mod tests {
         assert_eq!(expanded, Some(expected));
     }
 
-    /// The first rule that matches is the one transcribed, chosen here by a
-    /// literal token, as psm's `psm_stack_manipulation!` chooses by `yes`.
     #[test]
     fn the_first_rule_that_matches_is_transcribed() {
         let pick = r"
@@ -935,9 +839,6 @@ mod tests {
         );
     }
 
-    /// `$crate` is the crate itself; a `$` before a name nothing bound is
-    /// copied; `vis`, `ty`, `path`, `block` and `lifetime` take what rustc's
-    /// parsers take.
     #[test]
     fn fragments_take_what_rustc_takes() {
         let all = r"($v:vis struct $name:ident<$l:lifetime>($t:ty); $p:path => $b:block) => {
@@ -960,8 +861,6 @@ mod tests {
         );
     }
 
-    /// `$crate` is one token, which a macro it is passed to matches as an
-    /// identifier, as rustc does, and the scan can find where it is written.
     #[test]
     fn crate_passed_on_is_an_identifier() {
         let outer = rules("() => { inner!($crate); }");
@@ -989,8 +888,6 @@ mod tests {
         assert_eq!(crate_span.start().column, 16);
     }
 
-    /// With `local_inner_macros`, a call by a bare name in a transcriber
-    /// calls the defining crate's macro, by path; other calls stay.
     #[test]
     fn local_inner_macros_call_the_crates_macros() {
         let mut local = rules(
@@ -1007,8 +904,6 @@ mod tests {
         );
     }
 
-    /// An operator is one token, as rustc lexes it: `=>` is not `=` `>`, and
-    /// a `tt` takes all of `<<=`.
     #[test]
     fn operators_are_matched_whole() {
         let arrow = r"(= >) => { mod split; }; (=>) => { mod joined; };";
@@ -1019,8 +914,6 @@ mod tests {
         assert_eq!(expand(count, "'a x"), Some(text("mod two;")));
     }
 
-    /// The passes of a repetition share what the passes before them bound,
-    /// so a long input takes time in proportion to its length.
     #[test]
     fn long_repetitions_are_matched() {
         let input = "x ".repeat(20_000);
@@ -1028,21 +921,14 @@ mod tests {
         assert_eq!(expand(body, &input), Some(text("mod done;")));
     }
 
-    /// What this can't decide isn't expanded.
     #[test]
     fn what_cannot_be_decided_is_not_expanded() {
         for (body, input) in [
-            // A kind syn parses otherwise than rustc.
             (r"($e:expr) => { mod a; }", "1 + 1"),
-            // A fragment syn can't parse where rustc would parse one.
             (r"($i:item) => { mod a; }", "#![inner]"),
-            // No rule matches.
             (r"(a) => { mod a; }", "b"),
-            // Two ways to match.
             (r"($(a)? $(a)?) => { mod a; }", "a"),
-            // Repetitions whose counts differ.
             (r"($($a:ident)* ; $($b:ident)*) => { $($a $b)* }", "x y ; z"),
-            // A metavariable used at less depth than it repeats at.
             (r"($($a:ident)*) => { $a }", "x"),
         ] {
             assert_eq!(expand(body, input), None, "{body} with {input}");
@@ -1058,8 +944,6 @@ mod tests {
         }
     }
 
-    /// A fragment passed on is one token, which a literal token in another
-    /// macro's matcher doesn't match, as in rustc.
     #[test]
     fn fragments_passed_on_are_opaque() {
         let forward = rules(r"($v:vis) => { $v }");

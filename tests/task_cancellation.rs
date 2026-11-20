@@ -173,7 +173,6 @@ on_both_runtimes! {
             token.cancel();
             Err::<(), _>("child")
         });
-        // Polling the token observes the request without claiming the error.
         timeout(HUNG, cancel.cancelled()).await.unwrap();
         let result = tasks.join_until(cancel, None, Ok(())).await;
         assert_eq!(result, Err(ScopeError::Failed("child")));
@@ -507,8 +506,6 @@ on_both_runtimes! {
     }
 }
 
-// One thread at a time, so the error is recorded before the body cancels, and
-// shutdown and the orphan are both ready at the next poll.
 #[tokio::test]
 async fn an_orphaned_error_wins_the_result_over_a_shutdown_ready_at_the_same_poll() {
     let cancel = Cancellation::new();

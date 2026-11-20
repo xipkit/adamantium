@@ -1,5 +1,3 @@
-//! Consume bounded work in both result orders, then request shutdown.
-
 #[tokio::main]
 async fn main() -> Result<(), adamantium::ScopeError<std::convert::Infallible>> {
     use adamantium::{Cancellation, concurrently_ordered, concurrently_unordered_until, time};
@@ -15,7 +13,6 @@ async fn main() -> Result<(), adamantium::ScopeError<std::convert::Infallible>> 
     let mut ordered = std::pin::pin!(ordered);
     while let Some(value) = ordered.next().await {
         println!("ordered: {}", value?);
-        // Slow consumption pauses scheduling, with at most three retained items.
         time::sleep(Duration::from_millis(30)).await;
     }
 

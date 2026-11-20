@@ -1,6 +1,3 @@
-//! Reading a previous JSON report, to retry the files it could not review or
-//! to reuse the results it already has.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
@@ -20,10 +17,8 @@ use serde::Deserialize;
 struct PreviousReport {
     schema_version: u8,
     status: String,
-    /// Reports written before providers were selectable came from Decisions.
     #[serde(default)]
     provider: ProviderKind,
-    /// Reports written before packs were selectable used the Google pack.
     #[serde(default)]
     pack: Pack,
     model: String,
@@ -32,7 +27,6 @@ struct PreviousReport {
     files: Vec<PreviousFile>,
 }
 
-/// Just enough of a report to tell which schema the rest follows.
 #[derive(Deserialize)]
 struct SchemaVersion {
     schema_version: u8,
@@ -44,9 +38,6 @@ struct PreviousFile {
     status: String,
 }
 
-/// Keeps only the files that `previous_path` failed to review or never sent.
-/// The previous report must have the same scan root, provider, pack, model
-/// and rule names as `key` and `questions`.
 pub(crate) fn select_pending(
     scan: &mut Scan,
     previous_path: &Path,
@@ -126,9 +117,6 @@ pub(crate) fn select_pending(
     Ok(())
 }
 
-/// Results from a previous report that can stand in for asking the provider
-/// again: each was answered under the same review key, for a source whose
-/// hash the report recorded.
 #[derive(Default)]
 pub(crate) struct Cache {
     entries: BTreeMap<String, FileReport>,
@@ -212,7 +200,6 @@ mod tests {
     use super::*;
     use crate::style::rules::RuleSet;
 
-    /// The key of a review of `questions` from the Google pack.
     fn google_key(questions: &[Question]) -> ReviewKey {
         let rules = RuleSet::load(Pack::Google).unwrap();
         ReviewKey::new(
@@ -379,8 +366,6 @@ mod tests {
             report::{Finding, ReportStatus},
         };
 
-        /// A scan of `a.rs`, `b.rs`, `c.rs` and `d.rs`, each with distinct
-        /// source, and the key and questions for one rule.
         fn setup() -> (tempfile::TempDir, Scan, Vec<Question>, ReviewKey) {
             let dir = tempfile::tempdir().unwrap();
             for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
@@ -400,8 +385,6 @@ mod tests {
             (dir, scan, questions, key)
         }
 
-        /// A report as a real run would leave it: `a.rs` with a finding,
-        /// `b.rs` unresolved, `c.rs` failed and `d.rs` never sent.
         fn previous(scan: &Scan, questions: &[Question], key: &ReviewKey) -> Report {
             let mut report = Report::planned(scan, key.clone(), questions);
             let statuses = [

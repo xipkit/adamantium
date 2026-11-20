@@ -1,6 +1,3 @@
-//! Private scheduling boundary. The production path remains available when Cargo
-//! unifies the deterministic feature into an otherwise ordinary application.
-
 #![allow(
     clippy::disallowed_types,
     reason = "the primitive implementation owns synchronization"
@@ -61,9 +58,8 @@ impl World {
         self.check();
         #[cfg(feature = "deterministic")]
         if self.execution.is_some() {
-            // Shuttle 0.9.10 yield_now wakes the current task, so using it
-            // inside a waiter poll would turn a deadlock into a busy loop.
-            // Its sleep shim only switches tasks; it does not model time.
+            // Shuttle's yield_now wakes this task. Its sleep switches tasks without
+            // advancing time or turning a deadlock into a busy loop.
             shuttle::thread::sleep(std::time::Duration::ZERO);
         }
     }
@@ -85,8 +81,8 @@ pub(crate) fn production_only(_primitive: &str) {
     );
 }
 
-/// Reference ownership is observable through Actor::is_shared and into_inner.
-/// Yield before changing or observing it, just as before acquiring a lock.
+// Reference ownership is observable through Actor::is_shared and into_inner.
+// Yield before changing or observing it, just as before acquiring a lock.
 pub(crate) struct Shared<T> {
     inner: Option<Arc<T>>,
     world: World,
@@ -223,7 +219,6 @@ impl<T> DerefMut for Guard<'_, T> {
     }
 }
 
-/// Checks the execution before every poll, including a resumed future.
 #[cfg(feature = "tokio")]
 #[allow(clippy::future_not_send, reason = "Send follows the wrapped future")]
 pub(crate) async fn in_world<F: std::future::Future>(world: World, future: F) -> F::Output {

@@ -1,6 +1,3 @@
-//! The dependencies of a workspace, from `cargo metadata`, and the host
-//! target they are resolved for, from rustc.
-
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env,
@@ -13,48 +10,37 @@ use serde::{Deserialize, Serialize};
 
 use super::cfg::{self, Features, Truth};
 
-/// When a dependency's code runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
-    /// Linked into the workspace's programs.
     Runtime,
-    /// Runs only while compiling: a build dependency, a procedural macro, or
-    /// something only they depend on.
     Build,
 }
 
 /// A dependency and what is needed to read its library's source.
 #[derive(Debug)]
 pub struct Dependency {
-    /// Cargo's id for the package.
     pub id: String,
     pub name: String,
     pub version: String,
     pub source: Option<String>,
     pub kind: Kind,
-    /// The directory holding the dependency's `Cargo.toml`.
     pub root: PathBuf,
     pub lib: Option<Lib>,
-    /// The features a normal build gives it.
     pub features: Features,
-    /// Its normal dependencies, by the name each goes by in its code.
     pub externs: BTreeMap<String, Extern>,
 }
 
 /// A dependency as the crate that depends on it sees it.
 #[derive(Debug)]
 pub struct Extern {
-    /// Its library's crate name.
     pub lib: String,
-    /// Cargo's id for its package.
     pub id: String,
 }
 
 /// A dependency's library target.
 #[derive(Debug)]
 pub struct Lib {
-    /// The crate name its code and other crates call it by.
     pub name: String,
     pub src_path: PathBuf,
     pub edition: String,
@@ -127,10 +113,6 @@ fn cargo(root: &Path, args: &[&str], cargo_args: &[String]) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-/// The sole binary entry file, only when Cargo resolves the normal `tokio`
-/// dependency and its proc macro to the audited crates.io major versions.
-/// Path/git replacements, aliases, conditional dependencies and extra targets
-/// are deliberately not executor proofs.
 pub(crate) fn tokio_entry(root: &Path) -> Option<PathBuf> {
     let bytes = cargo(
         root,
@@ -179,9 +161,6 @@ pub(crate) fn tokio_entry(root: &Path) -> Option<PathBuf> {
     target.src_path.canonicalize().ok()
 }
 
-/// A package as one line of `cargo tree --format '|{p}|{f}|'` shows it:
-/// `|name v1.0.0 (proc-macro) (/path/to/it)|feature,feature|`, with the
-/// location only for packages outside a registry.
 #[derive(Debug, PartialEq, Eq)]
 struct Built {
     name: String,
@@ -215,8 +194,6 @@ impl Built {
         })
     }
 
-    /// Whether this line shows `package`. A package from a registry is
-    /// shown by name and version alone; a path package by its directory.
     fn shows(&self, package: &Package) -> bool {
         if self.name != package.name || self.version != package.version {
             return false;
@@ -274,11 +251,9 @@ struct NodeDep {
 #[derive(Deserialize)]
 struct DepKind {
     kind: Option<String>,
-    /// The platform the edge is for, as `cfg(...)` or a target triple.
     target: Option<String>,
 }
 
-/// The crate kinds Cargo builds as a library another crate can use.
 const LIB_KINDS: [&str; 6] = ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
 
 impl Package {
@@ -298,19 +273,12 @@ impl Package {
     }
 }
 
-/// The host a build is for, which decides which platform-specific
-/// dependency edges are active.
 struct Host<'a> {
     triple: &'a str,
     target: &'a cfg::Target,
 }
 
 impl NodeDep {
-    /// Whether the dependency has an edge of `kind` that is active on the
-    /// host. `--filter-platform` drops dependencies with no active edge, but
-    /// keeps every edge of a dependency with one, so a Windows-only normal
-    /// edge survives beside an active build edge. An edge whose platform
-    /// can't be decided counts as active.
     fn is(&self, kind: Option<&str>, host: &Host) -> bool {
         self.dep_kinds.iter().any(|dep_kind| {
             dep_kind.kind.as_deref() == kind
@@ -346,8 +314,6 @@ fn resolve(metadata: Metadata, built: &[Built], host: &Host) -> Result<Vec<Depen
         .map(String::as_str)
         .collect();
     let is_proc_macro = |id: &str| libs.get(id).is_some_and(|lib| lib.proc_macro);
-    // The feature sets of each package a normal build compiles. A package
-    // that only a dev-dependency's features pull in has none.
     let feature_sets: HashMap<&str, Vec<BTreeSet<String>>> = metadata
         .packages
         .iter()
@@ -363,8 +329,6 @@ fn resolve(metadata: Metadata, built: &[Built], host: &Host) -> Result<Vec<Depen
         .collect();
     let is_built = |id: &str| feature_sets.contains_key(id);
 
-    // Runtime code is what the members reach through normal dependencies
-    // without passing through a procedural macro, which runs in the compiler.
     let runtime = reachable(&members, &nodes, |dep| {
         dep.is(None, host) && !is_proc_macro(&dep.pkg) && is_built(&dep.pkg)
     });
@@ -415,8 +379,6 @@ fn resolve(metadata: Metadata, built: &[Built], host: &Host) -> Result<Vec<Depen
     Ok(dependencies)
 }
 
-/// The packages reachable from `start` through the edges `follow` accepts,
-/// including `start`.
 fn reachable<'a>(
     start: &HashSet<&'a str>,
     nodes: &HashMap<&str, &'a Node>,

@@ -2,12 +2,10 @@ use std::collections::VecDeque;
 
 use adamantium::{Actor, BoundedMap, Inserted, Str, random};
 
-/// The keys from most to least recently used.
 fn order<K: Clone, V>(map: &BoundedMap<K, V>) -> Vec<K> {
     map.iter().map(|(key, _)| key.clone()).collect()
 }
 
-/// The keys from least to most recently used, walking the other links.
 fn reverse_order<K: Clone, V>(map: &BoundedMap<K, V>) -> Vec<K> {
     map.iter().rev().map(|(key, _)| key.clone()).collect()
 }
@@ -57,7 +55,6 @@ fn replacing_a_value_refreshes_it_without_evicting() {
     assert_eq!(map.insert("a", 10), Inserted::Replaced(1));
     assert_eq!(map.len(), 3);
     assert_eq!(order(&map), ["a", "c", "b"]);
-    // "b" is now the least recently used, so it goes first.
     assert_eq!(map.insert("d", 4), Inserted::Evicted("b", 2));
     assert_eq!(order(&map), ["d", "a", "c"]);
     assert_eq!(map.peek("a"), Some(&10));
@@ -65,7 +62,6 @@ fn replacing_a_value_refreshes_it_without_evicting() {
 
 #[test]
 fn replacing_keeps_the_stored_key() {
-    // Equal keys that are told apart by a field outside equality.
     #[derive(Clone, Debug)]
     struct Key(u8, &'static str);
     impl PartialEq for Key {
@@ -111,7 +107,6 @@ fn get_and_get_mut_refresh_but_peek_and_contains_do_not() {
     assert_eq!(order(&map), ["b", "a", "c"]);
     assert_eq!(reverse_order(&map), ["c", "a", "b"]);
 
-    // Missing keys leave the order alone.
     assert_eq!(map.get("z"), None);
     assert_eq!(map.get_mut("z"), None);
     assert_eq!(order(&map), ["b", "a", "c"]);
@@ -134,10 +129,6 @@ fn getting_the_most_recent_entry_keeps_the_order() {
 
 #[test]
 fn removing_from_each_position_keeps_the_links() {
-    // Insertion order fixes where each entry sits in storage, and gets
-    // reorder their use, so removals hit every combination of storage
-    // position (first, middle, last) and use position (newest, middle,
-    // oldest).
     let keys = ["a", "b", "c", "d", "e"];
     for touched in 0..keys.len() {
         for removed in keys {
@@ -161,7 +152,6 @@ fn removing_from_each_position_keeps_the_links() {
                 assert_eq!(map.peek(*key), Some(key));
             }
 
-            // Evictions drain the rest in order of use.
             for key in reversed {
                 assert_eq!(map.pop_lru(), Some((key, key)));
             }
@@ -261,7 +251,6 @@ fn works_inside_an_actor() {
 
 #[test]
 fn a_huge_capacity_allocates_only_what_is_used() {
-    // Reserving the capacity up front would abort here.
     let mut map = BoundedMap::new(usize::MAX);
     for key in 0..100 {
         assert_eq!(map.insert(key, ()), Inserted::Added);
@@ -270,8 +259,6 @@ fn a_huge_capacity_allocates_only_what_is_used() {
     assert!(!map.is_full());
 }
 
-/// A plain list kept from most to least recently used, which every
-/// operation searches in full.
 struct Model {
     capacity: usize,
     entries: VecDeque<(u8, u32)>,
@@ -309,7 +296,6 @@ impl Model {
     }
 }
 
-/// xorshift64, so a failing seed reproduces.
 fn next(state: &mut u64) -> u64 {
     *state ^= *state << 13;
     *state ^= *state >> 7;
@@ -384,8 +370,6 @@ fn matches_a_naive_list_over_random_operations() {
     for seed in 0..300 {
         run_against_model(seed);
     }
-    // Fresh seeds each run widen the coverage over time; a failure names
-    // its seed so it can be added to the fixed range above.
     for _ in 0..50 {
         run_against_model(random::u64());
     }

@@ -66,31 +66,25 @@ pub struct Watcher<T> {
 }
 
 struct Shared<T> {
-    /// Held only inside this module's synchronous methods, which run no
-    /// caller code but `T::clone` and `T::fmt`.
+    // Held only inside this module's synchronous methods, which run no
+    // caller code but `T::clone` and `T::fmt`.
     state: Lock<State<T>>,
     world: World,
-    /// Notified on every send and on close.
     changed: WaitQueue,
 }
 
 struct State<T> {
     value: T,
-    /// Counts sends. A watcher has seen the value when its own count
-    /// matches; wrapping only needs the two to differ.
+    // A watcher has seen the value when its send count matches. Counters wrap.
     version: u64,
     closed: bool,
-    /// The live `Watch` handles. The last one to drop closes the watch.
     watches: usize,
 }
 
 impl<T> Shared<T> {
-    /// Every operation locks, so this is where a handle carried into the
-    /// deterministic harness is rejected. While unwinding the check is
-    /// skipped: the execution is already failing, and a second panic would
-    /// abort the process instead of reporting the first. A destructor can
-    /// then still close the watch or send to it, as a scope dropped by a
-    /// panic cancels its signal.
+    // Every operation locks, so this is where a handle carried into the
+    // deterministic harness is rejected. While unwinding the check is
+    // skipped: the execution is already failing, and a second panic would
     fn lock(&self) -> Guard<'_, State<T>> {
         if !std::thread::panicking() {
             self.world.check();
@@ -143,8 +137,7 @@ impl<T> Watch<T> {
             std::mem::replace(&mut state.value, value)
         };
         self.shared.changed.notify_all();
-        // The old value's destructor is the caller's code, so it runs after
-        // the lock is released, and after the wake in case it panics.
+        // Unlock and wake before dropping the old value. Its destructor may panic.
         drop(old);
         Ok(())
     }
@@ -208,8 +201,7 @@ impl<T> Watcher<T> {
             if let Some(changed) = self.mark() {
                 return changed;
             }
-            // Listen before checking again, so a send between the two
-            // checks still wakes this wait.
+            // Register before the second check so a concurrent send wakes the wait.
             let listener = self.shared.changed.listen();
             if let Some(changed) = self.mark() {
                 return changed;
@@ -218,8 +210,6 @@ impl<T> Watcher<T> {
         }
     }
 
-    /// `Some(Some(()))` for an unseen value, which it marks seen,
-    /// `Some(None)` once closed with nothing unseen, and `None` to wait.
     fn mark(&mut self) -> Option<Option<()>> {
         let state = self.shared.lock();
         if state.version != self.seen {
@@ -343,8 +333,6 @@ impl<T: Clone> Watcher<T> {
         .await
     }
 
-    /// `Some(Some(value))` for an unseen value, which it marks seen,
-    /// `Some(None)` once closed with nothing unseen, and `None` to wait.
     fn check(&mut self) -> Option<Option<T>> {
         let state = self.shared.lock();
         if state.version != self.seen {
@@ -362,7 +350,6 @@ impl<T: Clone> Watcher<T> {
 impl<T> Clone for Watch<T> {
     fn clone(&self) -> Self {
         let mut state = self.shared.lock();
-        // A count of every handle in memory can't reach usize::MAX.
         state.watches = state.watches.saturating_add(1);
         drop(state);
         Self {
@@ -415,8 +402,7 @@ fn debug_state<T: fmt::Debug>(
     shared: &Shared<T>,
     seen: Option<u64>,
 ) -> fmt::Result {
-    // `try_lock`, as in `Actor`'s `Debug`, so formatting from inside
-    // `T::clone` or `T::fmt` can't deadlock.
+    // Try the lock to avoid deadlock when T::clone or T::fmt formats the watch.
     shared.world.check();
     let Some(state) = shared.state.try_lock() else {
         return write!(f, "{name}(<in use>)");

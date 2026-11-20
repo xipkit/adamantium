@@ -1,5 +1,3 @@
-//! Call rewrites backed by Clippy's resolved callee spans.
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -49,10 +47,7 @@ pub(super) const IMPORTS: &[&[&str]] = &[
     &["fastrand", "u64"],
 ];
 
-/// Collects resolved callees by file so a deadline and its wait can be planned together.
 pub(super) fn callees(diagnostics: Vec<&Value>, root: &Path) -> BTreeMap<PathBuf, Calls> {
-    // A caller that seeds or observes fastrand's thread-local stream can
-    // depend on these draws advancing that same stream in order.
     let uses_fastrand_state = diagnostics.iter().any(|diagnostic| {
         matches!(
             disallowed_path(diagnostic, "clippy::disallowed_methods"),
@@ -106,7 +101,6 @@ struct Planner<'a> {
     text: Text<'a>,
     calls: &'a Calls,
     names: TypeNames,
-    /// The initializer of a single-use deadline, keyed by its wait's location.
     deadlines: BTreeMap<usize, Edit>,
     edits: Vec<Vec<Edit>>,
 }
@@ -133,8 +127,6 @@ impl Planner<'_> {
         })
     }
 
-    /// Finds `now()` when its result, optionally offset by a duration,
-    /// supplies the entire deadline.
     fn deadline(&self, expression: &Expr) -> Option<Edit> {
         let base = match unparen(expression) {
             Expr::Binary(sum)
@@ -169,8 +161,6 @@ impl Planner<'_> {
         })
     }
 
-    /// Traces an immutable `let deadline = ...` used once by the next
-    /// statement. A second mention could observe or change the clock domain.
     fn local_deadline(&self, pair: &[Stmt], text: &str) -> Option<(usize, Edit)> {
         let [Stmt::Local(local), Stmt::Expr(Expr::Await(awaited), _)] = pair else {
             return None;
@@ -256,8 +246,6 @@ impl Planner<'_> {
         let Lit::Int(zero) = &start_lit.lit else {
             return None;
         };
-        // A `u64` range starting at zero can't be empty. For rand the
-        // original integer type must be explicit, since its return is generic.
         if !start_lit.attrs.is_empty()
             || zero.base10_parse::<u64>().ok()? != 0
             || !matches!(range.limits, syn::RangeLimits::Closed(_))
@@ -289,7 +277,6 @@ impl<'ast> Visit<'ast> for Planner<'_> {
     }
 
     fn visit_expr_await(&mut self, awaited: &'ast ExprAwait) {
-        // An immediately awaited call preserves the timer-construction boundary.
         if let Expr::Call(call) = &*awaited.base {
             let deadline = self.until(awaited).and_then(|call| {
                 self.deadline(call.args.first()?)
@@ -320,8 +307,11 @@ impl<'ast> Visit<'ast> for Planner<'_> {
             && let Expr::Call(call) = &*awaited.base
             && let Expr::Path(path) = &*call.func
             && self.resolved(&call.func) == Some(Call::Blocking)
-            // The wrapper's generic parameters have a different order.
-            && path.path.segments.iter().all(|segment| matches!(segment.arguments, PathArguments::None))
+            && path
+                .path
+                .segments
+                .iter()
+                .all(|segment| matches!(segment.arguments, PathArguments::None))
             && let Some(args) = self.text.range(call.paren_token.span.join())
             && let Some(text) = self.text.get(args)
             && let Some(edit) = self.edit(node, &format!("::adamantium::blocking{text}.await"))
@@ -359,7 +349,6 @@ fn adamantium_wait(callee: &Expr) -> bool {
         && plain_path(&path.path).is_some_and(|parts| parts == ["adamantium", "time", "sleep_until"]))
 }
 
-/// File-wide overapproximation of names that might shadow standard types.
 #[derive(Default)]
 struct TypeNames {
     bound: BTreeSet<String>,
@@ -385,8 +374,6 @@ impl TypeNames {
                 }))
     }
 
-    /// Built-in Duration construction makes `Instant + Duration` a known
-    /// operator. A user-defined right operand could inspect the clock itself.
     fn duration(&self, expr: &Expr) -> bool {
         let (path, called) = match unparen(expr) {
             Expr::Call(call) => match &*call.func {

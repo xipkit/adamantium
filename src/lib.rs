@@ -1,42 +1,3 @@
-//! Adamantium is the fragment of Rust in which every value can cross a task,
-//! no lock outlives one synchronous method, and no task outlives its scope.
-//!
-//! The crate has two halves. The library gives that fragment its vocabulary:
-//! copy-on-write values ([`Str`], [`Bytes`], [`Array`], [`Deque`], [`Map`], [`Set`]), a
-//! structured task scope (`Tasks`), shared state whose methods run one at
-//! a time ([`Actor`]), a map that evicts its least recently used entry
-//! to stay within a capacity ([`BoundedMap`]), a bounded channel ([`Channel`]), a channel that sends
-//! each message to every subscriber ([`Topic`]), a publisher that never
-//! waits and disconnects a subscriber that falls behind ([`Fanout`]), a
-//! one-shot reply ([`Reply`]), the latest value of shared state
-//! ([`Watch`]), [`race`] to wait for the first of several events, a limit
-//! on how many calls run at once ([`Limit`]), calls that share one
-//! operation per key ([`SingleFlight`]), random draws that tests can replay
-//! ([`random`]), and `blocking` for code that must block a thread. The
-//! `cargo adamantium` subcommand applies the Clippy rules that keep a crate
-//! inside the fragment.
-//!
-//! Everything here is `Send + Sync + 'static` when its element types are, so
-//! a value of any of these types can be handed to a task without ceremony.
-//!
-//! The default `tokio` feature provides `Task`, `Tasks`, `concurrently`,
-//! `first_ok`, `AsyncActor`, the ordered and unordered concurrent streams, `blocking`, the
-//! `time` module, and `retry` and `RateLimit`, whose waits all end when a
-//! `Cancellation` is requested. `Tasks::spawn_supervised` restarts a task
-//! that fails, as often as a [`Restarts`] allows.
-//! Disable default features to use the values, synchronous actors, `BoundedMap`, channels, topics,
-//! fanouts, replies, watches, `Limit`, `KeyedLimit` and `SingleFlight` without a
-//! Tokio dependency.
-//!
-//! Both configurations build and are tested on `wasm32-wasip1`. WASI has one
-//! thread and aborts on a panic, so `blocking` and `Tasks::spawn_blocking` run
-//! their closure on that thread while other tasks wait, and a panic ends the
-//! program where other targets would report it to the scope.
-//! The opt-in `signal` feature adds `Cancellation::cancel_on_signal` on Unix
-//! and Windows and enables Tokio's process signal support.
-//! Enable the optional `tracing` feature for named task spans and warnings
-//! identifying unfinished named tasks when a scope's deadline expires.
-
 #![forbid(unsafe_code)]
 
 mod actor;
@@ -109,8 +70,6 @@ pub use tasks::{
 pub use topic::{Subscriptions, Topic};
 pub use watch::{Watch, Watcher};
 
-// Runs the migration guide's examples as doctests, so its rewrites keep
-// compiling against the current API.
 #[cfg(all(doctest, feature = "tokio"))]
 #[doc = include_str!("../docs/migrating.md")]
 struct MigratingGuide;

@@ -1,5 +1,3 @@
-//! These tests run with and without the `tokio` feature, so they poll by hand.
-
 use adamantium::{Topic, TryReceiveError};
 use std::{
     future::Future,
@@ -11,7 +9,6 @@ fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
 }
 
-/// Runs a send that must not have to wait.
 fn send_now<T: Clone>(topic: &mut Topic<T>, value: T) -> usize {
     let mut send = pin!(topic.send(value));
     match poll_once(send.as_mut()) {
@@ -65,8 +62,6 @@ fn a_full_subscriber_holds_the_message_back_from_everyone() {
     {
         let mut send = pin!(topic.send(2));
         assert_eq!(poll_once(send.as_mut()), Poll::Pending);
-        // The fast subscriber has room, but nobody gets the message until
-        // the slow one has room too.
         assert_eq!(fast.try_receive(), Err(TryReceiveError::Empty));
 
         assert_eq!(slow.try_receive(), Ok(1));
@@ -163,7 +158,6 @@ fn the_message_is_cloned_once_for_each_subscriber_but_the_last() {
     assert_eq!(clones.load(Ordering::Relaxed), 2);
 }
 
-/// Counts its drops, and can subscribe to a topic when it is dropped.
 struct Message {
     drops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     resubscribe: Option<adamantium::Subscriptions<Message>>,

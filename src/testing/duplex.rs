@@ -1,38 +1,3 @@
-//! Paired virtual byte streams for deterministic protocol and transport-fault tests.
-//!
-//! Built on the crate's modeled synchronization primitives ([`Lock`], [`WaitQueue`])
-//! and virtual clock ([`crate::time`]), so every lock acquisition, wakeup and
-//! delivery latency goes through the `adamantium::testing` scheduling seam without
-//! sockets or wall-clock waits.
-//!
-//! # Buffering, backpressure and wakeups
-//!
-//! Each direction (`A -> B` and `B -> A`) is an independent bounded FIFO byte pipe
-//! with capacity `buffer_capacity` (nonzero). Both ready-to-read bytes and
-//! latency-delayed in-flight bytes count toward `buffer_capacity`.
-//!
-//! - **Partial writes and backpressure**: `poll_write` accepts up to
-//!   `min(src.len(), available_space, max_write_chunk)` bytes. When
-//!   `available_space == 0`, `poll_write` registers a writer wakeup and returns
-//!   `Poll::Pending` until the peer drains bytes or closes/faults the link.
-//! - **Partial reads**: `poll_read` delivers up to
-//!   `min(ready.len(), dst.remaining(), max_read_chunk, remaining_disconnect_budget)`
-//!   bytes per poll.
-//! - **Clock-driven latency**: When `latency > Duration::ZERO`, each write is
-//!   enqueued in-flight with `ready_at = now + latency`. A reader facing an empty
-//!   ready buffer with in-flight data waits on both the direction's readability
-//!   queue and `crate::time::sleep_until(ready_at)`, so virtual time advances
-//!   deterministically when no task is runnable while immediate faults still wake
-//!   the reader without waiting for the timer.
-//! - **Wakeups**: Writing notifies the reader's queue; reading notifies the
-//!   writer's queue as buffer space opens; closing, dropping, or injecting a
-//!   [`TransportFault`] notifies all waiters on both sides.
-//! - **EOF and mid-frame disconnect**: `poll_shutdown` (or dropping the stream)
-//!   closes the outbound direction cleanly after all already-written bytes are
-//!   delivered, yielding `Ok(0)` (EOF) to the peer. `disconnect_after` or
-//!   [`DuplexControl::disconnect`] injects either clean EOF or an abrupt I/O
-//!   error (such as `ConnectionReset`) mid-transfer.
-
 use std::{
     collections::VecDeque,
     future::Future,
@@ -53,29 +18,24 @@ use crate::runtime::{
     wait::{WaitQueue, Waiter},
 };
 
-/// Fault injected on a virtual link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportFault {
-    /// Clean end-of-file (`Ok(0)` on read, `BrokenPipe` on write).
     Eof,
-    /// Abrupt transport error (for example [`io::ErrorKind::ConnectionReset`]).
     Error(io::ErrorKind),
 }
 
-/// Configuration for one unidirectional byte pipe (`A -> B` or `B -> A`).
+/// Configuration for one direction of a virtual byte stream.
+///
+/// `buffer_capacity` includes bytes in flight during `latency`. Capacity
+/// and any configured read or write chunk limit must be nonzero.
+/// `disconnect_after` limits the bytes the reader can receive before
+/// seeing EOF or an I/O error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinkConfig {
-    /// Maximum buffered bytes in this direction, including in-flight bytes.
-    /// Must be nonzero.
     pub buffer_capacity: usize,
-    /// Optional cap on bytes delivered per `poll_read`. Must be nonzero when `Some`.
     pub max_read_chunk: Option<usize>,
-    /// Optional cap on bytes accepted per `poll_write`. Must be nonzero when `Some`.
     pub max_write_chunk: Option<usize>,
-    /// Virtual delivery latency applied to each write via [`crate::time`].
     pub latency: Duration,
-    /// Optional byte budget after which the link terminates with [`TransportFault`].
-    /// The reader receives at most `limit` bytes before observing the fault.
     pub disconnect_after: Option<(usize, TransportFault)>,
 }
 
@@ -115,9 +75,7 @@ impl LinkConfig {
 /// Configuration for a paired [`DuplexStream`] connection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DuplexConfig {
-    /// Configuration for bytes flowing from stream A to stream B.
     pub a_to_b: LinkConfig,
-    /// Configuration for bytes flowing from stream B to stream A.
     pub b_to_a: LinkConfig,
 }
 

@@ -1,16 +1,3 @@
-//! Shared-state rewrites: local bindings and private fields holding
-//! `Arc<Mutex<T>>` or `Arc<RwLock<T>>` become `Actor<T>`.
-//!
-//! A binding is rewritten only when every use of it, and of every clone of
-//! it, has one of the forms the migration guide marks as mechanical: the
-//! constructor, clones, a guard used within one statement, a copy of the state, and
-//! taking the state back. Any other use leaves the binding and all of its
-//! clones unchanged, and the caller reports why with a link to the guide.
-//! Fields follow the same rules, with the extra checks in `fields`, and a
-//! field and the locals holding its state stand or fall together. So do a
-//! private function's parameters and return value and the values its calls
-//! pass and take, with the checks in `calls`.
-
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::Range,
@@ -34,37 +21,21 @@ use super::{
 mod calls;
 mod fields;
 
-/// Why a binding was left for review.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Reason {
-    /// A guard is bound, matched on or iterated, so it outlives its statement.
     AcrossStatements,
-    /// The statement that takes the guard also awaits.
     AcrossAwait,
-    /// The statement that takes the guard takes another lock too.
     TwoLocks,
-    /// The statement that takes the guard returns, breaks or uses `?`.
     ControlFlow,
-    /// The guard is taken inside another actor's `with` or `read` callback,
-    /// where calling an actor panics.
     InsideActor,
-    /// The statement that takes the guard calls a function, or a method on
-    /// a value other than the state, which might call an actor and would
-    /// then panic inside the callback.
     Calls,
-    /// A shared reader must be proved to run no code under its guard.
     RwLockRead,
-    /// Code that locks a field might run inside an actor's callback, where
-    /// the field's own actor would then panic.
     Nested(&'static str),
-    /// The enclosing future has no proved polling context.
     Poll,
-    /// Any other use that the rewrite can't follow.
     Unfollowed(&'static str),
 }
 
 impl Reason {
-    /// The migration guide's section for this case.
     pub(super) fn section(self) -> &'static str {
         match self {
             Self::AcrossStatements => "a-guard-held-across-statements",
@@ -96,7 +67,6 @@ impl Reason {
     }
 }
 
-/// A binding left as it was.
 pub(super) struct Refusal {
     pub(super) line: usize,
     pub(super) name: String,
@@ -105,27 +75,20 @@ pub(super) struct Refusal {
     pub(super) boundary: Option<String>,
 }
 
-/// The edits for one file, applied together, and the bindings left alone.
 pub(super) struct Outcome {
     pub(super) edits: Vec<Edit>,
     pub(super) refusals: Vec<Refusal>,
 }
 
-/// One file's rewrites before the checks that need the whole package.
 pub(super) struct Draft {
     file: PathBuf,
     groups: Vec<Group>,
-    /// Groups that hold one state, such as a field and a local it is
-    /// cloned into, which stand or fall together.
     links: Vec<(usize, usize)>,
-    /// The functions with parameters or a return value to rewrite, each
-    /// with how many of its calls fix followed and its groups.
     callees: Vec<(String, usize, Vec<usize>)>,
 }
 
 const ACTOR: &str = "::adamantium::Actor";
 
-/// The standard-library lock Clippy found inside an `Arc`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum LockKind {
     Mutex,
@@ -141,7 +104,6 @@ impl LockKind {
     }
 }
 
-/// Types and access methods resolved by Clippy before any edits are made.
 #[derive(Clone, Copy)]
 pub(super) enum LockEvidence {
     Type(LockKind),
@@ -151,7 +113,6 @@ pub(super) enum LockEvidence {
 
 pub(super) type LockSpans = BTreeMap<(usize, usize), LockEvidence>;
 
-/// The imports the rewrite can leave unused.
 pub(super) const IMPORTS: &[&[&str]] = &[
     &["std", "sync"],
     &["alloc", "sync"],
@@ -161,15 +122,11 @@ pub(super) const IMPORTS: &[&[&str]] = &[
     &["std", "sync", "RwLock"],
 ];
 
-/// A node whose text fix couldn't find, which only a parser bug would cause.
 const UNLOCATED: Reason = Reason::Unfollowed("fix couldn't find its source text");
 
-/// Why a group that holds the same state as a refused one is refused.
 const SHARED: Reason =
     Reason::Unfollowed("it holds the same state as a value fix leaves for review");
 
-/// Methods that take a lock on std, Tokio, parking_lot and Adamantium types.
-/// A statement that holds a guard and calls one of these holds two locks.
 const LOCKS: &[&str] = &[
     "lock",
     "try_lock",
@@ -187,7 +144,6 @@ const LOCKS: &[&str] = &[
     "snapshot",
 ];
 
-/// Plans the shared-state rewrites for one file using Clippy's resolved lock spans.
 pub(super) fn plan(file: &Path, source: &str, locks: &LockSpans, krate: &Crate) -> Draft {
     let mut draft = Draft {
         file: file.to_path_buf(),
@@ -274,14 +230,10 @@ pub(super) fn plan(file: &Path, source: &str, locks: &LockSpans, krate: &Crate) 
     draft
 }
 
-/// Finishes every file's plan in one package: a field is rewritten only if
-/// nothing in the package can reach it in a way fix can't follow.
 pub(super) fn settle(mut drafts: Vec<Draft>, krate: &Crate) -> Vec<(PathBuf, Outcome)> {
     for draft in &mut drafts {
         draft.share();
     }
-    // The statements that would become actor callbacks, anywhere in the
-    // package, and the names they call.
     let callbacks: BTreeSet<String> = drafts
         .iter()
         .flat_map(|draft| &draft.groups)
@@ -296,7 +248,6 @@ pub(super) fn settle(mut drafts: Vec<Draft>, krate: &Crate) -> Vec<(PathBuf, Out
 }
 
 impl Draft {
-    /// The groups that share a state, through the links between them.
     fn components(&self) -> Vec<Vec<usize>> {
         let mut parent: Vec<usize> = (0..self.groups.len()).collect();
         fn root(parent: &mut [usize], mut node: usize) -> usize {
@@ -323,7 +274,6 @@ impl Draft {
         components.into_values().collect()
     }
 
-    /// Refuses every group that holds the state of a refused one.
     fn share(&mut self) {
         for component in self.components() {
             let refused = component.iter().any(|&group| {
@@ -341,10 +291,6 @@ impl Draft {
         }
     }
 
-    /// Refuses each state that the package might reach where fix can't
-    /// follow, with every group holding it. A local is reached through the
-    /// functions that lock it as a field is, since a caller of one of them
-    /// might run inside an actor's callback.
     fn reach(&mut self, krate: &Crate, callbacks: &BTreeSet<String>) {
         for group in &mut self.groups {
             if let Some(reason) = krate.unreadable_reason() {
@@ -355,8 +301,6 @@ impl Draft {
                 group.refuse(reason);
             }
         }
-        // Every mention of a function's name but its own must be a call fix
-        // followed, or code fix can't see might pass or take other values.
         for (name, calls, groups) in &self.callees {
             if krate.occurrences(name) != calls + 1 {
                 for &group in groups {
@@ -405,7 +349,6 @@ impl Draft {
         }
     }
 
-    /// Why the package might use the field `member` where fix can't see.
     fn unseen(krate: &Crate, member: &str, file: &Path) -> Option<Reason> {
         if krate.field_declarations(member) > 1 {
             return Some(Reason::Unfollowed(
@@ -419,8 +362,6 @@ impl Draft {
             ))
     }
 
-    /// Why code that locks the state of `groups` might run inside an actor's
-    /// callback, if it might.
     fn hazard(groups: &[&Group], krate: &Crate, callbacks: &BTreeSet<String>) -> Option<Reason> {
         if groups.iter().any(|group| group.escapes) {
             return Some(Reason::Nested(
@@ -482,8 +423,6 @@ impl Draft {
     }
 }
 
-/// Rewrites in one file must not touch the same text: a guard inside the
-/// constructor of another binding, say. Both bindings are left alone.
 fn refuse_overlaps(groups: &mut [Group]) {
     let mut ranges: Vec<(usize, usize, usize)> = groups
         .iter()
@@ -516,19 +455,11 @@ fn refuse_overlaps(groups: &mut [Group]) {
     }
 }
 
-/// Names in the file that a pattern could match as a constant rather than
-/// bind, and names that may shadow the standard macros.
 #[derive(Default)]
 struct Names {
-    /// Constants, statics, structs and imports.
     constants: BTreeSet<String>,
-    /// `macro_rules!` definitions and imports.
     macros: BTreeSet<String>,
-    /// Type aliases for unsized types, such as `type Bytes = [u8];`.
     unsized_aliases: BTreeSet<String>,
-    /// Every name an item or import binds anywhere in the file. A relative
-    /// path through one of these, as `std` after `use custom as std;`, may
-    /// not reach the crate of that name.
     bound: BTreeSet<String>,
 }
 
@@ -566,8 +497,6 @@ impl<'ast> Visit<'ast> for Names {
     }
 }
 
-/// The standard macros whose arguments are expressions, and the position of
-/// their format string.
 pub(super) fn known_macro(name: &str) -> Option<usize> {
     match name {
         "format" | "print" | "println" | "eprint" | "eprintln" | "panic" => Some(0),
@@ -577,25 +506,15 @@ pub(super) fn known_macro(name: &str) -> Option<usize> {
     }
 }
 
-/// A standard macro call whose arguments parsed as expressions.
 struct MacroArgs {
     args: Vec<Expr>,
     format: usize,
-    /// Whether the first argument is borrowed mutably, as the destination of
-    /// `write!` and `writeln!` is.
     destination: bool,
-    /// Whether the first argument is a condition, as an assertion's is,
-    /// rather than a value the macro formats.
     condition: bool,
-    /// The first argument evaluated only on some paths: an assertion's
-    /// message runs only when it fails, and a debug assertion only in debug
-    /// builds.
     conditional: usize,
 }
 
 impl MacroArgs {
-    /// The value of a named format argument such as `width = 4`, which only
-    /// follows the format string. Any other `=` is an assignment to scan.
     fn named<'e>(&self, position: usize, arg: &'e Expr) -> Option<&'e Expr> {
         match arg {
             Expr::Assign(named)
@@ -609,8 +528,6 @@ impl MacroArgs {
     }
 }
 
-/// Parses the arguments of every standard macro call, nested ones included,
-/// keyed by where the call starts.
 struct Parsed<'t> {
     text: &'t Text<'t>,
     names: &'t Names,
@@ -660,21 +577,14 @@ impl<'ast> Visit<'ast> for Parsed<'_> {
     }
 }
 
-/// What a name means in one item scope.
 #[derive(Clone, PartialEq, Eq)]
 enum Binding {
-    /// A `use` or `extern crate`, with the path it names.
     Import(Vec<String>),
-    /// An item defined here.
     Item,
-    /// A generic parameter.
     Parameter,
-    /// A name whose meaning depends on the configuration, or that two
-    /// declarations claim.
     Ambiguous,
 }
 
-/// The items and imports of one module or block.
 struct ItemScope {
     names: HashMap<String, Binding>,
     globs: Vec<Vec<String>>,
@@ -695,7 +605,6 @@ impl ItemScope {
                 module,
             };
             if let Item::Use(item) = item {
-                // A leading `::` names a crate, never a local module.
                 let mut prefix = item
                     .leading_colon
                     .map(|_| vec!["::".to_owned()])
@@ -705,7 +614,6 @@ impl ItemScope {
                 own.names.extend(Self::bindings(item));
             }
             scope.globs.extend(own.globs);
-            // A `#[cfg]` item may not exist in the build fix checked.
             let conditional = item_attributes(item)
                 .iter()
                 .any(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"));
@@ -755,7 +663,6 @@ impl ItemScope {
         }
     }
 
-    /// The names an item other than `use` defines.
     fn bindings(item: &Item) -> Vec<(String, Binding)> {
         let item_name = |ident: &syn::Ident| vec![(ident.to_string(), Binding::Item)];
         match item {
@@ -811,54 +718,35 @@ pub(super) fn item_attributes(item: &Item) -> &[syn::Attribute] {
     }
 }
 
-/// What a single name resolves to among the file's items.
 enum Resolved {
     Path(Vec<String>),
     Item,
     Parameter,
-    /// Not declared in the file: the extern or standard prelude.
     Prelude,
-    /// A glob import might declare it.
     Ambiguous,
 }
 
-/// A local variable.
 struct Var {
-    /// The name without `r#`, under which `m` and `r#m` are one variable.
     name: String,
-    /// The name as the declaration spells it, for generated code.
     spelling: String,
-    /// The shared-state binding this variable holds, if it holds one.
     group: Option<usize>,
     used: bool,
-    /// Whether this stands for a struct field rather than a local. Its name
-    /// is the field's, and an access through a traced receiver uses it.
     field: bool,
-    /// Whether this is a reference to the lock itself, whose
-    /// `clone` copies the reference where an actor's copies the actor.
     lock_ref: bool,
-    /// The struct with candidate fields that this variable holds or points
-    /// to, by its declared type or a struct literal.
     record: Option<String>,
 }
 
-/// One shared lock and every variable that holds a clone of it.
 struct Group {
     name: String,
     line: usize,
     kind: LockKind,
     refusal: Option<Reason>,
     edits: Vec<Edit>,
-    /// The field's name, for a struct field.
     member: Option<String>,
-    /// The functions whose bodies take a guard of it.
     functions: BTreeSet<String>,
     poll_blocks: BTreeSet<String>,
     boundary: Option<String>,
-    /// Whether a guard of it is taken in a closure, an async block or
-    /// outside any function.
     escapes: bool,
-    /// The names of the functions and methods its callbacks might run.
     callbacks: BTreeSet<String>,
 }
 
@@ -886,17 +774,12 @@ impl Group {
 
 struct Scope {
     vars: Vec<usize>,
-    /// An item boundary: locals of enclosing functions aren't visible.
     barrier: bool,
 }
 
-/// How a block ends a guard's temporary scope.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BlockKind {
-    /// A plain block, whose final expression's temporaries outlive it.
     Plain,
-    /// A body that drops its temporaries before its value is used: a
-    /// function, closure, async block, loop or `if` branch.
     Body,
 }
 
@@ -905,21 +788,14 @@ enum Node<'a> {
     Expr(&'a Expr),
     Stmt(&'a Stmt),
     Block(&'a Block, BlockKind),
-    /// The arguments of a standard macro.
     Macro(&'a MacroArgs),
 }
 
-/// The expression whose evaluation a guard's temporary spans.
 #[derive(Clone, Copy)]
 enum Root<'a> {
-    /// A statement whose value is dropped.
     Statement(Full<'a>, bool),
-    /// A `let` initializer.
     Let(&'a Local, &'a Expr),
-    /// An expression whose value leaves a temporary scope: a body's final
-    /// expression, a `return` value, a match arm, a lazy boolean operand.
     Value(&'a Expr),
-    /// An `if` or `while` condition or a match guard.
     Condition(&'a Expr),
 }
 
@@ -965,34 +841,17 @@ struct Walker<'a> {
     items: Vec<ItemScope>,
     stack: Vec<Node<'a>>,
     groups: Vec<Group>,
-    /// `let` initializers that read under a guard, kept only if the variable
-    /// they declare is used later: (group, variable).
     pending: Vec<(usize, usize)>,
-    /// The same, while the `let` is still being read.
     awaiting: Vec<(usize, &'a Local)>,
-    /// The struct fields that could become actors, by name.
     fields: HashMap<String, fields::Field>,
-    /// For each enclosing `impl`, the struct with candidate fields it is
-    /// for, if it is for one.
     impls: Vec<Option<String>>,
-    /// For each enclosing `impl`, the type whose methods `self` calls, if
-    /// fix can name it; `None` for a function or trait, where `self` and
-    /// `Self` mean something else.
     owners: Vec<Option<String>>,
-    /// The enclosing functions, with the stack depth where each body starts.
     functions: Vec<(String, usize)>,
-    /// Pairs of groups that hold the same state.
     links: Vec<(usize, usize)>,
-    /// How many items and imports in the file bind each name.
     declared: HashMap<String, usize>,
-    /// The private functions with parameters or a return value to rewrite.
     callees: Vec<calls::Callee>,
-    /// Each candidate function by name, or `None` when two have one name.
     callee_names: HashMap<String, Option<usize>>,
-    /// Each candidate function by where its name is declared.
     signatures: HashMap<usize, usize>,
-    /// For each enclosing function, closure and async block, the group of
-    /// the value it returns, when it is a function that returns one.
     returns: Vec<Option<calls::Frame<'a>>>,
 }
 
@@ -1070,8 +929,6 @@ impl<'a> Walker<'a> {
         None
     }
 
-    /// Records a use of a variable by name, refusing a shared-state binding
-    /// used where fix can't follow it.
     fn mention(&mut self, name: &str, reason: Reason) {
         if let Some(var) = self.lookup(name) {
             if let Some(var) = self.vars.get_mut(var) {
@@ -1081,7 +938,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// The variable that a bare single-name path refers to.
     fn local(&self, expr: &Expr) -> Option<usize> {
         let Expr::Path(path) = expr else {
             return None;
@@ -1092,15 +948,11 @@ impl<'a> Walker<'a> {
         self.lookup(&bare(path.path.get_ident()?))
     }
 
-    /// A tracked variable named by `expr`, or the variable for a candidate
-    /// field that `expr` reads through a traced receiver.
     fn tracked(&self, expr: &Expr) -> Option<usize> {
         self.field_place(expr)
             .or_else(|| self.local(expr).filter(|&var| self.group_of(var).is_some()))
     }
 
-    /// The text that names `var` where `expr` does: a local's spelling at
-    /// its declaration, or a field access as written.
     fn holder(&self, var: usize, expr: &Expr) -> Option<String> {
         let var = self.vars.get(var)?;
         if var.field {
@@ -1122,7 +974,6 @@ impl<'a> Walker<'a> {
                 };
             }
             if scope.module {
-                // `use super::*` in an inline module sees its parent's names.
                 let parent = scopes.clone().find(|scope| scope.module);
                 let only_super = scope.globs.iter().all(|glob| glob == &["super"]);
                 if !scope.globs.is_empty() {
@@ -1148,7 +999,6 @@ impl<'a> Walker<'a> {
         Resolved::Prelude
     }
 
-    /// The full path that `segments` names, if every segment is a plain name.
     fn resolve_path(&self, path: &syn::Path, segments: usize) -> Option<Vec<String>> {
         let names: Vec<String> = path
             .segments
@@ -1171,7 +1021,6 @@ impl<'a> Walker<'a> {
         Some(resolved)
     }
 
-    /// Whether `path` without its last `skip` segments is `std::sync::Arc`.
     fn is_arc(&self, path: &syn::Path, skip: usize) -> bool {
         let Some(count) = path.segments.len().checked_sub(skip) else {
             return false;
@@ -1190,8 +1039,6 @@ impl<'a> Walker<'a> {
             })
     }
 
-    /// A resolved path as one starting from a crate, or `None` when its
-    /// first name might be a local alias rather than a crate.
     fn crate_path(&self, resolved: Vec<String>) -> Option<Vec<String>> {
         if resolved.first().is_some_and(|first| first == "::") {
             return Some(resolved.into_iter().skip(1).collect());
@@ -1202,7 +1049,6 @@ impl<'a> Walker<'a> {
         .then_some(resolved)
     }
 
-    /// The lock type Clippy resolved at `range`.
     fn lock_kind(&self, range: Range<usize>) -> Option<LockKind> {
         match self.locks.get(&(range.start, range.end))? {
             LockEvidence::Type(kind) => Some(*kind),
@@ -1210,7 +1056,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// The text of the lock type in a path such as `Mutex::new`.
     fn type_prefix(&self, path: &syn::Path) -> Option<Range<usize>> {
         let count = path.segments.len().checked_sub(1)?;
         let first = match &path.leading_colon {
@@ -1227,12 +1072,10 @@ impl<'a> Walker<'a> {
         Some(first.start..last.end)
     }
 
-    /// `::adamantium::Actor<T>` for the state `T`.
     fn actor_of(&self, state: &Type) -> Option<String> {
         Some(format!("{ACTOR}<{}>", self.text.get(self.text.of(state)?)?))
     }
 
-    /// The lock kind and its state type in `Arc<Lock<T>>`.
     fn arc_state<'t>(&self, ty: &'t Type) -> Option<(LockKind, &'t Type)> {
         let Type::Path(arc) = ty else {
             return None;
@@ -1254,7 +1097,6 @@ impl<'a> Walker<'a> {
         self.lock_state(lock)
     }
 
-    /// The lock kind and its state type in `Lock<T>`.
     fn lock_state<'t>(&self, ty: &'t Type) -> Option<(LockKind, &'t Type)> {
         let Type::Path(lock) = ty else {
             return None;
@@ -1269,14 +1111,12 @@ impl<'a> Walker<'a> {
         let Some(GenericArgument::Type(state)) = inner.args.first() else {
             return None;
         };
-        // These locks can hold a slice or trait object; an actor can't.
         if inner.args.len() != 1 || is_unsized(state, &self.names.unsized_aliases) {
             return None;
         }
         Some((kind, state))
     }
 
-    /// A shared lock's kind and its `Actor` constructor.
     fn constructor(&self, expr: &Expr) -> Option<(LockKind, String)> {
         let Expr::Call(arc) = expr else {
             return None;
@@ -1318,9 +1158,6 @@ impl<'a> Walker<'a> {
         Some((kind, replacement))
     }
 
-    /// The variable cloned or moved by `Arc::clone(&m)`, `Arc::clone(r)`
-    /// for a reference `r`, `m.clone()` or `m`, with the replacement for the
-    /// first two forms.
     fn clone_of(&self, expr: &Expr) -> Option<(usize, Option<String>)> {
         match expr {
             Expr::Path(_) => self.tracked(expr).map(|var| (var, None)),
@@ -1342,8 +1179,6 @@ impl<'a> Walker<'a> {
                 {
                     return None;
                 }
-                // A variable passed as it is compiles only as a reference,
-                // a parameter or a copy of one.
                 let held = match call.args.first()? {
                     Expr::Reference(reference) if reference.mutability.is_none() => {
                         &*reference.expr
@@ -1363,8 +1198,6 @@ impl<'a> Walker<'a> {
         self.destructures(&local.pat);
         let mut names = Vec::new();
         pattern_names(&local.pat, &mut names);
-        // A conditional `let` may shadow a binding in one configuration and
-        // not in another, whatever it declares.
         if !local.attrs.is_empty() {
             for name in &names {
                 if let Some(var) = self.lookup(name) {
@@ -1491,7 +1324,6 @@ impl<'a> Walker<'a> {
         self.settle(local, ident.and(declared));
     }
 
-    /// Declares the local that `local` binds as a new state, with `edits`.
     fn bind(
         &mut self,
         local: &'a Local,
@@ -1524,8 +1356,6 @@ impl<'a> Walker<'a> {
         var
     }
 
-    /// Resolves the checks waiting on `local`: a value read under a guard
-    /// must go to a single variable that is used later.
     fn settle(&mut self, local: &'a Local, var: Option<usize>) {
         let waiting: Vec<usize> = self
             .awaiting
@@ -1547,8 +1377,6 @@ impl<'a> Walker<'a> {
     }
 }
 
-/// Whether `ty` is written as an unsized type: a slice, `str`, a trait
-/// object, or one of `aliases`.
 fn is_unsized(ty: &Type, aliases: &BTreeSet<String>) -> bool {
     match ty {
         Type::Slice(_) | Type::TraitObject(_) => true,
@@ -1565,7 +1393,6 @@ fn is_unsized(ty: &Type, aliases: &BTreeSet<String>) -> bool {
     }
 }
 
-/// The variables a pattern binds.
 pub(super) fn pattern_names(pat: &Pat, names: &mut Vec<String>) {
     match pat {
         Pat::Ident(ident) => {
@@ -1594,19 +1421,13 @@ pub(super) fn pattern_names(pat: &Pat, names: &mut Vec<String>) {
     }
 }
 
-/// How a guard's statement becomes an actor call.
 struct Plan<'a> {
     root: Root<'a>,
-    /// A smaller expression to read instead of the whole root: one whose
-    /// value can't borrow the state.
     narrow: Option<&'a Expr>,
     mode: Mode,
-    /// What replaces the guard: the callback's parameter, or for a method
-    /// receiver, the state it points to.
     receiver: bool,
 }
 
-/// Whether `child` is the node `expr`.
 fn is(expr: &Expr, child: &Expr) -> bool {
     std::ptr::eq(expr, child)
 }
@@ -1635,8 +1456,6 @@ fn is_assignment(op: &BinOp) -> bool {
 }
 
 impl<'a> Walker<'a> {
-    /// The tracked variable and guard access in `m.lock().unwrap()` and
-    /// the corresponding `read`, `write` and `expect` forms.
     fn guard_access<'e>(&self, expr: &'e Expr) -> Option<(usize, &'e Expr, Option<Mode>)> {
         let Expr::MethodCall(unwrap) = expr else {
             return None;
@@ -1653,8 +1472,6 @@ impl<'a> Walker<'a> {
             LockKind::Mutex if lock.method == "lock" => None,
             LockKind::Mutex => return None,
             LockKind::RwLock => {
-                // An extension trait on the `Arc` can take precedence over
-                // the `RwLock` method picked up through Deref.
                 let range = self.text.of(&lock.method)?;
                 match self.locks.get(&(range.start, range.end))? {
                     LockEvidence::Read => Some(Mode::Read),
@@ -1666,8 +1483,6 @@ impl<'a> Walker<'a> {
         Some((var, &lock.receiver, mode))
     }
 
-    /// `Arc::try_unwrap(m).unwrap().into_inner().unwrap()`, or the same with
-    /// `Arc::into_inner`, as `m.into_inner()` followed by the first unwrap.
     fn unwrapped(&self, expr: &Expr) -> Option<(usize, String)> {
         let Expr::MethodCall(outer) = expr else {
             return None;
@@ -1709,7 +1524,6 @@ impl<'a> Walker<'a> {
         Some((var, format!("{name}.into_inner(){ok}.{unwrap}")))
     }
 
-    /// The variable dropped by `drop(m)`.
     fn dropped(&self, expr: &Expr) -> Option<usize> {
         let Expr::Call(call) = expr else {
             return None;
@@ -1742,14 +1556,11 @@ impl<'a> Walker<'a> {
         is_drop.then(|| self.tracked(call.args.first()?)).flatten()
     }
 
-    /// Finds the statement a guard lives for, or why it lives longer. The
-    /// guard is on top of the stack.
     fn root(&self) -> Result<Root<'a>, Reason> {
         let mut index = self.stack.len().checked_sub(1).ok_or(UNLOCATED)?;
         let Some(Node::Expr(mut child)) = self.stack.get(index).copied() else {
             return Err(Reason::Unfollowed("a guard is outside any statement"));
         };
-        // Set when a plain block's final expression passes its value up.
         let mut from_block = false;
         while let Some(next) = index.checked_sub(1) {
             index = next;
@@ -1787,8 +1598,6 @@ impl<'a> Walker<'a> {
                                     }
                                 }
                             }
-                            // Each operand of `&&` and `||` drops its own
-                            // temporaries.
                             Expr::Binary(binary)
                                 if matches!(binary.op, BinOp::And(_) | BinOp::Or(_)) =>
                             {
@@ -1830,14 +1639,10 @@ impl<'a> Walker<'a> {
                         if kind == BlockKind::Body {
                             return Ok(Root::Value(child));
                         }
-                        // A plain block's value keeps its temporaries alive in
-                        // the enclosing expression.
                         index = index.saturating_sub(1);
                         from_block = true;
                     }
                     Stmt::Macro(mac) => {
-                        // A braced macro with no semicolon at the end of a
-                        // block is the block's value, not a statement.
                         let tail = mac.semi_token.is_none()
                             && matches!(
                                 index.checked_sub(1).and_then(|below| self.stack.get(below)),
@@ -1864,11 +1669,8 @@ impl<'a> Walker<'a> {
 
     fn plan(&self, guard: &'a Expr) -> Result<Plan<'a>, Reason> {
         let top = self.stack.len().checked_sub(1).ok_or(UNLOCATED)?;
-        // Climb the projections of the guard: `*guard`, `guard.field`,
-        // `guard[i]`.
         let mut chain = guard;
         let mut index = top;
-        // Parentheses alone leave the guard itself.
         let mut projected = false;
         let parent = loop {
             let below = index.checked_sub(1).and_then(|below| self.stack.get(below));
@@ -1903,9 +1705,6 @@ impl<'a> Walker<'a> {
             {
                 Some(expr)
             }
-            // An operand or index that reads a `&mut` through the guard
-            // reborrows it rather than copying it out, so other reads stay
-            // in the statement's `with`.
             _ => None,
         };
         let read = projected
@@ -1918,8 +1717,6 @@ impl<'a> Walker<'a> {
                             Expr::Return(_) | Expr::If(_) | Expr::While(_) | Expr::Closure(_)
                         )
                 }
-                // Format and assertion macros take their arguments by
-                // reference, except a `write!` destination.
                 Some(Node::Macro(args)) => {
                     !(args.destination && args.args.first().is_some_and(|first| is(first, chain)))
                 }
@@ -1948,8 +1745,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// The edit that turns `guard`'s statement into an actor call, and the
-    /// names of the functions and methods its callback might run.
     fn guard_edit(
         &mut self,
         var: usize,
@@ -1967,8 +1762,6 @@ impl<'a> Walker<'a> {
             .map(|var| (var.name.clone(), var.spelling.clone()))
             .ok_or(UNLOCATED)?;
         let holder = self.holder(var, held).ok_or(UNLOCATED)?;
-        // A field's receiver stays outside the closure, so the code moving
-        // into it must not use the receiver either.
         let base = self.place_base(held);
         let guard_range = self.text.of(guard).ok_or(UNLOCATED)?;
         let full = plan.root.full();
@@ -1980,9 +1773,6 @@ impl<'a> Walker<'a> {
         if scan.locks {
             return Err(Reason::TwoLocks);
         }
-        // Serializing readers is safe for a direct copy. Even methods on
-        // the state and implicit calls through Deref or operators could
-        // wait for another reader, so leave those reads for review.
         if access == Some(Mode::Read) && !copies_guard(full, guard) {
             return Err(Reason::RwLockRead);
         }
@@ -2004,17 +1794,11 @@ impl<'a> Walker<'a> {
             return Err(Reason::Calls);
         }
         let Scan { runs, .. } = inside;
-        // Method lookup on a guard starts at the guard and reaches the state
-        // through `Deref`; on the callback's `&mut T` it would start at the
-        // reference and could pick another trait's method. Starting at `*m`
-        // keeps the state's lookup.
         let state = if plan.receiver {
             format!("(*{name})")
         } else {
             name.clone()
         };
-        // The closure's parameter takes the binding's name, so the code that
-        // moves into the closure must not name the binding anywhere else.
         let substitute = |range: Range<usize>| -> Result<String, Reason> {
             let region = self.text.get(range.clone()).ok_or(UNLOCATED)?;
             if names_in(region, &bare_name) != Some(1)
@@ -2107,8 +1891,6 @@ impl<'a> Walker<'a> {
         Ok((self.edit(range, replacement), runs))
     }
 
-    /// Whether the node on top of the stack is inside a closure passed to a
-    /// `with` or `read` method, which may be an actor's callback.
     fn inside_actor(&self) -> bool {
         self.stack
             .iter()
@@ -2126,8 +1908,6 @@ impl<'a> Walker<'a> {
             })
     }
 
-    /// Whether an expression starts with attributes, which can't move into a
-    /// closure body.
     fn attributed(&self, expr: &Expr) -> bool {
         self.text
             .of(expr)
@@ -2135,7 +1915,6 @@ impl<'a> Walker<'a> {
             .is_some_and(|text| text.starts_with('#'))
     }
 
-    /// Whether the statement on the stack carries attributes.
     fn statement_attributes(&self) -> bool {
         self.stack.iter().rev().find_map(|node| match node {
             Node::Stmt(Stmt::Macro(mac)) => Some(!mac.attrs.is_empty()),
@@ -2166,8 +1945,6 @@ impl<'a> Walker<'a> {
         self.scopes.pop();
     }
 
-    /// A function body, with its parameters in scope and the enclosing
-    /// function's locals out of it.
     fn function(&mut self, sig: &'a syn::Signature, body: &'a Block) {
         self.scopes.push(Scope {
             vars: Vec::new(),
@@ -2194,8 +1971,6 @@ impl<'a> Walker<'a> {
         self.scopes.pop();
     }
 
-    /// Runs `f` with `generics` in scope: a type parameter named `Arc`
-    /// shadows an imported one.
     fn generic(&mut self, generics: &syn::Generics, f: impl FnOnce(&mut Self)) {
         let mut scope = ItemScope::new([], false);
         for param in &generics.params {
@@ -2211,7 +1986,6 @@ impl<'a> Walker<'a> {
         self.items.pop();
     }
 
-    /// The condition of an `if` or `while`, declaring what its `let`s bind.
     fn condition(&mut self, expr: &'a Expr) {
         match expr {
             Expr::Binary(binary) if matches!(binary.op, BinOp::And(_)) => {
@@ -2266,8 +2040,6 @@ impl<'a> Walker<'a> {
         self.stack.pop();
     }
 
-    /// Every name in tokens that fix can't read as expressions counts as a
-    /// use, including the variables a string might capture.
     fn mentions(&mut self, tokens: TokenStream) {
         for token in tokens {
             match token {
@@ -2292,7 +2064,6 @@ impl<'a> Walker<'a> {
     }
 }
 
-/// The last segment of a call's path, as `read` in `Actor::read(&a, f)`.
 fn callee_name(func: &Expr) -> Option<String> {
     match func {
         Expr::Path(path) => path
@@ -2316,7 +2087,6 @@ fn is_unwrap(call: &syn::ExprMethodCall) -> bool {
         }
 }
 
-/// Whether the only operation under a read guard is its own dereference.
 fn copies_guard(full: Full<'_>, guard: &Expr) -> bool {
     fn unparen(mut expr: &Expr) -> &Expr {
         while let Expr::Paren(paren) = expr {
@@ -2338,8 +2108,6 @@ fn contains_let(expr: &Expr) -> bool {
     }
 }
 
-/// Whether a `let` initializer extends the life of a temporary, such as
-/// `let r = &*guard;`, which keeps the guard until `r` goes out of scope.
 fn let_extends(expr: &Expr) -> bool {
     match expr {
         Expr::Reference(_) | Expr::RawAddr(_) => true,
@@ -2383,8 +2151,6 @@ fn binds_by_reference(pat: &Pat) -> bool {
 
 impl<'a> Visit<'a> for Walker<'a> {
     fn visit_item(&mut self, item: &'a Item) {
-        // A `macro_rules!` body can name the locals in scope where it is
-        // defined, so it is read without an item barrier.
         if let Item::Macro(mac) = item {
             self.mac(&mac.mac);
             return;
@@ -2527,7 +2293,6 @@ impl<'a> Visit<'a> for Walker<'a> {
                     );
                 }
             }
-            // A closure's or an async block's `return` is its own.
             Expr::Closure(closure) => {
                 self.returns.push(None);
                 self.scoped(|walker| {
@@ -2597,23 +2362,16 @@ impl<'a> Visit<'a> for Walker<'a> {
     }
 }
 
-/// What the code that would run under a guard does, apart from the guard.
 struct Scan<'w, 'a> {
     walker: &'w Walker<'a>,
     guard: &'a Expr,
-    /// Inside a closure or async block, which doesn't run here.
     deferred: usize,
-    /// Inside code that runs only on some paths: a branch, a match arm, the
-    /// second operand of `&&` or `||`, or a loop body.
     branch: usize,
     awaits: bool,
     locks: bool,
     leaves: bool,
     calls: bool,
     unfollowed: Option<&'static str>,
-    /// The names of the functions and methods the code might run: method
-    /// names and every path that doesn't name a local. A field or a local
-    /// doesn't run anything.
     runs: BTreeSet<String>,
 }
 
@@ -2640,9 +2398,6 @@ impl<'w, 'a> Scan<'w, 'a> {
         }
     }
 
-    /// Whether `expr` is the state or a value computed from it alone: the
-    /// guard reached through fields, indexes, unary operators, borrows,
-    /// casts and method calls, or a macro, such as `write!`, given the guard.
     fn computed_from_state(&self, mut expr: &Expr) -> bool {
         loop {
             if is(expr, self.guard) {
@@ -2702,22 +2457,15 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
             Expr::MethodCall(call) if LOCKS.contains(&call.method.to_string().as_str()) => {
                 self.locks = true;
             }
-            // `Actor::read(&a, f)` and `Mutex::lock(&m)` take locks too.
             Expr::Call(call)
                 if callee_name(&call.func).is_some_and(|name| LOCKS.contains(&name.as_str())) =>
             {
                 self.locks = true;
             }
-            // An actor's callback can't use any actor, and a function or a
-            // method on another value might. Only methods on the state, or
-            // on a value computed from it, are called under the guard.
             Expr::Call(_) => self.calls = true,
             Expr::MethodCall(call) if !self.computed_from_state(&call.receiver) => {
                 self.calls = true
             }
-            // Indexing, field access (through a custom `Deref`) and unary
-            // operators on another value call its trait implementations, and
-            // assigning to another place drops its old value.
             Expr::Index(index) if !self.computed_from_state(&index.expr) => self.calls = true,
             Expr::Field(field) if !self.computed_from_state(&field.base) => self.calls = true,
             Expr::Unary(unary)
@@ -2727,9 +2475,6 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
                 self.calls = true;
             }
             Expr::Assign(assign) if !self.computed_from_state(&assign.left) => self.calls = true,
-            // An operator calls its operands' trait implementation, such as
-            // `PartialEq` or `AddAssign`, which might use an actor too, unless
-            // both operands are the state's or literals.
             Expr::Binary(binary)
                 if !matches!(binary.op, BinOp::And(_) | BinOp::Or(_))
                     && [&binary.left, &binary.right].into_iter().any(|operand| {
@@ -2744,9 +2489,6 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
                 self.deferred -= 1;
                 return;
             }
-            // A closure captures a variable it may move, so a value moved on
-            // only one path would be dropped when the closure returns rather
-            // than at the end of its scope.
             Expr::Path(_)
                 if self.branch > 0 && self.deferred == 0 && self.walker.local(expr).is_some() =>
             {
@@ -2801,9 +2543,6 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
             Some(parsed) => {
                 for (position, arg) in parsed.args.iter().enumerate() {
                     let value = parsed.named(position, arg).unwrap_or(arg);
-                    // Formatting a value calls its `Display` or `Debug`, and
-                    // `write!` calls its destination's `write_fmt`, which
-                    // might use an actor like any other call.
                     let calls = if position == parsed.format {
                         match value {
                             Expr::Lit(ExprLit {
@@ -2833,8 +2572,6 @@ impl<'a> Visit<'a> for Scan<'_, 'a> {
 
     fn visit_item(&mut self, _: &'a Item) {}
 
-    /// A `let` drops its value at the end of the block, inside the callback,
-    /// and a `Drop` might use an actor.
     fn visit_local(&mut self, local: &'a Local) {
         if self.deferred == 0 {
             self.calls = true;
@@ -2848,7 +2585,6 @@ mod tests {
     use super::*;
     use crate::fix::source::prune_imports;
 
-    /// Marks the text that stands in for Clippy's resolved `Mutex` spans.
     pub(super) fn mutex_spans(source: &str, mutexes: &[&str]) -> LockSpans {
         mutexes
             .iter()
@@ -2863,7 +2599,6 @@ mod tests {
             .collect()
     }
 
-    /// Plans `source` as the only file of its package.
     pub(super) fn outcome(source: &str, mutexes: &[&str]) -> Outcome {
         let spans = mutex_spans(source, mutexes);
         let file = Path::new("lib.rs");
@@ -2873,8 +2608,6 @@ mod tests {
         settled.pop().map(|(_, outcome)| outcome).unwrap()
     }
 
-    /// Plans `source` and applies the edits, with the imports they leave
-    /// unused removed, as `fix` does.
     pub(super) fn fix(source: &str, mutexes: &[&str]) -> (String, Vec<(String, Reason)>) {
         let outcome = outcome(source, mutexes);
         let mut edits = outcome.edits;
@@ -2893,8 +2626,6 @@ mod tests {
         (fixed, refusals)
     }
 
-    /// Asserts that nothing in `body` changes and that `name` is refused
-    /// for `reason`.
     fn refused(body: &str, name: &str, reason: Reason) {
         let source = format!("use std::sync::{{Arc, Mutex}};\n{body}\n");
         let (fixed, refusals) = fix(&source, &["Mutex"]);
@@ -3178,8 +2909,6 @@ fn hits() -> u32 {
             "fn f(other: &[u32]) { let m = Arc::new(Mutex::new(0usize)); *m.lock().unwrap() += other.len(); }",
             "fn f(other: &[u32]) { let m = Arc::new(Mutex::new(0usize)); *m.lock().unwrap() += (other, 1).0.len(); }",
             "fn f(other: &[u32]) { let m = Arc::new(Mutex::new(0usize)); let _n = (other, m.lock().unwrap().len()).0.len(); }",
-            // Formatting calls `Display` or `Debug`, and `write!` calls the
-            // destination's `write_fmt`.
             "fn f(other: &str) { let m = Arc::new(Mutex::new(0u32)); let _s = format!(\"{} {}\", *m.lock().unwrap(), other); }",
             "fn f(other: &str) { let m = Arc::new(Mutex::new(0u32)); let _s = format!(\"{} {other}\", *m.lock().unwrap()); }",
             "const OTHER: &str = \"\";\nfn f() { let m = Arc::new(Mutex::new(0u32)); assert_eq!(*m.lock().unwrap(), 0, \"{}\", OTHER); }",
@@ -3188,9 +2917,6 @@ fn hits() -> u32 {
         ] {
             refused(body, "m", Reason::Calls);
         }
-        // Without types, an operand read through the guard might be a `&mut`
-        // that the operator reborrows, so the whole statement stays in the
-        // callback, call and all.
         refused(
             "fn other() -> u32 { 1 }\nfn f() -> u32 { let m = Arc::new(Mutex::new(0u32)); *m.lock().unwrap() + other() }",
             "m",

@@ -75,16 +75,12 @@ impl Backoff {
         delay.saturating_mul(self.factor).min(self.max)
     }
 
-    /// How long to wait for `delay`, the current delay of the sequence.
     pub(crate) fn wait(&self, delay: Duration) -> Duration {
         if !self.jitter {
             return delay;
         }
         let half = delay / 2;
         let spread = delay.saturating_sub(half);
-        // A spread beyond u64 nanoseconds, over 584 years, is drawn from its
-        // first 584 years. Its half alone is past the 30-year cap on sleeps,
-        // so the wait is the same.
         let nanos = u64::try_from(spread.as_nanos()).unwrap_or(u64::MAX);
         half.saturating_add(Duration::from_nanos(crate::random::up_to(nanos)))
     }

@@ -1,5 +1,3 @@
-//! Drive a TCP connection through a mailbox, with explicit replies and shutdown.
-
 use adamantium::{AsyncActor, Reply, Tasks};
 use std::io;
 use tokio::{

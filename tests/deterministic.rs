@@ -50,8 +50,6 @@ async fn split_increment() -> usize {
         .map(|_| {
             let count = count.clone();
             async move {
-                // No awaits between the read and write: switching only on Pending
-                // would never detect this lost update.
                 let previous = count.read(|n| *n);
                 count.with(|n| *n = previous + 1);
             }
@@ -234,7 +232,6 @@ fn step_exhaustion_and_deadlock_are_distinct_failures_and_replay() {
             .kind(),
         FailureKind::Deadlock
     );
-    // An engine failure must reset the execution mark for subsequent work.
     assert_eq!(Actor::new(7).snapshot(), 7);
     testing::check(config(), atomic_increment).unwrap();
 }
@@ -724,8 +721,6 @@ fn foreign_receiver_stream_cannot_bypass_the_harness_boundary() {
 
 #[test]
 fn replies_and_watches_support_the_model_and_reject_foreign_handles() {
-    /// Runs `body` once in the harness with a value made outside it, and
-    /// returns how the execution failed.
     fn carried_in<V: Send + 'static>(value: V, body: fn(V)) -> FailureKind {
         let value = Mutex::new(Some(value));
         testing::check(
@@ -784,7 +779,6 @@ fn replies_and_watches_support_the_model_and_reject_foreign_handles() {
         FailureKind::Panic
     );
     assert_eq!(carried_in(watcher, drop), FailureKind::Panic);
-    // Unwinding drops the carried watch without panicking a second time.
     assert_eq!(
         carried_in(watch.clone(), |watch| {
             let _held = watch;
@@ -796,8 +790,6 @@ fn replies_and_watches_support_the_model_and_reject_foreign_handles() {
     assert!(!watch.is_closed(), "the rejected drop left the count alone");
     assert_eq!(watch.get(), "", "nothing was sent from the harness");
 
-    // A destructor that sends while unwinding reports the first panic
-    // rather than aborting on a second.
     struct SendOnDrop(Watch<String>);
     impl Drop for SendOnDrop {
         fn drop(&mut self) {
@@ -864,7 +856,6 @@ fn explain_reconstructs_named_task_timeline_without_payloads_or_perturbation() {
         tasks.spawn_named("channel-reader", async move {
             let first = rx.receive().await;
             assert!(first.is_some());
-            // Second receive blocks forever because `tx` stays open in `root`.
             let _second = rx.receive().await;
             Ok(())
         });
@@ -872,7 +863,6 @@ fn explain_reconstructs_named_task_timeline_without_payloads_or_perturbation() {
         tasks.spawn_named("watch-waiter", async move {
             let first = watcher.receive().await;
             assert!(first.is_some());
-            // Second receive blocks forever because `watch` stays open in `root`.
             let _second = watcher.receive().await;
             Ok(())
         });
@@ -898,7 +888,6 @@ fn explain_reconstructs_named_task_timeline_without_payloads_or_perturbation() {
         assert_eq!(timeline.failure(), Some(FailureKind::Deadlock));
         assert_eq!(timeline.replay(), failure.replay());
 
-        // Named tasks are reconstructed.
         let task_names: Vec<&str> = timeline
             .tasks()
             .iter()
@@ -908,7 +897,6 @@ fn explain_reconstructs_named_task_timeline_without_payloads_or_perturbation() {
         assert!(task_names.contains(&"channel-reader"), "{task_names:?}");
         assert!(task_names.contains(&"watch-waiter"), "{task_names:?}");
 
-        // Virtual timestamps advance to 15ms and wakeups are recorded.
         let saw_timer_wakeup = timeline.events().iter().any(|event| {
             event.timestamp() == Duration::from_millis(15)
                 && matches!(
@@ -936,7 +924,6 @@ fn explain_reconstructs_named_task_timeline_without_payloads_or_perturbation() {
         });
         assert!(saw_channel_wakeup, "{timeline}");
 
-        // Waiting tasks at deadlock identify which task is waiting on which operation.
         let reader_waiting = timeline.waiting().iter().any(|entry| {
             entry.task_name() == Some("channel-reader") && entry.operation() == "channel.receive"
         });
@@ -958,7 +945,6 @@ fn explain_reconstructs_named_task_timeline_without_payloads_or_perturbation() {
         );
         assert!(report.contains("15ms"), "{report}");
 
-        // Payloads are excluded from both Display and Debug output.
         assert!(!report.contains("secret-channel-payload"), "{report}");
         assert!(!report.contains("secret-watch-payload"), "{report}");
         assert!(!report.contains("initial-watch-payload"), "{report}");
@@ -1067,7 +1053,6 @@ fn explain_tracks_successive_wakeups_and_caught_panic_waiter_drops() {
     use futures_util::FutureExt;
 
     async fn two_receivers_and_caught_panic() {
-        // 1. Drop a pending sleep during a caught panic; execution continues cleanly.
         assert!(
             catch_unwind(AssertUnwindSafe(|| {
                 let mut sleep = std::pin::pin!(time::sleep(Duration::from_millis(50)));
@@ -1079,8 +1064,6 @@ fn explain_tracks_successive_wakeups_and_caught_panic_waiter_drops() {
             .is_err()
         );
 
-        // 2. Two receivers block on one channel, then a sender sends twice before
-        // either receiver runs again.
         let (tx, rx) = Channel::<u32>::bounded(2).split();
         let mut tasks = Tasks::<()>::new();
 
@@ -1089,7 +1072,6 @@ fn explain_tracks_successive_wakeups_and_caught_panic_waiter_drops() {
             assert_eq!(rx1.receive().await, Some(1));
             Ok(())
         });
-        // Yield until receiver-1 has polled and blocked on the channel.
         time::sleep(Duration::from_millis(1)).await;
 
         let rx2 = rx.clone();
@@ -1097,7 +1079,6 @@ fn explain_tracks_successive_wakeups_and_caught_panic_waiter_drops() {
             assert_eq!(rx2.receive().await, Some(2));
             Ok(())
         });
-        // Yield until receiver-2 has also polled and blocked on the channel.
         time::sleep(Duration::from_millis(1)).await;
 
         tx.send(1).await.unwrap();

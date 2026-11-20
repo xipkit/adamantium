@@ -52,9 +52,7 @@ impl Cancellation {
         self.request();
     }
 
-    /// Records the request. A scope's destructor calls this directly, since
-    /// it may run while unwinding, when `cancel`'s harness check would panic
-    /// a second time.
+    // Drop calls this directly to avoid a second panic from cancel's ownership check.
     fn request(&self) {
         // This handle keeps the watch open, so the send cannot fail.
         self.requested.send(true).unwrap_or(());
@@ -167,16 +165,10 @@ impl Default for Cancellation {
     }
 }
 
-/// Why a cancellable scope did not produce a value.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ScopeError<E> {
-    /// The body or a child returned an error.
     Failed(E),
-    /// The caller requested shutdown. From [`Tasks::run_with_grace`], every
-    /// task finished within the grace period.
     Cancelled,
-    /// The scope's deadline elapsed. From [`Tasks::run_with_grace`], the
-    /// grace period ran out and the remaining tasks were aborted.
     DeadlineExceeded,
 }
 
@@ -199,8 +191,6 @@ impl<E: std::error::Error + 'static> std::error::Error for ScopeError<E> {
     }
 }
 
-/// Why a wait ended before its work did: the caller requested shutdown, or
-/// the deadline elapsed.
 pub(crate) enum Shutdown {
     Cancelled,
     DeadlineExceeded,
@@ -215,9 +205,6 @@ impl Shutdown {
     }
 }
 
-/// Waits for cancellation or the deadline, whichever comes first. A request
-/// already present at a poll is reported by that poll, and cancellation wins
-/// over an equally ready deadline.
 pub(crate) async fn shutdown(cancellation: &Cancellation, deadline: Option<Instant>) -> Shutdown {
     let mut cancelled = pin!(cancellation.cancelled());
     let mut elapsed = pin!(elapsed(deadline));
@@ -233,14 +220,12 @@ pub(crate) async fn shutdown(cancellation: &Cancellation, deadline: Option<Insta
     .await
 }
 
-/// Waits until `deadline`, or forever for `None`.
 async fn elapsed(deadline: Option<Instant>) {
     let Some(deadline) = deadline else {
         return std::future::pending().await;
     };
     let mut sleep = pin!(time::sleep_until(deadline));
-    // Tokio timers round up to milliseconds. Check the clock as well so an
-    // expired deadline wins before polling the waiter's work on every poll.
+    // Tokio rounds timers up. Check the clock so expired deadlines win this poll.
     poll_fn(|cx| {
         if deadline <= time::now() || sleep.as_mut().poll(cx).is_ready() {
             Poll::Ready(())
@@ -251,34 +236,26 @@ async fn elapsed(deadline: Option<Instant>) {
     .await
 }
 
-/// The errors of failed tasks that nobody has claimed, oldest first. A task
-/// records its error here as it fails, whatever became of its handle, so the
-/// scope can always find it. A panic already observed by the scope also stays
-/// here until draining finishes, even if cancellation interrupts the drain.
+// Record errors even when no handle remains. Keep an observed panic until
+// cleanup finishes, including when cancellation interrupts the drain.
 struct Errors<E> {
     next: u64,
     recorded: BTreeMap<u64, E>,
     panic: Option<Box<dyn Any + Send>>,
-    /// Whether a recorded error has lost its handle, so that nothing but the
-    /// scope can ever report it.
     orphaned: bool,
-    /// Whether reaping found a task cancelled that the scope never aborted.
-    /// Its runtime is shutting down, and its result is gone.
+    // Whether reaping found a task cancelled that the scope never aborted.
+    // Its runtime is shutting down, and its result is gone.
     reaped_cancelled: bool,
 }
 
 impl<E> Errors<E> {
-    /// Whether a child failure has to stop a running body: an error nobody
-    /// can claim, or a panic.
     fn must_stop(&self) -> bool {
         self.orphaned || self.panic.is_some()
     }
 }
 
-/// What a scope shares with its tasks and their handles.
 struct Ledger<E> {
     errors: Lock<Errors<E>>,
-    /// Woken when a running body first has to stop.
     on_stop: WaitQueue,
 }
 
@@ -288,7 +265,6 @@ impl<E> Ledger<E> {
     }
 }
 
-/// What a failed task sends its handle: where to claim the error.
 struct Receipt(u64);
 
 type Shared<V> = Arc<Lock<V>>;
@@ -348,8 +324,6 @@ fn take_oldest<E>(errors: &SharedErrors<E>) -> Option<E> {
     errors.lock().recorded.pop_first().map(|(_, error)| error)
 }
 
-/// Marks that a recorded error can no longer reach anyone through its handle,
-/// and wakes a body waiting in [`stopped`].
 fn orphan<E>(errors: &SharedErrors<E>) {
     let first = {
         let mut errors = errors.lock();
@@ -362,8 +336,6 @@ fn orphan<E>(errors: &SharedErrors<E>) {
     }
 }
 
-/// Keeps the first panic among the scope's join errors, and wakes a body
-/// waiting in [`stopped`]. Returns whether `join_error` was a panic.
 fn keep_panic<E>(errors: &SharedErrors<E>, join_error: JoinError) -> bool {
     let Ok(payload) = join_error.try_into_panic() else {
         return false;
@@ -382,8 +354,6 @@ fn keep_panic<E>(errors: &SharedErrors<E>, join_error: JoinError) -> bool {
     true
 }
 
-/// Notes what a task taken out of the set early, before the scope joins,
-/// left behind. Returns whether it panicked.
 fn reaped<E>(errors: &SharedErrors<E>, result: Result<(), JoinError>) -> bool {
     match result {
         Ok(()) => false,
@@ -395,15 +365,10 @@ fn reaped<E>(errors: &SharedErrors<E>, result: Result<(), JoinError>) -> bool {
     }
 }
 
-/// Waits for a task of `set` to finish and takes it out of the set, or
-/// returns `None` once the set is empty.
 async fn join_next(set: &Shared<JoinSet>) -> Option<Result<(), JoinError>> {
     poll_fn(|cx| lock(set).poll_join_next(cx)).await
 }
 
-/// Takes tasks out of `set` as they finish while a body runs, so the scope
-/// lets go of them even if the body never spawns again. Returns once a task
-/// has panicked, with the panic kept for the scope to resume.
 async fn reap<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
     poll_fn(|cx| {
         loop {
@@ -422,17 +387,13 @@ async fn reap<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
     .await
 }
 
-/// Reaps finished tasks until a child failure has to stop the body: an
-/// error is orphaned, or a task panics, wherever the panic was found.
-/// Returns at once if one already has.
 async fn stopped<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
     let must_stop = async {
         loop {
             if errors.lock().must_stop() {
                 return;
             }
-            // Listen before checking again, so a failure between the two
-            // checks still wakes this wait.
+            // Register before the second check so a concurrent failure wakes the wait.
             let listener = errors.on_stop.listen();
             if errors.lock().must_stop() {
                 return;
@@ -451,8 +412,8 @@ async fn stopped<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
     };
 }
 
-/// Sends a task's result to its handle. An error the handle is no longer
-/// there to take stays recorded, now orphaned.
+// Sends a task's result to its handle. An error the handle is no longer
+// there to take stays recorded, now orphaned.
 fn deliver<T, E>(
     errors: &SharedErrors<E>,
     tx: Reply<Result<T, Receipt>>,
@@ -463,8 +424,6 @@ fn deliver<T, E>(
     }
 }
 
-/// Runs a task of [`Tasks::spawn_handled`]: its error goes to `on_error`, in
-/// place of the scope's record, so it never fails the scope.
 async fn handled<X>(future: impl Future<Output = Result<(), X>>, on_error: impl FnOnce(X)) {
     if let Err(error) = future.await {
         on_error(error);
@@ -512,9 +471,6 @@ fn no_orphan() -> ! {
 /// [`run`](Self::run) for the common shape, or [`new`](Self::new),
 /// [`spawn`](Self::spawn) and [`join`](Self::join) by hand.
 pub struct Tasks<E> {
-    /// Shared with the loop of [`run`](Self::run) or
-    /// [`run_until`](Self::run_until), which reaps finished tasks while the
-    /// body holds the scope.
     set: Shared<JoinSet>,
     world: World,
     errors: SharedErrors<E>,
@@ -951,33 +907,20 @@ impl<E: Send + 'static> Tasks<E> {
     }
 
     /// Runs a scope until completion, cancellation, or an absolute deadline.
-    /// Pass `None` for no deadline. A deadline uses [`crate::time`].
-    /// The body and children can observe clones of `cancellation` themselves.
+    /// Build deadlines with [`crate::time`] or pass `None` for no deadline.
     ///
-    /// A request already present at a poll wins over polling the body, including
-    /// before its first poll. Cancellation wins over an equally ready deadline.
-    /// On shutdown the body is dropped, the signal is cancelled, and async
-    /// children are aborted and drained. Their synchronous destructors finish
-    /// before return; async cleanup is not guaranteed a chance to run. Registered
-    /// [`spawn_blocking`](Self::spawn_blocking) closures that have started are
-    /// waited for, so a deadline bounds work, not cleanup time. Blocking work
-    /// should check the signal and finish promptly.
+    /// Each poll checks cancellation and then the deadline before polling the
+    /// body. A child panic or orphaned error also stops the body. Shutdown
+    /// cancels the signal, aborts async children, and waits for their
+    /// destructors and any started [`Self::spawn_blocking`] closures.
     ///
-    /// Precedence is: child panic (resumed after draining), an already returned
-    /// body error, oldest unclaimed child error (even during cleanup), then the
-    /// selected shutdown reason. Once cleanup starts its reason is fixed.
-    /// As in [`run`](Self::run), an [orphaned](Task) child error stops the body
-    /// at its next `await`, which also cancels the signal, and the scope fails
-    /// with the oldest unclaimed error. A child panic stops the body the same
-    /// way, and is resumed once the other children are drained. A shutdown
-    /// request present at the same poll still wins the poll, but that error or
-    /// panic then wins the result. Finished children are let go of while the
-    /// body runs, as in `run`.
+    /// In order of precedence, the result is a child panic resumed after
+    /// cleanup, a returned body error, the oldest unclaimed child error, or
+    /// the shutdown reason selected when cleanup began.
     ///
-    /// Dropping this future after it starts, or panicking in its body, signals
-    /// cancellation and requests aborts, but cannot wait for cleanup. Started
-    /// blocking closures may outlive it. To guarantee cleanup, request
-    /// cancellation and keep awaiting this future instead of dropping it.
+    /// Dropping the started future or panicking in its body requests abort
+    /// without waiting. To ensure cleanup, request cancellation and await
+    /// this future to completion.
     ///
     /// ```
     /// use adamantium::{Cancellation, ScopeError, Tasks, time};
@@ -1034,59 +977,23 @@ impl<E: Send + 'static> Tasks<E> {
         .await
     }
 
-    /// Runs a scope that shuts down gracefully: a cancellation request stops
-    /// the body, as in [`run_until`](Self::run_until), but lets the tasks
-    /// already admitted finish for up to `grace` before aborting the rest.
-    /// This is the shape of a server: the body accepts requests and spawns a
-    /// task for each, and on shutdown it stops accepting while the requests
-    /// in flight complete.
+    /// Runs a scope that gives its children time to finish on cancellation.
     ///
-    /// The scope goes through up to three phases.
+    /// Before cancellation this behaves like [`Self::run_until`] without a
+    /// deadline. A cancellation request drops the body and starts the grace
+    /// period. Queued blocking work can still start and [`Spawner`] can add
+    /// children until the drain ends. Tasks that admit work should observe
+    /// the cancellation signal.
     ///
-    /// 1. **Running.** The body runs as in [`run_until`](Self::run_until)
-    ///    with no deadline: an [orphaned](Task) child error or a child panic
-    ///    stops it at its next `await`, aborts the other tasks and fails the
-    ///    scope, and a request already present at a poll wins over polling
-    ///    the body, including before its first poll. A body that returns
-    ///    joins the tasks as [`join`](Self::join) does, waiting as long as
-    ///    they take until shutdown is requested.
-    /// 2. **Draining.** A request drops the body if it is still running, so
-    ///    nothing it was doing, such as accepting, continues. The tasks keep
-    ///    running and the grace period starts. Admission stays open as while
-    ///    joining: a task can still add siblings through a
-    ///    [`Spawner`] until the last task ends or the grace period runs out,
-    ///    so a request can start the work it needs to finish. A task that
-    ///    admits new work itself, such as a second accept loop, must stop on
-    ///    the signal; tasks that should simply finish can ignore it. Queued
-    ///    [`spawn_blocking`](Self::spawn_blocking) closures may still start.
-    ///    Draining ends when the last task ends. A task error or panic, or a
-    ///    failed body, ends it at once, aborting the rest as `join` does.
-    /// 3. **Aborting.** If the grace period runs out first, the remaining
-    ///    tasks are aborted and drained as in `run_until`: their synchronous
-    ///    destructors finish, queued blocking closures do not start, and
-    ///    started blocking closures are waited for, so `grace` bounds the
-    ///    work, not the cleanup. A grace period of zero aborts at once, as
-    ///    `run_until` does on cancellation. A grace period too long to
-    ///    represent as an instant never runs out.
+    /// If all tasks finish in time, returns [`ScopeError::Cancelled`]. At the
+    /// deadline, aborts remaining tasks and waits for cleanup as in
+    /// `run_until`, then returns [`ScopeError::DeadlineExceeded`]. The
+    /// deadline wins a tie, zero grace aborts immediately, and an
+    /// unrepresentable deadline never expires.
     ///
-    /// The shutdown reason is fixed when the phase ends: [`ScopeError::Cancelled`]
-    /// if draining ended with every task finished, or
-    /// [`ScopeError::DeadlineExceeded`] once the grace period has run out,
-    /// which a later end of the tasks cannot undo. The grace deadline wins
-    /// over a drain that becomes complete at the same poll. Once shutdown is
-    /// requested, the scope never returns the body's value, even if the body
-    /// had returned and every task then finished in time.
-    ///
-    /// Precedence is that of `run_until`: a child panic (resumed after
-    /// draining), then a returned body error, then the oldest unclaimed child
-    /// error, including one recorded during the drain or the aborts, then the
-    /// shutdown reason. Errors of [`spawn_handled`](Self::spawn_handled)
-    /// tasks go to their handlers and never end the drain.
-    ///
-    /// The scope cancels the signal itself on failure, as `run_until` does,
-    /// and dropping this future after it starts signals cancellation and
-    /// requests aborts without waiting for cleanup, so it also cuts the
-    /// grace period short.
+    /// Failures end the drain early and take precedence as in `run_until`.
+    /// Errors handled by [`Self::spawn_handled`] let the drain continue.
+    /// Dropping the started future requests abort without waiting.
     ///
     /// ```
     /// use adamantium::{Cancellation, ScopeError, Tasks, time};
@@ -1391,9 +1298,6 @@ impl<E: Send + 'static> Tasks<E> {
         self.propagate_panic();
     }
 
-    /// Lets the tasks finish for up to `grace`, then aborts and drains the
-    /// rest, and returns the shutdown reason: cancelled if every task
-    /// finished in time, or the deadline if the grace period ran out first.
     async fn drain_with_grace(&mut self, grace: Duration, body_failed: bool) -> Shutdown {
         let deadline = time::now().checked_add(grace);
         #[expect(
@@ -1416,9 +1320,7 @@ impl<E: Send + 'static> Tasks<E> {
         reason
     }
 
-    /// Ends a scope whose body an orphaned error or a task panic stopped.
     async fn fail<R>(mut self) -> Result<R, E> {
-        // A panic is resumed here, once the other tasks are drained.
         self.settle(true).await;
         match take_oldest(&self.errors) {
             Some(error) => Err(error),
@@ -1487,8 +1389,7 @@ impl<E: Send + 'static> Tasks<E> {
         no_result()
     }
 
-    // Keep the payload in the scope: cancellation can interrupt value or settle
-    // while they drain, and must not discard an already observed panic.
+    // Keep the panic in the scope so it survives a cancelled drain.
     fn remember_panic(&mut self, join_error: JoinError) {
         if keep_panic(&self.errors, join_error) {
             self.abort();
@@ -1555,9 +1456,7 @@ impl<T, E> Drop for Task<T, E> {
         if std::thread::panicking() && self.world != World::current() {
             return;
         }
-        // Closing first means a task failing from now on finds no handle and
-        // orphans its error itself, while one that already failed left its
-        // receipt here.
+        // Close before taking the receipt. Later failures orphan their own errors.
         self.rx.close();
         if let Ok(Err(_)) = self.rx.try_receive() {
             orphan(&self.errors);
@@ -1608,8 +1507,7 @@ where
     T: Send + 'static,
     E: Send + 'static,
 {
-    // The loop comes back for another item after every join, and an iterator
-    // may resume or panic if it is called again after its first `None`.
+    // Stop reading the iterator after None. It may resume or panic.
     let mut items = items.into_iter().fuse();
     let limit = limit.max(1);
     crate::runtime::in_world(World::current(), async move {
@@ -1654,14 +1552,11 @@ where
         }
         finished.sort_unstable_by_key(|(index, _)| *index);
         let mut values: Vec<T> = finished.into_iter().map(|(_, value)| value).collect();
-        // The indexes and the growth of `finished` left spare room that the
-        // caller would otherwise keep for as long as it keeps the results.
         values.shrink_to_fit();
         Ok(values)
     })
 }
 
-/// What the items of a [`first_ok`] have produced so far.
 struct Outcomes<T, E> {
     winner: Option<T>,
     errors: Vec<(usize, E)>,
@@ -2051,8 +1946,8 @@ mod retention_tests {
         );
     }
 
-    /// Spawns connections that finish at once, then waits without spawning
-    /// again: only the running scope's own reaping can let go of them.
+    // Spawns connections that finish at once, then waits without spawning
+    // again: only the running scope's own reaping can let go of them.
     async fn idle_server_scenario() {
         Tasks::<()>::run(async |tasks| {
             let served = crate::Actor::new(0);
@@ -2099,8 +1994,8 @@ mod retention_tests {
         );
     }
 
-    /// The scope's loop and the next spawn race to reap the same panic.
-    /// Whichever finds it, the body stops and the sibling is drained.
+    // The scope's loop and the next spawn race to reap the same panic.
+    // Whichever finds it, the body stops and the sibling is drained.
     async fn panic_reaped_by_either_scenario() {
         let dropped = crate::Actor::new(false);
         let guard = Dropped(dropped.clone());

@@ -1,5 +1,3 @@
-//! A provider that answers from a script instead of a service, for tests.
-
 use std::collections::BTreeMap;
 
 use adamantium::Actor;
@@ -9,26 +7,22 @@ use crate::style::provider::{
     Answer, Evaluation, FileReview, LineRange, Locations, Provider, ReviewError, Verdict,
 };
 
-/// Answers every file with the same verdicts, or fails as configured.
 pub(crate) struct FakeProvider {
     pub answers: Option<Vec<Verdict>>,
     pub refuse_input: bool,
     pub locations: FakeLocations,
     pub reviews: Actor<Vec<(String, String, Option<String>)>>,
-    /// The rules each `locate` call was asked about.
     pub locates: Actor<Vec<Vec<String>>>,
 }
 
 pub(crate) enum FakeLocations {
-    /// No location for any rule.
     Unplaced,
-    /// These locations, whatever the rules.
     Fixed(Vec<Option<LineRange>>),
-    /// A service failure.
     Unavailable,
 }
 
 impl FakeProvider {
+    /// Returns the given verdicts for each review.
     pub fn answering(verdicts: &[Verdict]) -> Self {
         Self {
             answers: Some(verdicts.to_vec()),
@@ -39,6 +33,7 @@ impl FakeProvider {
         }
     }
 
+    /// Returns a service error on review.
     pub fn unavailable() -> Self {
         Self {
             answers: None,
@@ -49,6 +44,7 @@ impl FakeProvider {
         }
     }
 
+    /// Counts attempted reviews.
     pub fn review_count(&self) -> usize {
         self.reviews.with(|reviews| reviews.len())
     }

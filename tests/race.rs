@@ -1,5 +1,3 @@
-//! These tests run with and without the `tokio` feature, so they poll by hand.
-
 use adamantium::{Channel, race};
 use std::{
     future::{Future, pending, ready},
@@ -15,7 +13,6 @@ fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
 }
 
-/// Counts its polls and its drop, and never finishes.
 struct Watched {
     polls: Arc<AtomicUsize>,
     drops: Arc<AtomicUsize>,
@@ -228,7 +225,6 @@ mod until_tests {
             assert_eq!(drops.load(Ordering::Relaxed), 1);
         }
 
-        // A cancellation already present wins without polling the wrapped future.
         let (watched, polls, _) = Watched::new();
         assert_eq!(
             until(&cancellation, None, watched).await,

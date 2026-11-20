@@ -1,4 +1,3 @@
-//! Conservative fixes: compiler suggestions first, then guide-approved syntax.
 use std::{
     collections::BTreeMap,
     fs,
@@ -35,6 +34,7 @@ struct StateSource {
     locks: state::LockSpans,
 }
 
+/// Applies compiler suggestions and safe migration rewrites, or prints a diff.
 pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<ExitCode> {
     let root = manifest::root(path)?.canonicalize()?;
     let mut diagnostics = Vec::new();
@@ -47,7 +47,6 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
     }
     let mut edits = Vec::new();
     let mut fallback = Vec::new();
-    // The imports that each file's accepted rewrites can leave unused.
     let mut imports: BTreeMap<PathBuf, Vec<&[&str]>> = BTreeMap::new();
     for diagnostic in &diagnostics {
         let mut suggestions = Vec::new();
@@ -59,8 +58,6 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
             accept(&mut edits, suggestion);
         }
     }
-    // Every compiler suggestion gets priority, even when another diagnostic
-    // appeared first in Cargo's stream.
     for (file, mut calls) in expressions::callees(fallback, &root) {
         for api in [Api::Core, Api::Tokio] {
             if calls.values().any(|call| call.api() == api)
@@ -84,9 +81,6 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
                 .extend_from_slice(expressions::IMPORTS);
         }
     }
-    // A shared-state rewrite changes every use of a binding at once, so it
-    // plans a whole file and its edits stand or fall together. A field's
-    // rewrite also depends on the rest of its package.
     let mut packages: BTreeMap<PathBuf, Vec<StateSource>> = BTreeMap::new();
     for (file, locks) in locks(&diagnostics, &root) {
         if !migration_available(&file, &root, Api::Core)? {
@@ -139,8 +133,6 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
             }
         }
     }
-    // A channel's rewrite changes its constructor and every use of its
-    // halves, so the edits for a file stand or fall together.
     for (file, constructors) in channels(&diagnostics, &root) {
         if !migration_available(&file, &root, Api::Core)? {
             continue;
@@ -173,8 +165,6 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
             );
         }
     }
-    // One pass per file sees every rewrite at once, so the imports they leave
-    // unused go together, whichever rewrite left each one.
     for (file, paths) in imports {
         let rewrites: Vec<Edit> = edits
             .iter()
@@ -225,7 +215,6 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
             );
         }
     } else {
-        // Read and validate every file before writing any file.
         for change in &changed {
             if fs::read_to_string(&change.file)? != change.before {
                 bail!("{} changed during fix", change.file.display());
@@ -236,14 +225,9 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
     let remaining = if dry_run {
         report
     } else {
-        // Each rewrite is checked by syntax alone, so only the compiler can
-        // tell whether the rewritten project still builds. Fix runs only on a
-        // project that built, so any error now is the rewrite's, and a
-        // rewrite nothing has verified is undone too.
         match check::check(&root, args, false, strict) {
             Ok(report) if report.status != check::Status::Error => report,
             Ok(report) => {
-                // The lines are those of the rewritten files.
                 for error in &report.errors {
                     match (&error.file, error.line) {
                         (Some(file), Some(line)) => {
@@ -293,20 +277,15 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
     })
 }
 
-/// One file's text before and after fix rewrites it.
 struct Change {
     file: PathBuf,
     before: String,
     after: String,
 }
 
-/// Writes every change. If a write fails, the files already written, and the
-/// one that failed, get their original text back.
 fn write(changes: &[Change]) -> Result<()> {
     for (index, change) in changes.iter().enumerate() {
         if let Err(error) = fs::write(&change.file, &change.after) {
-            // The failed write may have truncated the file, so it is restored
-            // whatever it holds now.
             let mut unrestored = usize::from(!restore(change, true));
             for written in changes.get(..index).unwrap_or_default() {
                 unrestored += usize::from(!restore(written, false));
@@ -323,8 +302,6 @@ fn write(changes: &[Change]) -> Result<()> {
     Ok(())
 }
 
-/// Restores every changed file and says why, exiting 2 when all of them have
-/// their original text again and failing otherwise.
 fn restore_all(changes: &[Change], reason: &str) -> Result<ExitCode> {
     let mut unrestored = 0;
     for change in changes {
@@ -338,13 +315,6 @@ fn restore_all(changes: &[Change], reason: &str) -> Result<ExitCode> {
     Ok(ExitCode::from(2))
 }
 
-/// Writes a file's original text back unless it already has it, naming the
-/// file if it can't, and returns whether the file has its original text now.
-/// Only a file that still has the text fix wrote is written: one with other
-/// text, or one that is gone or can't be read, was changed by something else
-/// since, so it is left as it is rather than undoing that change.
-/// `interrupted` says fix's own write failed partway, which leaves text that
-/// is neither the original nor fix's.
 fn restore(change: &Change, interrupted: bool) -> bool {
     let outcome = match fs::read(&change.file) {
         Ok(text) if text == change.before.as_bytes() => return true,
@@ -371,7 +341,6 @@ fn restore(change: &Change, interrupted: bool) -> bool {
     }
 }
 
-/// How many of the `changed` files fix wrote now have their original text.
 fn restored_note(changed: usize, unrestored: usize) -> String {
     if unrestored == 0 {
         format!("restored the {changed} file(s) it wrote")
@@ -380,12 +349,9 @@ fn restored_note(changed: usize, unrestored: usize) -> String {
     }
 }
 
-/// Adds a suggestion's edits unless any of them conflicts, returning whether
-/// it was added.
 fn accept(edits: &mut Vec<Edit>, mut suggestion: Vec<Edit>) -> bool {
     suggestion.sort();
     suggestion.dedup();
-    // Multipart suggestions are atomic, including conflicts within a group.
     let internally_conflicting = suggestion.windows(2).any(|pair| {
         pair.first()
             .zip(pair.get(1))
@@ -407,7 +373,6 @@ fn conflicts(a: &Edit, b: &Edit) -> bool {
 
 fn source_file(root: &Path, name: &str) -> Option<PathBuf> {
     let file = root.join(name).canonicalize().ok()?;
-    // Never modify dependencies or a symlink pointing out of the project.
     (file.starts_with(root) && file.extension().is_some_and(|ext| ext == "rs")).then_some(file)
 }
 
@@ -446,7 +411,6 @@ fn machine_suggestions(node: &Value, root: &Path, output: &mut Vec<Vec<Edit>>) {
     }
 }
 
-/// The resolved path named by a Clippy disallowed item diagnostic.
 fn disallowed_path<'a>(diagnostic: &'a Value, rule: &str) -> Option<&'a str> {
     if diagnostic.get("code")?.get("code")?.as_str()? != rule {
         return None;
@@ -454,7 +418,6 @@ fn disallowed_path<'a>(diagnostic: &'a Value, rule: &str) -> Option<&'a str> {
     quoted_path(diagnostic.get("message")?.as_str()?)
 }
 
-/// Primary spans in project files that did not come from a macro expansion.
 fn primary_locations<'a>(
     diagnostic: &'a Value,
     root: &'a Path,
@@ -475,7 +438,6 @@ fn primary_locations<'a>(
         })
 }
 
-/// The byte ranges Clippy resolved to a standard-library lock or guard method.
 fn locks(diagnostics: &[Value], root: &Path) -> BTreeMap<PathBuf, state::LockSpans> {
     use state::{LockEvidence, LockKind};
 
@@ -502,9 +464,6 @@ fn locks(diagnostics: &[Value], root: &Path) -> BTreeMap<PathBuf, state::LockSpa
     files
 }
 
-/// The callees in each project file that Clippy resolved to a Tokio channel
-/// constructor fix can rewrite, outside macro expansions, by start, with
-/// their end and the channel they make.
 fn channels(
     diagnostics: &[Value],
     root: &Path,
@@ -551,17 +510,13 @@ fn channels(
     files
 }
 
-/// How much of Adamantium a file's package can name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Api {
     None,
-    /// Values and actors, which need no runtime.
     Core,
-    /// Everything, including tasks, time and blocking work.
     Tokio,
 }
 
-/// Whether `file` can use `needs`, saying why not if it can't.
 fn migration_available(file: &Path, root: &Path, needs: Api) -> Result<bool> {
     let available = adamantium_api(file, root)? >= needs;
     if !available {
@@ -578,7 +533,6 @@ fn migration_available(file: &Path, root: &Path, needs: Api) -> Result<bool> {
     Ok(available)
 }
 
-/// The directory of the package whose manifest is nearest above `file`.
 fn package(file: &Path, root: &Path) -> Option<PathBuf> {
     file.ancestors()
         .skip(1)
@@ -587,8 +541,6 @@ fn package(file: &Path, root: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-// A migration must not introduce an unresolved crate path. Aliased dependencies
-// are left for review rather than guessing which name is available in scope.
 fn adamantium_api(file: &Path, root: &Path) -> Result<Api> {
     let Some(package) = package(file, root) else {
         return Ok(Api::None);
@@ -600,8 +552,6 @@ fn adamantium_api(file: &Path, root: &Path) -> Result<Api> {
     else {
         return Ok(Api::None);
     };
-    // Optional and inherited dependencies need feature/activation
-    // resolution for the selected build. Leave those for review.
     let flag = |name| dependency.get(name).and_then(toml_edit::Item::as_bool);
     let renamed = dependency.get("package").and_then(toml_edit::Item::as_str);
     let tokio = dependency
@@ -625,8 +575,6 @@ fn adamantium_api(file: &Path, root: &Path) -> Result<Api> {
     })
 }
 
-// One whole-file unified hunk keeps the preview valid without an external diff
-// executable, including files with no trailing newline.
 fn diff(file: &Path, before: &str, after: &str) {
     println!("--- a/{}\n+++ b/{}", file.display(), file.display());
     println!(
@@ -728,17 +676,14 @@ mod tests {
         assert_eq!(text(&rewritten), "before\n");
         assert!(restore(&rewritten, false));
 
-        // Something else edited the file after fix wrote it.
         let edited = change("edited.rs", Some("edited\n"));
         assert!(!restore(&edited, false));
         assert_eq!(text(&edited), "edited\n");
 
-        // Fix's own write stopped partway.
         let truncated = change("truncated.rs", Some("aft"));
         assert!(restore(&truncated, true));
         assert_eq!(text(&truncated), "before\n");
 
-        // Something else moved the file away after fix wrote it.
         let moved = change("moved.rs", Some("after\n"));
         let elsewhere = dir.path().join("elsewhere.rs");
         fs::rename(&moved.file, &elsewhere).unwrap();
@@ -786,9 +731,6 @@ mod tests {
         assert_eq!(fs::read_to_string(&first).unwrap(), "before\n");
     }
 
-    /// The anchors GitHub gives the migration guide's headings: lowercase,
-    /// punctuation such as backticks dropped, spaces as hyphens, and a
-    /// number after a repeated heading. Lines in code blocks aren't headings.
     fn guide_anchors() -> Result<BTreeSet<String>> {
         let guide =
             fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/migrating.md"))?;
@@ -831,8 +773,6 @@ mod tests {
         Ok(anchors)
     }
 
-    /// The paths a list in the bundled default and strict Clippy configurations
-    /// disallows.
     fn disallowed_paths(list: &str) -> Result<Vec<String>> {
         let config: toml_edit::DocumentMut = crate::lints::clippy_toml(true)?.parse()?;
         let entries = config
@@ -863,7 +803,6 @@ mod tests {
         ] {
             assert!(anchors.contains(anchor), "{anchor} in {anchors:?}");
         }
-        // `#[tokio::main]` starts a line in many of its code blocks.
         assert!(
             !anchors.iter().any(|anchor| anchor.contains("tokio")),
             "{anchors:?}"
@@ -1004,7 +943,6 @@ mod tests {
                 method("std::mem::forget"),
                 Hint::Explain("clippy::disallowed_methods"),
             ),
-            // A path a project added to its own clippy.toml.
             (
                 "clippy::disallowed_methods",
                 method("my_crate::spawn"),

@@ -17,15 +17,12 @@ use tokio::time::Instant;
 #[cfg(feature = "tokio")]
 use crate::tasks::{Cancellation, Shutdown, shutdown};
 
-/// A bounded channel that any number of tasks can send on and receive from.
+/// A bounded channel with any number of senders and receivers.
 ///
-/// Every clone is both a sender and a receiver. `send` waits while the
-/// channel is full, `receive` waits while it is empty, and each message
-/// goes to exactly one receiver. Because every clone can send, the channel
-/// stays open while any combined handle remains. Call [`close`](Self::close)
-/// explicitly, or consume every combined handle with [`split`](Self::split)
-/// to let separate [`Sender`] and [`Receiver`] ownership govern closure.
-/// Receivers drain queued messages before returning `None`.
+/// Each message goes to one receiver. Sends wait for space and receives
+/// wait for a message. Each clone keeps both sides open. Call [`Self::close`]
+/// explicitly or [`Self::split`] every combined handle to let ownership
+/// govern closure. Receivers drain queued messages before returning `None`.
 ///
 /// ```
 /// # #[cfg(feature = "tokio")]
@@ -74,15 +71,12 @@ pub struct Sender<T> {
 
 /// The receiving half of a bounded channel, created by [`Channel::split`].
 ///
-/// Clones compete for messages: each message goes to exactly one receiver.
-/// Dropping the last receiver closes the channel, wakes pending sends with
-/// [`Closed`], and then drops the messages still queued, since nothing can
-/// receive them. A combined [`Channel`] also owns a receiver and keeps the
-/// receiving side alive.
+/// Each message goes to one receiver. Dropping the last receiver closes the
+/// channel, wakes pending sends with [`Closed`], and drops queued messages.
+/// A combined [`Channel`] also keeps the receiving side alive.
 ///
-/// With the `tokio` feature, receivers implement `futures_core::Stream`,
-/// yielding queued messages until the channel is closed and drained.
-/// Receivers can be used directly with `StreamExt::next`.
+/// With `tokio`, receivers implement `Stream` and yield until the channel
+/// closes and drains.
 ///
 /// ```
 /// # #[cfg(feature = "tokio")]
@@ -109,36 +103,23 @@ pub struct Receiver<T> {
     waiter: Option<Waiter>,
 }
 
-/// Returned by [`Sender::try_send`] or [`Channel::try_send`].
-/// Both variants hold the value that was not sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrySendError<T> {
-    /// The channel is full but still open.
     Full(T),
-    /// The channel is closed.
     Closed(T),
 }
 
-/// Returned by [`Receiver::try_receive`] or [`Channel::try_receive`] when no
-/// message can be received.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TryReceiveError {
-    /// The channel is empty but still open.
     Empty,
-    /// The channel is closed and all queued messages have been received.
     Closed,
 }
 
-/// Returned by [`Sender::send_until`] or [`Channel::send_until`]. Every
-/// variant holds the value that was not sent.
 #[cfg(feature = "tokio")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendError<T> {
-    /// The channel is closed.
     Closed(T),
-    /// The caller requested shutdown.
     Cancelled(T),
-    /// The deadline elapsed.
     DeadlineExceeded(T),
 }
 
@@ -152,16 +133,11 @@ impl<T> SendError<T> {
     }
 }
 
-/// Returned by [`Receiver::receive_until`] or [`Channel::receive_until`]
-/// when no message was received.
 #[cfg(feature = "tokio")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiveError {
-    /// The channel is closed and all queued messages have been received.
     Closed,
-    /// The caller requested shutdown.
     Cancelled,
-    /// The deadline elapsed.
     DeadlineExceeded,
 }
 
@@ -358,15 +334,13 @@ impl<T> Sender<T> {
             .await
     }
 
-    /// Waits until the channel has room for a message or is closed. The room
-    /// lasts only while nothing else sends on the channel.
     pub(crate) async fn room(&self) {
         loop {
             if self.has_room() {
                 return;
             }
             let waiter = self.queue.space.listen();
-            // Registration precedes the recheck, so a receive cannot be lost.
+            // Register before rechecking to avoid losing a wakeup.
             if self.has_room() {
                 return;
             }
@@ -764,9 +738,8 @@ impl<T> Queue<T> {
             self.wake_closed();
         }
         if !sender {
-            // Nobody can receive these any more. Drop them now, after waking
-            // waiters and outside every lock, so a destructor that sends on or
-            // drops a handle to this channel sees it closed and cannot deadlock.
+            // Wake waiters before dropping messages outside the lock. A destructor
+            // can use this channel and must see it closed without deadlocking.
             self.values.clear();
         }
     }

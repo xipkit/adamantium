@@ -1,5 +1,3 @@
-//! Concurrent calls for one key that share one operation.
-
 use std::{
     collections::HashMap,
     fmt,
@@ -22,19 +20,12 @@ use crate::{Cancellation, ScopeError, race, tasks::shutdown};
 #[cfg(feature = "tokio")]
 use tokio::time::Instant;
 
-/// Lets concurrent calls for the same key share one operation and its
-/// output.
+/// Shares one operation and its result among concurrent calls for a key.
 ///
-/// [`run`](Self::run) starts the operation for a key if none is in flight,
-/// or joins the one that is, and every caller gets a copy of its output. An
-/// error is an output like any other, so put it in a `Result`: everyone
-/// sharing that operation gets the error, and the next call starts a new
-/// operation. Nothing is cached once an operation finishes.
-///
-/// No caller owns the operation. Whichever caller is waiting polls it, so
-/// dropping the caller that started it leaves the others to finish it.
-/// When the last caller is dropped, the operation is dropped too, and the
-/// next call starts a new one. Clones share the operations in flight.
+/// [`Self::run`] starts or joins an operation. Each caller gets a copy of its
+/// result, including errors. Waiting callers can finish the operation if its
+/// creator leaves. The last caller to leave drops any unfinished operation.
+/// Clones share in-flight work. Completed results are never cached.
 ///
 /// ```
 /// use adamantium::SingleFlight;
@@ -50,30 +41,17 @@ use tokio::time::Instant;
 ///
 /// # Sharing or serializing
 ///
-/// A caller can join an operation that started before it called. That is
-/// right when any output produced after the call began will do, such as
-/// reading a value or refreshing a token. It is wrong when a caller needs an
-/// operation that starts after its call: an acknowledgment that a write has
-/// been pushed can't share a push that began before the write. Let the
-/// operation report what it covered and call again when that isn't enough,
-/// and the second call joins an operation that started after the first
-/// ended.
-///
-/// Operations for one key also don't wait for each other to clean up. An
-/// operation dropped by its last caller runs its destructor in that caller,
-/// and anything it left to finish in the background, such as the tasks of a
-/// scope it was running, may still be finishing when the next call starts a
-/// new operation. When separate operations must not overlap, or every
-/// caller needs an operation of its own, serialize them per key with a
-/// [`KeyedLimit`](crate::KeyedLimit) instead.
+/// A caller can join an operation that started before it arrived. For writes,
+/// have the operation report which changes it covered and retry if needed.
+/// Cleanup from a dropped operation may overlap the next operation. Use a
+/// [`KeyedLimit`](crate::KeyedLimit) when each caller needs a separate
+/// operation or operations must run in sequence.
 ///
 /// # Panics
 ///
-/// If the operation panics, the panic continues in the caller that was
-/// polling it, and every other caller panics too. The operation can't call
-/// `run` for its own key, which would wait for itself: that call panics.
-/// The check sees only a call made by the operation itself, not one made by
-/// a task that the operation spawns and waits for.
+/// An operation panic propagates to all joined callers. A direct call to
+/// `run` for the operation's own key panics. An indirect cycle through a
+/// spawned task can still deadlock.
 pub struct SingleFlight<K, T> {
     shared: Arc<Shared<K, T>>,
 }
@@ -81,52 +59,40 @@ pub struct SingleFlight<K, T> {
 type Operation<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 struct Shared<K, T> {
-    /// The operations in flight. A finished, panicked or cancelled one is
-    /// removed under the same lock that changes its stage, so a new call
-    /// never joins it. Held only in this module's synchronous methods,
-    /// which run no caller code but `K::hash`, `K::eq` and `K::clone`.
+    // Remove the flight under the same lock that changes its stage so new
+    // calls cannot join a completed flight.
     flights: Lock<HashMap<K, Arc<Flight<T>>>>,
     world: World,
 }
 
 struct Flight<T> {
-    /// Locked after `Shared::flights` when both are needed.
+    // Locked after `Shared::flights` when both are needed.
     state: Lock<State<T>>,
     signal: Arc<Signal>,
-    /// Wakes `signal`. The operation is polled with it, whichever caller
-    /// polls it.
+    // Every caller polls the operation with the same waker.
     waker: Waker,
     world: World,
 }
 
 struct State<T> {
     stage: Stage<T>,
-    /// The calls that have joined and not yet returned or been dropped.
     callers: usize,
 }
 
 enum Stage<T> {
-    /// No caller is polling the operation.
     Idle(Operation<T>),
-    /// A caller has taken the operation out to poll it, or to create it.
+    // A caller has taken the operation out to poll it, or to create it.
     Polling,
-    /// The operation finished, and other callers have yet to take a copy
-    /// of its output.
     Finished(Arc<T>),
-    /// The operation panicked.
     Panicked,
-    /// Every caller has left: the last took the output, or the operation
-    /// was dropped unfinished.
     Ended,
 }
 
-/// What the operation's waker reaches. It holds no state of the flight, so
-/// a waker the operation left behind keeps nothing else alive.
+// A retained waker keeps only Signal alive.
 struct Signal {
-    /// Set when the operation is woken, and cleared by the caller that
-    /// takes it to poll it.
+    // Set when the operation is woken, and cleared by the caller that
+    // takes it to poll it.
     woken: AtomicBool,
-    /// Notified when the operation is woken or the flight ends.
     changed: WaitQueue,
 }
 
@@ -244,18 +210,14 @@ where
     T: Clone + Send + 'static,
     E: Clone + Send + 'static,
 {
-    /// Runs like [`run`](Self::run), but waits only until `cancellation` is
-    /// requested or `deadline` passes. Pass `None` for no deadline. A
-    /// deadline uses [`crate::time`].
+    /// Shares an operation until it completes, cancellation is requested, or
+    /// the deadline passes. Build deadlines with [`crate::time`] or pass
+    /// `None` for no deadline.
     ///
-    /// Returns `ScopeError::Failed` with the operation's error, or
-    /// `Cancelled` or `DeadlineExceeded`. A call that stops leaves the
-    /// operation to the other calls sharing it, and drops it only if it was
-    /// the last. A request already present at a poll wins, so a call that
-    /// finds one at its first poll neither starts nor joins an operation,
-    /// and cancellation wins over an equally ready deadline. A request also
-    /// wins over an operation that finished but whose output this call has
-    /// yet to take.
+    /// Each poll checks cancellation and then the deadline before joining
+    /// the flight or taking its result. A caller that stops leaves the
+    /// operation running for other callers. The last caller drops it.
+    /// Returns [`ScopeError::Failed`] for an operation error.
     ///
     /// # Panics
     ///
@@ -276,8 +238,7 @@ where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, E>> + Send + 'static,
     {
-        // The race drops the losing call before it returns, so a call that
-        // stops has left the flight by the time it does.
+        // The race drops the losing call, which leaves the flight before return.
         race((
             async { Err(shutdown(cancellation, deadline).await.scope_error()) },
             async { self.run(key, operation).await.map_err(ScopeError::Failed) },
@@ -287,9 +248,9 @@ where
 }
 
 impl<K, T> Shared<K, T> {
-    /// Every operation locks, so this is where a handle carried into another
-    /// harness execution is rejected. While unwinding the check is skipped,
-    /// so that a dropped call can still leave its flight.
+    // Every operation locks, so this is where a handle carried into another
+    // harness execution is rejected. While unwinding the check is skipped,
+    // so that a dropped call can still leave its flight.
     fn lock(&self) -> Guard<'_, HashMap<K, Arc<Flight<T>>>> {
         if !std::thread::panicking() {
             self.world.check();
@@ -299,7 +260,6 @@ impl<K, T> Shared<K, T> {
 }
 
 impl<T> Flight<T> {
-    /// A flight whose creator holds the operation it is about to create.
     fn new(world: World) -> Self {
         let signal = Arc::new(Signal {
             woken: AtomicBool::new(false),
@@ -324,16 +284,11 @@ impl<T> Flight<T> {
     }
 }
 
-/// One call's membership in a flight. Dropping it before the call returns
-/// leaves the flight.
 struct Caller<K: Hash + Eq, T> {
     shared: Arc<Shared<K, T>>,
     key: K,
     flight: Arc<Flight<T>>,
-    /// Whether this call has taken the operation out of the flight, to
-    /// create or poll it.
     polling: bool,
-    /// Whether this call has left the flight.
     done: bool,
 }
 
@@ -344,9 +299,7 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
         held: &mut Option<Operation<T>>,
         waiter: &mut Option<Waiter>,
     ) -> Poll<T> {
-        // The operation is polled at most once per poll of this call. One
-        // that wakes itself and returns `Pending`, as a yield does, must
-        // let the executor run other tasks before it is polled again.
+        // Poll the operation once per call poll so self-wakes yield to the executor.
         let mut polled_once = false;
         loop {
             let mut operation = match held.take() {
@@ -394,13 +347,8 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
         }
     }
 
-    /// Takes the operation if it was woken and no one else is polling it,
-    /// or this call's copy of the output if it has finished. Without
-    /// `may_poll`, a woken operation is left for the next poll, and the
-    /// call yields to be polled again.
     fn take_or_collect(&mut self, waiter: &mut Option<Waiter>, may_poll: bool) -> Taken<T> {
-        // Listen before looking, so a wake or an ending after the look is
-        // not missed.
+        // Register before checking for a wake or completion.
         if waiter.is_none() {
             *waiter = Some(self.flight.signal.changed.listen());
         }
@@ -448,7 +396,6 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
         }
     }
 
-    /// Ends the flight with the operation's output and leaves it.
     fn finish(&mut self, output: T) -> T {
         let mut flights = self.shared.lock();
         let mut state = self.flight.lock();
@@ -470,8 +417,6 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
         output.unwrap_or_else(Arc::unwrap_or_clone)
     }
 
-    /// Ends the flight because the operation panicked while this call was
-    /// creating or polling it, and leaves it.
     fn abandon(&mut self) {
         let mut flights = self.shared.lock();
         let mut state = self.flight.lock();
@@ -487,8 +432,8 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
 }
 
 impl<K: Hash + Eq, T> Caller<K, T> {
-    /// Removes this call's flight from the operations in flight, unless a
-    /// newer flight has already replaced it.
+    // Removes this call's flight from the operations in flight, unless a
+    // newer flight has already replaced it.
     fn forget(&self, flights: &mut HashMap<K, Arc<Flight<T>>>) {
         if flights
             .get(&self.key)
@@ -502,7 +447,6 @@ impl<K: Hash + Eq, T> Caller<K, T> {
 enum Taken<T> {
     Operation(Operation<T>),
     Output(T),
-    /// The operation was woken, but this poll has already polled it.
     Yield,
     Nothing,
 }
@@ -516,9 +460,7 @@ impl<K: Hash + Eq, T> Drop for Caller<K, T> {
         let mut state = self.flight.lock();
         state.callers -= 1;
         if state.callers > 0 {
-            // A wake this call was due to act on, such as one that arrived
-            // while it polled the operation, would otherwise be lost with
-            // it: hand the woken operation to the others.
+            // Pass a pending wake to the remaining callers when this caller leaves.
             let woken = matches!(state.stage, Stage::Idle(_))
                 && self.flight.signal.woken.load(Ordering::SeqCst);
             drop(state);
@@ -539,15 +481,13 @@ impl<K: Hash + Eq, T> Drop for Caller<K, T> {
         self.forget(&mut flights);
         drop(state);
         drop(flights);
-        // The operation's destructor, or the unclaimed output's, is the
-        // caller's code, so it runs after the locks are released. A new
-        // call can start a new operation in the meantime.
+        // Drop user data after releasing both locks. A new call may start meanwhile.
         drop(stage);
     }
 }
 
-/// Ends the flight as panicked if the operation panics while this call is
-/// creating or polling it, so the other callers don't wait for it.
+// Ends the flight as panicked if the operation panics while this call is
+// creating or polling it, so the other callers don't wait for it.
 struct Unwinding<'a, K: Hash + Eq, T: Clone> {
     caller: &'a mut Caller<K, T>,
     armed: bool,
@@ -597,9 +537,7 @@ fn refuse_self_join() -> ! {
 }
 
 thread_local! {
-    /// The flights whose operations the current thread is polling, by
-    /// address, innermost last. Each entry lasts one poll, so the list stays
-    /// correct when a task moves to another thread between polls.
+    // Each entry lasts one poll, so task migration between polls is safe.
     #[allow(clippy::disallowed_types, reason = "a per-thread list, never shared")]
     static POLLING: std::cell::Cell<Vec<usize>> = const { std::cell::Cell::new(Vec::new()) };
 }
@@ -638,8 +576,6 @@ fn polling_here<T>(flight: &Arc<Flight<T>>) -> bool {
     with_polling(|flights| flights.contains(&flight))
 }
 
-/// Marks the thread as polling a flight's operation until dropped,
-/// including by a panic.
 struct Polling;
 
 impl Polling {

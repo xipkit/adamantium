@@ -291,7 +291,6 @@ on_both_runtimes! {
     }
 }
 
-// On the current-thread runtime no spawned worker can run before we yield.
 #[tokio::test]
 async fn cancellation_before_first_poll_closes_and_discards_queue() {
     let dropped = Arc::new(AtomicUsize::new(0));

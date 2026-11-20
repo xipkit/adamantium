@@ -1,6 +1,3 @@
-//! Bounded storage boundary. Notification and endpoint ownership stay in Channel;
-//! only the linearizable storage operations change inside a modeled execution.
-
 use concurrent_queue::{ConcurrentQueue, PopError, PushError};
 
 #[cfg(feature = "deterministic")]
@@ -97,10 +94,10 @@ impl<T> Bounded<T> {
         }
     }
 
-    /// Drops every queued value, oldest first. Each value is taken out of the
-    /// storage before it drops, so its destructor holds no storage lock and
-    /// may use the same queue. If a destructor panics, the rest still drop,
-    /// as they would in a `Vec`. Like `close`, takes no step while unwinding.
+    // Drops every queued value, oldest first. Each value is taken out of the
+    // storage before it drops, so its destructor holds no storage lock and
+    // may use the same queue. If a destructor panics, the rest still drop,
+    // as they would in a `Vec`. Like `close`, takes no step while unwinding.
     pub(crate) fn clear(&self) {
         struct Rest<'a, T> {
             queue: &'a Bounded<T>,

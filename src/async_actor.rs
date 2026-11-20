@@ -4,28 +4,18 @@ use crate::{Channel, Closed, Tasks};
 
 /// A send-only mailbox for state owned by one asynchronous worker.
 ///
-/// Unlike [`crate::Actor`], the worker can borrow its state across an await.
-/// It finishes each handler before receiving the next message, in enqueue
-/// order. Concurrent senders have no ordering guarantee beyond that order.
-/// No shared-state lock is held while handling a message.
+/// The worker handles messages in enqueue order and can borrow its state
+/// across awaits without a lock. Call [`Self::close`] to stop accepting sends
+/// and drain the queue. Dropping every handle leaves the mailbox open.
 ///
-/// Call [`close`](Self::close) before waiting for successful scope completion:
-/// it rejects new sends and lets the worker drain accepted messages. Dropping
-/// all mailbox handles does **not** close the worker's channel. A handler error
-/// stops the worker and fails the scope. Nobody holds the worker's [`Task`](crate::Task)
-/// handle, so the error is [orphaned](crate::Task): under [`Tasks::run`] or
-/// [`Tasks::run_until`] it also stops a still-running scope body at its next
-/// `await`.
+/// A handler error fails the scope as an orphaned [`Task`](crate::Task) error.
+/// Failure, panic, or scope cancellation closes the mailbox and discards the
+/// queue, even before the first poll. Cancellation can interrupt in-flight
+/// I/O. Await scope shutdown to wait for cleanup.
 ///
-/// Failure, panic, or scope cancellation closes the mailbox and discards queued
-/// messages, even if handles survive or the worker has never been polled.
-/// Cancellation may interrupt in-flight I/O: accepted messages are not guaranteed
-/// delivery, and external effects cannot be rolled back. Dropping a scope requests
-/// cancellation without waiting; await its shutdown to wait for worker cleanup.
-///
-/// Mailbox cycles can deadlock. A handler must not await work that requires its
-/// own worker to advance, including sending to its own full mailbox or awaiting
-/// a reply from another worker that is waiting on this one.
+/// To avoid deadlock, a handler must never wait for its own worker to advance.
+/// This includes sending to its own full mailbox or waiting on another worker
+/// that needs this one.
 ///
 /// ```
 /// use adamantium::{AsyncActor, Tasks};
@@ -49,8 +39,8 @@ pub struct AsyncActor<M> {
     mailbox: Channel<M>,
 }
 
-// Constructed outside the future so aborting before its first poll also cleans
-// up the queue. Closing before draining prevents sends from refilling it.
+// Create the guard before the first poll so early abort drains the queue.
+// Close before draining to prevent new sends.
 struct MailboxGuard<M>(Channel<M>);
 
 impl<M> Drop for MailboxGuard<M> {
@@ -63,14 +53,9 @@ impl<M> Drop for MailboxGuard<M> {
 impl<M: Send + 'static> AsyncActor<M> {
     /// Starts one worker in `tasks`, owning `state` and a bounded mailbox.
     ///
-    /// `capacity` bounds queued messages, with one additional message being
-    /// handled; it does not bound producer tasks waiting to send. Zero is treated
-    /// as one. `handler` returns a boxed `Send` future that can borrow the state
-    /// until it completes. Use `|state, message| Box::pin(async move { ... })`.
-    /// Boxing makes that borrowing future's `Send` bound expressible on stable
-    /// Rust. The state and handler need `Send`, but do not need `Sync` or `Clone`.
-    ///
-    /// Requires a Tokio runtime, just like [`Tasks::spawn`].
+    /// `capacity` bounds queued messages and treats zero as one. One more
+    /// message may be in the handler. The boxed `Send` future can borrow
+    /// the state until it completes. Requires a Tokio runtime.
     ///
     /// A handler cannot keep a non-`Send` value across an await:
     ///

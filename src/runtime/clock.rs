@@ -1,7 +1,3 @@
-//! Execution-local timer registry and idle driver. The scheduler excludes the
-//! driver while any application task is runnable. Waking from the driver task,
-//! rather than the scheduler callback, avoids reentering Shuttle's state borrow.
-
 #![allow(
     clippy::disallowed_types,
     clippy::disallowed_methods,
@@ -71,7 +67,6 @@ pub(crate) fn now() -> Instant {
     with(|clock| clock.now)
 }
 
-/// The modeled wall clock: the execution's epoch plus elapsed virtual time.
 pub(crate) fn wall_now() -> SystemTime {
     with(|clock| {
         let elapsed = clock.now.saturating_duration_since(clock.origin);

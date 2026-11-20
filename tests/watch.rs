@@ -1,6 +1,3 @@
-//! These tests run with and without the `tokio` feature, so the
-//! latest-value type stays available to crates that leave Tokio out.
-
 #[cfg(feature = "tokio")]
 mod support;
 
@@ -45,7 +42,6 @@ fn poll_once<F: Future>(future: Pin<&mut F>, counter: &Arc<WakeCounter>) -> Poll
     future.poll(&mut Context::from_waker(&waker))
 }
 
-/// Polls a new future once.
 fn now<F: Future>(future: F) -> Poll<F::Output> {
     poll_once(pin!(future), &Arc::new(WakeCounter::default()))
 }
@@ -80,7 +76,6 @@ fn a_watcher_receives_the_latest_value_once() {
 
 #[test]
 fn changed_marks_the_newest_value_seen_without_copying_it() {
-    /// Neither `Clone` nor silent: each drop counts.
     struct Counted(Arc<AtomicUsize>);
     impl Drop for Counted {
         fn drop(&mut self) {
@@ -93,7 +88,6 @@ fn changed_marks_the_newest_value_seen_without_copying_it() {
     assert_eq!(now(watcher.changed()), Poll::Pending);
     watch.send(Counted(Arc::clone(&drops))).ok();
     watch.send(Counted(Arc::clone(&drops))).ok();
-    // The two replaced values, and nothing the wait made.
     assert_eq!(drops.load(Ordering::SeqCst), 2);
     assert_eq!(now(watcher.changed()), Poll::Ready(Some(())));
     assert_eq!(drops.load(Ordering::SeqCst), 2);
@@ -101,7 +95,6 @@ fn changed_marks_the_newest_value_seen_without_copying_it() {
     assert_eq!(now(watcher.changed()), Poll::Pending);
     watch.send(Counted(Arc::clone(&drops))).ok();
     drop(watch);
-    // An unseen last value comes before the end.
     assert_eq!(now(watcher.changed()), Poll::Ready(Some(())));
     assert_eq!(now(watcher.changed()), Poll::Ready(None));
     assert_eq!(drops.load(Ordering::SeqCst), 3);
@@ -323,7 +316,6 @@ fn wait_for_checks_each_value_once() {
         watch.send(3).unwrap();
         assert_eq!(poll_once(waiting.as_mut(), &counter), Poll::Ready(Some(3)));
     }
-    // The unseen current value is checked once, not again as a change.
     assert_eq!(checked, [1, 2, 3]);
     assert!(!watcher.has_changed(), "checked values are marked seen");
 }
@@ -365,15 +357,12 @@ fn a_watch_dropped_by_a_panic_still_closes() {
     assert_eq!(watcher.try_receive(), Err(TryReceiveError::Closed));
 }
 
-/// A value whose destructor reads the watch it was stored in.
 #[derive(Clone)]
 struct ReadsOnDrop(Option<Watcher<ReadsOnDrop>>);
 
 impl Drop for ReadsOnDrop {
     fn drop(&mut self) {
         if let Some(watcher) = self.0.take() {
-            // Takes the watch's lock, so it would deadlock if a send
-            // dropped the old value while holding it.
             let _ = watcher.is_closed();
         }
     }
@@ -421,7 +410,6 @@ async fn every_watcher_ends_on_the_last_value() {
             readers.push(t.spawn(async move {
                 let mut previous = watcher.get();
                 while let Some(value) = watcher.receive().await {
-                    // A value read by `get` isn't received again.
                     if value <= previous {
                         return Err("a value repeated or went backwards");
                     }
@@ -500,7 +488,6 @@ async fn receive_until_prefers_shutdown_to_an_unseen_value() {
     let mut watcher = watch.subscribe();
     watch.send(1).unwrap();
     let cancellation = Cancellation::new();
-    // Repeated, so an unordered race between the two would show.
     for _ in 0..16 {
         assert_eq!(
             watcher.receive_until(&cancellation, past()).await,
@@ -522,8 +509,6 @@ async fn receive_until_prefers_shutdown_to_an_unseen_value() {
 #[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_send_racing_a_new_wait_is_never_missed() {
-    // A wait that checks, then listens, can miss a send made between the
-    // two and sleep forever. Each round races a send against a fresh wait.
     let watch = Watch::new(0_u32);
     let result = Tasks::<&str>::run(async |t| {
         for round in 1..=20_000 {

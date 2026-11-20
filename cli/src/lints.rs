@@ -1,14 +1,9 @@
-//! The rules `cargo adamantium` applies: lint levels passed to Clippy and the
-//! Clippy configuration file. The repository's own `Cargo.toml` carries the
-//! default levels and a separate strict table, and a test keeps both in step.
-
 use std::{borrow::Cow, fmt};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
 use toml_edit::{DocumentMut, Item};
 
-/// Which tool owns a lint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tool {
@@ -16,7 +11,6 @@ pub enum Tool {
     Clippy,
 }
 
-/// How a lint is reported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
@@ -43,7 +37,6 @@ pub struct Example {
     pub after: &'static str,
 }
 
-/// Names registered by the opt-in Dylint library, excluded from `init`.
 pub const EXPERIMENTAL_LINTS: &[&str] = &[
     "adamantium_blocking_in_async",
     "adamantium_blocking_in_actor",
@@ -52,7 +45,6 @@ pub const EXPERIMENTAL_LINTS: &[&str] = &[
     "adamantium_race_with_timer",
 ];
 
-/// The rule name for the release profile check, which is not a Clippy lint.
 pub const OVERFLOW_RULE: &str = "adamantium::overflow_checks";
 pub const OVERFLOW_WHY: &str = "the release profile must set overflow-checks = true, so integer overflow panics instead of wrapping";
 pub const OVERFLOW_EXAMPLE: Example = example(
@@ -62,9 +54,6 @@ pub const OVERFLOW_EXAMPLE: Example = example(
 );
 pub const GUIDE: &str = "https://github.com/xipkit/adamantium/blob/main/docs/migrating.md";
 
-/// Where `fix` and `check` send the reader about a finding: the migration
-/// guide's section on it, or, for a rule the guide has no section on, the
-/// rule's explanation, which has a before and after for every rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hint<'a> {
     Guide(&'static str),
@@ -72,6 +61,7 @@ pub enum Hint<'a> {
 }
 
 impl<'a> Hint<'a> {
+    /// Selects a migration guide section or an explain command for a finding.
     pub fn new(rule: &'a str, message: &str) -> Self {
         let section = match rule {
             "clippy::await_holding_lock" => Some("a-lock-held-across-an-await"),
@@ -99,12 +89,8 @@ impl fmt::Display for Hint<'_> {
     }
 }
 
-/// The guide's section on each disallowed macro it covers, by the path as
-/// `clippy.toml` lists it.
 pub const DISALLOWED_MACROS: &[(&str, &[&str])] = &[("the-first-to-succeed", &["futures::select"])];
 
-/// The guide's section on each disallowed method it covers, by the path as
-/// `clippy.toml` lists it.
 pub const DISALLOWED_METHODS: &[(&str, &[&str])] = &[
     (
         "tasks",
@@ -219,8 +205,6 @@ pub const DISALLOWED_METHODS: &[(&str, &[&str])] = &[
     ("a-bounded-queue", &["tokio::sync::mpsc::channel"]),
 ];
 
-/// The guide's section on each disallowed type it covers, by the path as
-/// `clippy.toml` lists it.
 pub const DISALLOWED_TYPES: &[(&str, &[&str])] = &[
     ("shared-state", &["std::sync::Mutex", "parking_lot::Mutex"]),
     (
@@ -260,14 +244,10 @@ pub const DISALLOWED_TYPES: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// The path a disallowed-macro, -method or -type finding names. Clippy quotes
-/// the path as the configuration lists it, as in "use of a disallowed method
-/// `tokio::spawn`".
 pub(crate) fn quoted_path(message: &str) -> Option<&str> {
     message.split('`').nth(1)
 }
 
-/// The section on the path a disallowed-method or -type finding names.
 fn disallowed(message: &str, sections: &[(&'static str, &[&str])]) -> Option<&'static str> {
     let path = quoted_path(message)?;
     sections
@@ -352,13 +332,11 @@ fn capitalize(text: &str) -> String {
     first.to_uppercase().chain(chars).collect()
 }
 
-/// The Clippy configuration bundled with the CLI and used by this repository.
 pub const CLIPPY_TOML: &str = include_str!("../clippy.toml");
 
 pub(crate) const RWLOCK_READ: &str = "std::sync::RwLock::read";
 pub(crate) const RWLOCK_WRITE: &str = "std::sync::RwLock::write";
 
-/// Adds method resolution probes that `fix` consumes without reporting them.
 pub(crate) fn fix_clippy_toml(toml: &str) -> Result<String> {
     let mut config: DocumentMut = toml.parse().context("parsing fixer Clippy configuration")?;
     let methods = config
@@ -420,7 +398,6 @@ const fn clippy(name: &'static str, why: &'static str, example: Example) -> Lint
     }
 }
 
-/// The default lints, in the order the tables print them.
 pub const LINTS: &[Lint] = &[
     rust(
         "unsafe_code",
@@ -835,7 +812,6 @@ fn main() -> std::process::ExitCode {
     ),
 ];
 
-/// Additional lints enabled by the strict tier.
 pub const STRICT_LINTS: &[Lint] = &[clippy(
     "arithmetic_side_effects",
     "arithmetic can overflow or divide by zero; use checked, saturating or wrapping methods",

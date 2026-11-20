@@ -1,6 +1,3 @@
-//! A check report as a SARIF 2.1.0 log, which GitHub code scanning shows as
-//! annotations on pull requests.
-
 use std::{
     env,
     path::{Component, Path, PathBuf, Prefix},
@@ -17,18 +14,12 @@ use crate::{
 
 const SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
 
-/// The base that relative artifact URIs resolve against.
 const SRCROOT: &str = "%SRCROOT%";
 
 /// Where a report's file names are relative to, and what SARIF URIs are made
 /// relative to.
 pub struct Roots {
-    /// The Cargo workspace root. Clippy names files relative to it, even when
-    /// the check ran on a member's directory.
     pub workspace: PathBuf,
-    /// The git repository's root when there is one, otherwise the workspace
-    /// root. GitHub code scanning resolves relative URIs against the
-    /// repository root.
     pub source: PathBuf,
 }
 
@@ -65,8 +56,6 @@ impl Roots {
     }
 }
 
-/// The manifest that `--manifest-path` selects among arguments for `cargo
-/// clippy`. Arguments after `--` go to Clippy itself, not to Cargo.
 fn manifest_path(cargo_args: &[String]) -> Option<&str> {
     let mut args = cargo_args.iter().take_while(|arg| *arg != "--");
     while let Some(arg) = args.next() {
@@ -80,8 +69,6 @@ fn manifest_path(cargo_args: &[String]) -> Option<&str> {
     None
 }
 
-/// The root of the git repository holding `dir`, or `None` outside one or
-/// without git.
 fn repository(dir: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .current_dir(dir)
@@ -158,7 +145,6 @@ pub fn log(report: &Report, roots: &Roots) -> Value {
             "originalUriBaseIds": {
                 SRCROOT: { "uri": directory_uri(&roots.source) },
             },
-            // rustc counts columns in characters.
             "columnKind": "unicodeCodePoints",
             "invocations": [{
                 "executionSuccessful": report.status != Status::Error,
@@ -170,8 +156,6 @@ pub fn log(report: &Report, roots: &Roots) -> Value {
     })
 }
 
-/// The finding's file as an absolute path. The overflow check reads the
-/// project's own `Cargo.toml`; every other file name comes from Clippy.
 fn finding_path(finding: &Finding, report: &Report, roots: &Roots) -> PathBuf {
     let base = if finding.rule == OVERFLOW_RULE {
         &report.root
@@ -181,8 +165,6 @@ fn finding_path(finding: &Finding, report: &Report, roots: &Roots) -> PathBuf {
     PathBuf::from(normalize(&base.join(&finding.file).to_string_lossy()))
 }
 
-/// What GitHub shows for a rule: its reason, and Clippy's documentation for
-/// Clippy lints.
 fn descriptor(rule: &str) -> Value {
     let why = if rule == OVERFLOW_RULE {
         crate::lints::OVERFLOW_WHY
@@ -215,8 +197,6 @@ fn notification(problem: &Problem, level: &str, roots: &Roots) -> Value {
         "level": level,
         "message": { "text": problem.message },
     });
-    // A file named `clippy.toml` is Adamantium's bundled configuration, which
-    // is not in the repository.
     let file = problem
         .file
         .as_deref()
@@ -231,8 +211,6 @@ fn notification(problem: &Problem, level: &str, roots: &Roots) -> Value {
     notification
 }
 
-/// A physical location. GitHub requires a region, so a finding about a whole
-/// file points at its first line.
 fn location(path: &Path, line: Option<u64>, column: Option<u64>, source: &Path) -> Value {
     let artifact = match path.strip_prefix(source) {
         Ok(relative) => json!({ "uri": relative_uri(relative), "uriBaseId": SRCROOT }),
@@ -246,7 +224,6 @@ fn location(path: &Path, line: Option<u64>, column: Option<u64>, source: &Path) 
     json!({ "physicalLocation": { "artifactLocation": artifact, "region": region } })
 }
 
-/// A relative path as a URI reference with `/` separators.
 fn relative_uri(path: &Path) -> String {
     let mut uri = String::new();
     for component in path.components() {
@@ -258,7 +235,6 @@ fn relative_uri(path: &Path) -> String {
     uri
 }
 
-/// An absolute path as a `file` URI.
 fn file_uri(path: &Path) -> String {
     let mut uri = String::from("file://");
     for component in path.components() {
@@ -284,7 +260,6 @@ fn file_uri(path: &Path) -> String {
     uri
 }
 
-/// A directory as a `file` URI ending in `/`, as SARIF requires of a base.
 fn directory_uri(path: &Path) -> String {
     let mut uri = file_uri(path);
     if !uri.ends_with('/') {
@@ -293,7 +268,6 @@ fn directory_uri(path: &Path) -> String {
     uri
 }
 
-/// Percent-encodes one path segment, keeping only unreserved characters.
 fn encode(segment: &str, uri: &mut String) {
     for byte in segment.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
@@ -373,7 +347,6 @@ mod tests {
             results[0]["locations"][0]["physicalLocation"]["region"],
             json!({ "startLine": 3, "startColumn": 5 })
         );
-        // The overflow check reads the checked directory's manifest.
         assert_eq!(
             artifact(&results[1]),
             &json!({ "uri": "ws/member/Cargo.toml", "uriBaseId": SRCROOT })

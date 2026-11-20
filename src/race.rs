@@ -1,5 +1,3 @@
-//! Waiting for the first of several futures.
-
 #[cfg(feature = "tokio")]
 use std::fmt;
 use std::{
@@ -14,13 +12,9 @@ use tokio::time::Instant;
 #[cfg(feature = "tokio")]
 use crate::tasks::{Cancellation, Shutdown, shutdown};
 
-/// A group of futures that [`race`] can run. It is implemented for tuples of
-/// two to eight futures that have the same output.
 pub trait Race {
-    /// What the winning future returns.
     type Output;
 
-    /// Runs the futures until the first one finishes.
     fn race(self) -> impl Future<Output = Self::Output>;
 }
 
@@ -111,14 +105,10 @@ race_for_tuple!(A a, B b, C c, D d, E e, F f);
 race_for_tuple!(A a, B b, C c, D d, E e, F f, G g);
 race_for_tuple!(A a, B b, C c, D d, E e, F f, G g, H h);
 
-/// Returned by [`until`] when `cancellation` is requested or the deadline
-/// elapses before the wrapped future completes.
 #[cfg(feature = "tokio")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UntilError {
-    /// The caller requested shutdown.
     Cancelled,
-    /// The deadline elapsed.
     DeadlineExceeded,
 }
 

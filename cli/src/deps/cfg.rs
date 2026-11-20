@@ -1,10 +1,3 @@
-//! Evaluating `#[cfg]` predicates for a dependency without compiling it.
-//!
-//! Features and the host target are known from Cargo and rustc. Everything
-//! else, such as the profile's `debug_assertions` or a `--cfg` that a build
-//! script or `RUSTFLAGS` sets, is unknown, and code behind an unknown
-//! predicate counts as code that builds.
-
 use std::collections::{BTreeSet, HashSet};
 
 use proc_macro2::TokenStream;
@@ -18,7 +11,6 @@ use syn::{
     token,
 };
 
-/// What is known about a predicate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Truth {
     True,
@@ -31,6 +23,7 @@ impl Truth {
         if value { Self::True } else { Self::False }
     }
 
+    /// Negates a known value and preserves `Unknown`.
     pub fn not(self) -> Self {
         match self {
             Self::True => Self::False,
@@ -39,6 +32,7 @@ impl Truth {
         }
     }
 
+    /// Returns false if either input is false, true if both are true, or unknown.
     pub fn and(self, other: Self) -> Self {
         match (self, other) {
             (Self::False, _) | (_, Self::False) => Self::False,
@@ -47,13 +41,12 @@ impl Truth {
         }
     }
 
+    /// Returns true if either input is true, false if both are false, or unknown.
     pub fn or(self, other: Self) -> Self {
         self.not().and(other.not()).not()
     }
 }
 
-/// Configuration names that the build profile or the compiler's flags set,
-/// whatever `rustc --print cfg` says.
 const PROFILE_NAMES: [&str; 7] = [
     "debug_assertions",
     "overflow_checks",
@@ -64,8 +57,6 @@ const PROFILE_NAMES: [&str; 7] = [
     "sanitize",
 ];
 
-/// Configuration names that describe the target. Each one rustc doesn't
-/// print for the host is false there.
 const TARGET_NAMES: [&str; 14] = [
     "unix",
     "windows",
@@ -83,8 +74,6 @@ const TARGET_NAMES: [&str; 14] = [
     "target_thread_local",
 ];
 
-/// Configuration names that are never set when a dependency's library is
-/// built for another crate.
 const UNSET_NAMES: [&str; 4] = ["test", "doc", "doctest", "miri"];
 
 /// The configuration rustc sets for the host target, from `rustc --print cfg`.
@@ -242,8 +231,6 @@ impl Cfg<'_> {
             let inner = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
             Ok((holds, inner))
         });
-        // A `cfg_attr` that doesn't parse can't add a `cfg` that is known to
-        // be false, so the code still counts.
         if let Ok((holds, inner)) = parsed {
             let applies = applies.and(holds);
             if applies != Truth::False {
@@ -312,7 +299,6 @@ impl Cfg<'_> {
             .target
             .options
             .contains(&(name.to_owned(), value.map(str::to_owned)));
-        // `RUSTFLAGS` can turn on target features beyond the host's defaults.
         if name == "target_feature" {
             return if set { Truth::True } else { Truth::Unknown };
         }
@@ -328,7 +314,6 @@ mod tests {
 
     use super::*;
 
-    /// Evaluates a `cfg` predicate written as source.
     fn eval(cfg: &Cfg, predicate: &str) -> syn::Result<Truth> {
         (|input: ParseStream| cfg.predicate(input)).parse_str(predicate)
     }
@@ -370,7 +355,6 @@ mod tests {
         check(r#"feature = "on""#, Truth::True);
         check(r#"feature = "off""#, Truth::False);
         check(r#"not(feature = "off")"#, Truth::True);
-        // On in one of the package's builds only.
         check(r#"feature = "host""#, Truth::Unknown);
         check(r#"not(feature = "host")"#, Truth::Unknown);
     }
@@ -449,7 +433,6 @@ mod tests {
             ("#[cfg_attr(unix, test)] fn f() {}", Truth::False),
             ("#[cfg_attr(windows, test)] fn f() {}", Truth::True),
             ("#[cfg_attr(loom, test)] fn f() {}", Truth::Unknown),
-            // A procedural macro, which the audit does not expand.
             ("#[tokio::test] fn f() {}", Truth::True),
         ] {
             let item: syn::ItemFn = syn::parse_str(source).unwrap();

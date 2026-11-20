@@ -1,6 +1,3 @@
-//! These tests run with and without the `tokio` feature, so the one-shot
-//! reply stays available to crates that leave Tokio out.
-
 #[cfg(feature = "tokio")]
 use adamantium::{Cancellation, Channel, ReceiveError, Tasks, time};
 use adamantium::{Closed, Reply, ReplyReceiver, TryReceiveError};
@@ -42,7 +39,6 @@ fn poll_once<F: Future>(future: Pin<&mut F>, counter: &Arc<WakeCounter>) -> Poll
     future.poll(&mut Context::from_waker(&waker))
 }
 
-/// Polls a new future once.
 fn now<F: Future>(future: F) -> Poll<F::Output> {
     poll_once(pin!(future), &Arc::new(WakeCounter::default()))
 }
@@ -254,7 +250,6 @@ async fn receive_until_prefers_shutdown_to_a_sent_reply() {
     let (reply, answer) = Reply::pair();
     reply.send(1).unwrap();
     let cancellation = Cancellation::new();
-    // Repeated, so an unordered race between the two would show.
     for _ in 0..16 {
         assert_eq!(
             answer.receive_until(&cancellation, past()).await,

@@ -1,5 +1,3 @@
-//! A limit on how many calls run at the same time.
-
 mod keyed;
 pub use keyed::KeyedLimit;
 
@@ -55,7 +53,6 @@ struct Places {
     freed: WaitQueue,
 }
 
-/// A place under a limit, freed when dropped.
 struct Place {
     places: Arc<Places>,
 }

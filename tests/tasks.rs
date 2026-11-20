@@ -17,11 +17,8 @@ use adamantium::{Cancellation, Reply, Tasks, blocking, concurrently, first_ok};
 use support::timeout;
 use tokio::sync::{Barrier, Semaphore};
 
-/// How long a test waits before calling a join hung. No test relies on it for
-/// ordering; it only turns a hang into a failure.
 const HUNG: Duration = Duration::from_secs(30);
 
-/// Sets a flag when dropped, which is how a test sees that a task was aborted.
 struct Dropped(Arc<AtomicBool>);
 
 impl Drop for Dropped {
@@ -30,9 +27,6 @@ impl Drop for Dropped {
     }
 }
 
-/// A `Dropped` that takes a moment to finish. A scope that returns without
-/// draining its tasks gets ahead of the flag. The delay orders nothing, so it
-/// can't fail a scope that drains.
 struct DroppedSlowly(Arc<AtomicBool>);
 
 impl Drop for DroppedSlowly {
@@ -46,7 +40,6 @@ impl Drop for DroppedSlowly {
     }
 }
 
-/// A `DroppedSlowly` for several tasks: counts them once each has finished.
 struct CountedSlowly(Arc<AtomicUsize>);
 
 impl Drop for CountedSlowly {
@@ -60,7 +53,6 @@ impl Drop for CountedSlowly {
     }
 }
 
-/// Counts itself live for as long as it exists, and keeps the highest count.
 struct Live {
     live: Arc<AtomicUsize>,
 }
@@ -81,8 +73,6 @@ impl Drop for Live {
     }
 }
 
-/// Panics when dropped, which is how a test makes a task panic only once it
-/// is aborted.
 struct PanicsWhenDropped;
 
 impl Drop for PanicsWhenDropped {
@@ -91,7 +81,6 @@ impl Drop for PanicsWhenDropped {
     }
 }
 
-/// A task that never finishes on its own and reports when it is dropped.
 fn forever(
     dropped: &Arc<AtomicBool>,
 ) -> impl Future<Output = Result<(), &'static str>> + Send + use<> {
@@ -103,8 +92,6 @@ fn forever(
     }
 }
 
-/// Polls `future` once and checks that it is waiting, so what the test does
-/// next happens while it is under way.
 async fn begin<F: Future + Send>(mut future: Pin<&mut F>) {
     std::future::poll_fn(|cx| {
         assert!(
@@ -124,7 +111,6 @@ fn one_thread_runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-/// Writes each test twice, once per runtime flavor.
 macro_rules! on_both_runtimes {
     ($($(#[$attribute:meta])* async fn $name:ident() $body:block)*) => {$(
         mod $name {
@@ -304,8 +290,6 @@ on_both_runtimes! {
     async fn a_body_error_wins_over_a_recorded_task_error() {
         let mut tasks = Tasks::<&str>::new();
         let (sent, received) = Reply::pair();
-        // Nothing can abort this task once it has signalled: it finishes in
-        // the same poll, so its error is recorded before join returns.
         tasks.spawn(async move {
             sent.send(()).unwrap();
             Err::<(), _>("task")
@@ -318,8 +302,6 @@ on_both_runtimes! {
     async fn a_panic_during_join_wins_over_an_error() {
         let mut tasks = Tasks::<&str>::new();
         let (sent, received) = Reply::pair();
-        // Nothing can abort this task once it has signalled: it panics in the
-        // same poll, so the error below cannot cancel the panic.
         tasks.spawn::<(), _>(async move {
             sent.send(()).unwrap();
             panic!("kaboom after an error")
@@ -393,9 +375,6 @@ on_both_runtimes! {
         assert!(dropped.load(Ordering::SeqCst), "the pending item was not drained");
     }
 
-    // Which item does what depends on the order they start in, not on their
-    // input position. The window is full when the failure happens, so the third
-    // item is never taken.
     async fn concurrently_drains_running_items_and_starts_no_more_after_an_error() {
         let called = AtomicUsize::new(0);
         let started = Arc::new(AtomicUsize::new(0));
@@ -453,8 +432,6 @@ on_both_runtimes! {
         assert_eq!(taken.load(Ordering::SeqCst), 5);
     }
 
-    // The input never ends, so only stopping at the error can finish this. With
-    // one place in the window, the failed item is the last one taken.
     async fn concurrently_takes_no_more_items_after_an_error() {
         let taken = AtomicUsize::new(0);
         let items = (0..).inspect(|_| {
@@ -467,8 +444,6 @@ on_both_runtimes! {
         assert_eq!(taken.load(Ordering::SeqCst), 4);
     }
 
-    // This iterator would resume after its `None`, and the window still has an
-    // item to wait for when it returns that `None`.
     async fn concurrently_takes_nothing_after_the_first_none() {
         let calls = AtomicUsize::new(0);
         let items = std::iter::from_fn(|| match calls.fetch_add(1, Ordering::SeqCst) {
@@ -482,8 +457,6 @@ on_both_runtimes! {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
-    // The first item waits for the last, which can only start if the window
-    // moves past the first item while it is pending.
     async fn concurrently_rolls_past_a_slow_item_and_keeps_input_order() {
         let (release, released) = Reply::pair();
         let mut release = Some(release);
@@ -525,7 +498,6 @@ on_both_runtimes! {
     }
 
     async fn concurrently_keeps_input_order_when_items_finish_in_reverse() {
-        // Each item waits for the one after it, so the last finishes first.
         let mut release_previous = None;
         let mut items = Vec::new();
         for n in 0..8 {
@@ -579,8 +551,6 @@ on_both_runtimes! {
         assert!(dropped.load(Ordering::SeqCst), "the pending item was not drained");
     }
 
-    // The input never ends, so only stopping at the success can finish this.
-    // With one place in the window, each failure lets the next item start.
     async fn first_ok_tries_the_next_item_after_a_failure_and_stops_at_a_success() {
         let taken = AtomicUsize::new(0);
         let items = (0..).inspect(|_| {
@@ -594,7 +564,6 @@ on_both_runtimes! {
     }
 
     async fn first_ok_returns_every_error_in_input_order_when_items_fail_in_reverse() {
-        // Each item waits for the one after it, so the last fails first.
         let mut release_previous = None;
         let mut items = Vec::new();
         for n in 0..8 {
@@ -633,8 +602,6 @@ on_both_runtimes! {
         assert!(dropped.load(Ordering::SeqCst), "the pending item was not drained");
     }
 
-    // The loser can only panic once it is aborted, which happens after the
-    // winner has succeeded.
     #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     async fn first_ok_resumes_a_panic_from_a_loser_drained_after_a_success() {
         let succeeded = Arc::new(AtomicBool::new(false));
@@ -711,8 +678,6 @@ on_both_runtimes! {
     }
 }
 
-// One thread at a time, so the first task's error is recorded before the second
-// task can run. A multithreaded runtime gives no such order.
 #[tokio::test]
 async fn the_first_error_recorded_wins_whatever_the_spawn_order() {
     let mut tasks = Tasks::<&str>::new();
@@ -731,9 +696,6 @@ async fn the_first_error_recorded_wins_whatever_the_spawn_order() {
     assert_eq!(tasks.join(Ok(())).await, Err("failed first"));
 }
 
-// A handle dropped just as its task delivers a result must not take the error
-// with it. A barrier lines the two up, but the window is too small to hit every
-// round, so this leans on repetition.
 #[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_handle_dropped_as_its_task_fails_does_not_lose_the_error() {
@@ -867,7 +829,6 @@ on_both_runtimes! {
         let scope = Tasks::<&str>::run(async |t| {
             let failed = t.spawn(async { Err::<(), _>("handled") });
             assert_eq!(t.value(failed).await, Err("handled"));
-            // Give a wrongly orphaned error time to stop the body.
             sleep(Duration::from_millis(20)).await;
             let retried = t.spawn(async { Ok("recovered") });
             t.value(retried).await
@@ -883,8 +844,6 @@ on_both_runtimes! {
                 Err::<(), _>("arrived first")
             });
             received.receive().await.unwrap();
-            // On one thread the task has delivered its error by now; on
-            // several, this drop races the delivery, and either order counts.
             drop(failed);
             std::future::pending::<()>().await;
             Ok(())
@@ -903,7 +862,6 @@ on_both_runtimes! {
             received.receive().await.unwrap();
             sleep(Duration::from_millis(20)).await;
             finished.store(true, Ordering::SeqCst);
-            // The body returns before its next await, so this drop can't stop it.
             drop(kept);
             Ok(())
         });
@@ -921,12 +879,10 @@ on_both_runtimes! {
                 released.receive().await.unwrap();
                 Ok("sibling finished")
             });
-            // The handled task's error type need not be the scope's.
             t.spawn_handled(async { Err(String::from("connection reset")) }, move |error| {
                 handled.send(error).unwrap();
             });
             assert_eq!(handled_rx.receive().await.unwrap(), "connection reset");
-            // Give a wrongly recorded error time to stop the body.
             sleep(Duration::from_millis(20)).await;
             release.send(()).unwrap();
             t.value(sibling).await
@@ -1024,8 +980,6 @@ on_both_runtimes! {
     }
 }
 
-// One thread at a time, so the kept task's error is recorded by the time the
-// body runs again.
 #[tokio::test]
 async fn the_oldest_unclaimed_error_wins_over_the_orphan() {
     let (sent, received) = Reply::pair();
@@ -1042,9 +996,6 @@ async fn the_oldest_unclaimed_error_wins_over_the_orphan() {
     assert_eq!(timeout(HUNG, scope).await.unwrap(), Err("older and kept"));
 }
 
-// The handle is dropped just as its task fails. Whichever happens second must
-// see the first, or the body waits forever. The window is small, so this leans
-// on repetition.
 #[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_handle_dropped_as_its_task_fails_still_stops_the_body() {
@@ -1130,7 +1081,6 @@ async fn concurrently_stops_at_the_first_error() {
         let started = Arc::clone(&started);
         async move {
             if n == 1 {
-                // The sibling must own its guard before an error can cancel it.
                 while !started.load(Ordering::SeqCst) {
                     tokio::task::yield_now().await;
                 }
@@ -1149,8 +1099,6 @@ async fn concurrently_stops_at_the_first_error() {
     assert!(dropped.load(Ordering::SeqCst));
 }
 
-// One thread at a time, so the later item's error is recorded before the
-// earlier item can run. A multithreaded runtime gives no such order.
 #[tokio::test]
 async fn concurrently_reports_the_first_error_to_happen_not_the_first_input() {
     let (failing, earlier_may_fail) = Reply::pair();
@@ -1171,9 +1119,6 @@ async fn concurrently_reports_the_first_error_to_happen_not_the_first_input() {
     assert_eq!(timeout(HUNG, work).await.unwrap(), Err("later input"));
 }
 
-// The future is first polled on the first runtime, so its task lives there and
-// shutting it down cancels the task with nobody having aborted it and no error
-// to report. The second item must not start on the runtime that is left.
 #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
 #[test]
 fn concurrently_panics_if_the_runtime_cancels_its_items() {
@@ -1202,9 +1147,6 @@ fn concurrently_panics_if_the_runtime_cancels_its_items() {
     assert_eq!(called.load(Ordering::SeqCst), 1);
 }
 
-// The first item is stuck on a runtime that shuts down. The second finishes
-// there, so the third starts on the runtime that is left, and only an abort can
-// end it.
 #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
 #[test]
 fn concurrently_aborts_its_other_items_if_the_runtime_cancels_one() {
@@ -1282,7 +1224,6 @@ fn concurrently_does_nothing_until_polled() {
     assert_eq!(called.load(Ordering::SeqCst), 0);
 }
 
-// Calling needs no runtime, so the panic can only come from the poll.
 #[test]
 #[should_panic(expected = "Tokio 1.x runtime")]
 fn concurrently_needs_a_runtime_once_polled() {
@@ -1293,7 +1234,6 @@ fn concurrently_needs_a_runtime_once_polled() {
     );
 }
 
-// Each item goes straight into `f`, so only the iterator has to be `Send`.
 #[tokio::test]
 async fn concurrently_takes_items_that_are_not_send() {
     #[allow(clippy::disallowed_types, reason = "the item type under test")]
@@ -1347,8 +1287,6 @@ fn first_ok_does_nothing_until_polled() {
     assert_eq!(called.load(Ordering::SeqCst), 0);
 }
 
-// As for `concurrently`: the runtime that spawned the first item shuts down,
-// cancelling it with no success and no error to report.
 #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
 #[test]
 fn first_ok_panics_if_the_runtime_cancels_its_items() {

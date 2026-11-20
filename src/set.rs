@@ -220,7 +220,6 @@ impl<T> From<IndexSet<T>> for Set<T> {
 }
 
 impl<T: Hash + Eq, S: BuildHasher> From<HashSet<T, S>> for Set<T> {
-    /// Uses the source set's arbitrary iteration order as insertion order.
     fn from(values: HashSet<T, S>) -> Self {
         Self(Arc::new(values.into_iter().collect()))
     }
@@ -274,7 +273,6 @@ impl<T: fmt::Debug> fmt::Debug for Set<T> {
     }
 }
 
-/// Equal when the sets contain the same values, whatever the order.
 impl<T: Hash + Eq> PartialEq for Set<T> {
     fn eq(&self, other: &Self) -> bool {
         *self.0 == *other.0

@@ -20,7 +20,6 @@ pub struct Str {
         reason = "copy-on-write needs a growable buffer behind the Arc"
     )]
     storage: Arc<String>,
-    // None covers the entire String, whose length can change through make_mut.
     window: Option<Range<usize>>,
 }
 
