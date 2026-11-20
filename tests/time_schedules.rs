@@ -882,5 +882,22 @@ fn virtual_interval_tick_until_cancels_cleanly_and_loses_tie_to_cancellation() {
         })
         .await
         .unwrap();
+
+        // Zero-period tick_until yields so a sibling task can cancel on the same scheduler.
+        let zero_cancel = Cancellation::new();
+        let worker_cancel = zero_cancel.clone();
+        Tasks::run(async move |t| {
+            t.spawn(async move {
+                let mut zero = time::Interval::new(Duration::ZERO);
+                while zero.tick_until(&worker_cancel).await.is_some() {}
+                Ok::<(), ()>(())
+            });
+            let mut yielder = time::Interval::new(Duration::ZERO);
+            yielder.tick().await;
+            zero_cancel.cancel();
+            Ok(())
+        })
+        .await
+        .unwrap();
     });
 }

@@ -4,7 +4,7 @@
 use std::{pin::pin, task::Poll, time::Duration};
 
 use adamantium::{
-    Cancellation,
+    Cancellation, Tasks,
     time::{self, Interval, MissedTickBehavior},
 };
 use futures_util::poll;
@@ -206,4 +206,26 @@ async fn interval_reset_and_reset_at_reschedule_next_tick() {
 
     interval.reset_at(time::now() + Duration::from_secs(3));
     assert_eq!(interval.tick().await, start + Duration::from_secs(17));
+}
+
+#[tokio::test]
+async fn interval_zero_period_tick_until_cooperates_on_current_thread() {
+    let shutdown = Cancellation::new();
+    let worker_shutdown = shutdown.clone();
+    Tasks::run(async move |t| {
+        let mut ticks = 0u64;
+        t.spawn(async move {
+            let mut interval = Interval::new(Duration::ZERO);
+            while interval.tick_until(&worker_shutdown).await.is_some() {
+                ticks += 1;
+            }
+            assert!(ticks > 0);
+            Ok::<(), ()>(())
+        });
+        tokio::task::yield_now().await;
+        shutdown.cancel();
+        Ok(())
+    })
+    .await
+    .unwrap();
 }

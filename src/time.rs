@@ -217,6 +217,9 @@ impl Interval {
     /// completed.
     pub async fn tick(&mut self) -> Instant {
         sleep_until(self.next).await;
+        if self.period.is_zero() {
+            cooperate().await;
+        }
         let current = now();
         self.advance(current);
         current
@@ -233,6 +236,12 @@ impl Interval {
         match crate::tasks::shutdown(cancellation, Some(self.next)).await {
             crate::tasks::Shutdown::Cancelled => None,
             crate::tasks::Shutdown::DeadlineExceeded => {
+                // Expired/zero-period deadlines bypass Tokio's timer driver, so
+                // charge the cooperative budget to avoid starving other tasks.
+                cooperate().await;
+                if cancellation.is_cancelled() {
+                    return None;
+                }
                 let current = now();
                 self.advance(current);
                 Some(current)
@@ -278,4 +287,13 @@ fn duration_from_nanos_capped(nanos: u128) -> Duration {
     }
     let subsec_nanos = u32::try_from(nanos % 1_000_000_000).unwrap_or(0);
     Duration::new(secs, subsec_nanos)
+}
+
+async fn cooperate() {
+    #[cfg(feature = "deterministic")]
+    if crate::runtime::World::current().is_model() {
+        shuttle::future::yield_now().await;
+        return;
+    }
+    tokio::task::consume_budget().await;
 }
