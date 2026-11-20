@@ -117,11 +117,16 @@ impl Decisions {
             })?;
         let status = response.status();
         if !status.is_success() {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "a Retry-After HTTP date is compared with the real clock; the standalone CLI runs outside the deterministic harness"
+            )]
+            let now = SystemTime::now();
             let retry_after = response
                 .headers()
                 .get("retry-after")
                 .and_then(|value| value.to_str().ok())
-                .and_then(|value| parse_retry_after(value, SystemTime::now()));
+                .and_then(|value| parse_retry_after(value, now));
             let quota_error = status.as_u16() == 429
                 && response
                     .body_mut()
