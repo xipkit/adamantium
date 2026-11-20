@@ -1,0 +1,49 @@
+name: Build deep lint libraries
+
+on: workflow_call
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-22.04
+          - platform: darwin-arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Build and stage the native library
+        run: |
+          rustup toolchain install nightly-2026-08-20 --profile minimal --component rustc-dev,llvm-tools-preview,rustfmt
+          cargo install --locked --version 6.4.0 cargo-dylint dylint-link
+          ./lints/build.sh
+          cargo +nightly-2026-08-20 fmt --manifest-path lints/Cargo.toml -- --check
+          python3 lints/stage-release.py "$PLATFORM" "$CARGO_TARGET_DIR" "$RUNNER_TEMP/deep"
+      - name: Exercise the CLI with the staged release pin
+        run: |
+          cp "$RUNNER_TEMP/deep/$PLATFORM.json" cli/src/deep/
+          cargo build --locked -p cargo-adamantium
+          python3 lints/test-deep.py target/debug/cargo-adamantium "$RUNNER_TEMP/deep" "$PLATFORM"
+          library=$(find target/release -maxdepth 1 -name 'libadamantium_lints@*')
+          python3 lints/test.py --cli target/debug/cargo-adamantium --library "$library"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deep-${{ matrix.platform }}
+          path: ${{ runner.temp }}/deep/
+          if-no-files-found: error
+          overwrite: true
