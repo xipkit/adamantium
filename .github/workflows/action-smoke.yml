@@ -63,10 +63,19 @@ jobs:
           working-directory: cli/tests/fixtures/action-smoke
           sarif: 'true'
           upload-sarif: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+          sarif-category: adamantium-smoke-one
           deps: 'true'
           deps-baseline: ${{ runner.temp }}/deps-baseline.json
           style: concurrency
           style-changed: HEAD
+      - name: Upload another SARIF category
+        uses: ./
+        with:
+          rev: 576dff216296d5e8a960c6972779639e93e40f7c
+          working-directory: cli/tests/fixtures/action-smoke
+          sarif: 'true'
+          upload-sarif: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+          sarif-category: adamantium-smoke-two
       - name: Verify SARIF report
         run: python3 -c 'import json, os; report = json.load(open(os.environ["RUNNER_TEMP"] + "/adamantium.sarif")); assert report["version"] == "2.1.0"'
       - name: Reject invalid inputs

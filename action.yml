@@ -27,6 +27,9 @@ inputs:
   upload-sarif:
     description: Upload the SARIF report to GitHub code scanning (requires sarif and security-events write)
     default: 'false'
+  sarif-category:
+    description: Code scanning category; use a distinct value for each analysis in a workflow
+    default: adamantium
   deps:
     description: Run the dependency audit with --deny-new (true or false)
     default: 'false'
@@ -159,7 +162,7 @@ runs:
       uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: ${{ runner.temp }}/adamantium.sarif
-        category: adamantium
+        category: ${{ inputs.sarif-category }}
     - name: Audit dependencies
       if: ${{ inputs.deps == 'true' }}
       shell: bash
