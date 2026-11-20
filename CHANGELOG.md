@@ -10,6 +10,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `adamantium`: `testing::FaultInjector`, `testing::FaultRule`, `testing::FaultStep`,
+  and `testing::Latency` inject deterministic errors and virtual-clock latency into
+  mocked async traits using `adamantium::random` and `adamantium::time::sleep`,
+  reproducing identically under `testing::check` and `testing::replay`.
 - `adamantium`: `time::wall_now()` reads the wall clock for comparing absolute
   timestamps such as a JWT or cookie `exp`. In the deterministic harness it
   starts at `testing::Config::wall_epoch` and advances with virtual time, and
