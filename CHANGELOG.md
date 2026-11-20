@@ -10,6 +10,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `adamantium`: `AsyncActor::new_named` names the actor worker for `tracing`
+  spans, scope deadline reports, and `testing::explain` timelines.
+  `AsyncActor::try_send` and `AsyncActor::send_until` match `Channel`, and
+  `AsyncActor::call` and `AsyncActor::call_until` provide request-reply helpers
+  backed by `Reply::pair()`.
 - `cargo-adamantium`: `check --update-baseline` prunes resolved findings,
   `--fail-on-stale-baseline` requires an up-to-date baseline in CI, and
   `--summary` shows counts by rule and hotspot file.
