@@ -14,6 +14,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   until a `Cancellation` is requested or a deadline passes. A caller that
   stops leaves the operation to the others sharing it, and drops it only if
   it was the last.
+- `cargo-adamantium`: `check --update-baseline` prunes resolved findings,
+  `--fail-on-stale-baseline` requires an up-to-date baseline in CI, and
+  `--summary` shows counts by rule and hotspot file.
 - `cargo-adamantium`: `style check --pack concurrency` reviews files for
   state with a joint invariant split across separate Actors, locks or
   atomics (`split_actor_invariant`) and unbounded in-memory collection growth

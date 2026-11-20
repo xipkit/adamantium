@@ -1,7 +1,8 @@
 //! Running Clippy with the rules and turning its output into a report.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    cmp::Reverse,
+    collections::{BTreeMap, HashSet, VecDeque},
     env, fs,
     io::{self, BufRead, BufReader, Write},
     path::{Component, Path, PathBuf},
@@ -10,6 +11,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     ReportFormat,
@@ -20,6 +22,37 @@ use crate::{
 
 /// The version of the JSON report's layout.
 const SCHEMA_VERSION: u32 = 3;
+
+/// Arguments for `cargo adamantium check`.
+#[derive(clap::Args)]
+pub struct Args {
+    /// The project directory, or its Cargo.toml.
+    #[arg(default_value = ".")]
+    path: PathBuf,
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    format: ReportFormat,
+    /// Also run the experimental lints from this explicitly built Dylint library.
+    #[arg(long)]
+    dylint_library: Option<PathBuf>,
+    /// Include the strict rules for arithmetic and synchronization.
+    #[arg(long)]
+    strict: bool,
+    /// Leave out findings from an earlier `--format json` report.
+    #[arg(long, value_name = "REPORT")]
+    baseline: Option<PathBuf>,
+    /// Remove findings that no longer occur from the given baseline file.
+    #[arg(long, requires = "baseline")]
+    update_baseline: bool,
+    /// Exit with status 1 if the given baseline still has unmatched findings.
+    #[arg(long, requires = "baseline")]
+    fail_on_stale_baseline: bool,
+    /// In text output, summarize findings by rule and by the 10 most affected files.
+    #[arg(long)]
+    summary: bool,
+    /// Arguments passed on to `cargo clippy`, such as `--release` or `-p name`.
+    #[arg(last = true)]
+    cargo_args: Vec<String>,
+}
 
 /// What a check found.
 #[derive(Serialize)]
@@ -40,7 +73,7 @@ pub struct Report {
     pub errors: Vec<Problem>,
 }
 
-/// The outcome of a check, which is also its exit status.
+/// Whether the check completed and found rule violations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -82,10 +115,12 @@ pub struct Problem {
 /// relative to the project root and the text of its line, so it stays matched
 /// when edits elsewhere move it. Findings that share all three are counted,
 /// and only those beyond the earlier count are new.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Baseline {
-    /// The earlier findings this check has not matched yet.
-    remaining: BTreeMap<BaselineKey, usize>,
+#[derive(Debug)]
+struct Baseline {
+    original: String,
+    report: Value,
+    /// Indices of the original findings this check has not matched yet.
+    remaining: BTreeMap<BaselineKey, VecDeque<usize>>,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -192,18 +227,15 @@ enum DiagnosticKey {
 
 impl Baseline {
     /// Reads a report written by `check --format json`.
-    pub fn load(path: &Path) -> Result<Self> {
+    fn load(path: &Path) -> Result<Self> {
         let text =
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        Self::parse(&text).with_context(|| format!("using {} as a baseline", path.display()))
+        Self::parse(text).with_context(|| format!("using {} as a baseline", path.display()))
     }
 
-    fn parse(text: &str) -> Result<Self> {
-        let report: serde_json::Value =
-            serde_json::from_str(text).context("it is not a JSON report")?;
-        let version = report
-            .get("schema_version")
-            .and_then(serde_json::Value::as_u64);
+    fn parse(original: String) -> Result<Self> {
+        let report: Value = serde_json::from_str(&original).context("it is not a JSON report")?;
+        let version = report.get("schema_version").and_then(Value::as_u64);
         if version != Some(u64::from(SCHEMA_VERSION)) {
             let found = version.map_or_else(
                 || "no schema version".to_owned(),
@@ -213,21 +245,24 @@ impl Baseline {
                 "it has {found}, but a baseline must be a schema version {SCHEMA_VERSION} report; regenerate it with `cargo adamantium check --format json`"
             );
         }
-        let report: EarlierReport =
-            serde_json::from_value(report).context("it is not a check report")?;
-        if report.status == Status::Error {
+        let earlier = EarlierReport::deserialize(&report).context("it is not a check report")?;
+        if earlier.status == Status::Error {
             bail!("the project did not build when it was written, so its findings are incomplete");
         }
-        let mut baseline = Self::default();
-        for finding in report.findings {
+        let mut remaining = BTreeMap::<_, VecDeque<_>>::new();
+        for (index, finding) in earlier.findings.into_iter().enumerate() {
             let key = BaselineKey {
-                path: portable_path(&report.root, &finding.file),
+                path: portable_path(&earlier.root, &finding.file),
                 rule: finding.rule,
                 source: finding.source,
             };
-            *baseline.remaining.entry(key).or_insert(0) += 1;
+            remaining.entry(key).or_default().push_back(index);
         }
-        Ok(baseline)
+        Ok(Self {
+            original,
+            report,
+            remaining,
+        })
     }
 
     /// Matches a finding against one of the earlier findings not yet
@@ -238,19 +273,74 @@ impl Baseline {
             path: path.to_owned(),
             source: source.map(str::to_owned),
         };
-        match self.remaining.get_mut(&key) {
-            Some(count) if *count > 0 => {
-                *count -= 1;
-                true
-            }
-            _ => false,
-        }
+        self.remaining
+            .get_mut(&key)
+            .and_then(VecDeque::pop_front)
+            .is_some()
     }
 
     /// How many earlier findings were never matched.
     fn unmatched(&self) -> usize {
-        self.remaining.values().sum()
+        self.remaining.values().map(VecDeque::len).sum()
     }
+
+    /// Removes just the unmatched rows, retaining the original report data and order.
+    fn prune(mut self, path: &Path) -> Result<usize> {
+        let stale: HashSet<usize> = self.remaining.values().flatten().copied().collect();
+        if stale.is_empty() {
+            return Ok(0);
+        }
+        let findings = self
+            .report
+            .get_mut("findings")
+            .and_then(Value::as_array_mut)
+            .context("the baseline report has no findings array")?;
+        let mut index = 0;
+        findings.retain(|_| {
+            let matched = !stale.contains(&index);
+            index += 1;
+            matched
+        });
+        if findings.is_empty() {
+            *self
+                .report
+                .get_mut("status")
+                .context("the baseline report has no status")? =
+                serde_json::to_value(Status::Clean)?;
+        }
+        replace_baseline(path, &self.original, &self.report)
+            .with_context(|| format!("updating baseline {}", path.display()))?;
+        Ok(stale.len())
+    }
+}
+
+/// Writes a replacement next to the original and publishes it only if the baseline still matches.
+fn replace_baseline(path: &Path, original: &str, report: &Value) -> Result<()> {
+    let path = path.canonicalize()?;
+    let parent = path
+        .parent()
+        .context("the baseline file has no parent directory")?;
+    let mut updated = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(&mut updated, report)?;
+    writeln!(updated)?;
+
+    // On Unix the lock serializes updaters. Windows locks prevent reading through
+    // a second handle, so the portable snapshot check still runs before replacing.
+    #[cfg(unix)]
+    let _lock = {
+        let file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        file.lock()?;
+        file
+    };
+    updated
+        .as_file()
+        .set_permissions(fs::metadata(&path)?.permissions())?;
+    updated.as_file().sync_all()?;
+    if fs::read_to_string(&path)? != original {
+        bail!("the baseline changed during the check; rerun the check to update it");
+    }
+    updated.persist(&path)?;
+    Ok(())
 }
 
 impl Status {
@@ -263,80 +353,127 @@ impl Status {
     }
 }
 
-/// Runs the check and prints the report, as text on stderr or as JSON or
-/// SARIF on stdout. Findings in `baseline`, an earlier JSON report, are left
-/// out. The exit status is 0 when clean, 1 with findings and 2 when the
-/// project failed to build.
-pub fn run(
-    path: &Path,
-    cargo_args: &[String],
-    format: ReportFormat,
-    strict: bool,
-    baseline: Option<&Path>,
-    dylint_library: Option<&Path>,
-) -> Result<ExitCode> {
-    let root = manifest::root(path)?;
-    let baseline = baseline.map(Baseline::load).transpose()?;
-    let report = check_selected(
+/// Runs the check, applies any baseline options, and prints the report.
+pub fn run(args: Args) -> Result<ExitCode> {
+    let root = manifest::root(&args.path)?;
+    let baseline_path = args.baseline.as_deref();
+    let mut baseline = baseline_path.map(Baseline::load).transpose()?;
+    let text = matches!(args.format, ReportFormat::Text);
+    let mut report = check_selected(
         &root,
-        cargo_args,
-        matches!(format, ReportFormat::Text),
-        strict,
-        baseline,
+        &args.cargo_args,
+        text,
+        args.strict,
+        baseline.as_mut(),
         None,
-        dylint_library,
+        args.dylint_library.as_deref(),
     )?;
-    match format {
+    let pruned = if args.update_baseline
+        && report.status != Status::Error
+        && let (Some(path), Some(baseline)) = (baseline_path, baseline)
+    {
+        baseline.prune(path)?
+    } else {
+        0
+    };
+    if pruned > 0 {
+        report.baseline_unmatched = Some(0);
+    }
+    match args.format {
         ReportFormat::Json => print_json(&report)?,
         ReportFormat::Sarif => print_json(&sarif::log(
             &report,
-            &sarif::Roots::locate(&root, cargo_args)?,
+            &sarif::Roots::locate(&root, &args.cargo_args)?,
         ))?,
-        ReportFormat::Text => {
-            let mut stderr = io::stderr().lock();
-            for error in &report.errors {
-                if error.file.is_none() {
-                    writeln!(stderr, "error: {}", error.message)?;
-                }
-            }
-            let note = left_out_note(&report);
-            match report.status {
-                Status::Clean => writeln!(stderr, "adamantium: clean{note}")?,
-                Status::Findings => {
-                    let mut files: Vec<&str> = report
-                        .findings
-                        .iter()
-                        .map(|finding| finding.file.as_str())
-                        .collect();
-                    files.sort_unstable();
-                    files.dedup();
-                    writeln!(
-                        stderr,
-                        "adamantium: {} finding{} in {}{note}",
-                        report.findings.len(),
-                        if report.findings.len() == 1 { "" } else { "s" },
-                        files.join(", ")
-                    )?;
-                }
-                Status::Error => writeln!(
-                    stderr,
-                    "adamantium: the project did not build, so the rules were not all checked"
-                )?,
-            }
-            match report.baseline_unmatched {
-                None | Some(0) => {}
-                Some(1) => writeln!(
-                    stderr,
-                    "adamantium: 1 finding in the baseline no longer occurs; regenerate the baseline so it can't come back"
-                )?,
-                Some(unmatched) => writeln!(
-                    stderr,
-                    "adamantium: {unmatched} findings in the baseline no longer occur; regenerate the baseline so they can't come back"
-                )?,
-            }
+        ReportFormat::Text => print_text(&mut io::stderr().lock(), &report, args.summary)?,
+    }
+    if report.status == Status::Error {
+        return Ok(Status::Error.exit_code());
+    }
+    let mut stderr = io::stderr().lock();
+    if pruned > 0 {
+        writeln!(
+            stderr,
+            "adamantium: removed {pruned} stale baseline {}",
+            findings_label(pruned)
+        )?;
+    }
+    if let Some(unmatched @ 1..) = report.baseline_unmatched
+        && (text || args.fail_on_stale_baseline)
+    {
+        let verb = if unmatched == 1 { "occurs" } else { "occur" };
+        writeln!(
+            stderr,
+            "adamantium: {unmatched} {} in the baseline no longer {verb}. Run with --update-baseline to prune the baseline.",
+            findings_label(unmatched),
+        )?;
+        if args.fail_on_stale_baseline {
+            return Ok(Status::Findings.exit_code());
         }
     }
     Ok(report.status.exit_code())
+}
+
+fn findings_label(count: usize) -> &'static str {
+    if count == 1 { "finding" } else { "findings" }
+}
+
+fn print_text(stderr: &mut impl Write, report: &Report, summary: bool) -> io::Result<()> {
+    for error in &report.errors {
+        if error.file.is_none() {
+            writeln!(stderr, "error: {}", error.message)?;
+        }
+    }
+    let note = left_out_note(report);
+    let count = report.findings.len();
+    let label = findings_label(count);
+    match report.status {
+        Status::Clean => writeln!(stderr, "adamantium: clean{note}"),
+        Status::Findings if summary => {
+            writeln!(stderr, "adamantium: {count} {label}{note}")?;
+            writeln!(stderr, "Findings by rule:")?;
+            for (rule, count) in
+                ranked_counts(report.findings.iter().map(|finding| finding.rule.as_str()))
+            {
+                writeln!(stderr, "  {count:>5}  {rule}")?;
+            }
+            writeln!(stderr, "Top hotspot files:")?;
+            let files = ranked_counts(report.findings.iter().map(|finding| finding.file.as_str()));
+            for (file, count) in files.into_iter().take(10) {
+                writeln!(stderr, "  {count:>5}  {file}")?;
+            }
+            Ok(())
+        }
+        Status::Findings => {
+            let mut files: Vec<&str> = report
+                .findings
+                .iter()
+                .map(|finding| finding.file.as_str())
+                .collect();
+            files.sort_unstable();
+            files.dedup();
+            writeln!(
+                stderr,
+                "adamantium: {count} {label} in {}{note}",
+                files.join(", ")
+            )
+        }
+        Status::Error => writeln!(
+            stderr,
+            "adamantium: the project did not build, so the rules were not all checked"
+        ),
+    }
+}
+
+/// Counts each name, ranked by descending count and then by name.
+fn ranked_counts<'a>(names: impl Iterator<Item = &'a str>) -> Vec<(&'a str, usize)> {
+    let mut counts = BTreeMap::new();
+    for name in names {
+        *counts.entry(name).or_insert(0) += 1;
+    }
+    let mut counts: Vec<_> = counts.into_iter().collect();
+    counts.sort_unstable_by_key(|&(name, count)| (Reverse(count), name));
+    counts
 }
 
 /// The summary's note on findings the skip list or the baseline left out,
@@ -383,25 +520,25 @@ fn write_clippy_config(
     Ok((path, toml))
 }
 
+/// Checks a project without a baseline.
 pub(crate) fn check(
     root: &Path,
     cargo_args: &[String],
     echo: bool,
     strict: bool,
-    baseline: Option<Baseline>,
 ) -> Result<Report> {
-    check_with_suggestions(root, cargo_args, echo, strict, baseline, None)
+    check_with_suggestions(root, cargo_args, echo, strict, None)
 }
 
+/// Checks a project and collects raw diagnostics for the findings when requested.
 pub(crate) fn check_with_suggestions(
     root: &Path,
     cargo_args: &[String],
     echo: bool,
     strict: bool,
-    baseline: Option<Baseline>,
     diagnostics: Option<&mut Vec<serde_json::Value>>,
 ) -> Result<Report> {
-    check_selected(root, cargo_args, echo, strict, baseline, diagnostics, None)
+    check_selected(root, cargo_args, echo, strict, None, diagnostics, None)
 }
 
 fn check_selected(
@@ -409,7 +546,7 @@ fn check_selected(
     cargo_args: &[String],
     echo: bool,
     strict: bool,
-    baseline: Option<Baseline>,
+    baseline: Option<&mut Baseline>,
     mut diagnostics: Option<&mut Vec<serde_json::Value>>,
     dylint_library: Option<&Path>,
 ) -> Result<Report> {
@@ -575,7 +712,7 @@ fn check_selected(
         findings,
         skipped,
         baselined,
-        baseline_unmatched: baseline.as_ref().map(Baseline::unmatched),
+        baseline_unmatched: baseline.as_deref().map(Baseline::unmatched),
         warnings,
         errors,
     })
@@ -653,19 +790,19 @@ struct Setting<'a> {
 
 /// The diagnostics `classify` has sorted so far.
 #[derive(Default)]
-struct Sorted {
+struct Sorted<'a> {
     /// Diagnostics already sorted, since Clippy repeats them across targets.
     seen: HashSet<DiagnosticKey>,
     findings: Vec<Finding>,
     skipped: BTreeMap<String, usize>,
     /// The earlier findings not yet matched, when the check has a baseline.
-    baseline: Option<Baseline>,
+    baseline: Option<&'a mut Baseline>,
     baselined: BTreeMap<String, usize>,
     warnings: Vec<Problem>,
     errors: Vec<Problem>,
 }
 
-impl Sorted {
+impl Sorted<'_> {
     /// Whether the baseline has this finding, counting it as baselined if so.
     fn in_baseline(&mut self, rule: &str, path: &str, source: Option<&str>) -> bool {
         let matched = self
@@ -715,7 +852,7 @@ fn selects_targets(args: &[String]) -> bool {
 /// build error, a configuration or unavailable-lint warning, or noise,
 /// echoing diagnostics when `echo` is set. Without a primary span, only unknown or removed lint
 /// warnings are kept; compiler summaries are dropped.
-fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted) {
+fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted<'_>) {
     let Some(span) = diagnostic.spans.iter().find(|span| span.is_primary) else {
         let Some(code) = diagnostic.code else {
             return;
@@ -892,7 +1029,7 @@ mod tests {
 
     fn classify_with_config(
         config: &Config,
-        baseline: Option<Baseline>,
+        mut baseline: Option<Baseline>,
         diagnostics: Vec<Diagnostic>,
     ) -> Report {
         let root = Path::new("project");
@@ -906,7 +1043,7 @@ mod tests {
             echo: false,
         };
         let mut sorted = Sorted {
-            baseline,
+            baseline: baseline.as_mut(),
             ..Sorted::default()
         };
         for diagnostic in diagnostics {
@@ -919,7 +1056,7 @@ mod tests {
             findings: sorted.findings,
             skipped: sorted.skipped,
             baselined: sorted.baselined,
-            baseline_unmatched: sorted.baseline.as_ref().map(Baseline::unmatched),
+            baseline_unmatched: sorted.baseline.as_deref().map(Baseline::unmatched),
             warnings: sorted.warnings,
             errors: sorted.errors,
         }
@@ -1295,7 +1432,7 @@ mod tests {
 
     fn baseline(root: &str, findings: serde_json::Value) -> Baseline {
         Baseline::parse(
-            &serde_json::json!({
+            serde_json::json!({
                 "schema_version": SCHEMA_VERSION,
                 "root": root,
                 "status": "findings",
@@ -1456,12 +1593,14 @@ mod tests {
                 "the project did not build",
             ),
         ] {
-            let error = Baseline::parse(&text).unwrap_err().to_string();
+            let error = Baseline::parse(text.clone()).unwrap_err().to_string();
             assert!(error.starts_with(expected), "{text}: {error}");
         }
         assert_eq!(
-            Baseline::parse(&report(SCHEMA_VERSION.into(), "clean")).unwrap(),
-            Baseline::default()
+            Baseline::parse(report(SCHEMA_VERSION.into(), "clean"))
+                .unwrap()
+                .unmatched(),
+            0
         );
     }
 
