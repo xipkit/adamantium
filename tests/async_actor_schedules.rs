@@ -27,6 +27,7 @@ fn config() -> Config {
         seed: 226,
         iterations: 300,
         max_steps: 20_000,
+        ..Config::default()
     }
 }
 
@@ -76,6 +77,7 @@ fn new_named_worker_appears_in_explain_timelines_without_perturbation() {
             seed: 226,
             iterations: 20,
             max_steps: 5_000,
+            ..Config::default()
         }
         .with_scheduler(mode);
 
