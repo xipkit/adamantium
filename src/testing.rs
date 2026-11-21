@@ -407,6 +407,11 @@ impl std::error::Error for Failure {}
 /// Create fresh state in the factory for each execution. Use modeled primitives
 /// and virtual time in place of real I/O and wall-clock waits.
 ///
+/// The executions run on a new thread named like the caller's. It reports to
+/// the caller's `tracing` subscriber inside the caller's current span, but the
+/// caller's other thread-locals aren't visible to the scenario. [`replay`],
+/// [`shrink`], [`explain`] and [`replay_corpus`] run the same way.
+///
 /// Random, PCT and `DfsPrefix` checks stop at the iteration limit. PCT counts
 /// calibration as one execution and stops early if it finds no task choices.
 /// A `Dfs` check that reaches the limit with schedules left returns
@@ -1369,37 +1374,13 @@ fn run<S, F, Fut>(
     factory: F,
 ) -> Result<(Replay, Option<Collector>), Failure>
 where
-    S: Scheduler + 'static,
+    S: Scheduler + Send + 'static,
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()>,
 {
-    let _execution = Execution::enter();
-    let guard = Guard::enter();
-    let max_steps = record.max_steps;
-    let trace = Arc::new(Mutex::new(record));
-    let scheduler = Recording {
-        scheduler,
-        trace: Arc::clone(&trace),
-        replaying: original.is_some(),
-        saw_choice: false,
-    };
-    let mut engine = shuttle::Config::default();
-    // Nested scope/select/cleanup polls exceed Shuttle's 60 KiB default in
-    // Rust 1.88 debug builds. Match an ordinary worker's 2 MiB stack budget.
-    engine.stack_size = 2 * 1024 * 1024;
-    engine.max_steps = shuttle::MaxSteps::FailAfter(max_steps);
-    engine.failure_persistence = shuttle::FailurePersistence::None;
-    engine
-        .ungraceful_shutdown_config
-        .continuation_function_behavior = shuttle::ContinuationFunctionBehavior::Drop;
-    let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        shuttle::Runner::new(scheduler, engine).run(move || {
-            crate::runtime::clock::start();
-            shuttle::future::block_on(crate::runtime::coop::model::task(factory()));
-        });
-    }));
-    let collector = guard.finish();
-    let record = lock(&trace).clone();
+    let replaying = original.is_some();
+    let (record, collector, result) =
+        Execution::isolated(move || execute(record, scheduler, replaying, factory));
     let kind = if original.is_some_and(|(original, policy)| match policy {
         ReplayPolicy::Exact => original.steps != record.steps,
         ReplayPolicy::Prefix => !record.steps.starts_with(&original.steps),
@@ -1432,6 +1413,48 @@ where
         eprintln!("{failure}");
     }
     Err(failure)
+}
+
+/// Runs the executions of one harness call on the current thread and returns
+/// the last execution's record, its trace and how it ended.
+fn execute<S, F, Fut>(
+    record: Replay,
+    scheduler: S,
+    replaying: bool,
+    factory: F,
+) -> (Replay, Option<Collector>, std::thread::Result<()>)
+where
+    S: Scheduler + 'static,
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()>,
+{
+    let guard = Guard::enter();
+    let max_steps = record.max_steps;
+    let trace = Arc::new(Mutex::new(record));
+    let scheduler = Recording {
+        scheduler,
+        trace: Arc::clone(&trace),
+        replaying,
+        saw_choice: false,
+    };
+    let mut engine = shuttle::Config::default();
+    // Nested scope/select/cleanup polls exceed Shuttle's 60 KiB default in
+    // Rust 1.88 debug builds. Match an ordinary worker's 2 MiB stack budget.
+    engine.stack_size = 2 * 1024 * 1024;
+    engine.max_steps = shuttle::MaxSteps::FailAfter(max_steps);
+    engine.failure_persistence = shuttle::FailurePersistence::None;
+    engine
+        .ungraceful_shutdown_config
+        .continuation_function_behavior = shuttle::ContinuationFunctionBehavior::Drop;
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        shuttle::Runner::new(scheduler, engine).run(move || {
+            crate::runtime::clock::start();
+            shuttle::future::block_on(crate::runtime::coop::model::task(factory()));
+        });
+    }));
+    let collector = guard.finish();
+    let record = lock(&trace).clone();
+    (record, collector, result)
 }
 
 fn classify(payload: &(dyn Any + Send)) -> FailureKind {

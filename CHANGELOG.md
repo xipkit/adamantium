@@ -40,6 +40,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `std::thread::panicking()`, and so did a `testing::replay` or
   `testing::replay_corpus` that departed from its record at such a point. Later
   harness calls in the same test then failed.
+- Each `adamantium::testing` call runs on a new thread named like the test's,
+  with the test's `tracing` subscriber and current span. An execution that
+  failed while another task was still unwinding a panic, such as a step limit
+  reached in a destructor or two workers that both panic, used to leave the
+  test thread reporting `std::thread::panicking()`, and later harness calls in
+  the same test failed. The test's other thread-locals are no longer visible to
+  the scenario.
 
 ## [0.4.0] - 2026-11-21
 
