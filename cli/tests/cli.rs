@@ -513,10 +513,23 @@ fn check_applies_the_selected_sync_rules() {
     }
 }
 
+const CRYPTOGRAPHIC_RANDOMNESS_GUIDANCE: &str =
+    "Keep cryptographic randomness for keys and tokens at an input boundary.";
+
 #[test]
 fn check_reports_uncontrolled_randomness_and_allows_owned_seeds() {
+    let guide = fs::read_to_string(repository_root().join("docs/migrating.md")).unwrap();
+    assert!(guide.contains(CRYPTOGRAPHIC_RANDOMNESS_GUIDANCE));
+
     for strict in [false, true] {
-        check_marked_rules("random", strict).unwrap();
+        for finding in check_marked_rules("random", strict).unwrap() {
+            let remediation = finding["remediation"].as_str().unwrap();
+            assert!(remediation.contains("non-cryptographic"), "{finding}");
+            assert!(
+                remediation.contains(CRYPTOGRAPHIC_RANDOMNESS_GUIDANCE),
+                "{finding}"
+            );
+        }
     }
 
     let output = adamantium()
@@ -526,7 +539,14 @@ fn check_reports_uncontrolled_randomness_and_allows_owned_seeds() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("use adamantium::random"), "{stderr}");
+    assert!(
+        stderr.contains("use adamantium::random for non-cryptographic draws"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(CRYPTOGRAPHIC_RANDOMNESS_GUIDANCE),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -1961,6 +1981,11 @@ fn explain_has_an_example_for_every_rule_in_text_and_json() {
             );
         }
         assert_ne!(explanation["before"], explanation["after"], "{qualified}");
+        if qualified == "clippy::disallowed_methods" {
+            let replacement = explanation["replacement"].as_str().unwrap();
+            assert!(replacement.contains("non-cryptographic"));
+            assert!(replacement.contains(CRYPTOGRAPHIC_RANDOMNESS_GUIDANCE));
+        }
 
         let bare = adamantium()
             .current_dir(dir.path())

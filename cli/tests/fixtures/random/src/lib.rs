@@ -13,11 +13,11 @@ fn rand_08() {
 
 #[allow(deprecated, reason = "exercise rand 0.9's compatibility alias")]
 fn rand_09() {
-    use rand_09::{SeedableRng, rngs::StdRng};
+    use rand_09::{RngCore, SeedableRng, rngs::StdRng};
 
     let _ = rand_09::random::<u64>(); // disallowed_methods
     let _ = rand_09::thread_rng(); // disallowed_methods
-    let _ = rand_09::rng(); // disallowed_methods
+    rand_09::rng().fill_bytes(&mut [0; 32]); // disallowed_methods
     let _ = StdRng::from_os_rng(); // disallowed_methods
     drop(StdRng::try_from_os_rng()); // disallowed_methods
     let _ = StdRng::seed_from_u64(7);
