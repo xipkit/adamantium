@@ -18,7 +18,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -1605,6 +1605,86 @@ fn a_replay_that_diverges_while_a_task_unwinds_is_a_mismatch_and_leaves_the_thre
     std::fs::remove_file(&path).unwrap();
     assert!(matches!(error, CorpusError::Execution { source, .. }
         if source.kind() == FailureKind::ReplayMismatch));
+    assert!(!std::thread::panicking());
+    testing::check(config(), atomic_increment).unwrap();
+    assert!(!std::thread::panicking());
+}
+
+thread_local! {
+    static THREAD_END: std::cell::RefCell<Option<ThreadEnd>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Records whether its thread was still unwinding a panic when it ended.
+struct ThreadEnd(Arc<AtomicBool>);
+
+impl Drop for ThreadEnd {
+    fn drop(&mut self) {
+        self.0.store(std::thread::panicking(), Ordering::SeqCst);
+    }
+}
+
+/// Wraps a factory so that `unwinding` tells, once the thread that runs the
+/// scenario ends, whether that thread was still unwinding a panic.
+fn watch_thread_end<Fut>(
+    unwinding: &Arc<AtomicBool>,
+    factory: impl Fn() -> Fut + Send + Sync + 'static,
+) -> impl Fn() -> Fut + Send + Sync + 'static {
+    let unwinding = Arc::clone(unwinding);
+    move || {
+        THREAD_END.set(Some(ThreadEnd(Arc::clone(&unwinding))));
+        factory()
+    }
+}
+
+/// Reads an actor in a loop while it drops, so a task that unwinds through it
+/// keeps scheduling.
+struct SpinOnDrop(Actor<usize>);
+
+impl Drop for SpinOnDrop {
+    fn drop(&mut self) {
+        for _ in 0..5_000 {
+            self.0.read(|n| *n);
+        }
+    }
+}
+
+#[test]
+fn a_step_limit_while_a_task_unwinds_leaves_the_thread_clean() {
+    let unwinding = Arc::new(AtomicBool::new(false));
+    let scenario = watch_thread_end(&unwinding, || async {
+        let _spin = SpinOnDrop(Actor::new(0));
+        panic!("root fails");
+    });
+    let failure = testing::check(config(), scenario).unwrap_err();
+    assert_eq!(failure.kind(), FailureKind::StepLimit);
+    assert_eq!(failure.replay().iteration(), 1);
+    // The engine leaked the root task partway through its unwind.
+    assert!(unwinding.load(Ordering::SeqCst));
+    assert!(!std::thread::panicking());
+    testing::check(config(), atomic_increment).unwrap();
+    assert!(!std::thread::panicking());
+}
+
+#[test]
+fn a_panic_while_another_task_unwinds_leaves_the_thread_clean() {
+    let unwinding = Arc::new(AtomicBool::new(false));
+    let scenario = watch_thread_end(&unwinding, || async {
+        let workers = (0..2)
+            .map(|_| {
+                let watch = Watch::new(());
+                async move {
+                    let _watch = watch;
+                    panic!("worker fails");
+                }
+            })
+            .collect::<Vec<_>>();
+        testing::parallel(workers).await;
+    });
+    let failure = testing::check(config(), scenario).unwrap_err();
+    assert_eq!(failure.kind(), FailureKind::Panic);
+    assert_eq!(failure.replay().iteration(), 1);
+    // The engine leaked one worker partway through its unwind.
+    assert!(unwinding.load(Ordering::SeqCst));
     assert!(!std::thread::panicking());
     testing::check(config(), atomic_increment).unwrap();
     assert!(!std::thread::panicking());

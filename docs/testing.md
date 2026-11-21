@@ -106,6 +106,7 @@ Randomness:
 
 - Use `#[test]`, not `#[tokio::test]`.
 - Create primitives inside the execution that uses them.
+- Pass values into the factory, not through thread-locals. Each harness call runs on a new thread named like the test's. It keeps the test's `tracing` subscriber and current span.
 - Draw random numbers from `adamantium::random`. Read time from `time::now()` and `time::wall_now()`. Replace I/O, other clocks, other randomness, and foreign executors with deterministic fixtures.
 
 ## Limits
