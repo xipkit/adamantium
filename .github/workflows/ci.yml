@@ -94,5 +94,15 @@ jobs:
           node-version: 22
       - run: node --test style/scripts/evaluate-decisions.test.mjs
 
-  experimental-lints:
+  native-lints:
     uses: ./.github/workflows/deep-libraries.yml
+
+  experimental-lints:
+    needs: native-lints
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both native lint builds to pass
+        env:
+          RESULT: ${{ needs.native-lints.result }}
+        run: test "$RESULT" = success
