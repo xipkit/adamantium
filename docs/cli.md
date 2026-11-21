@@ -124,16 +124,16 @@ A dry run reports the status before the fixes.
 - An immediately awaited `tokio::time::sleep` or `tokio::time::sleep_until`.
 - `tokio::time::Instant::now()` that supplies the deadline for an immediately awaited `sleep_until`. This includes a direct argument or an immutable local used only by the next statement, with an optional offset made by a standard `Duration` constructor or constant. The wait can be Tokio's or a qualified `adamantium::time::sleep_until`.
 - An immediate `tokio::task::spawn_blocking(f).await.unwrap()`.
-- `rand::random::<u64>()` and `fastrand::u64(..)`, which become `adamantium::random::u64()`.
-- A `u64` draw from `0..=max` with `fastrand::u64` or `rand::random_range`, which becomes `adamantium::random::up_to(max)`. The `rand` range must identify the integer type by a literal suffix or an explicit type argument.
+- `fastrand::u64(..)`, which becomes `adamantium::random::u64()`, and `fastrand::u64(0..=max)`, which becomes `adamantium::random::up_to(max)`.
+- `rand::random()` and `rand::random_range(0..=max)` written as the first argument of a standard `Duration` constructor: `new`, `from_secs`, `from_millis`, `from_micros` or `from_nanos`. They become `adamantium::random::u64()` and `adamantium::random::up_to(max)`, as in retry jitter such as `Duration::from_millis(rand::random_range(0..=250))`. The constructor fixes the draw's type as `u64`.
 
-Adamantium's random draws are for non-secret values, such as retry jitter. Review random rewrites before applying them at security-sensitive boundaries.
+`rand`'s thread-local generator is cryptographically secure, and Adamantium's random draws are not. Neither the call nor its type shows whether a draw is a key or a token, but a draw that becomes a `Duration` is neither, so `fix` rewrites a `rand` draw only there. It names each other `rand` draw and the reason it stays. `fastrand` is not cryptographically secure, so `fix` rewrites its draws wherever they are.
 
 `fix` leaves these for review:
 
 - Compound callees, stored sleep futures, and blocking calls with explicit type arguments.
 - Clock reads for elapsed-time measurements, deadlines with multiple uses, and offsets of unknown type.
-- Other random types, ranges, distributions, and calls that rely on implicit `rand` type inference alone.
+- Other `rand` draws, and other random types, ranges and distributions.
 - `fastrand` draws when the findings show that the project seeds or reads the thread-local generator state directly.
 - Macro expansions, external source files, and conflicting suggestions.
 - Decisions about task scopes or lock lifetimes.

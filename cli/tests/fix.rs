@@ -406,10 +406,12 @@ fn timer_random_and_rwlock_rewrites_keep_behavior_and_are_idempotent() {
             true,
             "true\n",
             &[
-                "::adamantium::random::u64()",
+                "Duration::from_nanos(::adamantium::random::u64())",
+                "std::time::Duration::new(::adamantium::random::u64(), 0)",
+                "let _: u64 = ::adamantium::random::u64();",
                 "::adamantium::random::up_to( /* lower bound */ limit)",
-                "::adamantium::random::up_to(7_u64)",
-                "::adamantium::random::up_to(limit)",
+                "Duration::from_millis(::adamantium::random::up_to(7))",
+                "Duration::from_secs((::adamantium::random::up_to(limit)))",
             ],
         ),
         (
@@ -482,6 +484,72 @@ fn timer_and_random_rewrites_leave_unproved_calls_unchanged() {
             source
         );
     }
+}
+
+const CRYPTOGRAPHIC_RANDOMNESS_GUIDANCE: &str =
+    "Keep cryptographic randomness for keys and tokens at an input boundary.";
+
+fn assert_draws_left_for_review(output: &Output, draws: &[(usize, &str)]) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    for (line, path) in draws {
+        let refusal = format!(
+            "src/lib.rs:{line}: `{path}` stays: fix can't tell whether the draw is secret unless it goes straight into a `Duration` constructor such as `Duration::from_millis`. {CRYPTOGRAPHIC_RANDOMNESS_GUIDANCE}\n  Review https://github.com/xipkit/adamantium/blob/main/docs/migrating.md#randomness\n"
+        );
+        assert!(stderr.contains(&refusal), "missing {refusal}\n{stderr}");
+    }
+    assert_eq!(stderr.matches("` stays: ").count(), draws.len(), "{stderr}");
+}
+
+#[test]
+fn random_rewrites_leave_draws_that_might_be_secret_for_review() {
+    for (source, draws) in [
+        (
+            include_str!("fixtures/expression-rewrites/random-secret.rs"),
+            &[
+                (4, "rand::random"),
+                (8, "rand::random_range"),
+                (13, "rand::random_range"),
+                (17, "rand::random"),
+                (21, "rand::random_range"),
+                (25, "rand::random_range"),
+                (29, "rand::random"),
+            ][..],
+        ),
+        (
+            include_str!("fixtures/expression-rewrites/random-shadowed-duration.rs"),
+            &[(18, "rand::random")],
+        ),
+    ] {
+        let dir = project(source);
+        add_random_dependencies(dir.path()).unwrap();
+        let preview = run(&["fix", "--dry-run"], dir.path());
+        assert_draws_left_for_review(&preview, draws);
+        assert!(
+            preview.stdout.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&preview.stdout)
+        );
+        let output = run(&["fix"], dir.path());
+        assert_draws_left_for_review(&output, draws);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+            source
+        );
+    }
+
+    let mixed = include_str!("fixtures/expression-rewrites/random-mixed.rs");
+    let dir = project(mixed);
+    add_random_dependencies(dir.path()).unwrap();
+    let output = run(&["fix"], dir.path());
+    assert_draws_left_for_review(&output, &[(6, "rand::random_range")]);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+        mixed.replace(
+            "Duration::from_millis(range(0..=250))",
+            "Duration::from_millis(::adamantium::random::up_to(250))"
+        )
+    );
 }
 
 #[test]

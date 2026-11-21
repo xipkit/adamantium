@@ -22,6 +22,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   executions. It used to pass and report the shortfall only in
   `Replay::dfs_status`. `SchedulerMode::DfsPrefix` runs the same schedules and
   passes at the limit. Saved replay records move to format 5.
+- `cargo-adamantium fix` rewrites a `rand` draw to `adamantium::random` only
+  when the draw is the argument of a standard `Duration` constructor, such as
+  retry jitter, since it can't tell whether another draw is a key or a token.
+  It names each draw it leaves, with the cryptographic randomness guidance.
+  A draw in a `Duration` no longer needs a `u64` suffix or type argument.
 
 ### Fixed
 
