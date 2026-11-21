@@ -8,6 +8,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- `adamantium::testing::Replay::steps` counts the scheduling steps in a
+  recorded execution, which shows how large a scenario is.
+
 ### Changed
 
 - Adamantium's deterministic timelines show the operation at modeled scheduling

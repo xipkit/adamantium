@@ -212,6 +212,12 @@ impl Replay {
         self.max_steps
     }
 
+    /// The number of scheduling steps in this execution: each task choice and
+    /// each random draw. A DFS tree has one level per task choice.
+    pub fn steps(&self) -> usize {
+        self.steps.len()
+    }
+
     /// What [`crate::time::wall_now`] reported at the start of the execution.
     pub fn wall_epoch(&self) -> SystemTime {
         self.wall_epoch

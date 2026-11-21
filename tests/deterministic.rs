@@ -8,7 +8,8 @@
 use adamantium::{
     Actor, Cancellation, Channel, Reply, Tasks, TryReceiveError, Watch,
     testing::{
-        self, Config, CorpusError, DfsStatus, FailureKind, Replay, SchedulerMode, TimelineEventKind,
+        self, Config, CorpusError, DfsStatus, FailureKind, Replay, SchedulerMode, TimelineEvent,
+        TimelineEventKind,
     },
     time,
 };
@@ -200,6 +201,30 @@ fn dfs_distinguishes_a_complete_tree_from_the_iteration_limit() {
     assert_eq!(limited.dfs_status(), Some(DfsStatus::IterationLimit));
     assert_eq!(limited.iteration(), last.iteration() - 1);
     assert_eq!(testing::replay(&limited, two_workers).unwrap(), limited);
+}
+
+#[test]
+fn replay_steps_count_task_choices_and_random_draws() {
+    async fn drawing() {
+        two_workers().await;
+        let _draw = adamantium::random::u64();
+    }
+    let plain = testing::check(config(), two_workers).unwrap();
+    let choices: usize = testing::explain(&plain, two_workers)
+        .events()
+        .iter()
+        .filter_map(TimelineEvent::scheduled_steps)
+        .sum();
+    assert!(choices > 1);
+    assert_eq!(plain.steps(), choices);
+
+    let drawn = testing::check(config(), drawing).unwrap();
+    let choices: usize = testing::explain(&drawn, drawing)
+        .events()
+        .iter()
+        .filter_map(TimelineEvent::scheduled_steps)
+        .sum();
+    assert_eq!(drawn.steps(), choices + 1);
 }
 
 #[test]
