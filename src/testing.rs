@@ -344,7 +344,17 @@ impl fmt::Display for Failure {
         write!(f, "adamantium::testing {:?}: ", self.kind)?;
         let record = serde_json::to_string(self.replay()).map_err(|_| fmt::Error)?;
         writeln!(f, "{record}")?;
-        self.timeline.fmt_events(f)
+        self.timeline.fmt_events(f)?;
+        writeln!(
+            f,
+            "Rerun the same test using Config::from_env with these environment settings\n  ADAMANTIUM_SEED={} ADAMANTIUM_ITERATIONS={}",
+            self.replay().seed(),
+            self.replay().iterations()
+        )?;
+        write!(
+            f,
+            "For a replay fixture, use Replay::save on failure.replay(), then load it with Replay::load and run testing::replay with the same scenario."
+        )
     }
 }
 

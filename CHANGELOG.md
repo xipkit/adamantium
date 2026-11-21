@@ -8,6 +8,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Adamantium's deterministic failure reports show the environment settings
+  and fixture steps for reproducing the failure through the harness.
+
 ## [0.4.0] - 2026-11-21
 
 ### Added
