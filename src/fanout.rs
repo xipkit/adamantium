@@ -146,15 +146,15 @@ impl<T> Shared<T> {
     // Every operation locks, so this is where a handle carried into the
     // deterministic harness is rejected, as in `Watch`. While unwinding the
     // check is skipped, so a destructor can still close the fanout.
-    fn lock(&self) -> Guard<'_, State<T>> {
+    fn lock(&self, operation: &'static str) -> Guard<'_, State<T>> {
         if !std::thread::panicking() {
             self.world.check();
         }
-        self.state.lock()
+        self.state.lock(operation)
     }
 
     fn subscribe(self: &Arc<Self>) -> Feed<T> {
-        let mut state = self.lock();
+        let mut state = self.lock("Fanout::subscribe");
         let end = state.closed.then_some(Ended::Closed);
         let inbox = Arc::new(Inbox::new(end));
         if !state.closed {
@@ -168,7 +168,7 @@ impl<T> Shared<T> {
     }
 
     fn close(&self) -> bool {
-        self.close_with(self.lock())
+        self.close_with(self.lock("Fanout::close"))
     }
 
     fn close_with(&self, mut state: Guard<'_, State<T>>) -> bool {
@@ -210,14 +210,14 @@ impl<T> Inbox<T> {
     }
 
     fn end(&self, end: Ended) {
-        self.queue.lock().end = Some(end);
+        self.queue.lock("Inbox::end").end = Some(end);
     }
 
     // Ends the feed with [`Ended::Overflowed`] if its queue is full, and
     // says whether it did. Only a send adds to a queue, under the fanout's
     // lock, so a queue with room keeps it until that lock is released.
     fn end_if_full(&self, capacity: usize) -> bool {
-        let mut queue = self.queue.lock();
+        let mut queue = self.queue.lock("Inbox::end_if_full");
         let full = queue.events.len() >= capacity;
         if full {
             queue.end = Some(Ended::Overflowed);
@@ -226,7 +226,7 @@ impl<T> Inbox<T> {
     }
 
     fn push(&self, event: T) {
-        self.queue.lock().events.push_back(event);
+        self.queue.lock("Inbox::push").events.push_back(event);
     }
 }
 
@@ -255,7 +255,7 @@ impl<T> Fanout<T> {
 
     /// The number of feeds that are still connected and held.
     pub fn subscriber_count(&self) -> usize {
-        self.shared.lock().feeds.len()
+        self.shared.lock("Fanout::subscriber_count").feeds.len()
     }
 
     /// Closes the fanout for every handle. Each feed receives the events in
@@ -267,7 +267,7 @@ impl<T> Fanout<T> {
 
     /// Whether the fanout is closed.
     pub fn is_closed(&self) -> bool {
-        self.shared.lock().closed
+        self.shared.lock("Fanout::is_closed").closed
     }
 }
 
@@ -287,7 +287,7 @@ impl<T: Clone> Fanout<T> {
         // Declare clones before the guard so their destructors run after unlock
         // if T::clone panics.
         let mut events: Vec<T> = Vec::new();
-        let mut state = self.shared.lock();
+        let mut state = self.shared.lock("Fanout::send");
         if state.closed {
             drop(state);
             return Err(Closed(value));
@@ -333,7 +333,7 @@ impl<T> Feed<T> {
 
     /// The number of events waiting.
     pub fn len(&self) -> usize {
-        self.queue().events.len()
+        self.queue("Feed::len").events.len()
     }
 
     /// Whether no events are waiting.
@@ -344,7 +344,7 @@ impl<T> Feed<T> {
     /// Whether the feed gets no more events, because the fanout closed or
     /// the feed overflowed. Events already queued can still be received.
     pub fn is_ended(&self) -> bool {
-        self.queue().end.is_some()
+        self.queue("Feed::is_ended").end.is_some()
     }
 
     /// Receives the next event, waiting while none is queued. Once the feed
@@ -396,24 +396,24 @@ impl<T> Feed<T> {
     }
 
     fn next(&self) -> Option<Result<T, Ended>> {
-        let mut queue = self.queue();
+        let mut queue = self.queue("Feed::next");
         match queue.events.pop_front() {
             Some(event) => Some(Ok(event)),
             None => queue.end.map(Err),
         }
     }
 
-    fn queue(&self) -> Guard<'_, Queue<T>> {
+    fn queue(&self, operation: &'static str) -> Guard<'_, Queue<T>> {
         if !std::thread::panicking() {
             self.shared.world.check();
         }
-        self.inbox.queue.lock()
+        self.inbox.queue.lock(operation)
     }
 }
 
 impl<T> Clone for Fanout<T> {
     fn clone(&self) -> Self {
-        let mut state = self.shared.lock();
+        let mut state = self.shared.lock("Fanout::clone");
         state.fanouts = state.fanouts.saturating_add(1);
         drop(state);
         Self {
@@ -430,7 +430,7 @@ impl<T> Drop for Fanout<T> {
         {
             return;
         }
-        let mut state = self.shared.lock();
+        let mut state = self.shared.lock("Fanout::drop");
         state.fanouts = state.fanouts.saturating_sub(1);
         if state.fanouts == 0 {
             self.shared.close_with(state);
@@ -446,7 +446,7 @@ impl<T> Drop for Feed<T> {
         {
             return;
         }
-        let mut state = self.shared.lock();
+        let mut state = self.shared.lock("Feed::drop");
         // The list's handle is never the last, since this feed holds one, so
         // removing it drops no event under the lock. The queued events drop
         // with `self.inbox`, after the lock is released.
@@ -458,7 +458,7 @@ impl<T> fmt::Debug for Fanout<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Try the lock to avoid deadlock when formatting from T::clone.
         self.shared.world.check();
-        let Some(state) = self.shared.state.try_lock() else {
+        let Some(state) = self.shared.state.try_lock("Fanout::fmt") else {
             return f.write_str("Fanout(<in use>)");
         };
         f.debug_struct("Fanout")
@@ -471,7 +471,7 @@ impl<T> fmt::Debug for Fanout<T> {
 
 impl<T> fmt::Debug for Feed<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let queue = self.queue();
+        let queue = self.queue("Feed::fmt");
         f.debug_struct("Feed")
             .field("len", &queue.events.len())
             .field("ended", &queue.end)

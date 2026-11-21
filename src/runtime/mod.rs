@@ -54,22 +54,30 @@ impl World {
         );
     }
 
-    pub(crate) fn step(self) {
+    pub(crate) fn step(self, _operation: &'static str) {
         self.check();
         #[cfg(feature = "deterministic")]
         if self.execution.is_some() {
-            // Shuttle's yield_now wakes this task. Its sleep switches tasks without
-            // advancing time or turning a deadlock into a busy loop.
-            shuttle::thread::sleep(std::time::Duration::ZERO);
+            model_step(_operation);
         }
     }
 
-    pub(crate) fn step_unless_panicking(self) {
+    pub(crate) fn step_unless_panicking(self, _operation: &'static str) {
         #[cfg(feature = "deterministic")]
         if !std::thread::panicking() {
-            self.step();
+            self.step(_operation);
         }
     }
+}
+
+#[cfg(feature = "deterministic")]
+#[cold]
+#[inline(never)]
+fn model_step(operation: &'static str) {
+    let _scope = trace::enter_operation(operation);
+    // Shuttle's yield_now wakes this task. Its sleep switches tasks without
+    // advancing time or turning a deadlock into a busy loop.
+    shuttle::thread::sleep(std::time::Duration::ZERO);
 }
 
 #[cfg(all(feature = "signal", any(unix, windows)))]
@@ -86,13 +94,17 @@ pub(crate) fn production_only(_primitive: &str) {
 pub(crate) struct Shared<T> {
     inner: Option<Arc<T>>,
     world: World,
+    #[cfg(feature = "deterministic")]
+    drop_operation: &'static str,
 }
 
 impl<T> Shared<T> {
-    pub(crate) fn new(value: T) -> Self {
+    pub(crate) fn new(value: T, _drop_operation: &'static str) -> Self {
         Self {
             inner: Some(Arc::new(value)),
             world: World::current(),
+            #[cfg(feature = "deterministic")]
+            drop_operation: _drop_operation,
         }
     }
 
@@ -104,14 +116,14 @@ impl<T> Shared<T> {
         self.inner.as_ref().expect("shared pointer is present")
     }
 
-    pub(crate) fn is_shared(&self) -> bool {
-        self.world.step();
+    pub(crate) fn is_shared(&self, operation: &'static str) -> bool {
+        self.world.step(operation);
         Arc::strong_count(self.inner()) > 1
     }
 
     #[allow(clippy::expect_used, reason = "self has not previously been consumed")]
-    pub(crate) fn try_unwrap(mut self) -> Result<T, Self> {
-        self.world.step();
+    pub(crate) fn try_unwrap(mut self, operation: &'static str) -> Result<T, Self> {
+        self.world.step(operation);
         match Arc::try_unwrap(self.inner.take().expect("shared pointer is present")) {
             Ok(value) => Ok(value),
             Err(inner) => {
@@ -120,14 +132,14 @@ impl<T> Shared<T> {
             }
         }
     }
-}
 
-impl<T> Clone for Shared<T> {
-    fn clone(&self) -> Self {
-        self.world.step();
+    pub(crate) fn clone_handle(&self, operation: &'static str) -> Self {
+        self.world.step(operation);
         Self {
             inner: Some(Arc::clone(self.inner())),
             world: self.world,
+            #[cfg(feature = "deterministic")]
+            drop_operation: self.drop_operation,
         }
     }
 }
@@ -145,7 +157,7 @@ impl<T> Drop for Shared<T> {
         // A context-mismatch panic must not panic a second time in destruction.
         #[cfg(feature = "deterministic")]
         if self.inner.is_some() && !std::thread::panicking() {
-            self.world.step();
+            self.world.step(self.drop_operation);
         }
     }
 }
@@ -165,29 +177,47 @@ impl<T> Lock<T> {
         Self::Production(std::sync::Mutex::new(value))
     }
 
-    pub(crate) fn lock(&self) -> Guard<'_, T> {
+    pub(crate) fn lock(&self, _operation: &'static str) -> Guard<'_, T> {
         match self {
             Self::Production(lock) => {
                 Guard::Production(lock.lock().unwrap_or_else(PoisonError::into_inner))
             }
             #[cfg(feature = "deterministic")]
-            Self::Model(lock) => Guard::Model(lock.lock().unwrap_or_else(PoisonError::into_inner)),
+            Self::Model(lock) => {
+                let _scope = trace::enter_operation(_operation);
+                let guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                Guard::Model(ModelGuard {
+                    guard: Some(guard),
+                    operation: _operation,
+                })
+            }
         }
     }
 
-    pub(crate) fn try_lock(&self) -> Option<Guard<'_, T>> {
+    pub(crate) fn try_lock(&self, _operation: &'static str) -> Option<Guard<'_, T>> {
         match self {
             Self::Production(lock) => lock.try_lock().ok().map(Guard::Production),
             #[cfg(feature = "deterministic")]
-            Self::Model(lock) => lock.try_lock().ok().map(Guard::Model),
+            Self::Model(lock) => {
+                let _scope = trace::enter_operation(_operation);
+                lock.try_lock().ok().map(|guard| {
+                    Guard::Model(ModelGuard {
+                        guard: Some(guard),
+                        operation: _operation,
+                    })
+                })
+            }
         }
     }
 
-    pub(crate) fn into_inner(self) -> T {
+    pub(crate) fn into_inner(self, _operation: &'static str) -> T {
         match self {
             Self::Production(lock) => lock.into_inner().unwrap_or_else(PoisonError::into_inner),
             #[cfg(feature = "deterministic")]
-            Self::Model(lock) => lock.into_inner().unwrap_or_else(PoisonError::into_inner),
+            Self::Model(lock) => {
+                let _scope = trace::enter_operation(_operation);
+                lock.into_inner().unwrap_or_else(PoisonError::into_inner)
+            }
         }
     }
 }
@@ -195,26 +225,46 @@ impl<T> Lock<T> {
 pub(crate) enum Guard<'a, T> {
     Production(std::sync::MutexGuard<'a, T>),
     #[cfg(feature = "deterministic")]
-    Model(shuttle::sync::MutexGuard<'a, T>),
+    Model(ModelGuard<'a, T>),
 }
 
+#[cfg(feature = "deterministic")]
+pub(crate) struct ModelGuard<'a, T> {
+    guard: Option<shuttle::sync::MutexGuard<'a, T>>,
+    operation: &'static str,
+}
+
+#[cfg(feature = "deterministic")]
+impl<T> Drop for ModelGuard<'_, T> {
+    #[cold]
+    fn drop(&mut self) {
+        let _scope = trace::enter_operation(self.operation);
+        drop(self.guard.take());
+    }
+}
+
+#[allow(clippy::expect_used, reason = "only Drop takes the modeled guard")]
 impl<T> Deref for Guard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
         match self {
             Self::Production(guard) => guard,
             #[cfg(feature = "deterministic")]
-            Self::Model(guard) => guard,
+            Self::Model(guard) => guard.guard.as_deref().expect("modeled guard is present"),
         }
     }
 }
 
+#[allow(clippy::expect_used, reason = "only Drop takes the modeled guard")]
 impl<T> DerefMut for Guard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
         match self {
             Self::Production(guard) => guard,
             #[cfg(feature = "deterministic")]
-            Self::Model(guard) => guard,
+            Self::Model(guard) => guard
+                .guard
+                .as_deref_mut()
+                .expect("modeled guard is present"),
         }
     }
 }

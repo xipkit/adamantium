@@ -48,13 +48,13 @@ impl<T> Bounded<T> {
         }
     }
 
-    pub(crate) fn push(&self, value: T) -> Result<(), PushError<T>> {
-        self.world.step();
+    pub(crate) fn push(&self, value: T, operation: &'static str) -> Result<(), PushError<T>> {
+        self.world.step(operation);
         match &self.inner {
             Storage::Production(queue) => queue.push(value),
             #[cfg(feature = "deterministic")]
             Storage::Model { state, capacity } => {
-                let mut state = state.lock();
+                let mut state = state.lock(operation);
                 if state.closed {
                     Err(PushError::Closed(value))
                 } else if state.values.len() == *capacity {
@@ -67,13 +67,13 @@ impl<T> Bounded<T> {
         }
     }
 
-    pub(crate) fn pop(&self) -> Result<T, PopError> {
-        self.world.step();
+    pub(crate) fn pop(&self, operation: &'static str) -> Result<T, PopError> {
+        self.world.step(operation);
         match &self.inner {
             Storage::Production(queue) => queue.pop(),
             #[cfg(feature = "deterministic")]
             Storage::Model { state, .. } => {
-                let mut state = state.lock();
+                let mut state = state.lock(operation);
                 if let Some(value) = state.values.pop_front() {
                     Ok(value)
                 } else if state.closed {
@@ -85,12 +85,14 @@ impl<T> Bounded<T> {
         }
     }
 
-    pub(crate) fn close(&self) -> bool {
-        self.world.step_unless_panicking();
+    pub(crate) fn close(&self, operation: &'static str) -> bool {
+        self.world.step_unless_panicking(operation);
         match &self.inner {
             Storage::Production(queue) => queue.close(),
             #[cfg(feature = "deterministic")]
-            Storage::Model { state, .. } => !std::mem::replace(&mut state.lock().closed, true),
+            Storage::Model { state, .. } => {
+                !std::mem::replace(&mut state.lock(operation).closed, true)
+            }
         }
     }
 
@@ -98,54 +100,56 @@ impl<T> Bounded<T> {
     // storage before it drops, so its destructor holds no storage lock and
     // may use the same queue. If a destructor panics, the rest still drop,
     // as they would in a `Vec`. Like `close`, takes no step while unwinding.
-    pub(crate) fn clear(&self) {
+    pub(crate) fn clear(&self, operation: &'static str) {
         struct Rest<'a, T> {
             queue: &'a Bounded<T>,
+            operation: &'static str,
             done: bool,
         }
 
         impl<T> Drop for Rest<'_, T> {
             fn drop(&mut self) {
                 if !self.done {
-                    self.queue.clear();
+                    self.queue.clear(self.operation);
                 }
             }
         }
 
         let mut rest = Rest {
             queue: self,
+            operation,
             done: false,
         };
-        while let Some(value) = self.take() {
+        while let Some(value) = self.take(operation) {
             drop(value);
         }
         rest.done = true;
     }
 
-    fn take(&self) -> Option<T> {
-        self.world.step_unless_panicking();
+    fn take(&self, operation: &'static str) -> Option<T> {
+        self.world.step_unless_panicking(operation);
         match &self.inner {
             Storage::Production(queue) => queue.pop().ok(),
             #[cfg(feature = "deterministic")]
-            Storage::Model { state, .. } => state.lock().values.pop_front(),
+            Storage::Model { state, .. } => state.lock(operation).values.pop_front(),
         }
     }
 
-    pub(crate) fn is_closed(&self) -> bool {
-        self.world.step();
+    pub(crate) fn is_closed(&self, operation: &'static str) -> bool {
+        self.world.step(operation);
         match &self.inner {
             Storage::Production(queue) => queue.is_closed(),
             #[cfg(feature = "deterministic")]
-            Storage::Model { state, .. } => state.lock().closed,
+            Storage::Model { state, .. } => state.lock(operation).closed,
         }
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.world.step();
+    pub(crate) fn len(&self, operation: &'static str) -> usize {
+        self.world.step(operation);
         match &self.inner {
             Storage::Production(queue) => queue.len(),
             #[cfg(feature = "deterministic")]
-            Storage::Model { state, .. } => state.lock().values.len(),
+            Storage::Model { state, .. } => state.lock(operation).values.len(),
         }
     }
 }

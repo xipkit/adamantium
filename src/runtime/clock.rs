@@ -198,7 +198,7 @@ impl Future for Sleep {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        self.world.step();
+        self.world.step("Sleep::poll");
         let ready = with(|clock| {
             if self.deadline <= clock.now {
                 if let Some(key) = self.key.take() {
@@ -247,7 +247,7 @@ impl Drop for Sleep {
             }
             return;
         }
-        self.world.step_unless_panicking();
+        self.world.step_unless_panicking("Sleep::drop");
         if let Some(token) = self.trace_token.take() {
             trace::end_wait(token, "time.sleep", self.wait_id, true);
         }

@@ -8,6 +8,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- Adamantium's deterministic timelines show the operation at modeled scheduling
+  points, name parallel workers, and group repeated steps.
+
 ### Fixed
 
 - Adamantium's deterministic failure reports show the environment settings

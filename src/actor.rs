@@ -98,7 +98,7 @@ impl<S> Actor<S> {
     /// An actor holding `state`.
     pub fn new(state: S) -> Self {
         Self {
-            state: Shared::new(Lock::new(state)),
+            state: Shared::new(Lock::new(state), "Actor::drop"),
         }
     }
 
@@ -110,7 +110,7 @@ impl<S> Actor<S> {
     /// inside `f` leaves the state as `f` left it; the next caller sees it.
     pub fn with<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
         let _inside = Inside::enter();
-        let mut guard = self.state.lock();
+        let mut guard = self.state.lock("Actor::with");
         f(&mut guard)
     }
 
@@ -120,36 +120,41 @@ impl<S> Actor<S> {
     /// so a method that only reads, such as `Tally::total`, can be passed
     /// by name.
     pub fn read<R>(&self, f: impl FnOnce(&S) -> R) -> R {
+        self.read_with("Actor::read", f)
+    }
+
+    fn read_with<R>(&self, operation: &'static str, f: impl FnOnce(&S) -> R) -> R {
         let _inside = Inside::enter();
-        let guard = self.state.lock();
+        let guard = self.state.lock(operation);
         f(&guard)
     }
 
     /// The state, if this is the only handle to it; otherwise the actor back.
     pub fn into_inner(self) -> Result<S, Self> {
-        self.state
-            .try_unwrap()
-            .map(Lock::into_inner)
-            .map_err(|state| Self { state })
+        let state = self
+            .state
+            .try_unwrap("Actor::into_inner")
+            .map_err(|state| Self { state })?;
+        Ok(state.into_inner("Actor::into_inner"))
     }
 
     /// Whether another handle to the same state exists.
     pub fn is_shared(&self) -> bool {
-        self.state.is_shared()
+        self.state.is_shared("Actor::is_shared")
     }
 }
 
 impl<S: Clone> Actor<S> {
     /// A copy of the state as it is now.
     pub fn snapshot(&self) -> S {
-        self.read(S::clone)
+        self.read_with("Actor::snapshot", S::clone)
     }
 }
 
 impl<S> Clone for Actor<S> {
     fn clone(&self) -> Self {
         Self {
-            state: self.state.clone(),
+            state: self.state.clone_handle("Actor::clone"),
         }
     }
 }
@@ -162,7 +167,7 @@ impl<S: Default> Default for Actor<S> {
 
 impl<S: fmt::Debug> fmt::Debug for Actor<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.state.try_lock() {
+        match self.state.try_lock("Actor::fmt") {
             Some(state) => f.debug_tuple("Actor").field(&*state).finish(),
             None => f.write_str("Actor(<in use>)"),
         }

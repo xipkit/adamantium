@@ -374,7 +374,7 @@ pub struct FaultInjector<E = ()> {
 impl<E> Clone for FaultInjector<E> {
     fn clone(&self) -> Self {
         Self {
-            state: self.state.clone(),
+            state: self.state.clone_handle("FaultInjector::clone"),
         }
     }
 }
@@ -395,7 +395,7 @@ impl<E> FaultInjector<E> {
     /// Creates an injector with no rules or scheduled faults.
     pub fn new() -> Self {
         Self {
-            state: Shared::new(Lock::new(State::default())),
+            state: Shared::new(Lock::new(State::default()), "FaultInjector::drop"),
         }
     }
 
@@ -407,12 +407,16 @@ impl<E> FaultInjector<E> {
 
     /// Sets or replaces the fallback rule used when no operation-specific rule matches.
     pub fn set_default_rule(&self, rule: FaultRule<E>) {
-        self.state.lock().default_rule = Some(rule);
+        self.state
+            .lock("FaultInjector::set_default_rule")
+            .default_rule = Some(rule);
     }
 
     /// Clears the fallback rule.
     pub fn clear_default_rule(&self) {
-        self.state.lock().default_rule = None;
+        self.state
+            .lock("FaultInjector::clear_default_rule")
+            .default_rule = None;
     }
 
     /// Sets the rule for `op`, returning `self` for chaining.
@@ -423,12 +427,18 @@ impl<E> FaultInjector<E> {
 
     /// Sets or replaces the rule for `op`.
     pub fn set_rule(&self, op: impl Into<String>, rule: FaultRule<E>) {
-        self.state.lock().rules.insert(op.into(), rule);
+        self.state
+            .lock("FaultInjector::set_rule")
+            .rules
+            .insert(op.into(), rule);
     }
 
     /// Removes any rule registered for `op`.
     pub fn clear_rule(&self, op: &str) {
-        self.state.lock().rules.remove(op);
+        self.state
+            .lock("FaultInjector::clear_rule")
+            .rules
+            .remove(op);
     }
 
     /// Appends scripted steps to the global schedule, returning `self` for chaining.
@@ -439,7 +449,10 @@ impl<E> FaultInjector<E> {
 
     /// Appends scripted steps to the global schedule.
     pub fn push_schedule(&self, steps: impl IntoIterator<Item = FaultStep<E>>) {
-        self.state.lock().global_schedule.extend(steps);
+        self.state
+            .lock("FaultInjector::push_schedule")
+            .global_schedule
+            .extend(steps);
     }
 
     /// Appends scripted steps for `op`, returning `self` for chaining.
@@ -462,7 +475,7 @@ impl<E> FaultInjector<E> {
         steps: impl IntoIterator<Item = FaultStep<E>>,
     ) {
         self.state
-            .lock()
+            .lock("FaultInjector::push_op_schedule")
             .op_schedules
             .entry(op.into())
             .or_default()
@@ -478,7 +491,7 @@ impl<E> FaultInjector<E> {
     /// 4. Immediate `Ok(())`.
     pub async fn inject(&self, op: &str) -> Result<(), E> {
         let decision = {
-            let mut state = self.state.lock();
+            let mut state = self.state.lock("FaultInjector::inject");
             state.total_calls += 1;
             let op_call = if let Some(count) = state.op_calls.get_mut(op) {
                 *count += 1;
@@ -518,12 +531,17 @@ impl<E> FaultInjector<E> {
 
     /// Returns how many times `inject(op)` has been called.
     pub fn calls(&self, op: &str) -> usize {
-        self.state.lock().op_calls.get(op).copied().unwrap_or(0)
+        self.state
+            .lock("FaultInjector::calls")
+            .op_calls
+            .get(op)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Returns the total number of `inject` calls across all operations.
     pub fn total_calls(&self) -> usize {
-        self.state.lock().total_calls
+        self.state.lock("FaultInjector::total_calls").total_calls
     }
 }
 

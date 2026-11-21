@@ -135,7 +135,7 @@ impl JoinSet {
     }
 
     pub(crate) fn spawn(&mut self, future: impl Future<Output = ()> + Send + 'static) {
-        self.world.step();
+        self.world.step("JoinSet::spawn");
         match &mut self.inner {
             Set::Production { tasks, unfinished } => {
                 tasks.spawn(Counted {
@@ -168,7 +168,7 @@ impl JoinSet {
     }
 
     pub(crate) fn spawn_blocking(&mut self, f: impl FnOnce() + Send + 'static) {
-        self.world.step();
+        self.world.step("JoinSet::spawn_blocking");
         match &mut self.inner {
             // WASI has one thread, so the closure runs inside a task of its own.
             #[cfg(target_os = "wasi")]
@@ -222,7 +222,7 @@ impl JoinSet {
     }
 
     pub(crate) fn unfinished(&self) -> usize {
-        self.world.step();
+        self.world.step("JoinSet::unfinished");
         match &self.inner {
             Set::Production { unfinished, .. } => unfinished.load(Ordering::Relaxed),
             #[cfg(feature = "deterministic")]
@@ -231,7 +231,7 @@ impl JoinSet {
     }
 
     pub(crate) fn abort_all(&mut self) {
-        self.world.step_unless_panicking();
+        self.world.step_unless_panicking("JoinSet::abort_all");
         self.close();
         match &mut self.inner {
             Set::Production { tasks, .. } => tasks.abort_all(),
@@ -268,7 +268,7 @@ impl JoinSet {
     }
 
     fn take_finished(&mut self) -> Option<Result<(), JoinError>> {
-        self.world.step();
+        self.world.step("JoinSet::take_finished");
         match &mut self.inner {
             Set::Production { tasks, .. } => {
                 tasks.try_join_next().map(|r| r.map_err(production_error))
@@ -416,14 +416,15 @@ mod model {
 
     impl<T> Task<T> {
         pub(super) fn is_finished(&self) -> bool {
-            self.completion.result.lock().is_some()
+            self.completion.result.lock("Task::is_finished").is_some()
         }
 
         pub(super) fn abort(&self) {
+            let _scope = crate::runtime::trace::enter_operation("Task::abort");
             self.abort.abort();
         }
         pub(super) fn take(&self) -> Option<Result<T, JoinError>> {
-            self.completion.result.lock().take()
+            self.completion.result.lock("Task::take").take()
         }
     }
 
@@ -463,7 +464,7 @@ mod model {
                 (_, Err(payload)) => Err(JoinError::Panic(payload)),
                 (result, Ok(())) => result,
             };
-            *self.completion.result.lock() = Some(result);
+            *self.completion.result.lock("Task::finish") = Some(result);
             self.completion.changed.notify_all();
         }
     }
@@ -502,6 +503,7 @@ mod model {
             result: Lock::new(None),
             changed,
         });
+        let _scope = crate::runtime::trace::enter_operation("Task::spawn");
         let handle = shuttle::future::spawn(crate::runtime::coop::model::task(Transport {
             future: Some(Box::pin(future)),
             completion: completion.clone(),

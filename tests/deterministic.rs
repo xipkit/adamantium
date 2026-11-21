@@ -83,6 +83,93 @@ fn finds_and_replays_a_race_without_awaits() {
     }
 }
 
+async fn dropping_subscriptions_loses_an_update() {
+    struct Subscription {
+        subscribers: Actor<usize>,
+        _watcher: adamantium::Watcher<()>,
+    }
+
+    impl Drop for Subscription {
+        fn drop(&mut self) {
+            let previous = self.subscribers.read(|count| *count);
+            self.subscribers.with(|count| *count = previous - 1);
+        }
+    }
+
+    let subscribers = Actor::new(2);
+    let watch = Watch::new(());
+    let workers = (0..2)
+        .map(|_| {
+            let subscription = Subscription {
+                subscribers: subscribers.clone(),
+                _watcher: watch.subscribe(),
+            };
+            async move { drop(subscription) }
+        })
+        .collect::<Vec<_>>();
+    testing::parallel(workers).await;
+    assert_eq!(
+        subscribers.read(|count| *count),
+        0,
+        "lost subscriber update"
+    );
+}
+
+#[test]
+fn timeline_shows_both_parallel_reads_before_either_write() {
+    let failure = testing::check(config(), dropping_subscriptions_loses_an_update).unwrap_err();
+    let timeline = testing::explain(failure.replay(), dropping_subscriptions_loses_an_update);
+    assert_eq!(timeline.failure(), Some(FailureKind::Panic));
+    assert_eq!(timeline.replay(), failure.replay());
+    let mut reads = std::collections::BTreeSet::new();
+    for event in timeline.events() {
+        if event.scheduled_operation() == Some("Actor::with") {
+            break;
+        }
+        if event.scheduled_operation() == Some("Actor::read")
+            && let TimelineEventKind::Scheduled {
+                task_name: Some(name),
+                ..
+            } = event.kind()
+        {
+            reads.insert(name.as_str());
+        }
+    }
+    assert_eq!(
+        reads,
+        ["parallel-0", "parallel-1"].into_iter().collect(),
+        "{timeline}"
+    );
+    let report = timeline.to_string();
+    assert!(report.contains("\"parallel-0\" Actor::read"), "{report}");
+    assert!(report.contains("\"parallel-1\" Actor::read"), "{report}");
+    assert!(report.contains("Actor::with"), "{report}");
+}
+
+#[test]
+fn timeline_folds_consecutive_decisions_for_one_operation() {
+    async fn worker() {
+        let actor = Actor::new(0);
+        for _ in 0..3 {
+            actor.with(|count| *count += 1);
+        }
+        actor.read(|count| assert_eq!(*count, 3));
+    }
+
+    let replay = testing::check(config(), worker).unwrap();
+    let timeline = testing::explain(&replay, worker);
+    let updates: Vec<_> = timeline
+        .events()
+        .iter()
+        .filter(|event| event.scheduled_operation() == Some("Actor::with"))
+        .collect();
+    assert_eq!(updates.len(), 1, "{timeline}");
+    let event = updates.first().unwrap();
+    // Acquiring and releasing the modeled lock each gives the scheduler a choice.
+    assert_eq!(event.scheduled_steps(), Some(6), "{timeline}");
+    assert!(timeline.to_string().contains("(×6)"), "{timeline}");
+}
+
 async fn two_workers() {
     let count = Actor::new(0);
     let worker = count.clone();

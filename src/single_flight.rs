@@ -120,7 +120,7 @@ impl<K, T> SingleFlight<K, T> {
 
     /// The number of keys with an operation in flight.
     pub fn len(&self) -> usize {
-        self.shared.lock().len()
+        self.shared.lock("SingleFlight::len").len()
     }
 
     /// Whether no operation is in flight.
@@ -173,14 +173,14 @@ where
     }
 
     fn join(&self, key: K) -> Caller<K, T> {
-        let mut flights = self.shared.lock();
+        let mut flights = self.shared.lock("SingleFlight::join");
         if let Some(flight) = flights.get(&key) {
             let flight = Arc::clone(flight);
             if polling_here(&flight) {
                 drop(flights);
                 refuse_self_join();
             }
-            flight.lock().callers += 1;
+            flight.lock("SingleFlight::join").callers += 1;
             drop(flights);
             return Caller {
                 shared: Arc::clone(&self.shared),
@@ -251,11 +251,11 @@ impl<K, T> Shared<K, T> {
     // Every operation locks, so this is where a handle carried into another
     // harness execution is rejected. While unwinding the check is skipped,
     // so that a dropped call can still leave its flight.
-    fn lock(&self) -> Guard<'_, HashMap<K, Arc<Flight<T>>>> {
+    fn lock(&self, operation: &'static str) -> Guard<'_, HashMap<K, Arc<Flight<T>>>> {
         if !std::thread::panicking() {
             self.world.check();
         }
-        self.flights.lock()
+        self.flights.lock(operation)
     }
 }
 
@@ -276,11 +276,11 @@ impl<T> Flight<T> {
         }
     }
 
-    fn lock(&self) -> Guard<'_, State<T>> {
+    fn lock(&self, operation: &'static str) -> Guard<'_, State<T>> {
         if !std::thread::panicking() {
             self.world.check();
         }
-        self.state.lock()
+        self.state.lock(operation)
     }
 }
 
@@ -340,7 +340,7 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
             match polled {
                 Poll::Ready(output) => return Poll::Ready(self.finish(output)),
                 Poll::Pending => {
-                    self.flight.lock().stage = Stage::Idle(operation);
+                    self.flight.lock("Caller::poll").stage = Stage::Idle(operation);
                     self.polling = false;
                 }
             }
@@ -352,7 +352,7 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
         if waiter.is_none() {
             *waiter = Some(self.flight.signal.changed.listen());
         }
-        let mut state = self.flight.lock();
+        let mut state = self.flight.lock("Caller::take_or_collect");
         match &mut state.stage {
             Stage::Idle(_) if !may_poll => {
                 if self.flight.signal.woken.load(Ordering::SeqCst) {
@@ -397,8 +397,8 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
     }
 
     fn finish(&mut self, output: T) -> T {
-        let mut flights = self.shared.lock();
-        let mut state = self.flight.lock();
+        let mut flights = self.shared.lock("Caller::finish");
+        let mut state = self.flight.lock("Caller::finish");
         state.callers -= 1;
         let output = if state.callers == 0 {
             state.stage = Stage::Ended;
@@ -418,8 +418,8 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
     }
 
     fn abandon(&mut self) {
-        let mut flights = self.shared.lock();
-        let mut state = self.flight.lock();
+        let mut flights = self.shared.lock("Caller::abandon");
+        let mut state = self.flight.lock("Caller::abandon");
         state.callers -= 1;
         state.stage = Stage::Panicked;
         self.forget(&mut flights);
@@ -456,8 +456,8 @@ impl<K: Hash + Eq, T> Drop for Caller<K, T> {
         if self.done {
             return;
         }
-        let mut flights = self.shared.lock();
-        let mut state = self.flight.lock();
+        let mut flights = self.shared.lock("Caller::drop");
+        let mut state = self.flight.lock("Caller::drop");
         state.callers -= 1;
         if state.callers > 0 {
             // Pass a pending wake to the remaining callers when this caller leaves.
