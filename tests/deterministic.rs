@@ -1018,6 +1018,63 @@ fn failure_displays_the_failing_execution_timeline_and_replay() {
 }
 
 #[test]
+#[cfg(not(target_os = "wasi"))]
+fn failure_stderr_can_be_reproduced_with_printed_environment() {
+    const CHILD: &str = "ADAMANTIUM_FAILURE_REPORT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let executions = AtomicUsize::new(0);
+        let failure = testing::check(Config::from_env().unwrap(), move || {
+            let iteration = executions.fetch_add(1, Ordering::Relaxed);
+            async move {
+                assert_eq!(iteration, 0, "fail on the second execution");
+            }
+        })
+        .unwrap_err();
+        assert_eq!(failure.kind(), FailureKind::Panic);
+        assert_eq!(failure.replay().iteration(), 2);
+        return;
+    }
+
+    let run = |seed: &str, iterations: &str| {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "failure_stderr_can_be_reproduced_with_printed_environment",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("ADAMANTIUM_SEED", seed)
+            .env("ADAMANTIUM_ITERATIONS", iterations)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{stderr}");
+        stderr
+    };
+    let stderr = run("42", "7");
+    let (_, report) = stderr.split_once("adamantium::testing Panic: ").unwrap();
+    assert!(!report.contains("SHUTTLE_"), "{report}");
+    assert!(!report.contains("shuttle::check_random"), "{report}");
+    let mut lines = report.lines();
+    let record = lines.next().unwrap();
+    let mut footer = lines.rev();
+    assert_eq!(
+        footer.next().unwrap(),
+        "For a replay fixture, use Replay::save on failure.replay(), then load it with Replay::load and run testing::replay with the same scenario."
+    );
+    let settings = footer
+        .next()
+        .unwrap()
+        .strip_prefix("  ADAMANTIUM_SEED=")
+        .unwrap();
+    let (seed, iterations) = settings.split_once(" ADAMANTIUM_ITERATIONS=").unwrap();
+    assert_eq!((seed, iterations), ("42", "7"));
+    let rerun = run(seed, iterations);
+    let (_, rerun_report) = rerun.split_once("adamantium::testing Panic: ").unwrap();
+    assert_eq!(rerun_report.lines().next().unwrap(), record);
+}
+
+#[test]
 fn explain_preserves_panic_schedule_and_omits_panic_payload() {
     async fn panicking_worker() {
         Tasks::<()>::run(async |tasks| {
