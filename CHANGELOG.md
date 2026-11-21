@@ -8,8 +8,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-21
+
 ### Added
 
+- `cargo-adamantium check --deep` runs experimental crate-wide lints using
+  Dylint for indirect blocking, nested actor and limit access, and races
+  between timers and futures that may lose work when dropped. The published
+  CLI pins the compiler and verifies the prebuilt library's checksum on
+  Linux x86-64 (GNU) and macOS arm64.
+- The composite GitHub Action installs and caches the CLI from an exact
+  crates.io version or a full commit SHA. It can run deep checks, enforce a
+  dependency audit baseline with Cargo feature selection, produce and upload
+  SARIF with a configurable category, and run advisory style review.
+- `adamantium::testing::DuplexStream` models a bounded byte stream with
+  independent directions, partial reads and writes, virtual latency, and
+  disconnects. Use the paired endpoints to test transport code through Tokio's
+  `AsyncRead` and `AsyncWrite` traits.
+- `adamantium::testing::explain` replays an execution and shows named tasks,
+  virtual timestamps, waits, and wakeups. `testing::shrink` reduces a recorded
+  schedule while reproducing the original failure.
+- `adamantium::time::Interval` provides periodic ticks on the same clock as
+  `time::now()`, with configurable missed-tick behavior and a cancellable
+  `tick_until`.
 - `adamantium`: `testing::FaultInjector`, `testing::FaultRule`, `testing::FaultStep`,
   and `testing::Latency` inject deterministic errors and virtual-clock latency into
   mocked async traits using `adamantium::random` and `adamantium::time::sleep`,
@@ -73,7 +94,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `adamantium`: `KeyedLimit` serializes calls for the same key, including
   inside a connection `Limit`, and evicts keys after their last call ends.
 - `adamantium`: deterministic tests can select probabilistic concurrency testing
-  or bounded depth-first search and replay saved failure schedules as a corpus.
+  (PCT) or bounded depth-first search (DFS) and replay saved failure schedules
+  as a regression corpus.
 - `adamantium`: `random::u64` and `random::up_to` give application code random
   draws that the deterministic harness takes from its seed and a `Replay`
   repeats.
@@ -86,6 +108,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   without Tokio.
 - `cargo-adamantium`: `deps --deny-new` lets CI reject increases in unsafe
   code or unscoped task starts across dependency updates using a JSON baseline.
+  `deps` accepts Cargo feature flags so the audit can match the build.
 - `adamantium`: `Watcher::changed` waits for a value the watcher hasn't
   seen and marks it seen without copying it, so the value needn't be `Clone`
   and no copy is made and dropped.
@@ -115,14 +138,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - `adamantium`: deterministic test failures print the named task timeline
   alongside the replay JSON.
-
 - `cargo-adamantium`: a style finding's `guidance` says what goes wrong
   instead of repeating the question asked of the model. Reports record their
   rule pack and use schema version 4, so `--cache-from` needs a report from
   this version.
 - `adamantium`: replay records use format 4 to capture the scheduler, its
   bounds and the wall-clock epoch. Regenerate saved records from previous
-  formats.
+  formats, including format 2 from 0.3.0.
 - `adamantium`: `testing::Config` has a `wall_epoch` field. Struct literals
   that list every field need `..Config::default()`.
 - `adamantium`: the `time` docs and the `tokio::time::Instant::now` lint
@@ -139,13 +161,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `cargo-adamantium`: Default rules report thread-local and implicitly
   seeded randomness from `rand` and `fastrand` and recommend
   `adamantium::random` for replayable draws.
+- The default CLI rules report `futures::select!` and, with Tokio 1.44 or later,
+  `tokio::select!` with future branches. Use scoped tasks or the cancellation
+  operations for the work being selected.
 - `cargo-adamantium`: The messages for Tokio's `broadcast` channel suggest
   `Fanout` alongside `Topic`.
 
 ### Fixed
 
-- `adamantium`: Repeated uncontended calls to `Limit` or `KeyedLimit` now
-  give other runnable tasks a turn when the cooperative budget runs out.
+- Ready async channel operations, ready interval ticks, and uncontended
+  `Limit` or `KeyedLimit` calls give other runnable tasks a turn when the
+  cooperative budget runs out.
+- `Tasks` preserves the join notification for a completed task even when
+  another task has already reaped its completion.
 - `adamantium`: Dropping a `Channel`'s last receiver drops the values still
   queued, as Tokio's `mpsc` receivers do. Before, they lived until the last
   sender dropped too, so a queued `Reply` kept its requester waiting.
@@ -213,7 +241,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and `style` for reviewing code against the Google Rust style guide. Checks
   support text, JSON, SARIF, baselines, and an optional strict lint tier.
 
-[Unreleased]: https://github.com/xipkit/adamantium/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/xipkit/adamantium/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/xipkit/adamantium/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/xipkit/adamantium/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/xipkit/adamantium/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/xipkit/adamantium/compare/286dc4203db35925e980a90d3dbb9c1f34f4e00c...v0.1.1

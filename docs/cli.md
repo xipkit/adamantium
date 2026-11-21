@@ -588,7 +588,7 @@ coverage](../lints/README.md) for details.
 
 ## GitHub Action
 
-The GitHub Action installs the command from a pinned commit and caches the binary. Check out your project and install Rust with Clippy first:
+The GitHub Action installs the command from an exact crates.io release or a pinned commit and caches the binary. Check out your project and install Rust with Clippy first.
 
 ```yaml
 steps:
@@ -596,13 +596,13 @@ steps:
   - uses: dtolnay/rust-toolchain@stable
     with:
       components: clippy
-  - uses: xipkit/adamantium@main # Pin the action to a commit in production.
+  - uses: xipkit/adamantium@v0.4.0 # Pin the action to a commit in production.
     with:
-      rev: bfa0f78916cebb6c65cfaeefce45ed34339d324f # CLI commit
+      version: '0.4.0'
       # working-directory: path/to/project
 ```
 
 - For deep checking, supply an exact published `version` with prebuilt library support and set `deep: true`.
-- `rev` must be a full commit SHA. Change it to upgrade the command.
-- The cache is separate for each commit, runner platform, and Rust compiler.
+- To install from source, supply a full commit SHA as `rev` in place of `version`.
+- The cache is separate for each release or commit, runner platform, and Rust compiler.
 - The action requires Git, Cargo, and Clippy on the runner.
