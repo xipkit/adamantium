@@ -87,6 +87,7 @@ include = [
     "examples/**",
     "benches/**/*.rs",
     "docs/migrating.md",
+    "docs/testing.md",
     "CHANGELOG.md",
     "README.md",
     "LICENSE",

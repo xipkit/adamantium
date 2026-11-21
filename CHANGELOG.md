@@ -22,6 +22,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   executions. It used to pass and report the shortfall only in
   `Replay::dfs_status`. `SchedulerMode::DfsPrefix` runs the same schedules and
   passes at the limit. Saved replay records move to format 5.
+- The deterministic testing guide, `docs/testing.md`, now covers application
+  code: shared state built from `Actor` and `Watch`, a protocol over modeled
+  streams with faults and deadlines, wall-clock expiry, seeds in CI, seams for
+  code the harness can't run, and choosing a scheduler. Its examples run as
+  doctests.
 
 ### Fixed
 

@@ -73,3 +73,7 @@ pub use watch::{Watch, Watcher};
 #[cfg(all(doctest, feature = "tokio"))]
 #[doc = include_str!("../docs/migrating.md")]
 struct MigratingGuide;
+
+#[cfg(all(doctest, feature = "deterministic"))]
+#[doc = include_str!("../docs/testing.md")]
+struct TestingGuide;
