@@ -4,9 +4,10 @@ use std::{
     path::Path,
 };
 
+use crate::sha256_hex;
 use crate::style::{
     provider::ProviderKind,
-    report::{FileReport, FileStatus, Report, ReviewKey, SCHEMA_VERSION, sha256_hex},
+    report::{FileReport, FileStatus, Report, ReviewKey, SCHEMA_VERSION},
     rules::{Pack, Question},
     scan::Scan,
 };

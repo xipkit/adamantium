@@ -18,6 +18,9 @@ inputs:
     description: Enable strict checks (true or false)
     required: false
     default: 'false'
+  deep:
+    description: Run crate-wide checks with the pinned prebuilt library (requires a published version)
+    default: 'false'
   cargo-args:
     description: Use a YAML literal block with one Cargo argument per line. Blank lines are ignored.
     required: false
@@ -47,6 +50,8 @@ runs:
     - name: Validate inputs
       shell: bash
       env:
+        DEEP: ${{ inputs.deep }}
+        REV: ${{ inputs.rev }}
         STRICT: ${{ inputs.strict }}
         SARIF: ${{ inputs.sarif }}
         UPLOAD_SARIF: ${{ inputs.upload-sarif }}
@@ -57,12 +62,15 @@ runs:
         STYLE: ${{ inputs.style }}
         STYLE_CHANGED: ${{ inputs.style-changed }}
       run: |
-        for name in STRICT SARIF UPLOAD_SARIF DEPS; do
+        for name in STRICT DEEP SARIF UPLOAD_SARIF DEPS; do
           case "${!name}" in
             true|false) ;;
             *) echo "$name must be true or false" >&2; exit 1 ;;
           esac
         done
+        if [[ "$DEEP" == true && -n "$REV" ]]; then
+          echo 'deep requires a published version with embedded lint checksums' >&2; exit 1
+        fi
         if [[ "$UPLOAD_SARIF" == true && "$SARIF" != true ]]; then
           echo 'upload-sarif requires sarif' >&2; exit 1
         fi
@@ -133,12 +141,14 @@ runs:
       working-directory: ${{ inputs.working-directory }}
       env:
         ADAMANTIUM_BASELINE: ${{ inputs.baseline }}
+        ADAMANTIUM_DEEP: ${{ inputs.deep }}
         ADAMANTIUM_STRICT: ${{ inputs.strict }}
         ADAMANTIUM_CARGO_ARGS: ${{ inputs.cargo-args }}
         ADAMANTIUM_SARIF: ${{ inputs.sarif }}
       run: |
         export PATH="$RUNNER_TEMP/adamantium/bin:$PATH"
         args=(adamantium check)
+        if [[ "$ADAMANTIUM_DEEP" == true ]]; then args+=(--deep); fi
         if [[ -n "$ADAMANTIUM_BASELINE" ]]; then
           args+=(--baseline "$ADAMANTIUM_BASELINE")
         fi

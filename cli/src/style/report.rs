@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, fmt, fs::File, io::Read, path::Path};
 
+use crate::sha256_hex;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::style::{
     provider::{
@@ -108,13 +108,6 @@ impl ReviewKey {
             context_sha256: context.map(|context| sha256_hex(context.as_bytes())),
         })
     }
-}
-
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 impl Report {

@@ -34,6 +34,12 @@ pub struct Args {
     dylint_library: Option<PathBuf>,
     #[arg(
         long,
+        conflicts_with = "dylint_library",
+        help = "Run the crate-wide checks using this release's verified prebuilt library"
+    )]
+    deep: bool,
+    #[arg(
+        long,
         help = "Include the strict rules for arithmetic and synchronization"
     )]
     strict: bool,
@@ -364,6 +370,7 @@ pub fn run(args: Args) -> Result<ExitCode> {
             strict: args.strict || (!args.no_strict && config.strict),
             baseline: baseline.as_mut(),
             dylint_library: args.dylint_library.as_deref(),
+            deep: args.deep,
             ..CheckOptions::default()
         },
     )?;
@@ -552,6 +559,7 @@ struct CheckOptions<'a> {
     baseline: Option<&'a mut Baseline>,
     diagnostics: Option<&'a mut Vec<Value>>,
     dylint_library: Option<&'a Path>,
+    deep: bool,
 }
 
 fn check_selected(
@@ -566,6 +574,7 @@ fn check_selected(
         baseline,
         mut diagnostics,
         dylint_library,
+        deep,
     } = options;
     let conf = tempfile::tempdir().context("creating a directory for clippy.toml")?;
     let (clippy_config, clippy_toml) =
@@ -593,8 +602,21 @@ fn check_selected(
         baseline,
         ..Sorted::default()
     };
-    if let Some(library) = dylint_library {
-        match dylint_command(root, cargo_args, library) {
+    // Keep the verified copy alive through both Dylint invocations.
+    let prebuilt;
+    let dylint = if deep {
+        Some(match crate::deep::prepare(root) {
+            Ok(prepared) => {
+                prebuilt = prepared;
+                dylint_command(root, cargo_args, &prebuilt.library, Some(&prebuilt.runner))
+            }
+            Err(error) => Err(error),
+        })
+    } else {
+        dylint_library.map(|path| dylint_command(root, cargo_args, path, None))
+    };
+    if let Some(result) = dylint {
+        match result {
             Ok(command) => commands.push(command),
             Err(error) => sorted.errors.push(Problem {
                 message: format!("experimental check incomplete: {error:#}"),
@@ -606,7 +628,7 @@ fn check_selected(
     let mut rules: HashSet<String> = lints::selected(strict)
         .map(lints::Lint::qualified)
         .collect();
-    if dylint_library.is_some() {
+    if deep || dylint_library.is_some() {
         rules.extend(EXPERIMENTAL_LINTS.iter().map(|name| (*name).to_owned()));
     }
     let setting = Setting {
@@ -745,12 +767,22 @@ fn parse_cargo_line(line: &str) -> serde_json::Result<CargoLine> {
     Ok(parsed)
 }
 
-fn dylint_command(root: &Path, cargo_args: &[String], library: &Path) -> Result<Command> {
+fn dylint_command(
+    root: &Path,
+    cargo_args: &[String],
+    library: &Path,
+    runner: Option<&Path>,
+) -> Result<Command> {
     let library = library
         .canonicalize()
         .context("resolving the Dylint library; build lints/ first")?;
     anyhow::ensure!(library.is_file(), "Dylint library is not a file");
-    let listed = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+    let program = runner
+        .map(Path::as_os_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| env::var_os("CARGO"))
+        .unwrap_or_else(|| "cargo".into());
+    let listed = Command::new(&program)
         .current_dir(root)
         .args(["dylint", "list", "--no-metadata", "--lib-path"])
         .arg(&library)
@@ -769,7 +801,7 @@ fn dylint_command(root: &Path, cargo_args: &[String], library: &Path) -> Result<
             "Dylint library does not register {lint}"
         );
     }
-    let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    let mut command = Command::new(program);
     command
         .current_dir(root)
         .args(["dylint", "--no-metadata", "--lib-path"])

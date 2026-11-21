@@ -568,20 +568,23 @@ With `--format json`, the `policy` object gives the `status` (`clean`, `findings
 
 ## Experimental execution-context checks
 
-An optional [Dylint prototype](../lints/README.md) detects two things:
-
-- Known blocking operations inside async execution.
-- Nested `Actor::with`, `read`, or `snapshot` access.
-
-It needs a library that you build explicitly, and a separate pinned nightly toolchain:
+Use a published CLI with prebuilt library support and a rustup-managed compiler:
 
 ```sh
-cargo adamantium check --dylint-library /absolute/path/to/the/built/library
+cargo adamantium check --deep -- --locked
 ```
 
-- Ordinary checks and `init` keep their existing toolchain.
-- Read the setup, coverage limits, and measurements of the prototype before you use it.
-- A failed experimental check has exit status `2`. It never falls back silently to a Clippy-only success.
+Deep checking detects indirect blocking in async code and actor callbacks,
+nested actor access, nested limits, and races between timers and futures that
+may lose work when dropped. On Linux x86-64 (GNU) and macOS arm64, the CLI
+sets up the pinned nightly and Dylint runner, and verifies the release
+library against its embedded SHA-256 before loading it. The usual JSON, SARIF,
+baseline, package selection, and exit-status options apply. An incomplete
+deep check exits with status 2.
+
+For a source checkout or another host, build the library locally and use
+`--dylint-library /absolute/path/to/library`. See the [Dylint setup and
+coverage](../lints/README.md) for details.
 
 ## GitHub Action
 
@@ -599,6 +602,7 @@ steps:
       # working-directory: path/to/project
 ```
 
+- For deep checking, supply an exact published `version` with prebuilt library support and set `deep: true`.
 - `rev` must be a full commit SHA. Change it to upgrade the command.
 - The cache is separate for each commit, runner platform, and Rust compiler.
 - The action requires Git, Cargo, and Clippy on the runner.

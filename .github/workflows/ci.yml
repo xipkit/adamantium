@@ -94,25 +94,15 @@ jobs:
           node-version: 22
       - run: node --test style/scripts/evaluate-decisions.test.mjs
 
+  native-lints:
+    uses: ./.github/workflows/deep-libraries.yml
+
   experimental-lints:
+    needs: native-lints
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - name: Install the opt-in lint toolchain
-        run: |
-          rustup toolchain install nightly-2026-08-20 --profile minimal --component rustc-dev,llvm-tools-preview,rustfmt
-          cargo install --locked --version 6.4.0 cargo-dylint dylint-link
-      - name: Build and exercise the experimental lints
+      - name: Require both native lint builds to pass
         env:
-          RUSTUP_TOOLCHAIN: stable
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: |
-          cargo build --locked -p cargo-adamantium
-          ./lints/build.sh
-          cargo +nightly-2026-08-20 fmt --manifest-path lints/Cargo.toml -- --check
-          library=$(find target/release -maxdepth 1 -name 'libadamantium_lints@*.so')
-          test -n "$library"
-          python3 lints/test.py --cli target/debug/cargo-adamantium --library "$library"
+          RESULT: ${{ needs.native-lints.result }}
+        run: test "$RESULT" = success
