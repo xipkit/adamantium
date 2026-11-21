@@ -195,7 +195,7 @@ impl<T> Channel<T> {
     /// assert_eq!(receiver.try_receive(), Err(TryReceiveError::Closed));
     /// ```
     pub fn split(self) -> (Sender<T>, Receiver<T>) {
-        self.sender.queue.world.step();
+        self.sender.queue.world.step("Channel::split");
         (self.sender, self.receiver)
     }
 
@@ -355,10 +355,13 @@ impl<T> Sender<T> {
     /// Sends without waiting, returning the value if the channel is full
     /// or closed.
     pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
-        self.queue.values.push(value).map_err(|error| match error {
-            concurrent_queue::PushError::Full(value) => TrySendError::Full(value),
-            concurrent_queue::PushError::Closed(value) => TrySendError::Closed(value),
-        })?;
+        self.queue
+            .values
+            .push(value, "Channel::try_send")
+            .map_err(|error| match error {
+                concurrent_queue::PushError::Full(value) => TrySendError::Full(value),
+                concurrent_queue::PushError::Closed(value) => TrySendError::Closed(value),
+            })?;
         self.queue.items.notify_one();
         #[cfg(feature = "tokio")]
         self.queue.streams.notify_all();
@@ -422,12 +425,12 @@ impl<T> Sender<T> {
 
     /// Whether the channel is closed, possibly with messages still queued.
     pub fn is_closed(&self) -> bool {
-        self.queue.values.is_closed()
+        self.queue.values.is_closed("Channel::is_closed")
     }
 
     /// The number of messages waiting.
     pub fn len(&self) -> usize {
-        self.queue.values.len()
+        self.queue.values.len("Channel::len")
     }
 
     /// Whether no messages are waiting.
@@ -437,7 +440,7 @@ impl<T> Sender<T> {
 
     /// The most messages the channel holds.
     pub fn capacity(&self) -> usize {
-        self.queue.world.step();
+        self.queue.world.step("Channel::capacity");
         self.queue.capacity
     }
 }
@@ -461,10 +464,14 @@ impl<T> Receiver<T> {
     /// the channel is open and empty, or [`TryReceiveError::Closed`] once
     /// it is closed and drained.
     pub fn try_receive(&self) -> Result<T, TryReceiveError> {
-        let value = self.queue.values.pop().map_err(|error| match error {
-            concurrent_queue::PopError::Empty => TryReceiveError::Empty,
-            concurrent_queue::PopError::Closed => TryReceiveError::Closed,
-        })?;
+        let value = self
+            .queue
+            .values
+            .pop("Channel::try_receive")
+            .map_err(|error| match error {
+                concurrent_queue::PopError::Empty => TryReceiveError::Empty,
+                concurrent_queue::PopError::Closed => TryReceiveError::Closed,
+            })?;
         self.queue.space.notify_one();
         Ok(value)
     }
@@ -525,12 +532,12 @@ impl<T> Receiver<T> {
 
     /// Whether the channel is closed, possibly with messages still queued.
     pub fn is_closed(&self) -> bool {
-        self.queue.values.is_closed()
+        self.queue.values.is_closed("Channel::is_closed")
     }
 
     /// The number of messages waiting.
     pub fn len(&self) -> usize {
-        self.queue.values.len()
+        self.queue.values.len("Channel::len")
     }
 
     /// Whether no messages are waiting.
@@ -540,14 +547,14 @@ impl<T> Receiver<T> {
 
     /// The most messages the channel holds.
     pub fn capacity(&self) -> usize {
-        self.queue.world.step();
+        self.queue.world.step("Channel::capacity");
         self.queue.capacity
     }
 }
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        self.queue.lock().senders += 1;
+        self.queue.lock("Sender::clone").senders += 1;
         Self {
             queue: Arc::clone(&self.queue),
         }
@@ -590,7 +597,7 @@ impl<T> Stream for Receiver<T> {
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        self.queue.lock().receivers += 1;
+        self.queue.lock("Receiver::clone").receivers += 1;
         Self {
             queue: Arc::clone(&self.queue),
             #[cfg(feature = "tokio")]
@@ -673,7 +680,7 @@ impl std::error::Error for ReceiveError {}
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        self.queue.drop_endpoint(true);
+        self.queue.drop_endpoint(true, "Sender::drop");
     }
 }
 
@@ -696,13 +703,13 @@ struct State {
 }
 
 impl<T> Queue<T> {
-    fn lock(&self) -> Guard<'_, State> {
-        self.world.step();
-        self.state.lock()
+    fn lock(&self, operation: &'static str) -> Guard<'_, State> {
+        self.world.step(operation);
+        self.state.lock(operation)
     }
 
     fn close(&self) -> bool {
-        let was_open = self.values.close();
+        let was_open = self.values.close("Channel::close");
         if was_open {
             self.wake_closed();
         }
@@ -716,13 +723,13 @@ impl<T> Queue<T> {
         self.space.notify_all();
     }
 
-    fn drop_endpoint(&self, sender: bool) {
+    fn drop_endpoint(&self, sender: bool, operation: &'static str) {
         #[cfg(feature = "deterministic")]
         if std::thread::panicking() && self.world != World::current() {
             return;
         }
-        self.world.step_unless_panicking();
-        let mut state = self.state.lock();
+        self.world.step_unless_panicking(operation);
+        let mut state = self.state.lock(operation);
         let count = if sender {
             &mut state.senders
         } else {
@@ -734,19 +741,19 @@ impl<T> Queue<T> {
         if !last {
             return;
         }
-        if self.values.close() {
+        if self.values.close(operation) {
             self.wake_closed();
         }
         if !sender {
             // Wake waiters before dropping messages outside the lock. A destructor
             // can use this channel and must see it closed without deadlocking.
-            self.values.clear();
+            self.values.clear(operation);
         }
     }
 }
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.queue.drop_endpoint(false);
+        self.queue.drop_endpoint(false, "Receiver::drop");
     }
 }

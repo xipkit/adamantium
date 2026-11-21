@@ -48,7 +48,7 @@ impl WaitQueue {
     }
 
     pub(crate) fn listen(&self) -> Waiter {
-        self.world.step_unless_panicking();
+        self.world.step_unless_panicking("WaitQueue::listen");
         Waiter {
             listener: Some(self.event.listen()),
             world: self.world,
@@ -62,14 +62,14 @@ impl WaitQueue {
     }
 
     pub(crate) fn notify_one(&self) {
-        self.world.step_unless_panicking();
+        self.world.step_unless_panicking("WaitQueue::notify_one");
         #[cfg(feature = "deterministic")]
         super::trace::record_wakeup(self.operation, self.wait_id, false);
         self.event.notify_additional(1);
     }
 
     pub(crate) fn notify_all(&self) {
-        self.world.step_unless_panicking();
+        self.world.step_unless_panicking("WaitQueue::notify_all");
         #[cfg(feature = "deterministic")]
         super::trace::record_wakeup(self.operation, self.wait_id, true);
         self.event.notify(usize::MAX);
@@ -98,7 +98,7 @@ impl Future for Waiter {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        self.world.step_unless_panicking();
+        self.world.step_unless_panicking("Waiter::poll");
         let poll = match &mut self.listener {
             Some(listener) => Pin::new(listener).poll(cx),
             None => Poll::Ready(()),
@@ -135,7 +135,7 @@ impl Drop for Waiter {
             }
             return;
         }
-        self.world.step_unless_panicking();
+        self.world.step_unless_panicking("Waiter::drop");
         #[cfg(feature = "deterministic")]
         if let Some(token) = self.trace_token.take() {
             super::trace::end_wait(token, self.operation, self.wait_id, true);

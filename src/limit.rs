@@ -120,7 +120,9 @@ impl Limit {
 
     /// The number of places that are free now.
     pub fn available(&self) -> usize {
-        self.places.limit.saturating_sub(*self.places.taken.lock())
+        self.places
+            .limit
+            .saturating_sub(*self.places.taken.lock("Limit::available"))
     }
 
     async fn take(&self) -> Place {
@@ -128,7 +130,7 @@ impl Limit {
     }
 
     fn try_take(&self) -> Option<Place> {
-        let mut taken = self.places.taken.lock();
+        let mut taken = self.places.taken.lock("Limit::try_take");
         if *taken >= self.places.limit {
             return None;
         }
@@ -142,7 +144,7 @@ impl Limit {
 impl Drop for Place {
     fn drop(&mut self) {
         {
-            let mut taken = self.places.taken.lock();
+            let mut taken = self.places.taken.lock("Place::drop");
             *taken = taken.saturating_sub(1);
         }
         self.places.freed.notify_one();

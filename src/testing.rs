@@ -24,7 +24,7 @@ use shuttle::scheduler::{
 
 use crate::runtime::{
     execution::Execution,
-    trace::{Collector, Guard, RawEvent},
+    trace::{self, Collector, Guard, RawEvent, Scheduling},
 };
 
 mod duplex;
@@ -658,6 +658,7 @@ pub enum TimelineEventKind {
 pub struct TimelineEvent {
     timestamp: Duration,
     kind: TimelineEventKind,
+    scheduling: Option<Scheduling>,
 }
 
 impl TimelineEvent {
@@ -669,6 +670,17 @@ impl TimelineEvent {
     /// The event details.
     pub fn kind(&self) -> &TimelineEventKind {
         &self.kind
+    }
+
+    /// The modeled operation about to resume, if this is a labeled scheduling event.
+    pub fn scheduled_operation(&self) -> Option<&'static str> {
+        self.scheduling.as_ref()?.operation
+    }
+
+    /// The number of consecutive scheduling decisions represented by this event.
+    /// Returns `None` for other kinds of events.
+    pub fn scheduled_steps(&self) -> Option<usize> {
+        self.scheduling.as_ref().map(|scheduling| scheduling.steps)
     }
 }
 
@@ -766,7 +778,11 @@ impl Timeline {
             match &event.kind {
                 TimelineEventKind::Scheduled { task_id, task_name } => {
                     format_task_label(f, *task_id, task_name.as_deref())?;
-                    writeln!(f, " scheduled")?;
+                    write!(f, " {}", event.scheduled_operation().unwrap_or("scheduled"))?;
+                    if let Some(steps) = event.scheduled_steps().filter(|&steps| steps > 1) {
+                        write!(f, " (×{steps})")?;
+                    }
+                    writeln!(f)?;
                 }
                 TimelineEventKind::Wait {
                     task_id,
@@ -838,7 +854,7 @@ impl Timeline {
 }
 
 /// Replays `record` with timeline tracing enabled to reconstruct task names,
-/// virtual timestamps, wait operations and wakeups without altering the schedule.
+/// virtual timestamps, modeled operations, waits and wakeups without altering the schedule.
 ///
 /// The returned [`Timeline`] excludes all user payloads and panic messages.
 pub fn explain<F, Fut>(record: &Replay, factory: F) -> Timeline
@@ -881,8 +897,12 @@ fn build_timeline(
     let mut events = Vec::with_capacity(collector.events.len() + usize::from(failure.is_some()));
     let mut last_timestamp = Duration::ZERO;
     for raw in collector.events {
-        let (timestamp, kind) = match raw {
-            RawEvent::Scheduled { timestamp, task_id } => {
+        let (timestamp, kind, scheduling) = match raw {
+            RawEvent::Scheduled {
+                timestamp,
+                task_id,
+                scheduling,
+            } => {
                 task_ids.entry(task_id).or_insert_with(|| name_of(task_id));
                 (
                     timestamp,
@@ -890,6 +910,7 @@ fn build_timeline(
                         task_id,
                         task_name: name_of(task_id),
                     },
+                    Some(scheduling),
                 )
             }
             RawEvent::Wait {
@@ -907,6 +928,7 @@ fn build_timeline(
                         operation,
                         wait_id,
                     },
+                    None,
                 )
             }
             RawEvent::Wakeup {
@@ -933,6 +955,7 @@ fn build_timeline(
                         operation,
                         wait_id,
                     },
+                    None,
                 )
             }
             RawEvent::WaitCompleted {
@@ -950,6 +973,7 @@ fn build_timeline(
                         operation,
                         wait_id,
                     },
+                    None,
                 )
             }
             RawEvent::WaitCancelled {
@@ -967,11 +991,16 @@ fn build_timeline(
                         operation,
                         wait_id,
                     },
+                    None,
                 )
             }
         };
         last_timestamp = timestamp;
-        events.push(TimelineEvent { timestamp, kind });
+        events.push(TimelineEvent {
+            timestamp,
+            kind,
+            scheduling,
+        });
     }
 
     if let Some(kind) = failure {
@@ -986,6 +1015,7 @@ fn build_timeline(
                 task_id,
                 task_name: task_id.and_then(name_of),
             },
+            scheduling: None,
         });
     }
 
@@ -1166,6 +1196,7 @@ impl Scheduler for Playback {
 }
 
 /// Runs independent test workers and joins their results in input order.
+/// The timeline names them `parallel-0`, `parallel-1`, and so on.
 ///
 /// Only usable inside this harness. This is a primitive test fixture, not a model
 /// of Tasks' error/cancellation semantics. A worker panic fails the execution.
@@ -1182,8 +1213,14 @@ where
     );
     let handles = workers
         .into_iter()
-        .map(crate::runtime::coop::model::task)
-        .map(shuttle::future::spawn)
+        .enumerate()
+        .map(|(index, worker)| {
+            let _scope = trace::enter_operation("testing::parallel");
+            shuttle::future::spawn(crate::runtime::coop::model::task(async move {
+                trace::record_current_task_name(&format!("parallel-{index}"));
+                worker.await
+            }))
+        })
         .collect::<Vec<_>>();
     let mut values = Vec::with_capacity(handles.len());
     for handle in handles {

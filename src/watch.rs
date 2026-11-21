@@ -85,15 +85,15 @@ impl<T> Shared<T> {
     // Every operation locks, so this is where a handle carried into the
     // deterministic harness is rejected. While unwinding the check is
     // skipped: the execution is already failing, and a second panic would
-    fn lock(&self) -> Guard<'_, State<T>> {
+    fn lock(&self, operation: &'static str) -> Guard<'_, State<T>> {
         if !std::thread::panicking() {
             self.world.check();
         }
-        self.state.lock()
+        self.state.lock(operation)
     }
 
     fn close(&self) -> bool {
-        self.close_with(self.lock())
+        self.close_with(self.lock("Watch::close"))
     }
 
     fn close_with(&self, mut state: Guard<'_, State<T>>) -> bool {
@@ -129,7 +129,7 @@ impl<T> Watch<T> {
     /// Sending needs no watchers: one subscribed later reads the new value.
     pub fn send(&self, value: T) -> Result<(), Closed<T>> {
         let old = {
-            let mut state = self.shared.lock();
+            let mut state = self.shared.lock("Watch::send");
             if state.closed {
                 return Err(Closed(value));
             }
@@ -147,7 +147,7 @@ impl<T> Watch<T> {
     pub fn subscribe(&self) -> Watcher<T> {
         Watcher {
             shared: Arc::clone(&self.shared),
-            seen: self.shared.lock().version,
+            seen: self.shared.lock("Watch::subscribe").version,
         }
     }
 
@@ -160,27 +160,27 @@ impl<T> Watch<T> {
 
     /// Whether the watch is closed.
     pub fn is_closed(&self) -> bool {
-        self.shared.lock().closed
+        self.shared.lock("Watch::is_closed").closed
     }
 }
 
 impl<T: Clone> Watch<T> {
     /// A copy of the current value.
     pub fn get(&self) -> T {
-        self.shared.lock().value.clone()
+        self.shared.lock("Watch::get").value.clone()
     }
 }
 
 impl<T> Watcher<T> {
     /// Whether a value this watcher hasn't seen is waiting.
     pub fn has_changed(&self) -> bool {
-        self.shared.lock().version != self.seen
+        self.shared.lock("Watcher::has_changed").version != self.seen
     }
 
     /// Whether the watch is closed. An unseen last value can still be
     /// received.
     pub fn is_closed(&self) -> bool {
-        self.shared.lock().closed
+        self.shared.lock("Watcher::is_closed").closed
     }
 
     /// Waits for a value this watcher hasn't seen and marks it seen, as
@@ -211,7 +211,7 @@ impl<T> Watcher<T> {
     }
 
     fn mark(&mut self) -> Option<Option<()>> {
-        let state = self.shared.lock();
+        let state = self.shared.lock("Watcher::changed");
         if state.version != self.seen {
             self.seen = state.version;
             Some(Some(()))
@@ -227,7 +227,7 @@ impl<T: Clone> Watcher<T> {
     /// A copy of the current value, which this watcher then counts as
     /// seen. Use [`has_changed`](Self::has_changed) to look without marking.
     pub fn get(&mut self) -> T {
-        let state = self.shared.lock();
+        let state = self.shared.lock("Watcher::get");
         let value = state.value.clone();
         self.seen = state.version;
         value
@@ -244,11 +244,11 @@ impl<T: Clone> Watcher<T> {
 
     async fn receive_inner(&mut self) -> Option<T> {
         loop {
-            if let Some(received) = self.check() {
+            if let Some(received) = self.check("Watcher::receive") {
                 return received;
             }
             let listener = self.shared.changed.listen();
-            if let Some(received) = self.check() {
+            if let Some(received) = self.check("Watcher::receive") {
                 return received;
             }
             listener.await;
@@ -260,7 +260,7 @@ impl<T: Clone> Watcher<T> {
     /// [`TryReceiveError::Closed`] once it is closed and the last value has
     /// been seen.
     pub fn try_receive(&mut self) -> Result<T, TryReceiveError> {
-        match self.check() {
+        match self.check("Watcher::try_receive") {
             Some(Some(value)) => Ok(value),
             Some(None) => Err(TryReceiveError::Closed),
             None => Err(TryReceiveError::Empty),
@@ -333,8 +333,8 @@ impl<T: Clone> Watcher<T> {
         .await
     }
 
-    fn check(&mut self) -> Option<Option<T>> {
-        let state = self.shared.lock();
+    fn check(&mut self, operation: &'static str) -> Option<Option<T>> {
+        let state = self.shared.lock(operation);
         if state.version != self.seen {
             let value = state.value.clone();
             self.seen = state.version;
@@ -349,7 +349,7 @@ impl<T: Clone> Watcher<T> {
 
 impl<T> Clone for Watch<T> {
     fn clone(&self) -> Self {
-        let mut state = self.shared.lock();
+        let mut state = self.shared.lock("Watch::clone");
         state.watches = state.watches.saturating_add(1);
         drop(state);
         Self {
@@ -366,7 +366,7 @@ impl<T> Drop for Watch<T> {
         {
             return;
         }
-        let mut state = self.shared.lock();
+        let mut state = self.shared.lock("Watch::drop");
         state.watches = state.watches.saturating_sub(1);
         if state.watches == 0 {
             self.shared.close_with(state);
@@ -376,7 +376,7 @@ impl<T> Drop for Watch<T> {
 
 impl<T> Clone for Watcher<T> {
     fn clone(&self) -> Self {
-        self.shared.world.step();
+        self.shared.world.step("Watcher::clone");
         Self {
             shared: Arc::clone(&self.shared),
             seen: self.seen,
@@ -386,13 +386,13 @@ impl<T> Clone for Watcher<T> {
 
 impl<T: fmt::Debug> fmt::Debug for Watch<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        debug_state(f, "Watch", &self.shared, None)
+        debug_state(f, "Watch", &self.shared, None, "Watch::fmt")
     }
 }
 
 impl<T: fmt::Debug> fmt::Debug for Watcher<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        debug_state(f, "Watcher", &self.shared, Some(self.seen))
+        debug_state(f, "Watcher", &self.shared, Some(self.seen), "Watcher::fmt")
     }
 }
 
@@ -401,10 +401,11 @@ fn debug_state<T: fmt::Debug>(
     name: &str,
     shared: &Shared<T>,
     seen: Option<u64>,
+    operation: &'static str,
 ) -> fmt::Result {
     // Try the lock to avoid deadlock when T::clone or T::fmt formats the watch.
     shared.world.check();
-    let Some(state) = shared.state.try_lock() else {
+    let Some(state) = shared.state.try_lock(operation) else {
         return write!(f, "{name}(<in use>)");
     };
     let mut debug = f.debug_struct(name);
@@ -417,6 +418,6 @@ fn debug_state<T: fmt::Debug>(
 
 impl<T> Drop for Watcher<T> {
     fn drop(&mut self) {
-        self.shared.world.step_unless_panicking();
+        self.shared.world.step_unless_panicking("Watcher::drop");
     }
 }

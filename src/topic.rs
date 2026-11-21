@@ -160,7 +160,7 @@ impl<T> Subscriptions<T> {
     /// topic has been dropped, the receiver is already closed.
     pub fn subscribe(&self) -> Receiver<T> {
         let (sender, receiver) = Channel::bounded(self.capacity).split();
-        let mut subscribers = self.subscribers.lock();
+        let mut subscribers = self.subscribers.lock("Subscriptions::subscribe");
         subscribers.remove_closed();
         if subscribers.open {
             subscribers.senders.push(sender);
@@ -169,7 +169,7 @@ impl<T> Subscriptions<T> {
     }
 
     fn current(&self) -> Vec<Sender<T>> {
-        let mut subscribers = self.subscribers.lock();
+        let mut subscribers = self.subscribers.lock("Subscriptions::current");
         subscribers.remove_closed();
         subscribers.senders.clone()
     }
@@ -196,7 +196,7 @@ impl<T> Clone for Subscriptions<T> {
 impl<T> Drop for Topic<T> {
     fn drop(&mut self) {
         let senders = {
-            let mut subscribers = self.subscriptions.subscribers.lock();
+            let mut subscribers = self.subscriptions.subscribers.lock("Topic::drop");
             subscribers.open = false;
             std::mem::take(&mut subscribers.senders)
         };

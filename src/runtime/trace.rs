@@ -45,10 +45,48 @@ struct QueueWaiter {
     notified: bool,
 }
 
+pub(crate) fn enter_operation(operation: &'static str) -> Option<OperationScope> {
+    if !is_active() {
+        return None;
+    }
+    let task_id = current_task_id()?;
+    let previous = with_collector(|collector| {
+        collector
+            .operations
+            .entry(task_id)
+            .or_default()
+            .replace(operation)
+    })?;
+    Some(OperationScope { task_id, previous })
+}
+
+// Shuttle can switch tasks on this thread before the operation returns.
+pub(crate) struct OperationScope {
+    task_id: usize,
+    previous: Option<&'static str>,
+}
+
+impl Drop for OperationScope {
+    fn drop(&mut self) {
+        with_collector(|collector| {
+            if let Some(operation) = collector.operations.get_mut(&self.task_id) {
+                *operation = self.previous;
+            }
+        });
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Scheduling {
+    pub(crate) operation: Option<&'static str>,
+    pub(crate) steps: usize,
+}
+
 pub(crate) enum RawEvent {
     Scheduled {
         timestamp: Duration,
         task_id: usize,
+        scheduling: Scheduling,
     },
     Wait {
         timestamp: Duration,
@@ -83,6 +121,7 @@ pub(crate) struct Collector {
     pub(crate) active_waits: BTreeMap<u64, WaitEntry>,
     pub(crate) teardown_snapshot: Option<Vec<WaitEntry>>,
     queue_waiters: BTreeMap<u64, Vec<QueueWaiter>>,
+    operations: BTreeMap<usize, Option<&'static str>>,
     pub(crate) events: Vec<RawEvent>,
     pub(crate) last_scheduled: Option<usize>,
 }
@@ -97,6 +136,7 @@ impl Collector {
             active_waits: BTreeMap::new(),
             teardown_snapshot: None,
             queue_waiters: BTreeMap::new(),
+            operations: BTreeMap::new(),
             events: Vec::new(),
             last_scheduled: None,
         }
@@ -178,13 +218,29 @@ pub(crate) fn record_scheduled(task_id: usize, shuttle_name: Option<String>) {
         if let Some(name) = shuttle_name {
             collector.names.entry(task_id).or_insert(name);
         }
-        if collector.last_scheduled != Some(task_id) {
-            collector.last_scheduled = Some(task_id);
-            collector.events.push(RawEvent::Scheduled {
-                timestamp: clock::elapsed(),
-                task_id,
-            });
+        collector.last_scheduled = Some(task_id);
+        let timestamp = clock::elapsed();
+        let operation = collector.operations.get(&task_id).copied().flatten();
+        if let Some(RawEvent::Scheduled {
+            timestamp: previous_time,
+            task_id: previous_task,
+            scheduling,
+        }) = collector.events.last_mut()
+            && *previous_task == task_id
+            && *previous_time == timestamp
+            && scheduling.operation == operation
+        {
+            scheduling.steps += 1;
+            return;
         }
+        collector.events.push(RawEvent::Scheduled {
+            timestamp,
+            task_id,
+            scheduling: Scheduling {
+                operation,
+                steps: 1,
+            },
+        });
     });
 }
 

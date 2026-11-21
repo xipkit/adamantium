@@ -102,7 +102,7 @@ impl<K: Clone + Eq + Hash> KeyedLimit<K> {
     #[allow(clippy::future_not_send, reason = "Send follows the key")]
     async fn take(&self, key: K) -> (Place, Registration<'_, K>) {
         let limit = {
-            let mut keys = self.keys.lock();
+            let mut keys = self.keys.lock("KeyedLimit::take");
             let entry = keys.entry(key.clone()).or_insert_with(|| Entry {
                 limit: Limit::new(1),
                 calls: 0,
@@ -119,7 +119,7 @@ impl<K: Clone + Eq + Hash> KeyedLimit<K> {
 impl<K: Eq + Hash> Drop for Registration<'_, K> {
     fn drop(&mut self) {
         // Register and evict under one lock so a key never has two live limits.
-        let mut keys = self.table.keys.lock();
+        let mut keys = self.table.keys.lock("Registration::drop");
         if let Some(entry) = keys.get_mut(&self.key) {
             entry.calls -= 1;
             if entry.calls == 0 {

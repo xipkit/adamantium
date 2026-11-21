@@ -16,14 +16,16 @@ pub(super) struct Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        lock(&self.tasks).names.remove(&self.id);
+        lock(&self.tasks, "Registration::drop")
+            .names
+            .remove(&self.id);
     }
 }
 
 pub(super) fn track(tasks: &Shared<Running>, name: Str) -> (Registration, tracing::Span) {
     let span = tracing::info_span!("adamantium.task", task.name = %name).or_current();
     let id = {
-        let mut running = lock(tasks);
+        let mut running = lock(tasks, "trace::track");
         let id = running.next;
         running.next += 1;
         running.names.insert(id, name);
@@ -60,7 +62,7 @@ impl<E> Tasks<E> {
         // Snapshot before cancellation and release the lock before calling a
         // subscriber, which may itself run application code.
         let running_tasks: Vec<_> = {
-            let running = lock(&self.named);
+            let running = lock(&self.named, "Tasks::report_deadline");
             if running.next == 0 {
                 return;
             }

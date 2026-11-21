@@ -173,12 +173,16 @@ impl DuplexStream {
 
     /// Returns the total bytes delivered so far on the inbound direction.
     pub fn bytes_read(&self) -> usize {
-        self.inbound.lock().bytes_delivered
+        self.inbound
+            .lock("DuplexStream::bytes_read")
+            .bytes_delivered
     }
 
     /// Returns the total bytes delivered to the peer so far on the outbound direction.
     pub fn bytes_written_delivered(&self) -> usize {
-        self.outbound.lock().bytes_delivered
+        self.outbound
+            .lock("DuplexStream::bytes_written_delivered")
+            .bytes_delivered
     }
 }
 
@@ -187,14 +191,16 @@ impl Drop for DuplexStream {
         if std::thread::panicking() && self.outbound.world != World::current() {
             return;
         }
-        self.outbound.world.step_unless_panicking();
+        self.outbound
+            .world
+            .step_unless_panicking("DuplexStream::drop");
         {
-            let mut out_state = self.outbound.state.lock();
+            let mut out_state = self.outbound.state.lock("DuplexStream::drop");
             out_state.write_closed = true;
         }
         self.outbound.readable.notify_all();
         {
-            let mut in_state = self.inbound.state.lock();
+            let mut in_state = self.inbound.state.lock("DuplexStream::drop");
             in_state.read_closed = true;
         }
         self.inbound.writable.notify_all();
@@ -214,7 +220,7 @@ impl AsyncRead for DuplexStream {
         }
 
         loop {
-            let mut state = this.inbound.lock();
+            let mut state = this.inbound.lock("DuplexStream::poll_read");
             if let Some(kind) = state.fault {
                 drop(state);
                 this.read_waiter = None;
@@ -318,7 +324,7 @@ impl AsyncWrite for DuplexStream {
         this.outbound.world.check();
 
         loop {
-            let mut state = this.outbound.lock();
+            let mut state = this.outbound.lock("DuplexStream::poll_write");
             if let Some(kind) = state.fault {
                 drop(state);
                 this.write_waiter = None;
@@ -396,7 +402,7 @@ impl AsyncWrite for DuplexStream {
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.outbound.world.check();
-        let state = self.outbound.lock();
+        let state = self.outbound.lock("DuplexStream::poll_flush");
         if let Some(kind) = state.fault {
             return Poll::Ready(Err(io::Error::from(kind)));
         }
@@ -409,7 +415,7 @@ impl AsyncWrite for DuplexStream {
     fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.as_mut().get_mut();
         this.outbound.world.check();
-        let mut state = this.outbound.lock();
+        let mut state = this.outbound.lock("DuplexStream::poll_shutdown");
         if let Some(kind) = state.fault {
             return Poll::Ready(Err(io::Error::from(kind)));
         }
@@ -464,13 +470,13 @@ impl Direction {
         }
     }
 
-    fn lock(&self) -> Guard<'_, DirectionState> {
-        self.world.step();
-        self.state.lock()
+    fn lock(&self, operation: &'static str) -> Guard<'_, DirectionState> {
+        self.world.step(operation);
+        self.state.lock(operation)
     }
 
     fn inject_fault(&self, fault: TransportFault) {
-        let mut state = self.lock();
+        let mut state = self.lock("DuplexControl::inject_fault");
         match fault {
             TransportFault::Eof => {
                 state.write_closed = true;

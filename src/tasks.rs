@@ -261,7 +261,7 @@ struct Ledger<E> {
 
 impl<E> Ledger<E> {
     fn lock(&self) -> Guard<'_, Errors<E>> {
-        self.errors.lock()
+        self.errors.lock("Ledger::lock")
     }
 }
 
@@ -275,8 +275,8 @@ fn shared<V>(value: V) -> Shared<V> {
     Arc::new(Lock::new(value))
 }
 
-fn lock<V>(shared: &Shared<V>) -> Guard<'_, V> {
-    shared.lock()
+fn lock<'a, V>(shared: &'a Shared<V>, operation: &'static str) -> Guard<'a, V> {
+    shared.lock(operation)
 }
 
 #[allow(
@@ -284,7 +284,9 @@ fn lock<V>(shared: &Shared<V>) -> Guard<'_, V> {
     reason = "each registered task starts at most once"
 )]
 fn take_work<W>(task: Shared<Option<W>>) -> W {
-    lock(&task).take().expect("task starts once")
+    lock(&task, "Tasks::take_work")
+        .take()
+        .expect("task starts once")
 }
 
 // If runtime cancellation left the caller holding the last reference, preserve
@@ -303,7 +305,7 @@ struct Registering<'a> {
 impl Drop for Registering<'_> {
     fn drop(&mut self) {
         if self.admitted {
-            lock(self.set).finish_spawn();
+            lock(self.set, "JoinSet::finish_spawn").finish_spawn();
         }
     }
 }
@@ -366,13 +368,13 @@ fn reaped<E>(errors: &SharedErrors<E>, result: Result<(), JoinError>) -> bool {
 }
 
 async fn join_next(set: &Shared<JoinSet>) -> Option<Result<(), JoinError>> {
-    poll_fn(|cx| lock(set).poll_join_next(cx)).await
+    poll_fn(|cx| lock(set, "JoinSet::poll_join_next").poll_join_next(cx)).await
 }
 
 async fn reap<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
     poll_fn(|cx| {
         loop {
-            let next = lock(set).poll_join_next(cx);
+            let next = lock(set, "JoinSet::poll_join_next").poll_join_next(cx);
             match next {
                 Poll::Ready(Some(result)) => {
                     if reaped(errors, result) {
@@ -604,7 +606,7 @@ impl<E: Send + 'static> Spawner<E> {
         };
         let retained = shared(Some(work));
         {
-            let mut set = lock(&self.set);
+            let mut set = lock(&self.set, "Tasks::submit");
             // The owner already reaped and may still submit after observing
             // a panic, so it can drain the new work before resuming the panic.
             if require_open {
@@ -1281,7 +1283,7 @@ impl<E: Send + 'static> Tasks<E> {
                 aborted = true;
             }
             let next = poll_fn(|cx| {
-                let mut set = lock(&self.set);
+                let mut set = lock(&self.set, "Tasks::settle");
                 let next = set.poll_join_next(cx);
                 if matches!(next, Poll::Ready(None)) {
                     set.close();
@@ -1342,7 +1344,7 @@ impl<E: Send + 'static> Tasks<E> {
     /// up work not reflected here; joining waits for those calls as well.
     pub fn len(&self) -> usize {
         self.world.check();
-        lock(&self.set).unfinished()
+        lock(&self.set, "Tasks::unfinished").unfinished()
     }
 
     /// Whether every spawned task has finished, with [`len`](Self::len)'s
@@ -1353,7 +1355,7 @@ impl<E: Send + 'static> Tasks<E> {
 
     fn reap(&mut self) {
         loop {
-            let next = lock(&self.set).try_join_next();
+            let next = lock(&self.set, "JoinSet::try_join_next").try_join_next();
             let Some(result) = next else {
                 break;
             };
@@ -1404,7 +1406,7 @@ impl<E: Send + 'static> Tasks<E> {
     }
 
     fn abort(&mut self) {
-        lock(&self.set).abort_all();
+        lock(&self.set, "Tasks::abort").abort_all();
         if let Some(cancellation) = &self.cancellation {
             cancellation.cancel();
         }
@@ -1429,7 +1431,7 @@ impl<E> Drop for Tasks<E> {
         if std::thread::panicking() && self.world.is_model() && self.world != World::current() {
             return;
         }
-        lock(&self.set).abort_all();
+        lock(&self.set, "Tasks::drop").abort_all();
         if let Some(cancellation) = &self.cancellation {
             cancellation.request();
         }
@@ -1446,7 +1448,7 @@ impl<E> fmt::Debug for Tasks<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.world.check();
         f.debug_struct("Tasks")
-            .field("len", &lock(&self.set).len())
+            .field("len", &lock(&self.set, "Tasks::fmt").len())
             .finish()
     }
 }
@@ -1519,7 +1521,7 @@ where
         // Fill the window, then wait for a place to open. A task records its
         // error just before it ends, so this stops before taking another item.
         while !tasks.failed() {
-            if lock(&tasks.set).len() < limit
+            if lock(&tasks.set, "JoinSet::len").len() < limit
                 && let Some(item) = items.next()
             {
                 let index = started;
@@ -1528,7 +1530,7 @@ where
                 let finished = Arc::clone(&finished);
                 tasks.spawn(async move {
                     let value = future.await?;
-                    lock(&finished).push((index, value));
+                    lock(&finished, "Tasks::record_finished").push((index, value));
                     Ok(())
                 });
                 continue;
@@ -1546,7 +1548,7 @@ where
             }
         }
         tasks.join(Ok(())).await?;
-        let mut finished = std::mem::take(&mut *lock(&finished));
+        let mut finished = std::mem::take(&mut *lock(&finished, "Tasks::take_finished"));
         if finished.len() != started {
             no_result();
         }
@@ -1615,8 +1617,8 @@ where
         let mut started = 0;
         // A task reports just before it ends, so this stops before taking
         // another item once one has succeeded.
-        while lock(&outcomes).winner.is_none() && !tasks.failed() {
-            if lock(&tasks.set).len() < limit
+        while lock(&outcomes, "Tasks::race").winner.is_none() && !tasks.failed() {
+            if lock(&tasks.set, "JoinSet::len").len() < limit
                 && let Some(item) = items.next()
             {
                 let index = started;
@@ -1625,7 +1627,7 @@ where
                 let outcomes = Arc::clone(&outcomes);
                 tasks.spawn(async move {
                     let result = future.await;
-                    let mut outcomes = lock(&outcomes);
+                    let mut outcomes = lock(&outcomes, "Tasks::race");
                     match result {
                         Ok(value) => {
                             if outcomes.winner.is_none() {
@@ -1652,7 +1654,7 @@ where
         tasks.abort();
         let Ok(()) = tasks.join(Ok(())).await;
         let (winner, mut errors) = {
-            let mut outcomes = lock(&outcomes);
+            let mut outcomes = lock(&outcomes, "Tasks::race");
             (outcomes.winner.take(), std::mem::take(&mut outcomes.errors))
         };
         if let Some(value) = winner {
@@ -1811,7 +1813,7 @@ mod retention_tests {
             for _ in 0..1_000 {
                 let handles: Vec<_> = (0..100).map(|_| tasks.spawn(async { Ok(()) })).collect();
                 assert!(
-                    lock(&tasks.set).len() <= 100,
+                    lock(&tasks.set, "JoinSet::len").len() <= 100,
                     "completed entries accumulated"
                 );
                 for handle in handles {
@@ -1824,7 +1826,7 @@ mod retention_tests {
                     tasks.spawn_handled(async { Ok::<_, ()>(()) }, |()| {});
                 }
                 assert!(
-                    lock(&tasks.set).len() <= 100,
+                    lock(&tasks.set, "JoinSet::len").len() <= 100,
                     "completed handled entries accumulated"
                 );
                 while !tasks.is_empty() {
@@ -1849,7 +1851,7 @@ mod retention_tests {
                     yield_now().await;
                 }
                 // One task entry and at most one coalesced completion.
-                assert!(lock(&tasks.set).len() <= 2);
+                assert!(lock(&tasks.set, "JoinSet::len").len() <= 2);
             }
         })
         .await
@@ -1902,7 +1904,7 @@ mod retention_tests {
         })
         .await;
         release.send(()).unwrap();
-        while lock(&set).unfinished() != 0 {
+        while lock(&set, "JoinSet::unfinished").unfinished() != 0 {
             yield_now().await;
         }
 
@@ -1961,7 +1963,7 @@ mod retention_tests {
                     |()| panic!("the connection succeeded"),
                 );
             }
-            while served.snapshot() < 100 || !lock(&tasks.set).is_empty() {
+            while served.snapshot() < 100 || !lock(&tasks.set, "JoinSet::is_empty").is_empty() {
                 crate::time::sleep(std::time::Duration::from_millis(1)).await;
             }
             Ok(())
@@ -2045,7 +2047,7 @@ mod retention_tests {
                         yield_now().await;
                     }
                     let trigger = tasks.spawn(async { Ok(()) });
-                    assert_eq!(lock(&tasks.set).len(), 1);
+                    assert_eq!(lock(&tasks.set, "JoinSet::len").len(), 1);
                     // Reaping only releases the scope's bookkeeping. Handles
                     // continue to own their results until value is requested.
                     assert_eq!(tasks.value(retained).await, Ok(42));
