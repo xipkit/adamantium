@@ -23,6 +23,7 @@ dependencies = [
  "shuttle-engine",
  "shuttle-schedulers",
  "shuttle-std",
+ "syn 3.0.9",
  "tokio",
  "tracing",
  "tracing-subscriber",

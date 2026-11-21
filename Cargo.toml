@@ -126,6 +126,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 im = "=15.1.0"
 serde_json = "1"
 serde_yaml = "0.9"
+syn = { version = "3", default-features = false, features = ["full", "parsing"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt"] }
 
 [target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
