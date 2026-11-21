@@ -5,8 +5,8 @@ use std::{
 
 use serde_json::Value;
 use syn::{
-    BinOp, Expr, ExprAwait, ExprCall, ExprPath, GenericArgument, Lit, Pat, PathArguments, Stmt,
-    Type, UseTree, punctuated::Pair, visit::Visit,
+    BinOp, Expr, ExprAwait, ExprCall, ExprPath, Lit, Pat, PathArguments, Stmt, UseTree,
+    punctuated::Pair, spanned::Spanned, visit::Visit,
 };
 
 use super::{
@@ -32,9 +32,37 @@ impl Call {
             _ => Api::Tokio,
         }
     }
+
+    pub(super) fn path(self) -> &'static str {
+        match self {
+            Self::Sleep => "tokio::time::sleep",
+            Self::SleepUntil => "tokio::time::sleep_until",
+            Self::Now => "tokio::time::Instant::now",
+            Self::Blocking => "tokio::task::spawn_blocking",
+            Self::Rand => "rand::random",
+            Self::RandRange => "rand::random_range",
+            Self::Fastrand => "fastrand::u64",
+        }
+    }
 }
 
 type Calls = BTreeMap<(usize, usize), Call>;
+
+/// Why `fix` leaves a `rand` draw from a cryptographically secure generator.
+pub(super) const UNPROVED_DRAW: &str = "fix can't tell whether the draw is secret unless it goes straight into a `Duration` constructor such as `Duration::from_millis`. Keep cryptographic randomness for keys and tokens at an input boundary.";
+/// The migration guide section on randomness.
+pub(super) const DRAW_SECTION: &str = "randomness";
+
+pub(super) struct Refusal {
+    pub(super) line: usize,
+    pub(super) call: Call,
+}
+
+#[derive(Default)]
+pub(super) struct Outcome {
+    pub(super) edits: Vec<Vec<Edit>>,
+    pub(super) refusals: Vec<Refusal>,
+}
 
 /// `Duration` constructors whose first parameter is a `u64`.
 const INTEGER_CONSTRUCTORS: &[&str] = &[
@@ -84,9 +112,9 @@ pub(super) fn callees(diagnostics: Vec<&Value>, root: &Path) -> BTreeMap<PathBuf
     files
 }
 
-pub(super) fn plan(file: &Path, source: &str, calls: &Calls) -> Vec<Vec<Edit>> {
+pub(super) fn plan(file: &Path, source: &str, calls: &Calls) -> Outcome {
     let Ok(tree) = syn::parse_file(source) else {
-        return Vec::new();
+        return Outcome::default();
     };
     let mut names = TypeNames::default();
     if calls
@@ -101,10 +129,11 @@ pub(super) fn plan(file: &Path, source: &str, calls: &Calls) -> Vec<Vec<Edit>> {
         calls,
         names,
         deadlines: BTreeMap::new(),
-        edits: Vec::new(),
+        durations: BTreeSet::new(),
+        outcome: Outcome::default(),
     };
     planner.visit_file(&tree);
-    planner.edits
+    planner.outcome
 }
 
 struct Planner<'a> {
@@ -113,7 +142,9 @@ struct Planner<'a> {
     calls: &'a Calls,
     names: TypeNames,
     deadlines: BTreeMap<usize, Edit>,
-    edits: Vec<Vec<Edit>>,
+    /// Source ranges of the `u64` arguments of `Duration` constructors.
+    durations: BTreeSet<(usize, usize)>,
+    outcome: Outcome,
 }
 
 impl Planner<'_> {
@@ -209,19 +240,20 @@ impl Planner<'_> {
         Some((self.text.of(awaited)?.start, self.deadline(&init.expr)?))
     }
 
+    /// Whether `call` is the `u64` argument of a `Duration` constructor, where
+    /// the draw is a time span and its type is `u64` whatever it is written as.
+    fn in_duration(&self, call: &ExprCall) -> bool {
+        self.text
+            .of(call)
+            .is_some_and(|range| self.durations.contains(&(range.start, range.end)))
+    }
+
     fn random(&self, call: &ExprCall, kind: Call) -> Option<Vec<Edit>> {
         let Expr::Path(callee) = &*call.func else {
             return None;
         };
-        let generics = &callee.path.segments.last()?.arguments;
-        let typed = match generics {
-            PathArguments::AngleBracketed(args) => {
-                matches!(args.args.first(), Some(GenericArgument::Type(ty)) if self.names.primitive_u64(ty))
-            }
-            _ => false,
-        };
         if kind == Call::Rand {
-            return (call.args.is_empty() && typed).then(|| {
+            return call.args.is_empty().then(|| {
                 self.edit(callee, "::adamantium::random::u64")
                     .map(|edit| vec![edit])
             })?;
@@ -250,7 +282,6 @@ impl Planner<'_> {
             return Some(coalesce(edits));
         }
         let start = range.start.as_deref()?;
-        let end = range.end.as_deref()?;
         let Expr::Lit(start_lit) = start else {
             return None;
         };
@@ -260,10 +291,7 @@ impl Planner<'_> {
         if !start_lit.attrs.is_empty()
             || zero.base10_parse::<u64>().ok()? != 0
             || !matches!(range.limits, syn::RangeLimits::Closed(_))
-            || !(kind == Call::Fastrand
-                || typed
-                || zero.suffix() == "u64"
-                || matches!(end, Expr::Lit(lit) if matches!(&lit.lit, Lit::Int(int) if int.suffix() == "u64")))
+            || range.end.is_none()
         {
             return None;
         }
@@ -304,7 +332,8 @@ impl<'ast> Visit<'ast> for Planner<'_> {
                 _ => None,
             };
             if rewrite.is_some() || deadline.is_some() {
-                self.edits
+                self.outcome
+                    .edits
                     .push(rewrite.into_iter().chain(deadline).collect());
             }
         }
@@ -327,18 +356,30 @@ impl<'ast> Visit<'ast> for Planner<'_> {
             && let Some(text) = self.text.get(args)
             && let Some(edit) = self.edit(node, &format!("::adamantium::blocking{text}.await"))
         {
-            self.edits.push(vec![edit]);
+            self.outcome.edits.push(vec![edit]);
             return;
         }
         syn::visit::visit_expr_method_call(self, node);
     }
 
     fn visit_expr_call(&mut self, call: &'ast ExprCall) {
-        if let Some(kind @ (Call::Rand | Call::RandRange | Call::Fastrand)) =
-            self.resolved(&call.func)
-            && let Some(edits) = self.random(call, kind)
+        if self.names.constructs_duration(call, INTEGER_CONSTRUCTORS)
+            && let Some(argument) = call.args.first()
+            && let Some(range) = self.text.of(unparen(argument))
         {
-            self.edits.push(edits);
+            self.durations.insert((range.start, range.end));
+        }
+        match self.resolved(&call.func) {
+            Some(kind @ (Call::Rand | Call::RandRange)) if !self.in_duration(call) => {
+                self.outcome.refusals.push(Refusal {
+                    line: self.text.line(call.span()),
+                    call: kind,
+                });
+            }
+            Some(kind @ (Call::Rand | Call::RandRange | Call::Fastrand)) => {
+                self.outcome.edits.extend(self.random(call, kind));
+            }
+            _ => {}
         }
         syn::visit::visit_expr_call(self, call);
     }
@@ -370,19 +411,6 @@ struct TypeNames {
 impl TypeNames {
     fn unshadowed(&self, name: &str) -> bool {
         !self.opaque && !self.bound.contains(name)
-    }
-
-    fn primitive_u64(&self, ty: &Type) -> bool {
-        let Type::Path(ty) = ty else {
-            return false;
-        };
-        ty.qself.is_none()
-            && (ty.path.is_ident("u64") && self.unshadowed("u64")
-                || plain_path(&ty.path).is_some_and(|segments| {
-                    matches!(segments.as_slice(), [krate, module, name]
-                        if matches!(krate.as_str(), "core" | "std") && module == "primitive" && name == "u64"
-                            && self.unshadowed(krate))
-                }))
     }
 
     fn duration(&self, expr: &Expr) -> bool {

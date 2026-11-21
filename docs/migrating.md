@@ -42,8 +42,10 @@ changes behavior in a way to check.
 | `tokio::time::sleep` | `time::sleep` | Yes |
 | `tokio::time::interval` | `time::Interval` | Mostly |
 | `SystemTime::now()` compared with an expiry | `time::wall_now()` | Yes |
-| `rand::random::<u64>()`, `fastrand::u64(..)` | `random::u64()` | Yes |
-| `fastrand::u64(0..=max)`, `rand::random_range(0..=max)` for a `u64` range | `random::up_to(max)` | Yes |
+| `fastrand::u64(..)` | `random::u64()` | Yes |
+| `fastrand::u64(0..=max)` | `random::up_to(max)` | Yes |
+| `rand::random()`, `rand::random_range(0..=max)` as the argument of a `Duration` constructor | `random::u64()`, `random::up_to(max)` | Yes |
+| Any other `rand::random::<u64>()`, `rand::random_range(0..=max)` | `random::u64()`, `random::up_to(max)` if the draw isn't secret | No |
 
 ## Shared state
 
@@ -1491,3 +1493,8 @@ derive its sequence from the harness.
 Keep cryptographic randomness for keys and tokens at an input boundary.
 Supply fixed test inputs at that boundary when running under the
 deterministic harness.
+
+`cargo adamantium fix` rewrites a `rand` draw only when it goes straight into
+a `Duration` constructor, as retry jitter does, because a `Duration` can't be
+a key or a token. It names each other `rand` draw for you to decide. `fastrand`
+is not cryptographically secure, so `fix` rewrites its draws wherever they are.
