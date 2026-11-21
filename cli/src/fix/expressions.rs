@@ -5,8 +5,8 @@ use std::{
 
 use serde_json::Value;
 use syn::{
-    BinOp, Expr, ExprAwait, ExprCall, GenericArgument, Lit, Pat, PathArguments, Stmt, Type,
-    UseTree, punctuated::Pair, visit::Visit,
+    BinOp, Expr, ExprAwait, ExprCall, ExprPath, GenericArgument, Lit, Pat, PathArguments, Stmt,
+    Type, UseTree, punctuated::Pair, visit::Visit,
 };
 
 use super::{
@@ -35,6 +35,17 @@ impl Call {
 }
 
 type Calls = BTreeMap<(usize, usize), Call>;
+
+/// `Duration` constructors whose first parameter is a `u64`.
+const INTEGER_CONSTRUCTORS: &[&str] = &[
+    "new",
+    "from_secs",
+    "from_millis",
+    "from_micros",
+    "from_nanos",
+];
+const FLOAT_CONSTRUCTORS: &[&str] = &["from_secs_f32", "from_secs_f64"];
+const DURATION_CONSTANTS: &[&str] = &["ZERO", "MAX"];
 
 pub(super) const IMPORTS: &[&[&str]] = &[
     &["tokio", "time"],
@@ -375,35 +386,28 @@ impl TypeNames {
     }
 
     fn duration(&self, expr: &Expr) -> bool {
-        let (path, called) = match unparen(expr) {
-            Expr::Call(call) => match &*call.func {
-                Expr::Path(path) => (path, true),
-                _ => return false,
-            },
-            Expr::Path(path) => (path, false),
-            _ => return false,
-        };
+        match unparen(expr) {
+            Expr::Call(call) => [INTEGER_CONSTRUCTORS, FLOAT_CONSTRUCTORS]
+                .into_iter()
+                .any(|members| self.constructs_duration(call, members)),
+            Expr::Path(path) => self.duration_item(path, DURATION_CONSTANTS),
+            _ => false,
+        }
+    }
+
+    fn constructs_duration(&self, call: &ExprCall, members: &[&str]) -> bool {
+        matches!(&*call.func, Expr::Path(path) if self.duration_item(path, members))
+    }
+
+    /// Whether `path` names one of `members` of the standard `Duration`.
+    fn duration_item(&self, path: &ExprPath, members: &[&str]) -> bool {
         let Some(parts) = plain_path(&path.path) else {
             return false;
         };
         let Some((member, owner)) = parts.split_last() else {
             return false;
         };
-        let standard_member = if called {
-            matches!(
-                member.as_str(),
-                "new"
-                    | "from_secs"
-                    | "from_millis"
-                    | "from_micros"
-                    | "from_nanos"
-                    | "from_secs_f32"
-                    | "from_secs_f64"
-            )
-        } else {
-            matches!(member.as_str(), "ZERO" | "MAX")
-        };
-        if path.qself.is_some() || !path.attrs.is_empty() || !standard_member {
+        if path.qself.is_some() || !path.attrs.is_empty() || !members.contains(&member.as_str()) {
             return false;
         }
         let absolute = path.path.leading_colon.is_some();
