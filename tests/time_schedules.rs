@@ -182,13 +182,15 @@ fn a_failure_decided_by_the_wall_clock_replays_identically() {
         .await;
     }
     // Some schedules pass, so the failure comes from the explored order.
+    // DfsPrefix stops after the first schedule, which passes. Dfs would go on
+    // to the failing ones.
     assert!(
         testing::check(
             Config {
                 iterations: 1,
                 ..config()
             }
-            .with_scheduler(testing::SchedulerMode::Dfs),
+            .with_scheduler(testing::SchedulerMode::DfsPrefix),
             failure
         )
         .is_ok()

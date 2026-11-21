@@ -30,13 +30,16 @@ fn concurrent_updates() {
 
 ## Choose a scheduler
 
-Pass `Config` directly for seeded random sampling. Use `config.with_scheduler(SchedulerMode::Pct { depth: 3 })` for probabilistic concurrency testing (PCT), or `config.with_scheduler(SchedulerMode::Dfs)` for bounded depth-first search (DFS).
+Random or PCT is the default choice. Pass `Config` directly for seeded random sampling, or use `config.with_scheduler(SchedulerMode::Pct { depth: 3 })` for probabilistic concurrency testing (PCT). Both sample schedules, so they suit a scenario of any size.
+
+Depth-first search (DFS) is for scenarios of a handful of steps. `config.with_scheduler(SchedulerMode::Dfs)` runs every reachable schedule, and the number of schedules grows exponentially with the number of steps. `record.steps()` gives the number of scheduling steps in a recorded execution. A check that runs out of `iterations` before it runs every schedule fails with `FailureKind::IterationLimit`. That failure has no failing schedule: `failure.replay()` holds the last execution, which passed. To run only the first `iterations` schedules in DFS order, use `SchedulerMode::DfsPrefix`.
 
 | Mode | What it explores | How exploration ends when executions pass |
 | --- | --- | --- |
 | `Random` | Samples scheduling choices among runnable tasks using `seed`. | Runs `iterations` executions. |
 | `Pct { depth }` | Samples task priorities using `seed`. After calibration, each execution has at most `depth - 1` sampled priority changes. Explicit yields can also lower priorities. | Runs `iterations` executions, including calibration. Stops after calibration if that execution offered no task choices. |
-| `Dfs` | Enumerates modeled task choices. Each execution starts with the same fixed random data stream. | `record.dfs_status()` gives `Some(DfsStatus::Complete)` after all reachable schedules pass, or `Some(DfsStatus::IterationLimit)` if schedules remain when the execution budget runs out. |
+| `Dfs` | Enumerates modeled task choices. Each execution starts with the same fixed random data stream. | Passes after every reachable schedule runs, with `record.dfs_status()` giving `Some(DfsStatus::Complete)`. Fails with `FailureKind::IterationLimit` if schedules remain after `iterations` executions. |
+| `DfsPrefix` | Enumerates task choices in the same order as `Dfs`. | Passes after every reachable schedule runs or after `iterations` executions, whichever comes first. `record.dfs_status()` gives `Some(DfsStatus::Complete)` or `Some(DfsStatus::IterationLimit)`. |
 
 `iterations` limits executions. `max_steps` limits scheduling operations in each execution and returns `FailureKind::StepLimit` on exhaustion. Both must be positive, as must PCT `depth`. Random and PCT sample schedules. DFS covers the modeled task choices for the supplied fixture and fixed data stream, so vary the fixture separately to cover other inputs.
 
@@ -48,7 +51,7 @@ On failure, the harness prints a JSON replay record. It contains the scheduler m
 2. Load it with `Replay::load`.
 3. Pass it and the same factory to `testing::replay`.
 
-Single-record replay requires an exact schedule. Keep the scheduling behavior, dependencies, and fixture inputs compatible. `Replay::load` reports incompatible metadata by field. The current format is version 4, so regenerate records from earlier versions.
+Single-record replay requires an exact schedule. Keep the scheduling behavior, dependencies, and fixture inputs compatible. `Replay::load` reports incompatible metadata by field. The current format is version 5, so regenerate records from earlier versions.
 
 ## Run a regression corpus
 
