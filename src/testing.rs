@@ -36,7 +36,7 @@ pub use duplex::{
 pub use fault::{FaultInjector, FaultRule, FaultStep, Latency};
 
 const ENGINE: &str = "shuttle=0.9.10;engine=0.1.8;std=0.1.5;schedulers=0.1.1";
-const FORMAT: u32 = 4;
+const FORMAT: u32 = 5;
 
 /// Bounds for schedule exploration.
 ///
@@ -130,18 +130,31 @@ impl From<Config> for Exploration {
     }
 }
 
+/// How [`check`] chooses schedules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SchedulerMode {
+    /// Samples task choices using the seed.
     Random,
+    /// Samples task priorities using the seed, with at most `depth - 1`
+    /// priority changes in each execution after calibration.
     Pct { depth: usize },
+    /// Enumerates every reachable schedule depth-first. Fails with
+    /// [`FailureKind::IterationLimit`] if schedules remain after
+    /// `iterations` executions.
     Dfs,
+    /// Enumerates schedules in the same order as `Dfs`, but passes after
+    /// `iterations` executions even when schedules remain.
+    DfsPrefix,
 }
 
+/// How much of the schedule tree a DFS check covered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DfsStatus {
+    /// Every reachable schedule ran.
     Complete,
+    /// Schedules remained when the check reached its iteration limit.
     IterationLimit,
 }
 
@@ -186,8 +199,8 @@ impl Replay {
         self.scheduler
     }
 
-    /// Coverage of the original DFS check. Absent for other modes and for a
-    /// DFS check that found a failing schedule.
+    /// Coverage of the original `Dfs` or `DfsPrefix` check. Absent for other
+    /// modes and for a DFS check that found a failing schedule.
     pub fn dfs_status(&self) -> Option<DfsStatus> {
         self.dfs_status
     }
@@ -272,8 +285,13 @@ impl Replay {
         if let SchedulerMode::Pct { depth: 0 } = self.scheduler {
             return Err(invalid_replay("scheduler.pct.depth must be nonzero"));
         }
-        if self.dfs_status.is_some() && self.scheduler != SchedulerMode::Dfs {
-            return Err(invalid_replay("dfs_status requires the DFS scheduler"));
+        if self.dfs_status.is_some()
+            && !matches!(
+                self.scheduler,
+                SchedulerMode::Dfs | SchedulerMode::DfsPrefix
+            )
+        {
+            return Err(invalid_replay("dfs_status requires a DFS scheduler"));
         }
         if self.dfs_status == Some(DfsStatus::IterationLimit) && self.iteration != self.iterations {
             return Err(invalid_replay(
@@ -316,6 +334,9 @@ pub enum FailureKind {
     Deadlock,
     StepLimit,
     ReplayMismatch,
+    /// A [`SchedulerMode::Dfs`] check ran `iterations` executions and
+    /// schedules remained. Every execution it ran passed.
+    IterationLimit,
 }
 
 /// A failed execution with a named task timeline and a replay record.
@@ -333,7 +354,8 @@ impl Failure {
     }
 
     /// The observed execution record, suitable for [`replay`] or [`Replay::save`].
-    /// On a replay mismatch, this contains the steps actually executed.
+    /// On a replay mismatch, this contains the steps actually executed. On an
+    /// iteration limit, this is the last execution, which passed.
     pub fn replay(&self) -> &Replay {
         self.timeline.replay()
     }
@@ -348,6 +370,21 @@ impl fmt::Debug for Failure {
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "adamantium::testing {:?}: ", self.kind)?;
+        if self.kind == FailureKind::IterationLimit {
+            let plural = |count: usize| if count == 1 { "" } else { "s" };
+            let (executions, steps) = (self.replay().iteration(), self.replay().steps());
+            writeln!(
+                f,
+                "DFS ran {executions} execution{} and schedules remain. The last execution took {steps} scheduling step{}.",
+                plural(executions),
+                plural(steps)
+            )?;
+            return write!(
+                f,
+                "DFS suits scenarios of a handful of steps. For this scenario, use SchedulerMode::Pct. To finish the search, raise Config::iterations. To stop after {executions} execution{} without failing, use SchedulerMode::DfsPrefix.",
+                plural(executions)
+            );
+        }
         let record = serde_json::to_string(self.replay()).map_err(|_| fmt::Error)?;
         writeln!(f, "{record}")?;
         self.timeline.fmt_events(f)?;
@@ -370,11 +407,12 @@ impl std::error::Error for Failure {}
 /// Create fresh state in the factory for each execution. Use modeled primitives
 /// and virtual time in place of real I/O and wall-clock waits.
 ///
-/// Random and PCT checks stop at the iteration limit. PCT counts calibration
-/// as one execution and stops early if it finds no task choices. Inspect
-/// [`Replay::dfs_status`] to see whether DFS covered every reachable schedule.
-/// Exceeding `max_steps` returns [`FailureKind::StepLimit`]. The limit counts
-/// scheduling operations and cannot stop a CPU-only loop.
+/// Random, PCT and `DfsPrefix` checks stop at the iteration limit. PCT counts
+/// calibration as one execution and stops early if it finds no task choices.
+/// A `Dfs` check that reaches the limit with schedules left returns
+/// [`FailureKind::IterationLimit`]. Exceeding `max_steps` returns
+/// [`FailureKind::StepLimit`]. The limit counts scheduling operations and
+/// cannot stop a CPU-only loop.
 ///
 /// # Panics
 ///
@@ -424,7 +462,7 @@ where
         "adamantium::testing uses Config::seed and Replay::save; remove Shuttle environment overrides"
     );
     let record = Replay::new(exploration);
-    match exploration.scheduler {
+    let (record, _) = match exploration.scheduler {
         SchedulerMode::Random => run(
             record,
             RandomScheduler::new_from_seed(seed, iterations),
@@ -437,9 +475,23 @@ where
             None,
             factory,
         ),
-        SchedulerMode::Dfs => run(record, DfsScheduler::new(None, true), None, factory),
+        SchedulerMode::Dfs | SchedulerMode::DfsPrefix => {
+            run(record, DfsScheduler::new(None, true), None, factory)
+        }
+    }?;
+    if exploration.scheduler == SchedulerMode::Dfs
+        && record.dfs_status == Some(DfsStatus::IterationLimit)
+    {
+        let kind = FailureKind::IterationLimit;
+        let failure = Failure {
+            kind,
+            timeline: Box::new(build_timeline(record, Some(kind), None)),
+            shrink_message: None,
+        };
+        eprintln!("{failure}");
+        return Err(failure);
     }
-    .map(|(record, _)| record)
+    Ok(record)
 }
 
 /// Replays one saved execution with fresh state, the original step limit and
@@ -1262,7 +1314,12 @@ impl<S: Scheduler> Scheduler for Recording<S> {
             return None;
         }
         let schedule = self.scheduler.new_execution();
-        if !self.replaying && trace.scheduler == SchedulerMode::Dfs {
+        if !self.replaying
+            && matches!(
+                trace.scheduler,
+                SchedulerMode::Dfs | SchedulerMode::DfsPrefix
+            )
+        {
             // Query before checking the limit so a tree that finishes on the
             // final allowed execution counts as complete.
             if schedule.is_none() {

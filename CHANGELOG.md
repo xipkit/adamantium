@@ -17,6 +17,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Adamantium's deterministic timelines show the operation at modeled scheduling
   points, name parallel workers, and group repeated steps.
+- `adamantium::testing::check` with `SchedulerMode::Dfs` fails with
+  `FailureKind::IterationLimit` if schedules remain after `iterations`
+  executions. It used to pass and report the shortfall only in
+  `Replay::dfs_status`. `SchedulerMode::DfsPrefix` runs the same schedules and
+  passes at the limit. Saved replay records move to format 5.
 
 ### Fixed
 
