@@ -1509,3 +1509,103 @@ fn shrink_rejects_a_shorter_schedule_with_a_different_panic_in_the_same_task() {
     assert_eq!(failure.kind(), FailureKind::Panic);
     assert_eq!(observed.load(Ordering::Relaxed), 2);
 }
+
+fn recorded_steps(record: &Replay) -> serde_json::Result<Vec<Option<usize>>> {
+    serde_json::from_value(serde_json::to_value(record)?["steps"].take())
+}
+
+fn with_steps(record: &Replay, steps: &[Option<usize>]) -> serde_json::Result<Replay> {
+    let mut json = serde_json::to_value(record)?;
+    json["steps"] = serde_json::to_value(steps)?;
+    serde_json::from_value(json)
+}
+
+/// Steps, then task switches: what `testing::shrink` minimizes, in that order.
+fn schedule_cost(steps: &[Option<usize>]) -> (usize, usize) {
+    let tasks = steps.iter().flatten().collect::<Vec<_>>();
+    let switches = tasks
+        .windows(2)
+        .filter(|pair| pair.first() != pair.last())
+        .count();
+    (steps.len(), switches)
+}
+
+/// Checks that the root task's failed assertion unwinds through a modeled
+/// drop that schedules, so the record's last step comes while it unwinds.
+fn assert_last_step_unwinds_through_watch_drop(record: &Replay) {
+    let timeline = testing::explain(record, dropping_subscriptions_loses_an_update);
+    assert_eq!(timeline.failure(), Some(FailureKind::Panic), "{timeline}");
+    let last = timeline
+        .events()
+        .iter()
+        .rev()
+        .find_map(TimelineEvent::scheduled_operation);
+    assert_eq!(last, Some("Watch::drop"), "{timeline}");
+}
+
+#[test]
+fn shrink_reduces_a_failure_that_unwinds_through_modeled_drops_and_leaves_the_thread_clean() {
+    let scenario = dropping_subscriptions_loses_an_update;
+    let failure = testing::check(config(), scenario).unwrap_err();
+    assert_last_step_unwinds_through_watch_drop(failure.replay());
+
+    let shrunk = testing::shrink(failure.replay(), scenario).unwrap();
+    assert!(!std::thread::panicking());
+    assert!(
+        schedule_cost(&recorded_steps(&shrunk).unwrap())
+            < schedule_cost(&recorded_steps(failure.replay()).unwrap())
+    );
+    // Later harness calls in the same thread still behave.
+    let replayed = testing::replay(&shrunk, scenario).unwrap_err();
+    assert_eq!(replayed.kind(), FailureKind::Panic);
+    assert_eq!(replayed.replay(), &shrunk);
+    let timeline = testing::explain(failure.replay(), scenario);
+    assert_eq!(timeline.failure(), Some(FailureKind::Panic));
+    testing::check(config(), atomic_increment).unwrap();
+    assert!(!std::thread::panicking());
+}
+
+#[test]
+fn a_replay_that_diverges_while_a_task_unwinds_is_a_mismatch_and_leaves_the_thread_clean() {
+    let scenario = dropping_subscriptions_loses_an_update;
+    let failure = testing::check(config(), scenario).unwrap_err();
+    assert_last_step_unwinds_through_watch_drop(failure.replay());
+    let steps = recorded_steps(failure.replay()).unwrap();
+    let (&Some(root), earlier) = steps.split_last().unwrap() else {
+        panic!("the record ends with a random draw: {steps:?}");
+    };
+    // Every other task has finished by the time the root task unwinds.
+    let finished = earlier
+        .iter()
+        .flatten()
+        .copied()
+        .find(|&task| task != root)
+        .unwrap();
+    let ending_with = |last| [earlier, std::slice::from_ref(&last)].concat();
+    let finished_task = ending_with(Some(finished));
+    let random_draw = ending_with(None);
+
+    for (divergence, steps) in [
+        ("schedule ends early", earlier),
+        ("finished task", &finished_task),
+        ("random draw", &random_draw),
+    ] {
+        let diverging = with_steps(failure.replay(), steps).unwrap();
+        let mismatch = testing::replay(&diverging, scenario).unwrap_err();
+        assert_eq!(mismatch.kind(), FailureKind::ReplayMismatch, "{divergence}");
+        assert!(!std::thread::panicking(), "{divergence}");
+    }
+
+    let path = replay_path("diverges-while-unwinding");
+    with_steps(failure.replay(), &finished_task)
+        .unwrap()
+        .save(&path)
+        .unwrap();
+    let error = testing::replay_corpus([&path], scenario).unwrap_err();
+    std::fs::remove_file(&path).unwrap();
+    assert!(matches!(error, CorpusError::Execution { source, .. }
+        if source.kind() == FailureKind::ReplayMismatch));
+    assert!(!std::thread::panicking());
+    testing::check(config(), atomic_increment).unwrap();
+    assert!(!std::thread::panicking());
+}

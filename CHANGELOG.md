@@ -29,6 +29,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and fixture steps for reproducing the failure through the harness.
 - `cargo-adamantium` limits its replayable randomness recommendation to
   non-cryptographic draws and explains where to keep cryptographic randomness.
+- `adamantium::testing::shrink` reduces failures whose task is still
+  unwinding through modeled drops, such as a watch or an actor dropped after a
+  failed assertion. It used to leave the test thread reporting
+  `std::thread::panicking()`, and so did a `testing::replay` or
+  `testing::replay_corpus` that departed from its record at such a point. Later
+  harness calls in the same test then failed.
 
 ## [0.4.0] - 2026-11-21
 
