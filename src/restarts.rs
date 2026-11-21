@@ -1,5 +1,3 @@
-//! Restarting a task that fails.
-
 use std::{
     collections::VecDeque,
     future::{Future, poll_fn},
@@ -49,8 +47,6 @@ impl Restarts {
         }
     }
 
-    /// The wait before a restart that is number `count` in its window,
-    /// counting from one, with the backoff's jitter applied.
     fn wait(&self, count: usize) -> Duration {
         let Some(backoff) = self.backoff else {
             return Duration::ZERO;
@@ -67,8 +63,8 @@ impl Restarts {
     }
 }
 
-/// Lets other tasks run once, so a task that restarts with no wait cannot
-/// keep its thread and can still be aborted.
+// Lets other tasks run once, so a task that restarts with no wait cannot
+// keep its thread and can still be aborted.
 async fn yield_once() {
     let mut yielded = false;
     poll_fn(|context| {
@@ -153,16 +149,12 @@ impl<E: Send + 'static> Tasks<E> {
     }
 }
 
-/// Runs the futures that `work` makes, one after another, until one succeeds
-/// or fails with no restart left. `report` says whether to emit a tracing
-/// event for each restart.
 async fn supervise<T, E, F, Fut>(restarts: Restarts, mut work: F, report: bool) -> Result<T, E>
 where
     F: FnMut(Option<E>) -> Fut + Send,
     Fut: Future<Output = Result<T, E>> + Send,
     E: Send,
 {
-    // When each restart in the window happened, oldest first.
     let mut restarted: VecDeque<Instant> = VecDeque::new();
     let mut last = None;
     loop {

@@ -1,6 +1,3 @@
-//! Source text shared by the rewrites: byte ranges of parsed nodes, the
-//! names a piece of text mentions, and the imports a rewrite leaves unused.
-
 use std::{
     collections::{BTreeSet, HashMap},
     ops::Range,
@@ -13,7 +10,6 @@ use syn::{ItemUse, Lit, UseTree, ext::IdentExt, spanned::Spanned, visit::Visit};
 
 use super::Edit;
 
-/// Whether any module in the file is declared as `mod name;`.
 fn has_out_of_line_module(tree: &syn::File) -> bool {
     struct Modules(bool);
     impl<'ast> Visit<'ast> for Modules {
@@ -27,8 +23,6 @@ fn has_out_of_line_module(tree: &syn::File) -> bool {
     modules.0
 }
 
-/// Joins edits that touch, such as two adjacent `use` lines removed, since
-/// the fix pipeline treats touching edits as conflicting.
 pub(super) fn coalesce(mut edits: Vec<Edit>) -> Vec<Edit> {
     edits.sort();
     let mut joined: Vec<Edit> = Vec::with_capacity(edits.len());
@@ -46,8 +40,6 @@ pub(super) fn coalesce(mut edits: Vec<Edit>) -> Vec<Edit> {
 
 pub(super) struct Text<'a> {
     pub(super) source: &'a str,
-    /// The bytes before the text that `syn` parsed: a byte order mark and a
-    /// shebang line.
     pub(super) prefix: usize,
 }
 
@@ -79,8 +71,6 @@ impl<'a> Text<'a> {
     }
 }
 
-/// The names in an `std::fmt` format string that capture variables, such as
-/// `x` and `width` in `"{x:width$}"`.
 pub(super) fn format_captures(format: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut chars = format.chars().peekable();
@@ -128,13 +118,10 @@ fn is_identifier(name: &str) -> bool {
         && name != "_"
 }
 
-/// An identifier's name without `r#`, which Rust resolves as the same name.
 pub(super) fn bare(ident: &proc_macro2::Ident) -> String {
     ident.unraw().to_string()
 }
 
-/// How many times `text` names `name`, as an identifier or as a variable
-/// that a string captures, or `None` if it doesn't tokenize.
 pub(super) fn names_in(text: &str, name: &str) -> Option<usize> {
     fn count(tokens: TokenStream, name: &str) -> usize {
         tokens
@@ -160,8 +147,6 @@ pub(super) fn names_in(text: &str, name: &str) -> Option<usize> {
         .map(|tokens| count(tokens, name))
 }
 
-/// The edits that remove each import of one of `paths` that `edits` leave
-/// unused in `file`, whose text is `source`.
 pub(super) fn prune_imports(
     file: &Path,
     source: &str,
@@ -171,8 +156,6 @@ pub(super) fn prune_imports(
     let Ok(tree) = syn::parse_file(source) else {
         return Vec::new();
     };
-    // A module in another file can name its ancestors' private imports, so
-    // fix can't see every use of them.
     if has_out_of_line_module(&tree) {
         return Vec::new();
     }
@@ -180,19 +163,13 @@ pub(super) fn prune_imports(
     coalesce(Imports::prune(&text, file, &tree, edits, paths))
 }
 
-/// Removes the imports that a rewrite leaves unused.
 struct Imports<'t> {
     text: &'t Text<'t>,
-    /// The import paths the rewrite can leave unused, such as
-    /// `["std", "sync", "Mutex"]`. Fix leaves every other import alone.
     paths: &'t [&'t [&'t str]],
-    /// Byte offsets of every identifier in the file, by name.
     idents: HashMap<String, Vec<Range<usize>>>,
 }
 
 impl<'t> Imports<'t> {
-    /// The edits that remove each import in `paths` whose name `edits`
-    /// leave unused.
     fn prune(
         text: &'t Text<'t>,
         file: &Path,
@@ -214,8 +191,6 @@ impl<'t> Imports<'t> {
                 uses.0.iter().filter_map(|item| text.of(*item)).collect();
             imports.collect(tokens, &paths);
         }
-        // A `use` path's first name can refer to another import, as `Arc`
-        // does in `use Arc as Shared;`.
         for item in &uses.0 {
             if item.leading_colon.is_none() {
                 imports.roots(&item.tree);
@@ -243,8 +218,6 @@ impl<'t> Imports<'t> {
                 None => {}
             }
         }
-        // Lines removed together leave at most the blank line that separated
-        // them from what follows, and none at the top of the file.
         lines.sort_by_key(|range| range.start);
         let mut runs: Vec<Range<usize>> = Vec::new();
         for range in lines {
@@ -268,9 +241,6 @@ impl<'t> Imports<'t> {
             .collect()
     }
 
-    /// Records the identifiers that could name an import: not those in `use`
-    /// items, nor those after `::` in a longer path, except a path through
-    /// `self`, `super` or `crate`, which can reach the import.
     fn collect(&mut self, tokens: TokenStream, uses: &[Range<usize>]) {
         let mut colons = 0;
         let mut module = false;
@@ -320,8 +290,6 @@ impl<'t> Imports<'t> {
         }
     }
 
-    /// Collects the starts of leaves importing one of the paths whose name
-    /// appears nowhere else in the file once `edits` apply.
     fn unused(
         &self,
         tree: &UseTree,
@@ -363,8 +331,6 @@ impl<'t> Imports<'t> {
         let Some(leaf) = self.text.of(tree) else {
             return;
         };
-        // Text an edit replaces is gone, but its replacement can keep a name,
-        // as `Actor::new(Arc::new(1))` keeps `Arc`.
         let elsewhere = self.idents.get(&name).into_iter().flatten().any(|range| {
             !(leaf.start <= range.start && range.end <= leaf.end)
                 && !edits
@@ -378,8 +344,6 @@ impl<'t> Imports<'t> {
         }
     }
 
-    /// The tree without the removed leaves: `None` when nothing is left,
-    /// `Some(None)` when unchanged.
     fn rewrite(&self, tree: &UseTree, removed: &BTreeSet<usize>) -> Option<Option<String>> {
         match tree {
             UseTree::Path(path) => match self.rewrite(&path.tree, removed)? {
@@ -414,8 +378,6 @@ impl<'t> Imports<'t> {
         }
     }
 
-    /// An item's text with its indentation and line break, when the item
-    /// has its own line.
     fn line(&self, item: &ItemUse) -> Option<Range<usize>> {
         let range = self.text.of(item)?;
         let source = self.text.source;
@@ -431,8 +393,6 @@ impl<'t> Imports<'t> {
         Some(start..range.end + line_break(source.get(range.end..)?))
     }
 
-    /// Extends whole lines to remove over the blank line below them when
-    /// they follow a blank line or start the file.
     fn without_blank_line(&self, lines: Range<usize>) -> Range<usize> {
         let source = self.text.source;
         let whole = lines.start == 0
@@ -451,7 +411,6 @@ impl<'t> Imports<'t> {
     }
 }
 
-/// The length of the line break that `text` starts with.
 fn line_break(text: &str) -> usize {
     if text.starts_with("\r\n") {
         2

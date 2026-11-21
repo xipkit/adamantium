@@ -1,8 +1,3 @@
-//! `cargo adamantium deps`: which dependencies use `unsafe` code or call
-//! the paths `clippy.toml` disallows, so a project can see what its
-//! guarantees rest on. The rules stop at the crate boundary; this report
-//! looks past it.
-
 mod cfg;
 mod disallowed;
 pub(crate) mod metadata;
@@ -33,9 +28,9 @@ const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum Format {
-    /// A table on stdout, then the disallowed calls of each dependency.
+    #[value(help = "A table on stdout, then the disallowed calls of each dependency")]
     Text,
-    /// A report on stdout.
+    #[value(help = "A report on stdout")]
     Json,
 }
 
@@ -44,7 +39,6 @@ pub enum Format {
 pub struct Report {
     pub schema_version: u32,
     pub root: PathBuf,
-    /// The target triple the dependencies were resolved and read for.
     pub target: String,
     pub dependencies: Vec<Dependency>,
 }
@@ -54,9 +48,7 @@ pub struct Report {
 pub struct Dependency {
     pub name: String,
     pub version: String,
-    /// Where Cargo gets it from, or null for a path dependency.
     pub source: Option<String>,
-    /// The package directory of a path dependency, relative to the audit root when possible.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     pub kind: Kind,
@@ -138,8 +130,6 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
     let (triple, printed) = metadata::host(root)?;
     let target = Target::parse(&printed);
     let resolved = metadata::dependencies(root, &triple, &target, cargo_args)?;
-    // Each library's dependencies by the names its code uses, mapped to
-    // their library names.
     let externs: HashMap<&str, BTreeMap<String, String>> = resolved
         .iter()
         .map(|dependency| {

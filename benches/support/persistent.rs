@@ -4,8 +4,6 @@ use adamantium::{Array, Deque, Map, Set};
 
 pub const SIZES: [usize; 7] = [16, 64, 256, 1_024, 4_096, 16_384, 65_536];
 
-// These operations intentionally use only the common subset of the APIs.
-// im's hash collections do not preserve Adamantium's insertion order.
 pub trait Collection: Clone {
     const NAME: &'static str;
     const BACKEND: &'static str;
@@ -77,7 +75,7 @@ collection!(
     |v: &Self| v.iter().copied().sum()
 );
 
-// A wrapper gives Vector a second workload without changing the candidate.
+/// Uses a persistent vector for the deque benchmark.
 #[derive(Clone)]
 pub struct PersistentDeque(im::Vector<usize>);
 collection!(
@@ -133,14 +131,14 @@ collection!(
     |v: &Self| v.iter().copied().sum()
 );
 
+/// Clones, edits, and drops one snapshot.
 pub fn snapshot_edit<T: Collection>(original: &T, size: usize) {
     let mut changed = black_box(original).clone();
     changed.edit(size);
-    // Include destruction: transient snapshots must pay to release their storage.
     drop(black_box(changed));
 }
 
-// Callgrind toggles collection only inside this function, excluding construction.
+/// Runs the edit loop measured by Callgrind.
 #[inline(never)]
 pub fn profile_snapshots<T: Collection>(original: &T, size: usize, repeats: usize) {
     for _ in 0..repeats {

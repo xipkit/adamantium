@@ -187,7 +187,6 @@ scenario!(children_discover_after_the_body_returns, {
         });
         Ok(spawner)
     }));
-    // The body has returned and joining is pending on its registered child.
     begin(scope.as_mut()).await;
     release.send(()).unwrap();
     let spawner = scope.await.unwrap();
@@ -232,7 +231,6 @@ scenario!(
             let spawner = tasks.spawner();
             let first = spawner.spawn(async { Ok(42) }).unwrap();
             assert_eq!(tasks.value(first).await, Ok(42));
-            // Give the run loop a chance to reap the now empty set.
             tokio::task::yield_now().await;
             let (reply, received) = Reply::pair();
             tasks.spawn(async move {
@@ -432,7 +430,6 @@ scenario!(
             let _guard = guard;
             pending::<Result<(), &str>>().await
         });
-        // The unpolled join future still owns shutdown authority.
         let cancellation = Cancellation::new();
         drop(scope.join_until(cancellation.clone(), None, Ok(())));
         assert!(cancellation.is_cancelled());
@@ -567,7 +564,6 @@ scenario!(registration_races_owner_drop, {
     drop(scope);
     producer.join(Ok(())).await.unwrap();
     for observation in observations {
-        // Drop requests abort but, unlike join, cannot await destruction.
         while !observation.snapshot().dropped {
             tokio::task::yield_now().await;
         }
@@ -637,8 +633,6 @@ fn runtime_rejection_destroys_work_outside_the_registration_lock() {
         struct Resubmit(Spawner<()>, Actor<bool>);
         impl Drop for Resubmit {
             fn drop(&mut self) {
-                // The scope is open, but the runtime will also discard this
-                // new task. Its future has no further cleanup to perform.
                 self.0.spawn(async { Ok(()) }).unwrap();
                 self.1.with(|done| *done = true);
             }

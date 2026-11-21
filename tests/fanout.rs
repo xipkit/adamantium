@@ -1,6 +1,3 @@
-//! These tests run with and without the `tokio` feature, so the ones that
-//! don't need a runtime poll by hand.
-
 #[cfg(feature = "tokio")]
 mod support;
 
@@ -45,12 +42,10 @@ fn poll_once<F: Future>(future: Pin<&mut F>, counter: &Arc<WakeCounter>) -> Poll
     future.poll(&mut Context::from_waker(&waker))
 }
 
-/// Polls a new future once.
 fn now<F: Future>(future: F) -> Poll<F::Output> {
     poll_once(pin!(future), &Arc::new(WakeCounter::default()))
 }
 
-/// Receives everything queued, and how the feed ended if it has.
 fn drain<T>(feed: &mut Feed<T>) -> (Vec<T>, Option<Ended>) {
     let mut events = Vec::new();
     loop {
@@ -151,7 +146,6 @@ fn a_resubscribed_feed_starts_from_the_next_event() {
     assert_eq!(drain(&mut fresh), (vec![3], None));
     assert_eq!(drain(&mut feed), (vec![1], Some(Ended::Overflowed)));
 
-    // A healthy feed can resubscribe too, and keeps its own place.
     let mut copy = fresh.resubscribe();
     assert_eq!(fanout.send(4), sent(2, 0));
     assert_eq!(drain(&mut fresh), (vec![4], None));
@@ -298,7 +292,6 @@ fn dropping_a_waiting_receive_loses_nothing() {
     assert_eq!(feed.try_receive(), Ok(Some(1)));
 }
 
-/// Clones itself, unless it holds `PANICS`.
 #[derive(Debug, PartialEq)]
 struct Fragile(u32);
 
@@ -348,9 +341,6 @@ fn a_fanout_dropped_by_a_panic_still_closes() {
     assert_eq!(feed.try_receive(), Err(Ended::Closed));
 }
 
-/// An event whose destructor reads the fanout it was sent on. Its clones
-/// hold nothing: cloning a `Fanout` takes the lock a send holds while it
-/// clones events.
 struct ReadsOnDrop(Option<Fanout<ReadsOnDrop>>);
 
 impl Clone for ReadsOnDrop {
@@ -373,29 +363,24 @@ impl Drop for ReadsOnDrop {
 fn events_are_dropped_outside_the_lock() {
     let fanout = Fanout::new(1);
     let reads = || ReadsOnDrop(Some(fanout.clone()));
-    // Nobody takes this one, so the send drops it.
     assert!(fanout.send(reads()).is_ok());
 
-    // One feed takes the event itself; dropping the feed drops it.
     let feed = fanout.subscribe();
     assert!(fanout.send(reads()).is_ok());
     drop(feed);
 
-    // The same for a feed that overflowed.
     let overflowed = fanout.subscribe();
     assert!(fanout.send(reads()).is_ok());
     assert!(fanout.send(ReadsOnDrop(None)).is_ok());
     assert!(overflowed.is_ended());
     drop(overflowed);
 
-    // And for the events a close leaves queued.
     let closed = fanout.subscribe();
     assert!(fanout.send(reads()).is_ok());
     assert!(fanout.close());
     drop(closed);
 }
 
-/// A waker that reads the fanout its receive waits on.
 struct ReadsOnWake(Fanout<u32>);
 
 impl Wake for ReadsOnWake {
@@ -427,9 +412,6 @@ fn feeds_are_woken_outside_the_lock() {
     );
 }
 
-/// An event whose second clone panics, and whose destructor reads the
-/// fanout. It reaches the fanout through an `Arc`, since cloning a `Fanout`
-/// handle inside `clone` would take the lock a send holds.
 struct ExplodesOnSecondClone {
     fanout: Arc<Fanout<ExplodesOnSecondClone>>,
     clones: Arc<AtomicUsize>,
@@ -564,7 +546,6 @@ async fn receive_until_prefers_shutdown_to_a_queued_event() {
     let mut feed = fanout.subscribe();
     fanout.send(1).unwrap();
     let cancellation = Cancellation::new();
-    // Repeated, so an unordered race between the two would show.
     for _ in 0..16 {
         assert_eq!(
             feed.receive_until(&cancellation, past()).await,
@@ -642,9 +623,6 @@ async fn concurrent_publishers_reach_every_feed_in_one_order() {
 #[cfg(not(target_os = "wasi"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stalled_task_never_holds_up_a_healthy_one() {
-    // The healthy reader acknowledges each event, so it never falls a whole
-    // queue behind. The stalled one never reads, and the publisher goes on
-    // without waiting for it.
     let fanout = Fanout::new(4);
     let stalled = fanout.subscribe();
     let result = Tasks::<&str>::run(async |t| {

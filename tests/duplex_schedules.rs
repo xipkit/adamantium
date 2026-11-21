@@ -88,7 +88,6 @@ fn partial_reads_writes_and_backpressure_transfer_all_bytes_in_order() {
 
         let workers: Vec<Worker> = vec![
             Box::pin(async move {
-                // Single write is capped by max_write_chunk (3) and buffer_capacity (4).
                 let first = a.write(&payload).await.unwrap();
                 assert!(first > 0 && first <= 3);
                 a.write_all(&payload[first..]).await.unwrap();
@@ -140,7 +139,6 @@ fn clock_driven_latency_advances_virtual_time_without_wall_clock_waits() {
         ];
         testing::parallel(workers).await;
     });
-    // Virtual 30s * 200 iterations * 3 runs must finish in well under 5s wall time.
     assert!(wall_start.elapsed() < Duration::from_secs(5));
 }
 
@@ -165,7 +163,6 @@ fn immediate_disconnect_wakes_reader_waiting_on_in_flight_latency() {
                 let mut buf = [0_u8; 16];
                 let err = b.read(&mut buf).await.unwrap_err();
                 assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
-                // Disconnect wakes the reader before the 600s latency elapses.
                 assert!(time::now() < start + Duration::from_secs(600));
             }),
             Box::pin(async move {
@@ -230,12 +227,8 @@ fn framed_request_response_fixture_and_saved_schedule_replay_mid_frame_disconnec
         testing::parallel(workers).await;
     }
 
-    // 1. Healthy framed request/response exchange with partial reads/writes and latency.
     check(|| framed_session(None));
 
-    // 2. Mid-frame disconnect on the second response:
-    //    First response is 4 + 13 = 17 bytes. Cutting at 23 bytes stops 2 bytes
-    //    into the second response payload (after its 4-byte length header).
     let disconnect_scenario = || {
         framed_session(Some((
             23,
@@ -281,8 +274,6 @@ fn concurrent_fault_failure_replays_exact_interleaving_from_saved_schedule() {
                     let written = write_frame(&mut client, b"abcdefghij").await;
                     assert!(written.is_ok(), "unexpected write disconnect: {written:?}");
                     let resp = read_frame(&mut client).await;
-                    // Assert no disconnect occurs; the fault injector will break this
-                    // on some interleaving, producing a deterministic Failure + Replay.
                     assert!(resp.is_ok(), "unexpected transport disconnect: {resp:?}");
                 }),
                 Box::pin(async move {

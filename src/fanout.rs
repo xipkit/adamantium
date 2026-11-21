@@ -1,5 +1,3 @@
-//! Sending each event to every subscriber that keeps up.
-
 use std::{collections::VecDeque, fmt, sync::Arc};
 
 #[cfg(feature = "tokio")]
@@ -12,29 +10,14 @@ use crate::{
     runtime::{Guard, Lock, World, wait::WaitQueue},
 };
 
-/// Sends each event to every subscriber, and disconnects a subscriber that
-/// falls behind instead of waiting for it.
+/// Publishes events to subscribers without waiting for them.
 ///
-/// Each [`Feed`] has its own queue of at most `capacity` events.
-/// [`send`](Self::send) never waits: it gives every feed that has room a
-/// clone of the event, and disconnects every feed whose queue is full. A
-/// disconnected feed receives the events already in its queue, then
-/// [`Ended::Overflowed`], and never a later event. Whatever a feed receives
-/// is therefore an unbroken run of the events sent since it subscribed, with
-/// none missing in between.
+/// [`Self::send`] queues a copy for each feed with room and disconnects full
+/// feeds. All feeds see the same send order. Each feed drains its queue
+/// before reporting [`Ended::Overflowed`] or [`Ended::Closed`].
 ///
-/// Use a `Fanout` when a subscriber must neither hold up the publisher nor
-/// silently miss an event. Use [`Topic`](crate::Topic) to make the publisher
-/// wait for a slow subscriber instead, and [`Watch`](crate::Watch) when only
-/// the latest value matters.
-///
-/// Clones share the subscribers, and every clone can send and subscribe.
-/// Sends from all clones reach every feed in one order: the order in which
-/// they took the fanout's lock, which for sends from one task is the order
-/// they were made. Dropping the last `Fanout`, or calling
-/// [`close`](Self::close), closes it: each feed receives the events already
-/// in its queue and then [`Ended::Closed`]. Feeds don't hold the fanout
-/// open, and dropping a feed unsubscribes it.
+/// Clones share the subscribers. [`Self::close`] or dropping the last
+/// publisher closes the fanout. Dropping a feed unsubscribes it.
 ///
 /// ```
 /// use adamantium::{Ended, Fanout, Sent};
@@ -59,12 +42,9 @@ use crate::{
 ///
 /// # Recovering from overflow
 ///
-/// A feed that overflowed has missed events. To catch up, take a new feed
-/// with [`Feed::resubscribe`] first, then read a snapshot of the state the
-/// events describe, then apply the new feed's events. Subscribing before
-/// the snapshot means no event falls between the two, but the new feed can
-/// repeat a change the snapshot already includes, so applying an event
-/// twice must do no harm.
+/// After overflow, [`Feed::resubscribe`] before taking a snapshot so no
+/// changes are missed. Events may repeat changes included in the snapshot,
+/// so they must be safe to apply twice.
 ///
 /// ```
 /// use adamantium::{Actor, Ended, Fanout, Map};
@@ -114,79 +94,58 @@ pub struct Feed<T> {
     inbox: Arc<Inbox<T>>,
 }
 
-/// What [`Fanout::send`] did with an event.
+/// Counts from [`Fanout::send`]. `delivered` counts feeds that got the event.
+/// `disconnected` counts feeds whose queue was full.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Sent {
-    /// The feeds that received the event.
     pub delivered: usize,
-    /// The feeds whose queue was full, which this send disconnected.
     pub disconnected: usize,
 }
 
-/// Why a [`Feed`] receives no more events. A feed returns this once it has
-/// received every event in its queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ended {
-    /// The fanout was closed.
     Closed,
-    /// The feed's queue was full when an event was sent, so the feed was
-    /// disconnected and missed that event and every later one. See
-    /// [`Feed::resubscribe`].
     Overflowed,
 }
 
-/// Returned by [`Feed::receive_until`] when no event was received.
 #[cfg(feature = "tokio")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeedError {
-    /// The fanout was closed and the feed has received every queued event.
     Closed,
-    /// The feed fell behind and was disconnected, and has received every
-    /// queued event.
     Overflowed,
-    /// The caller requested shutdown.
     Cancelled,
-    /// The deadline elapsed.
     DeadlineExceeded,
 }
 
 struct Shared<T> {
-    /// Held only inside this module's synchronous methods, which run no
-    /// caller code but `T::clone`. A send holds it from start to finish, so
-    /// every feed sees sends in the same order.
+    // Each send holds this lock so all feeds see the same order.
+    // T::clone is the only caller code run under it.
     state: Lock<State<T>>,
     capacity: usize,
     world: World,
 }
 
 struct State<T> {
-    /// The connected feeds. A feed leaves when it overflows, when the
-    /// fanout closes, and when it is dropped, so each one here is held.
     feeds: Vec<Arc<Inbox<T>>>,
     closed: bool,
-    /// The live `Fanout` handles. The last one to drop closes the fanout.
     fanouts: usize,
 }
 
-/// A feed's queue. It is locked only after the fanout's lock or on its
-/// own, and never while running caller code.
+// Lock the inbox alone or after the fanout lock. Run no caller code here.
 struct Inbox<T> {
     queue: Lock<Queue<T>>,
-    /// Notified on every event and when the feed ends.
     arrived: WaitQueue,
 }
 
 struct Queue<T> {
     events: VecDeque<T>,
-    /// Set once the feed is disconnected. Events queued before stay
-    /// receivable.
     end: Option<Ended>,
 }
 
 impl<T> Shared<T> {
-    /// Every operation locks, so this is where a handle carried into the
-    /// deterministic harness is rejected, as in `Watch`. While unwinding the
-    /// check is skipped, so a destructor can still close the fanout.
+    // Every operation locks, so this is where a handle carried into the
+    // deterministic harness is rejected, as in `Watch`. While unwinding the
+    // check is skipped, so a destructor can still close the fanout.
     fn lock(&self) -> Guard<'_, State<T>> {
         if !std::thread::panicking() {
             self.world.check();
@@ -229,8 +188,8 @@ impl<T> Shared<T> {
 }
 
 impl<T> State<T> {
-    /// Disconnects the feeds whose queue is full and returns them, to be
-    /// woken and dropped after the lock is released.
+    // Disconnects the feeds whose queue is full and returns them, to be
+    // woken and dropped after the lock is released.
     #[must_use]
     fn cut_off_full(&mut self, capacity: usize) -> Vec<Arc<Inbox<T>>> {
         self.feeds
@@ -254,9 +213,9 @@ impl<T> Inbox<T> {
         self.queue.lock().end = Some(end);
     }
 
-    /// Ends the feed with [`Ended::Overflowed`] if its queue is full, and
-    /// says whether it did. Only a send adds to a queue, under the fanout's
-    /// lock, so a queue with room keeps it until that lock is released.
+    // Ends the feed with [`Ended::Overflowed`] if its queue is full, and
+    // says whether it did. Only a send adds to a queue, under the fanout's
+    // lock, so a queue with room keeps it until that lock is released.
     fn end_if_full(&self, capacity: usize) -> bool {
         let mut queue = self.queue.lock();
         let full = queue.events.len() >= capacity;
@@ -325,9 +284,8 @@ impl<T: Clone> Fanout<T> {
     /// Destructors of `T` and the wakers of waiting feeds run after the lock
     /// is released, and can use it.
     pub fn send(&self, value: T) -> Result<Sent, Closed<T>> {
-        // Declared before the guard, so that if a `T::clone` panics, the
-        // clones already made drop after unwinding has released the lock:
-        // their destructors are the caller's code.
+        // Declare clones before the guard so their destructors run after unlock
+        // if T::clone panics.
         let mut events: Vec<T> = Vec::new();
         let mut state = self.shared.lock();
         if state.closed {
@@ -344,8 +302,7 @@ impl<T: Clone> Fanout<T> {
                 inbox.push(event);
             }
         }
-        // Wakers are the caller's code too, so they run after the lock is
-        // released.
+        // Wakers can run caller code, so wake after releasing the lock.
         let delivered = state.feeds.clone();
         drop(state);
         for inbox in delivered.iter().chain(&cut_off) {
@@ -355,8 +312,7 @@ impl<T: Clone> Fanout<T> {
             delivered: delivered.len(),
             disconnected: cut_off.len(),
         };
-        // A feed dropped since the lock was released leaves its queue to the
-        // last of these handles, which drops it here, outside the lock.
+        // Drop these handles outside the lock. One may own the last queue reference.
         drop(delivered);
         drop(cut_off);
         drop(events);
@@ -439,8 +395,6 @@ impl<T> Feed<T> {
         .await
     }
 
-    /// `Some(Ok(event))` for a queued event, `Some(Err(end))` once ended
-    /// with nothing queued, and `None` to wait.
     fn next(&self) -> Option<Result<T, Ended>> {
         let mut queue = self.queue();
         match queue.events.pop_front() {
@@ -460,7 +414,6 @@ impl<T> Feed<T> {
 impl<T> Clone for Fanout<T> {
     fn clone(&self) -> Self {
         let mut state = self.shared.lock();
-        // A count of every handle in memory can't reach usize::MAX.
         state.fanouts = state.fanouts.saturating_add(1);
         drop(state);
         Self {
@@ -503,8 +456,7 @@ impl<T> Drop for Feed<T> {
 
 impl<T> fmt::Debug for Fanout<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // `try_lock`, as in `Watch`'s `Debug`, so formatting from inside
-        // `T::clone` can't deadlock.
+        // Try the lock to avoid deadlock when formatting from T::clone.
         self.shared.world.check();
         let Some(state) = self.shared.state.try_lock() else {
             return f.write_str("Fanout(<in use>)");

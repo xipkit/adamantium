@@ -117,22 +117,30 @@ A dry run reports the status before the fixes.
 - The migration rewrites require a dependency named `adamantium` that is not optional and not inherited from the workspace.
 - The Tokio rewrites also require the default features or an explicit `tokio` feature.
 
-### Clippy suggestions and Tokio calls
+### Clippy suggestions and call rewrites
 
 `fix` first applies the Clippy suggestions that are `MachineApplicable`. It then rewrites these expressions, including calls through imported aliases:
 
-- A call that Clippy resolves to `tokio::time::sleep` and that is awaited immediately.
+- An immediately awaited `tokio::time::sleep` or `tokio::time::sleep_until`.
+- `tokio::time::Instant::now()` that supplies the deadline for an immediately awaited `sleep_until`. This includes a direct argument or an immutable local used only by the next statement, with an optional offset made by a standard `Duration` constructor or constant. The wait can be Tokio's or a qualified `adamantium::time::sleep_until`.
 - An immediate `tokio::task::spawn_blocking(f).await.unwrap()`.
+- `rand::random::<u64>()` and `fastrand::u64(..)`, which become `adamantium::random::u64()`.
+- A `u64` draw from `0..=max` with `fastrand::u64` or `rand::random_range`, which becomes `adamantium::random::up_to(max)`. The `rand` range must identify the integer type by a literal suffix or an explicit type argument.
+
+Adamantium's random draws are for non-secret values, such as retry jitter. Review random rewrites before applying them at security-sensitive boundaries.
 
 `fix` leaves these for review:
 
 - Compound callees, stored sleep futures, and blocking calls with explicit type arguments.
+- Clock reads for elapsed-time measurements, deadlines with multiple uses, and offsets of unknown type.
+- Other random types, ranges, distributions, and calls that rely on implicit `rand` type inference alone.
+- `fastrand` draws when the findings show that the project seeds or reads the thread-local generator state directly.
 - Macro expansions, external source files, and conflicting suggestions.
 - Decisions about task scopes or lock lifetimes.
 
-### A local `Arc<Mutex<T>>`
+### A local shared lock
 
-`fix` changes a local `Arc<Mutex<T>>` into an `Actor<T>` when every use of the binding, and of every clone of it, is mechanical. `fix` follows a binding through imports, `use ... as` aliases, clones, moves, and shadowing.
+`fix` changes a local `Arc<std::sync::Mutex<T>>` or `Arc<std::sync::RwLock<T>>` into an `Actor<T>` when every use of the binding, and of every clone of it, is mechanical. `fix` follows a binding through imports, `use ... as` aliases, clones, moves, and shadowing.
 
 These uses are mechanical:
 
@@ -143,6 +151,8 @@ These uses are mechanical:
 | A guard used within one statement | `with`, or `read` when the statement only reads. A method called on the guard is called on `(*m)`, which keeps its method lookup. |
 | `lock().unwrap().clone()` | A guard statement, such as `with(\|m\| (*m).clone())`. Shorten it to `snapshot()` when the state is `Clone`. |
 | `Arc::try_unwrap` or `Arc::into_inner`, followed by `into_inner` | `into_inner` |
+
+An actor serializes readers. For an `RwLock`, `fix` rewrites `read().unwrap()` or `read().expect("…")` only when the statement copies the state directly with `*guard`. It leaves reads with borrowing, nested locks, methods, operators, or other calls for review. Writes follow the existing guard checks and use `with`.
 
 Any other use leaves the binding and all its clones unchanged. `fix` then names the binding and the section of the guide to read. These uses are not mechanical:
 

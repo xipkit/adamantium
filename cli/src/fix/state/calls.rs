@@ -1,44 +1,19 @@
-//! Parameters and return values of type `Arc<Mutex<T>>` that become
-//! `Actor<T>`.
-//!
-//! A function is a candidate when it is private, it isn't async, `extern` or
-//! a trait's, and no attribute macro reads it. Each of its parameters typed
-//! `Arc<Mutex<T>>`, `&Arc<Mutex<T>>` or `&Mutex<T>`, and a return type of
-//! `Arc<Mutex<T>>`, gets a group of its own, as a field does. A call fix
-//! follows names the function directly: `f(..)` for a free function, and
-//! `self.f(..)`, `Self::f(..)` or `Type::f(..)` in an `impl` of its type for
-//! a method. Every argument to a candidate parameter must be a value fix
-//! tracks, moved, cloned or borrowed, and holds the parameter's state; the
-//! result must be bound by a `let`, set a candidate field or be returned.
-//! Every value the function returns must be one fix tracks or a
-//! constructor. Anything else leaves the group, and every group holding its
-//! state, for review. Once the package is scanned, a function named anywhere
-//! but its declaration and the calls fix followed is left for review too.
-
 use std::collections::hash_map::Entry;
 
 use syn::{Block, Expr, ImplItem, Item, Pat, PathArguments, ReturnType, Stmt, Type, visit::Visit};
 
 use super::{
-    Edit, Group, ItemScope, Reason, Resolved, UNLOCATED, Walker, bare, fields::may_be_unsized,
-    item_attributes,
+    Edit, Group, ItemScope, LockKind, Reason, Resolved, UNLOCATED, Walker, bare,
+    fields::may_be_unsized, item_attributes,
 };
 use crate::fix::scan::macro_attribute;
 
-/// A private function with parameters or a return value to rewrite.
 pub(super) struct Callee {
     pub(super) name: String,
-    /// The type of the `impl` that declares it, for a method or an
-    /// associated function.
     owner: Option<String>,
-    /// Whether it takes `self`.
     receiver: bool,
-    /// For each parameter after `self`, the group of a candidate, and
-    /// whether its type is `&Mutex<T>`.
     params: Vec<Option<(usize, bool)>>,
-    /// The group of the value it returns, for a candidate return type.
     returns: Option<usize>,
-    /// How many of its calls fix followed.
     pub(super) calls: usize,
 }
 
@@ -51,23 +26,16 @@ impl Callee {
     }
 }
 
-/// The body of a function that returns a candidate.
 pub(super) struct Frame<'a> {
-    /// The group of the value it returns.
     pub(super) group: usize,
-    /// The body's final expression, until it is read.
     tail: Option<&'a Expr>,
 }
 
-/// Why a parameter is left alone because of a call.
 const ARGUMENT: Reason = Reason::Unfollowed("a call passes it a value fix can't follow");
 
-/// Why a return value is left alone because of the function's body.
 const RETURNED: Reason = Reason::Unfollowed("its function returns a value fix can't follow");
 
 impl<'a> Walker<'a> {
-    /// Finds the functions with parameters or a return value to rewrite,
-    /// before any of their calls.
     pub(super) fn callee_candidates(&mut self, items: &'a [Item]) {
         for item in items {
             if macro_attribute(item_attributes(item)) {
@@ -123,7 +91,6 @@ impl<'a> Walker<'a> {
         {
             return;
         }
-        // A type parameter declared `?Sized` may hold what an actor can't.
         let generics = [Some(&sig.generics), owner.map(|(_, generics)| generics)];
         let sized = |state: &Type| {
             !generics
@@ -137,17 +104,18 @@ impl<'a> Walker<'a> {
                 continue;
             };
             let param = match &*typed.pat {
-                Pat::Ident(ident) if ident.by_ref.is_none() && ident.subpat.is_none() => {
-                    self.parameter_type(&typed.ty, &sized).map(|(edit, mutex)| {
+                Pat::Ident(ident) if ident.by_ref.is_none() && ident.subpat.is_none() => self
+                    .parameter_type(&typed.ty, &sized)
+                    .map(|(edit, kind, lock_ref)| {
                         let group = self.groups.len();
                         self.groups.push(Group::new(
                             bare(&ident.ident),
                             self.text.line(ident.ident.span()),
+                            kind,
                             vec![edit],
                         ));
-                        (group, mutex)
-                    })
-                }
+                        (group, lock_ref)
+                    }),
                 _ => None,
             };
             params.push(param);
@@ -156,13 +124,16 @@ impl<'a> Walker<'a> {
         let returns = match &sig.output {
             ReturnType::Type(_, ty) => self
                 .arc_state(ty)
-                .filter(|state| sized(state))
-                .and_then(|state| Some(self.edit(self.text.of(ty)?, self.actor_of(state)?)))
-                .map(|edit| {
+                .filter(|(_, state)| sized(state))
+                .and_then(|(kind, state)| {
+                    Some((kind, self.edit(self.text.of(ty)?, self.actor_of(state)?)))
+                })
+                .map(|(kind, edit)| {
                     let group = self.groups.len();
                     self.groups.push(Group::new(
                         format!("{name}()"),
                         self.text.line(sig.ident.span()),
+                        kind,
                         vec![edit],
                     ));
                     group
@@ -194,13 +165,14 @@ impl<'a> Walker<'a> {
         });
     }
 
-    /// The edit that makes a parameter of type `Arc<Mutex<T>>`,
-    /// `&Arc<Mutex<T>>` or `&Mutex<T>` hold an actor, and whether it is the
-    /// last.
-    fn parameter_type(&self, ty: &Type, sized: &impl Fn(&Type) -> bool) -> Option<(Edit, bool)> {
-        let (held, state, mutex) = match ty {
+    fn parameter_type(
+        &self,
+        ty: &Type,
+        sized: &impl Fn(&Type) -> bool,
+    ) -> Option<(Edit, LockKind, bool)> {
+        let (held, (kind, state), lock_ref) = match ty {
             Type::Reference(reference) if reference.mutability.is_none() => {
-                match self.mutex_state(&reference.elem) {
+                match self.lock_state(&reference.elem) {
                     Some(state) => (&*reference.elem, state, true),
                     None => (&*reference.elem, self.arc_state(&reference.elem)?, false),
                 }
@@ -210,11 +182,13 @@ impl<'a> Walker<'a> {
         if !sized(state) {
             return None;
         }
-        Some((self.edit(self.text.of(held)?, self.actor_of(state)?), mutex))
+        Some((
+            self.edit(self.text.of(held)?, self.actor_of(state)?),
+            kind,
+            lock_ref,
+        ))
     }
 
-    /// The type an `impl` is for, when it is a single name for an item that
-    /// the file declares once, so that every `impl` naming it means it.
     pub(super) fn owner(&self, item: &syn::ItemImpl) -> Option<String> {
         let Type::Path(path) = &*item.self_ty else {
             return None;
@@ -231,16 +205,13 @@ impl<'a> Walker<'a> {
         .then_some(name)
     }
 
-    /// The candidate function that `sig` declares.
     pub(super) fn signature(&self, sig: &syn::Signature) -> Option<usize> {
         let start = self.text.of(&sig.ident)?.start;
         self.signatures.get(&start).copied()
     }
 
-    /// Makes the parameter at `position` of the candidate `callee`, just
-    /// declared by `pat`, hold its group's state.
     pub(super) fn parameter(&mut self, callee: usize, position: usize, pat: &Pat) {
-        let Some((group, mutex)) = self
+        let Some((group, lock_ref)) = self
             .callees
             .get(callee)
             .and_then(|callee| callee.params.get(position).copied().flatten())
@@ -254,17 +225,15 @@ impl<'a> Walker<'a> {
             && let Some(entry) = self.vars.get_mut(var)
         {
             entry.group = Some(group);
-            entry.mutex_ref = mutex;
+            entry.lock_ref = lock_ref;
             entry.spelling = ident.ident.to_string();
         }
     }
 
-    /// The frame for the body of `callee`, if it returns a candidate.
     pub(super) fn frame(&mut self, callee: usize, body: &'a Block) -> Option<Frame<'a>> {
         let group = self.callees.get(callee)?.returns?;
         let tail = match body.stmts.last() {
             Some(Stmt::Expr(expr, None)) => Some(expr),
-            // A macro ending the body gives its value too.
             Some(Stmt::Macro(mac)) if mac.semi_token.is_none() => {
                 if let Some(state) = self.groups.get_mut(group) {
                     state.refuse(RETURNED);
@@ -276,20 +245,15 @@ impl<'a> Walker<'a> {
         Some(Frame { group, tail })
     }
 
-    /// The group of the value returned, when `expr` is the final expression
-    /// of the body of a function that returns a candidate.
     pub(super) fn tail(&mut self, expr: &Expr) -> Option<usize> {
         let frame = self.returns.last_mut()?.as_mut()?;
         if !frame.tail.is_some_and(|tail| super::is(tail, expr)) {
             return None;
         }
-        // Read once, so reading it as an ordinary expression doesn't come
-        // back here.
         frame.tail = None;
         Some(frame.group)
     }
 
-    /// Follows `return value` in a function that returns a candidate.
     pub(super) fn followed_return(&mut self, expr: &'a Expr) -> bool {
         let Expr::Return(syn::ExprReturn {
             expr: Some(value), ..
@@ -305,9 +269,8 @@ impl<'a> Walker<'a> {
         true
     }
 
-    /// A value that a function returning the state of `group` returns.
     pub(super) fn returned(&mut self, group: usize, expr: &'a Expr) {
-        if let Some(constructor) = self.constructor(expr)
+        if let Some((_, constructor)) = self.constructor(expr)
             && let Some(range) = self.text.of(expr)
         {
             self.visit_expr(expr);
@@ -331,8 +294,6 @@ impl<'a> Walker<'a> {
         self.visit_expr(expr);
     }
 
-    /// Records that `source`, which `expr` moves, clones or borrows, holds
-    /// the state of `group`, with the replacement for `Arc::clone(&source)`.
     pub(super) fn flows(
         &mut self,
         group: usize,
@@ -361,8 +322,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// The candidate function that `expr` calls by its name, and the
-    /// position of the argument for its first parameter after `self`.
     fn callee(&self, expr: &Expr) -> Option<(usize, usize)> {
         let named = |name: &syn::Ident| {
             let index = self.callee_names.get(&bare(name)).copied().flatten()?;
@@ -418,8 +377,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Follows the arguments of a call to the candidate `callee`, whose
-    /// first parameter after `self` takes the argument at `offset`.
     fn arguments(&mut self, callee: usize, offset: usize, expr: &'a Expr) {
         let args = match expr {
             Expr::Call(call) => &call.args,
@@ -445,8 +402,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// An argument to the parameter whose state is `group`: a tracked value
-    /// moved, cloned or borrowed.
     fn argument(&mut self, group: usize, arg: &'a Expr) {
         let source = match arg {
             Expr::Reference(reference)
@@ -467,8 +422,6 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Follows a call to a candidate function whose result goes where fix
-    /// can't follow it, if `expr`, on top of the stack, is one.
     pub(super) fn followed_call(&mut self, expr: &'a Expr) -> bool {
         let Some((callee, offset)) = self.callee(expr) else {
             return false;
@@ -484,8 +437,6 @@ impl<'a> Walker<'a> {
         true
     }
 
-    /// The group of the value returned by `expr`, when it is a call to a
-    /// candidate function that returns one, after following its arguments.
     pub(super) fn returned_by(&mut self, expr: &'a Expr) -> Option<usize> {
         let (callee, offset) = self.callee(expr)?;
         let group = self.callees.get(callee)?.returns?;
@@ -495,7 +446,6 @@ impl<'a> Walker<'a> {
         Some(group)
     }
 
-    /// Refuses every group of each candidate function called `name`.
     pub(super) fn mention_callee(&mut self, name: &str, reason: Reason) {
         let groups: Vec<usize> = self
             .callees
@@ -515,15 +465,16 @@ impl<'a> Walker<'a> {
 mod tests {
     use std::path::Path;
 
-    use super::super::{Reason, plan, settle, tests::fix};
+    use super::super::{
+        Reason, plan, settle,
+        tests::{fix, mutex_spans},
+    };
     use crate::fix::scan::Crate;
 
     const MUTEXES: &[&str] = &["Mutex", "Mutex<u64>"];
 
     const BUMP: &str = "fn bump(hits: &Arc<Mutex<u64>>) {\n    *hits.lock().unwrap() += 1;\n}\n";
 
-    /// Asserts that `body` changes nothing and that `name` is refused for
-    /// `reason`.
     fn refused(body: &str, name: &str, reason: Reason) {
         let source = format!("use std::sync::{{Arc, Mutex}};\n{body}\n");
         let (fixed, refusals) = fix(&source, MUTEXES);
@@ -574,14 +525,7 @@ mod tests {
         let source = format!(
             "use std::sync::{{Arc, Mutex}};\n{BUMP}fn f() {{ let m = Arc::new(Mutex::new(1)); bump(&m); }}\n"
         );
-        let spans = MUTEXES
-            .iter()
-            .flat_map(|mutex| {
-                source
-                    .match_indices(mutex)
-                    .map(|(start, _)| (start, start + mutex.len()))
-            })
-            .collect();
+        let spans = mutex_spans(&source, MUTEXES);
         for (other, refused) in [
             ("fn g() -> u8 { 1 }\n", false),
             ("fn g() { super::bump(&todo!()); }\n", true),
@@ -678,8 +622,6 @@ mod tests {
         }
     }
 
-    /// `count` never locks `hits` itself, only through `bump`, so the
-    /// functions that might lock it are those of the parameter's group too.
     const COUNT: &str = "fn count() -> u64 {\n    let hits = Arc::new(Mutex::new(0));\n    bump(&hits);\n    Arc::try_unwrap(hits).unwrap().into_inner().unwrap()\n}\n";
 
     #[test]
@@ -728,8 +670,6 @@ mod tests {
 
     #[test]
     fn cloning_a_mutex_reference_is_refused() {
-        // `clone` on `&Mutex<T>` copies the reference, but on `&Actor<T>`
-        // it would copy the actor.
         refused(
             "fn f(hits: &Mutex<u64>) { let copy = hits.clone(); *copy.lock().unwrap() += 1; }\nfn g() { let m = Arc::new(Mutex::new(1)); f(&m); }",
             "hits",

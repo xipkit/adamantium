@@ -4,17 +4,15 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-/// A set of rules evaluated together, embedded in the binary.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Pack {
-    /// The judgment-based parts of the Google Rust style guide.
+    #[value(help = "The judgment-based parts of the Google Rust style guide")]
     #[default]
     Google,
-    /// Concurrency bugs that Clippy and the Dylint lints can't see: state with
-    /// a joint invariant split across separate Actors, locks or atomics, and
-    /// unbounded in-memory collection growth. Other evaluated rules remain out
-    /// until they pass whole-file CLI evaluation without false positives.
+    #[value(
+        help = "Concurrency bugs that Clippy and the Dylint lints can't see: state with a joint invariant split across separate Actors, locks or atomics, and unbounded in-memory collection growth. Other evaluated rules remain out until they pass whole-file CLI evaluation without false positives"
+    )]
     Concurrency,
 }
 
@@ -84,6 +82,7 @@ impl RuleSet {
         Ok(rules)
     }
 
+    /// Selects named questions, or all questions when no names are given.
     pub fn select(&self, names: &[String]) -> Result<Vec<Question>> {
         if names.is_empty() {
             return Ok(self.questions.clone());
@@ -131,9 +130,6 @@ mod tests {
         );
     }
 
-    /// The evaluation's precision and recall hold only for the wording it
-    /// sent, so each shipped rule must match its evaluated definition byte
-    /// for byte.
     #[test]
     fn shipped_concurrency_rules_match_the_evaluated_definitions() {
         let evaluated_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -1,5 +1,3 @@
-//! Exclusion for calls that share a key.
-
 use std::{collections::HashMap, future::Future, hash::Hash, sync::Arc};
 
 use super::{Kind, Limit, Place};
@@ -120,8 +118,7 @@ impl<K: Clone + Eq + Hash> KeyedLimit<K> {
 
 impl<K: Eq + Hash> Drop for Registration<'_, K> {
     fn drop(&mut self) {
-        // The same lock protects registration and final eviction, so an
-        // arrival can never get a new limit while the old one is in use.
+        // Register and evict under one lock so a key never has two live limits.
         let mut keys = self.table.keys.lock();
         if let Some(entry) = keys.get_mut(&self.key) {
             entry.calls -= 1;

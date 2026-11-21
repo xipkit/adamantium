@@ -5,9 +5,6 @@
     reason = "scenario assertions and panic fixtures"
 )]
 
-//! The phases of `Tasks::run_with_grace`: running, draining within the grace
-//! period, and aborting what is left when it runs out.
-
 #[cfg(not(target_os = "wasi"))]
 mod support;
 
@@ -38,7 +35,6 @@ mod virtual_time {
         assert_eq!(testing::replay(&record, factory).unwrap(), record);
     }
 
-    /// What happened, and when, relative to the start of the scenario.
     #[derive(Clone)]
     struct Log {
         start: tokio::time::Instant,
@@ -58,7 +54,6 @@ mod virtual_time {
             self.events.with(|events| events.push((at, event)));
         }
 
-        /// Notes `event` when the returned guard is dropped.
         fn on_drop(&self, event: &'static str) -> Noted {
             Noted(Some((self.clone(), event)))
         }
@@ -75,7 +70,6 @@ mod virtual_time {
     struct Noted(Option<(Log, &'static str)>);
 
     impl Noted {
-        /// Notes nothing after all.
         fn disarm(&mut self) {
             self.0 = None;
         }
@@ -89,8 +83,6 @@ mod virtual_time {
         }
     }
 
-    /// A request that takes `duration` to answer, noting whether it finished
-    /// or was dropped unfinished.
     async fn request(log: Log, duration: Duration) -> Result<(), &'static str> {
         let mut unfinished = log.on_drop("request dropped");
         time::sleep(duration).await;
@@ -99,7 +91,6 @@ mod virtual_time {
         Ok(())
     }
 
-    /// Requests shutdown after `delay`, as a signal handler would.
     fn cancel_after(tasks: &mut Tasks<&'static str>, signal: &Cancellation, delay: Duration) {
         let signal = signal.clone();
         tasks.spawn(async move {
@@ -199,7 +190,6 @@ mod virtual_time {
     #[test]
     fn a_returned_body_joins_until_shutdown_then_drains() {
         check(|| async {
-            // Without a request, the scope joins as long as its tasks take.
             let log = Log::new();
             let result = Tasks::<&str>::run_with_grace(Cancellation::new(), TICK, async |tasks| {
                 tasks.spawn(request(log.clone(), TICK * 30));
@@ -209,8 +199,6 @@ mod virtual_time {
             assert_eq!(result, Ok(42));
             assert_eq!(log.events(), [(TICK * 30, "request finished")]);
 
-            // A request while joining starts the grace period, and the body's
-            // value is no longer returned.
             for (duration, reason, event) in [
                 (
                     TICK * 3,
@@ -344,7 +332,6 @@ mod virtual_time {
                     tasks.spawn(async move {
                         draining.cancelled().await;
                         time::sleep(TICK).await;
-                        // The request needs more work to finish.
                         spawner
                             .spawn(request(follow_up, TICK * 2))
                             .map_err(|SpawnError| "the drain refused a sibling")?;
@@ -356,7 +343,6 @@ mod virtual_time {
                 .await;
                 assert_eq!(result, Err(reason));
                 assert_eq!(log.events(), [expected]);
-                // Admission closed with the drain.
                 let late = kept.with(Option::take).unwrap();
                 assert_eq!(
                     late.spawn(async { Ok::<_, &str>(()) }).map(drop),
@@ -404,9 +390,6 @@ mod tokio_clock {
         }
     }
 
-    /// The grace deadline and the end of the last task are both ready when
-    /// the scope next polls: the deadline wins. The scope is held unpolled
-    /// while the clock passes the deadline and the request ends.
     #[tokio::test(start_paused = true)]
     async fn the_grace_deadline_wins_over_a_drain_ending_at_the_same_poll() {
         let signal = Cancellation::new();
@@ -434,8 +417,6 @@ mod tokio_clock {
         assert_eq!(scope.await, Err(ScopeError::DeadlineExceeded));
     }
 
-    /// Started blocking work holds the scope past its grace period, and an
-    /// error it returns then wins over the deadline.
     #[tokio::test(start_paused = true)]
     async fn started_blocking_work_outlives_the_grace_period() {
         for outcome in [Ok(()), Err("blocking cleanup failed")] {
@@ -475,8 +456,6 @@ mod tokio_clock {
         }
     }
 
-    /// Blocking work admitted before shutdown but still queued gets to start
-    /// during the drain.
     #[test]
     fn queued_blocking_work_starts_during_the_drain() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -520,8 +499,6 @@ mod tokio_clock {
         });
     }
 
-    /// A panic during the drain aborts the other tasks and is resumed once
-    /// they are drained, ahead of the shutdown reason.
     #[tokio::test(start_paused = true)]
     async fn a_panic_during_the_drain_is_resumed_after_the_rest_are_aborted() {
         let signal = Cancellation::new();

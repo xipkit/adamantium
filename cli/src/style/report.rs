@@ -13,7 +13,6 @@ use crate::style::{
     scan::Scan,
 };
 
-/// The version of the JSON report this build writes.
 pub(crate) const SCHEMA_VERSION: u8 = 4;
 
 #[derive(Deserialize, Serialize)]
@@ -27,16 +26,12 @@ pub(crate) struct Report {
     pub files: Vec<FileReport>,
 }
 
-/// Everything besides a file's path and source that decides its review. Two
-/// reviews of the same source under the same key ask the same questions.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct ReviewKey {
     pub provider: ProviderKind,
     pub pack: Pack,
     pub model: String,
-    /// SHA-256 of the selected rules' full definitions, as sent.
     pub rules_sha256: String,
-    /// SHA-256 of `--context`, or `None` without one.
     pub context_sha256: Option<String>,
 }
 
@@ -52,16 +47,11 @@ pub(crate) enum ReportStatus {
 pub(crate) struct FileReport {
     pub path: String,
     pub status: FileStatus,
-    /// Whether these results were carried over from a previous report
-    /// instead of asking the provider again.
     pub cached: bool,
-    /// SHA-256 of the source the results describe.
     pub source_sha256: Option<String>,
     pub findings: Vec<Finding>,
     pub unresolved: Vec<Unresolved>,
     pub no_violation_count: usize,
-    /// Input tokens spent on this file in this run, including locating its
-    /// findings; `None` for cached files or when the provider didn't say.
     pub input_tokens: Option<u64>,
     pub error: Option<String>,
 }
@@ -69,26 +59,18 @@ pub(crate) struct FileReport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FileStatus {
-    /// Not sent yet, or not sent because this is a dry run.
     Planned,
-    /// Every rule was answered.
     Checked,
-    /// The provider answered, but left some rules unresolved.
     Incomplete,
-    /// The file could not be reviewed.
     Error,
-    /// Not sent because an earlier service failure stopped the run.
     NotChecked,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Finding {
     pub rule: String,
-    /// The lines that break the rule. Absent when the violation concerns the
-    /// whole file or the provider gave no confident range.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines: Option<LineRange>,
-    /// What goes wrong: the rule's description of its `violation` choice.
     pub guidance: String,
     pub confidence: f64,
     pub probabilities: BTreeMap<String, f64>,
@@ -110,6 +92,7 @@ pub(crate) enum UnresolvedReason {
 }
 
 impl ReviewKey {
+    /// Identifies a review by provider, pack, model, rules, and context.
     pub fn new(
         provider: ProviderKind,
         pack: Pack,
@@ -246,8 +229,6 @@ impl FileReport {
         }
     }
 
-    /// Marks the file unreviewed, discarding any answers it already has but
-    /// keeping the tokens they cost.
     fn fail(&mut self, error: String) {
         self.status = FileStatus::Error;
         self.findings.clear();
@@ -256,8 +237,6 @@ impl FileReport {
         self.error = Some(error);
     }
 
-    /// Asks `provider` about this file's `source` and to locate the rules it
-    /// breaks, and records the answers.
     fn review(
         &mut self,
         provider: &dyn Provider,
@@ -287,15 +266,11 @@ impl FileReport {
                 ..review
             })
             .inspect_err(|_| {
-                // A failed locate may have been billed for requests it made
-                // before failing, so the file's total is no longer known.
                 self.input_tokens = None;
             })?;
         self.place(locations).map_err(ReviewError::Service)
     }
 
-    /// The questions whose rules this file's findings break, in finding
-    /// order.
     fn violated(&self, questions: &[Question]) -> Vec<Question> {
         self.findings
             .iter()
@@ -304,7 +279,6 @@ impl FileReport {
             .collect()
     }
 
-    /// Gives each finding the lines the provider located for it.
     fn place(&mut self, locations: Locations) -> Result<()> {
         self.input_tokens = self
             .input_tokens

@@ -1,5 +1,3 @@
-//! Narrowing a scan to the files git reports as changed.
-
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
@@ -10,10 +8,6 @@ use anyhow::{Context, Result, bail};
 
 use crate::style::scan::Scan;
 
-/// Keeps only the scanned files that differ from where the current branch
-/// left `base`: changes committed since then, staged and unstaged changes,
-/// and untracked files that aren't ignored. Deleted files are gone from the
-/// scan already. With `base` of `HEAD`, only uncommitted changes remain.
 pub(crate) fn retain_changed(scan: &mut Scan, base: &str) -> Result<()> {
     let top = git(&scan.root, &["rev-parse", "--show-toplevel"])
         .context("--changed needs a git repository")?;
@@ -53,7 +47,6 @@ pub(crate) fn retain_changed(scan: &mut Scan, base: &str) -> Result<()> {
     Ok(())
 }
 
-/// Runs git in `dir` and returns its standard output.
 fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new("git")
         .current_dir(dir)
@@ -81,7 +74,6 @@ fn path_from_git(bytes: &[u8]) -> Result<PathBuf> {
     Ok(PathBuf::from(OsStr::from_bytes(bytes)))
 }
 
-/// Git prints paths as UTF-8 outside Unix.
 #[cfg(not(unix))]
 fn path_from_git(bytes: &[u8]) -> Result<PathBuf> {
     Ok(PathBuf::from(
@@ -119,8 +111,6 @@ mod tests {
             .collect())
     }
 
-    /// A repository with `main` at one commit of four files, and a `topic`
-    /// branch checked out from it.
     fn repository() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -157,7 +147,6 @@ mod tests {
             changed(root, "HEAD").unwrap(),
             ["src/edited.rs", "src/staged.rs", "src/untracked.rs"]
         );
-        // Paths stay relative to the scan root, below the repository root.
         assert_eq!(
             changed(&root.join("src"), "HEAD").unwrap(),
             ["edited.rs", "staged.rs", "untracked.rs"]

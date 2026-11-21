@@ -1,7 +1,3 @@
-//! A separate proof of where futures are polled. Construction reachability
-//! cannot establish this: every use must be a direct await, whose enclosing
-//! future must in turn have a proof, all the way to an audited executor.
-
 use super::*;
 
 #[derive(Default)]
@@ -17,7 +13,6 @@ struct Await {
 }
 
 impl Poll {
-    /// Resolves the only executor boundary supported by this proof.
     pub(super) fn new(package: &Path) -> Self {
         Self {
             entry: crate::deps::metadata::tokio_entry(package),
@@ -25,12 +20,8 @@ impl Poll {
         }
     }
 
-    /// Adds direct-await edges and checks the Cargo entry file's syntax.
-    /// Returns whether an opaque macro or attribute can generate code.
     pub(super) fn add(&mut self, file: &Path, tree: &syn::File, macros: &BTreeSet<String>) -> bool {
         if self.entry.as_deref() == Some(file) && tree.attrs.is_empty() {
-            // Module loading and name shadowing are outside this first root
-            // proof. In particular, `tokio::main` must resolve to the extern.
             struct Shadow(bool);
             impl<'ast> Visit<'ast> for Shadow {
                 fn visit_item_mod(&mut self, _: &'ast syn::ItemMod) {
@@ -46,8 +37,6 @@ impl Poll {
                     self.0 = true;
                 }
                 fn visit_ident(&mut self, ident: &'ast syn::Ident) {
-                    // Definitions of `tokio` other than modules/imports can
-                    // also shadow its namespace (e.g. a generic parameter).
                     self.0 |= ident == "tokio";
                 }
                 fn visit_path(&mut self, _: &'ast syn::Path) {}
@@ -69,8 +58,6 @@ impl Poll {
                 }
             }
         }
-        // Scan attributes independently of the name visitor's specialized
-        // traversal: statement/expression attributes can wrap a future too.
         struct Attributes<'a> {
             allowed: Option<&'a Attribute>,
             macros: &'a BTreeSet<String>,
@@ -115,16 +102,12 @@ impl Poll {
         attrs.opaque
     }
 
-    /// Whether this exact declaration can use the audited macro exemption.
     pub(super) fn root(&self, file: &Path, sig: &syn::Signature) -> bool {
         self.root.as_ref().is_some_and(|(path, line)| {
             path == file && *line == sig.ident.span().start().line && sig.ident == "main"
         })
     }
 
-    /// All names are counted, including unknown macro tokens and strings.
-    /// Uniqueness plus this closed accounting deliberately overestimates
-    /// callers; an alias, unresolved dispatch or hidden use cannot disappear.
     pub(super) fn prove(&self, krate: &Crate, name: &str) -> Result<(), String> {
         self.chain(krate, name, &mut BTreeSet::new())
     }
@@ -190,8 +173,6 @@ impl Poll {
     }
 }
 
-/// Only the default runtime or an explicit stable flavor is audited. Options
-/// such as `crate`, or wrappers on the function, need their own proof.
 fn main_attribute(attr: &Attribute) -> bool {
     let names: Vec<_> = attr
         .path()
@@ -309,8 +290,6 @@ mod tests {
     fn proof(source: &str) -> Result<(), String> {
         let file = Path::new("main.rs");
         let mut krate = Crate::default();
-        // Cargo identity has its own integration tests. This isolates the
-        // source proof after Cargo has identified the binary target file.
         krate.poll.entry = Some(file.to_owned());
         krate.add(file, source);
         krate.poll.prove(&krate, "leaf")

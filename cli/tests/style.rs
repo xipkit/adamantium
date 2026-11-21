@@ -207,7 +207,6 @@ fn retry_uses_only_failed_and_unchecked_files_without_a_key() {
     assert_eq!(report["files"].as_array().unwrap().len(), 0);
 }
 
-/// `style check` on `dir` for one rule, without an API key.
 fn style_check(dir: &std::path::Path, args: &[&str]) -> Command {
     let mut command = cargo_adamantium_no_key();
     command
@@ -340,15 +339,12 @@ fn a_fully_cached_run_needs_no_key_and_keeps_its_findings() {
         serde_json::json!({ "start_line": 1, "end_line": 1 })
     );
 
-    // A different context is a different review, so the file is sent again,
-    // which needs a key.
     let output = style_check(dir.path(), &["--cache-from", cache, "--context", "library"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("OPENAI_API_KEY"));
 
-    // A dry run shows the cached findings but still succeeds.
     let output = style_check(dir.path(), &["--cache-from", cache, "--dry-run"])
         .output()
         .unwrap();

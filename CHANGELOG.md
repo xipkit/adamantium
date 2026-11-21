@@ -10,6 +10,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `adamantium`: `testing::FaultInjector`, `testing::FaultRule`, `testing::FaultStep`,
+  and `testing::Latency` inject deterministic errors and virtual-clock latency into
+  mocked async traits using `adamantium::random` and `adamantium::time::sleep`,
+  reproducing identically under `testing::check` and `testing::replay`.
 - `adamantium`: `time::wall_now()` reads the wall clock for comparing absolute
   timestamps such as a JWT or cookie `exp`. In the deterministic harness it
   starts at `testing::Config::wall_epoch` and advances with virtual time, and
@@ -19,6 +23,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   until a `Cancellation` is requested or a deadline passes. A caller that
   stops leaves the operation to the others sharing it, and drops it only if
   it was the last.
+- `adamantium`: `AsyncActor::new_named` names the actor worker for `tracing`
+  spans, scope deadline reports, and `testing::explain` timelines.
+  `AsyncActor::try_send` and `AsyncActor::send_until` match `Channel`, and
+  `AsyncActor::call` and `AsyncActor::call_until` provide request-reply helpers
+  backed by `Reply::pair()`.
 - `adamantium`: `BoundedMap` holds at most a fixed number of entries and
   evicts the least recently used one to make room for a new key, so a cache
   or session table inside an `Actor` stays bounded. `insert` returns the
@@ -28,6 +37,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `--summary` shows counts by rule and hotspot file.
 - `cargo-adamantium` reads strict and baseline defaults for `check` and a
   dependency baseline for `deps --deny-new` from `Cargo.toml` metadata.
+- `cargo-adamantium`: `fix` rewrites immediately awaited `sleep_until` calls,
+  clock reads that supply a proved deadline, tracked `Arc<RwLock<T>>` state
+  with direct-copy reads, and simple `u64` draws from `rand` and `fastrand`.
 - `cargo-adamantium`: `style check --pack concurrency` reviews files for
   state with a joint invariant split across separate Actors, locks or
   atomics (`split_actor_invariant`) and unbounded in-memory collection growth
@@ -116,6 +128,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `adamantium`: the `time` docs and the `tokio::time::Instant::now` lint
   message direct TTLs, cache expiry and retry windows to `time::now()`, and
   `std::time::Instant::now()` only to metrics and logging.
+- `cargo-adamantium`: Default rules report `std::time::SystemTime::now` and
+  recommend `adamantium::time::wall_now` for comparing absolute timestamps
+  such as a JWT or cookie `exp`. A timestamp only for logging can keep it
+  under an `#[expect]` with a reason.
 - `cargo-adamantium`: Default rules report Tokio `oneshot`, Tokio `watch`,
   and `std::sync::mpsc::sync_channel`. Strict rules also report bounded Tokio
   `mpsc`, `Notify`, and `Semaphore`. Broadcast diagnostics recommend

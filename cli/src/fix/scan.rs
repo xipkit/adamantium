@@ -1,10 +1,3 @@
-//! What a field rewrite needs to know about the whole package: which files
-//! name the field, which functions mention which names, and which code might
-//! run later or inside an actor's callback.
-//!
-//! The scan reads syntax only, so every answer errs toward refusing: a name
-//! counts wherever it appears, whatever it refers to.
-
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
@@ -22,58 +15,32 @@ use syn::{
 
 mod poll;
 
-/// A function, method or associated function defined in the package.
 struct Function {
     asynchronous: bool,
     wrapped: bool,
-    /// Declared in a trait or a trait implementation, so it may run through
-    /// an operator, a `Drop`, a format or dynamic dispatch, not only by name.
     trait_method: bool,
-    /// Declared `pub`, so another crate might call it.
     public: bool,
-    /// Every name its body mentions.
     mentions: BTreeSet<String>,
 }
 
-/// One package's source, as a field rewrite needs it.
 #[derive(Default)]
 pub(super) struct Crate {
     poll: poll::Poll,
-    /// Opaque code could manufacture a caller without spelling its name.
     opaque_poll: bool,
-    /// The files that name each struct field, in an access, a literal, a
-    /// pattern, a declaration or a macro.
     members: HashMap<String, BTreeSet<PathBuf>>,
-    /// How many named fields of structs, unions and variants have each name.
     fields: HashMap<String, usize>,
-    /// Why fix can't see all of the package's source, if it can't.
     unreadable: Option<&'static str>,
     functions: HashMap<String, Vec<Function>>,
-    /// Names mentioned in code that may run later or elsewhere: closures,
-    /// async blocks, macros fix can't read and items under attribute macros.
     deferred: BTreeSet<String>,
-    /// Names used as values rather than called: the last segment of a
-    /// longer path, as `bump` in `Self::bump`, and names in attribute
-    /// strings, as serde's `default = "fresh"` names `fresh`.
     values: BTreeSet<String>,
-    /// Single names used as values. A method can't be named this way, only
-    /// a function or a variable.
     bare_values: BTreeSet<String>,
-    /// The names each name is imported under with `use ... as`, so a call
-    /// under the new name still reaches the original.
     renames: HashMap<String, BTreeSet<String>>,
-    /// Whether an actor callback already in the package calls anything.
     callbacks: bool,
-    /// Whether the package has a library, whose public functions another
-    /// crate can call.
     library: bool,
-    /// How many times each name appears in the package's source, in code,
-    /// in macros and in string literals other than documentation.
     words: HashMap<String, usize>,
 }
 
 impl Crate {
-    /// Scans every Rust file under `package`, except build output.
     pub(super) fn scan(package: &Path) -> Result<Self> {
         let manifest: toml_edit::DocumentMut =
             fs::read_to_string(package.join("Cargo.toml"))?.parse()?;
@@ -86,10 +53,7 @@ impl Crate {
         Ok(krate)
     }
 
-    /// Adds the Rust files under `dir`. A directory or file fix can't read
-    /// leaves every field for review rather than failing the whole fix.
     fn walk(&mut self, dir: &Path, seen: &mut BTreeSet<PathBuf>) {
-        // Symbolic links can form a cycle.
         let Ok(canonical) = dir.canonicalize() else {
             self.unreadable(UNREAD);
             return;
@@ -123,7 +87,6 @@ impl Crate {
         }
     }
 
-    /// Adds one file's source.
     pub(super) fn add(&mut self, file: &Path, source: &str) {
         let Ok(tree) = syn::parse_file(source) else {
             self.unreadable(UNPARSED);
@@ -152,32 +115,24 @@ impl Crate {
         self.unreadable.get_or_insert(reason);
     }
 
-    /// Why fix can't see all of the package's source, if it can't.
     pub(super) fn unreadable_reason(&self) -> Option<&'static str> {
         self.unreadable
     }
 
-    /// Whether a file other than `file` names the field `name`.
     pub(super) fn names_member_elsewhere(&self, name: &str, file: &Path) -> bool {
         self.members
             .get(name)
             .is_some_and(|files| files.iter().any(|other| other != file))
     }
 
-    /// How many named fields in the package are called `name`.
     pub(super) fn field_declarations(&self, name: &str) -> usize {
         self.fields.get(name).copied().unwrap_or(0)
     }
 
-    /// How many times `name` appears anywhere in the package's source.
     pub(super) fn occurrences(&self, name: &str) -> usize {
         self.words.get(name).copied().unwrap_or(0)
     }
 
-    /// `functions` and every function that mentions one of them, directly or
-    /// through another: every function that may run one of them. A name an
-    /// import gives one of them counts as reached too, so it can be called,
-    /// or used as a value, under that name.
     pub(super) fn callers(&self, functions: &BTreeSet<String>) -> BTreeSet<String> {
         let mut reached = functions.clone();
         loop {
@@ -206,12 +161,10 @@ impl Crate {
         }
     }
 
-    /// Whether this exact function is the audited binary entry candidate.
     pub(super) fn poll_root(&self, file: &Path, sig: &syn::Signature) -> bool {
         self.poll.root(file, sig)
     }
 
-    /// Proves every async caller, plus functions containing awaited blocks.
     pub(super) fn poll_hazard(
         &self,
         functions: &BTreeSet<String>,
@@ -231,8 +184,6 @@ impl Crate {
         None
     }
 
-    /// Why one of `functions` might run inside an actor's callback or out of
-    /// fix's sight, if one might.
     pub(super) fn hazard(&self, functions: &BTreeSet<String>) -> Option<Hazard> {
         let definitions = || {
             functions
@@ -246,7 +197,6 @@ impl Crate {
         if self.library && definitions().any(|function| function.public) {
             return Some(Hazard::Public);
         }
-        // A callback can only reach a field through a function that locks it.
         if self.callbacks && !functions.is_empty() {
             return Some(Hazard::Callbacks);
         }
@@ -260,21 +210,17 @@ impl Crate {
     }
 }
 
-/// Why code that locks a field might run where fix can't follow it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Hazard {
     Trait,
     Public,
-    /// A closure, async block, macro or function value might run it later.
     Escapes,
-    /// An actor callback already in the package calls something.
     Callbacks,
 }
 
 const UNPARSED: &str = "a Rust file in its package doesn't parse";
 const UNREAD: &str = "fix couldn't read every Rust file in its package";
 
-/// Attributes that are not macros and don't generate code from their item.
 const INERT: &[&str] = &[
     "allow",
     "cfg",
@@ -293,9 +239,6 @@ const INERT: &[&str] = &[
     "warn",
 ];
 
-/// Whether `attrs` hold an attribute that might be a macro reading its
-/// item: anything but the compiler's inert attributes and a `derive` of
-/// `Clone` and `Default`, which copy an actor as they copy an `Arc`.
 pub(super) fn macro_attribute(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
         if attr.path().is_ident("derive") {
@@ -318,12 +261,10 @@ pub(super) fn macro_attribute(attrs: &[Attribute]) -> bool {
     })
 }
 
-/// The standard macros whose arguments parse as expressions.
 fn reads_as_expressions(name: &str) -> bool {
     super::state::known_macro(name).is_some() || name == "vec"
 }
 
-/// Expression arguments of an unshadowed standard macro, if readable.
 fn expression_arguments(
     mac: &Macro,
     shadowed: &BTreeSet<String>,
@@ -337,7 +278,6 @@ fn expression_arguments(
         .ok()
 }
 
-/// Every name in `tokens`, without `r#`.
 pub(super) fn idents(tokens: TokenStream, names: &mut BTreeSet<String>) {
     for token in tokens {
         match token {
@@ -350,16 +290,12 @@ pub(super) fn idents(tokens: TokenStream, names: &mut BTreeSet<String>) {
     }
 }
 
-/// Counts every name in `tokens`, without `r#`, and every word in their
-/// string literals, which an attribute such as serde's `default = "fresh"`
-/// or a format string may use as a name. Documentation is prose, not code.
 fn words(tokens: TokenStream, counts: &mut HashMap<String, usize>) {
     let tokens: Vec<TokenTree> = tokens.into_iter().collect();
     let punct = |index: Option<usize>, c: char| matches!(index.and_then(|index| tokens.get(index)), Some(TokenTree::Punct(punct)) if punct.as_char() == c);
     for (index, token) in tokens.iter().enumerate() {
         match token {
             TokenTree::Group(group) => {
-                // `#[doc = "..."]` or `#![doc = "..."]`.
                 let attribute = punct(index.checked_sub(1), '#')
                     || (punct(index.checked_sub(1), '!') && punct(index.checked_sub(2), '#'));
                 let documentation = attribute
@@ -390,8 +326,6 @@ fn words(tokens: TokenStream, counts: &mut HashMap<String, usize>) {
     }
 }
 
-/// Whether `tokens` invoke `include!` or carry a `#[path]` attribute, which
-/// read source fix doesn't scan.
 fn includes(tokens: TokenStream) -> bool {
     let tokens: Vec<TokenTree> = tokens.into_iter().collect();
     tokens.iter().zip(tokens.iter().skip(1)).any(|pair| match pair {
@@ -410,8 +344,6 @@ fn includes(tokens: TokenStream) -> bool {
     })
 }
 
-/// Whether `tokens` could call `with` or `read` with an argument: an actor
-/// callback in code fix can't read.
 fn calls_back(tokens: TokenStream) -> bool {
     let tokens: Vec<TokenTree> = tokens.into_iter().collect();
     tokens
@@ -438,7 +370,6 @@ fn collect_macro_names(item: &Item, names: &mut BTreeSet<String>) {
                 names.insert(ident.unraw().to_string());
             }
         }
-        // An import can bring in a macro of a standard macro's name.
         Item::Use(_) => {
             let mut tokens = BTreeSet::new();
             idents(item.to_token_stream(), &mut tokens);
@@ -453,9 +384,6 @@ fn collect_macro_names(item: &Item, names: &mut BTreeSet<String>) {
     }
 }
 
-/// Whether a callback passed to `with` or `read` might call something. A
-/// closure that only reads fields and applies operators can't, unless an
-/// operator is a trait implementation, which `Hazard::Trait` covers.
 fn callback_calls(arg: &Expr) -> bool {
     struct Calls(bool);
     impl<'ast> Visit<'ast> for Calls {
@@ -481,17 +409,12 @@ fn callback_calls(arg: &Expr) -> bool {
 struct Scan<'c> {
     krate: &'c mut Crate,
     file: &'c Path,
-    /// Macros the file defines or imports, which may shadow standard ones.
     macros: &'c BTreeSet<String>,
-    /// Inside a trait or a trait implementation.
     trait_depth: usize,
-    /// The local variables in scope, innermost last. A scope that starts an
-    /// item hides those of the scopes around it.
     locals: Vec<(BTreeSet<String>, bool)>,
 }
 
 impl Scan<'_> {
-    /// Runs `f` in a scope that declares `pat`'s names, if any.
     fn scoped<'p>(
         &mut self,
         pats: impl IntoIterator<Item = &'p syn::Pat>,
@@ -507,7 +430,6 @@ impl Scan<'_> {
         self.locals.pop();
     }
 
-    /// Declares `pat`'s names in the innermost scope.
     fn bind(&mut self, pat: &syn::Pat) {
         let mut names = Vec::new();
         super::state::pattern_names(pat, &mut names);
@@ -528,7 +450,6 @@ impl Scan<'_> {
         false
     }
 
-    /// A function body, with its parameters in scope.
     fn body(&mut self, sig: &'_ syn::Signature, block: &'_ syn::Block) {
         let params: Vec<&syn::Pat> = sig
             .inputs
@@ -549,7 +470,6 @@ impl Scan<'_> {
             .insert(self.file.to_path_buf());
     }
 
-    /// Code that may run later or elsewhere, and whose fields fix can't see.
     fn defer(&mut self, tokens: TokenStream) {
         let mut names = BTreeSet::new();
         idents(tokens, &mut names);
@@ -588,7 +508,6 @@ impl Scan<'_> {
             });
     }
 
-    /// Records a call to `with` or `read` that passes a callback.
     fn callback<'e>(&mut self, name: &str, args: impl IntoIterator<Item = &'e Expr>) {
         if (name == "with" || name == "read") && args.into_iter().any(callback_calls) {
             self.krate.callbacks = true;
@@ -677,7 +596,6 @@ impl<'ast> Visit<'ast> for Scan<'_> {
         self.scoped([], false, |scan| syn::visit::visit_block(scan, block));
     }
 
-    /// A `let` declares its names after its initializer.
     fn visit_local(&mut self, local: &'ast syn::Local) {
         if let Some(init) = &local.init {
             self.visit_expr(&init.expr);
@@ -695,8 +613,6 @@ impl<'ast> Visit<'ast> for Scan<'_> {
         self.bind(&binding.pat);
     }
 
-    /// The names an `if let` or `while let` binds are in scope in its body
-    /// only.
     fn visit_expr_if(&mut self, branch: &'ast syn::ExprIf) {
         self.scoped([], false, |scan| {
             scan.visit_expr(&branch.cond);
@@ -746,7 +662,6 @@ impl<'ast> Visit<'ast> for Scan<'_> {
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         match &*call.func {
-            // A called path is not a value.
             Expr::Path(path) => {
                 if let Some(last) = path.path.segments.last() {
                     self.callback(&last.ident.to_string(), call.args.iter().skip(1));
@@ -840,8 +755,6 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 }
 
-/// The identifiers in the string literals of `tokens`, which an attribute
-/// may resolve as paths.
 fn strings(tokens: TokenStream, names: &mut BTreeSet<String>) {
     for token in tokens {
         match token {

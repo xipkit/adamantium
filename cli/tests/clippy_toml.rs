@@ -1,8 +1,3 @@
-//! The paths in Adamantium's `clippy.toml`. Its external-crate entries carry
-//! `allow-invalid`, so these tests check what that would otherwise hide: that
-//! every path names a real item, and that no project gets a warning for an
-//! item that its features leave out.
-
 use std::{
     collections::BTreeSet,
     env, fs,
@@ -15,22 +10,18 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use toml_edit::{Document, DocumentMut, InlineTable, Item, Value};
 
-/// The arrays of `clippy.toml` whose entries name paths.
 const LISTS: [&str; 3] = [
     "disallowed-types",
     "disallowed-methods",
     "disallowed-macros",
 ];
 
-/// Every feature that defines an item `clippy.toml` names. `tokio::task::Builder`
-/// also needs `--cfg tokio_unstable`.
 const ALL_FEATURES: &str = concat!(
     "async-channel,async-std/unstable,crossbeam-channel,fastrand/std,flume,futures,parking_lot,",
     "rand/thread_rng,rand/sys_rng,rand_08/std,rand_08/std_rng,rand_09/thread_rng,",
     "smol,tokio/full,tokio/tracing",
 );
 
-/// A line of `cargo --message-format=json`, with the fields these tests read.
 #[derive(Deserialize)]
 struct CargoMessage {
     message: Option<Diagnostic>,
@@ -80,7 +71,6 @@ fn path(entry: &InlineTable) -> Result<&str> {
         .with_context(|| format!("an entry without a path: {entry}"))
 }
 
-/// A copy of `entry` whose path names nothing, and which Clippy warns about.
 fn misspelled(entry: &InlineTable) -> Result<InlineTable> {
     let mut copy = entry.clone();
     copy.insert("path", format!("{}_misspelled", path(entry)?).into());
@@ -88,9 +78,6 @@ fn misspelled(entry: &InlineTable) -> Result<InlineTable> {
     Ok(copy)
 }
 
-/// Runs Clippy on the `paths` fixture with `config` as its `clippy.toml`, and
-/// returns what it reports about the configuration: the path of each entry it
-/// couldn't resolve, or the message of any other diagnostic.
 fn unresolved(
     config: &DocumentMut,
     features: &str,
@@ -98,8 +85,6 @@ fn unresolved(
 ) -> Result<BTreeSet<String>> {
     let config = config.to_string();
     let dir = tempfile::tempdir()?;
-    // Clippy names the file by its canonical path, which differs when the
-    // temporary directory is reached through a symlink, as on macOS.
     let file = dir.path().canonicalize()?.join("clippy.toml");
     fs::write(&file, &config)?;
     let entries = entries(&config)?;
@@ -136,9 +121,6 @@ fn unresolved(
     Ok(reported)
 }
 
-/// Where each entry of `config` is, with its path. Clippy may span a whole
-/// entry or only its path, depending on its version, so a diagnostic belongs
-/// to the entry whose range contains its span.
 fn entries(config: &str) -> Result<Vec<(Range<usize>, String)>> {
     let document = Document::parse(config)?;
     let mut entries = Vec::new();
@@ -159,10 +141,6 @@ fn entries(config: &str) -> Result<Vec<(Range<usize>, String)>> {
     Ok(entries)
 }
 
-/// Strips `allow-invalid` from every crate path and adds a misspelled copy of
-/// each, then resolves them all with every feature on. Clippy must report
-/// exactly the copies. Slice methods are checked separately because Clippy
-/// suppresses unresolved-path warnings when the root isn't a loaded crate.
 #[test]
 fn every_crate_path_resolves_with_every_feature_on() {
     let mut config = shipped().unwrap();
@@ -192,9 +170,6 @@ fn every_crate_path_resolves_with_every_feature_on() {
     );
 }
 
-/// Rust resolves slice methods directly, including a misspelling that Clippy
-/// would silently ignore. Build the references from the shipped entries so
-/// every configured slice method is checked.
 #[test]
 fn every_slice_method_resolves() {
     let config = shipped().unwrap();
@@ -223,9 +198,6 @@ fn every_slice_method_resolves() {
     );
 }
 
-/// The paths fixture uses Tokio without dependencies that can re-enable its
-/// optional features. One misspelled entry shows that Clippy loaded Tokio and
-/// resolved paths in it even when sync is off.
 #[test]
 fn no_tokio_feature_set_warns() {
     let shipped = shipped().unwrap();

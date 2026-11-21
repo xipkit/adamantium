@@ -1,6 +1,3 @@
-//! Runtime selection for scoped spawn/abort/join. Production stays on Tokio
-//! even when the deterministic feature is unified into an application build.
-
 #![allow(
     clippy::disallowed_types,
     clippy::disallowed_methods,
@@ -44,12 +41,10 @@ pub(crate) struct JoinSet {
     inner: Set,
     reaped_completion: Option<Result<(), JoinError>>,
     world: World,
-    /// Shared admission closes under the same lock as registration and abort.
+    // Shared admission closes under the same lock as registration and abort.
     closed: bool,
-    /// A shared spawn may still be destroying synchronously cancelled work
-    /// outside the set lock. Draining must include that cleanup.
+    // Drain must also wait for cancelled work being destroyed outside the lock.
     registering: usize,
-    /// Who polled the set while it was empty, woken by the next spawn.
     idle: Option<Waker>,
 }
 
@@ -62,8 +57,8 @@ enum Set {
     Model {
         tasks: Vec<model::Task<()>>,
         changed: std::sync::Arc<super::wait::WaitQueue>,
-        /// Kept across polls, so a task that finishes between them wakes
-        /// the next one.
+        // Kept across polls, so a task that finishes between them wakes
+        // the next one.
         waiter: Option<super::wait::Waiter>,
     },
 }
@@ -249,9 +244,9 @@ impl JoinSet {
         }
     }
 
-    /// Releases finished entries during submission. Coalesce successes into
-    /// one completion so a joiner still wakes up to check the scope's error
-    /// ledger. Stop at the first join error so the owner can handle it.
+    // Releases finished entries during submission. Coalesce successes into
+    // one completion so a joiner still wakes up to check the scope's error
+    // ledger. Stop at the first join error so the owner can handle it.
     pub(crate) fn reap_finished(&mut self) {
         if matches!(self.reaped_completion, Some(Err(_))) {
             return;
@@ -291,13 +286,8 @@ impl JoinSet {
         }
     }
 
-    /// Polls for a finished task and takes it out of the set, returning
-    /// `Ready(None)` if the set and its registrations are empty. Whatever it
-    /// returns, `cx` is woken
-    /// when there may be something new to take: when a task finishes, or,
-    /// unlike Tokio's set, when the next task is spawned into an empty set.
-    /// So a caller can keep polling for finished tasks while others are
-    /// spawned. As with Tokio, only the waker of the latest poll is kept.
+    // Keep the latest waker for task completion or the next spawn into an
+    // empty set, even when this call returns Ready(None).
     pub(crate) fn poll_join_next(
         &mut self,
         cx: &mut Context<'_>,
@@ -517,9 +507,8 @@ mod model {
             completion: completion.clone(),
         }));
         let abort = handle.abort_handle();
-        // Shuttle's JoinHandle destructor accesses the current execution by
-        // task ID. Keep it inside this execution; the owned abort permission
-        // and our completion slot are safe to destroy after a misuse rejection.
+        // Shuttle's join handle must drop in its own execution. The abort permission
+        // and completion slot can drop after a context mismatch.
         drop(handle);
         Task {
             abort,

@@ -1,5 +1,3 @@
-//! Sending each message to every subscriber.
-
 use std::{fmt, sync::Arc};
 
 use crate::{
@@ -135,9 +133,9 @@ impl<T: Clone> Topic<T> {
     }
 }
 
-/// Gives each subscriber a clone of `value`, and the last one `value` itself.
-/// Every sender has room or is closed: the topic is the only sender, and
-/// `&mut self` on its sends keeps another send from taking the room.
+// Gives each subscriber a clone of `value`, and the last one `value` itself.
+// Every sender has room or is closed: the topic is the only sender, and
+// `&mut self` on its sends keeps another send from taking the room.
 fn deliver<T: Clone>(senders: &[Sender<T>], value: T) -> usize {
     let mut delivered = 0;
     let mut value = Some(value);
@@ -170,7 +168,6 @@ impl<T> Subscriptions<T> {
         receiver
     }
 
-    /// The senders of the subscribers that still hold their receiver.
     fn current(&self) -> Vec<Sender<T>> {
         let mut subscribers = self.subscribers.lock();
         subscribers.remove_closed();
@@ -179,9 +176,9 @@ impl<T> Subscriptions<T> {
 }
 
 impl<T> Subscribers<T> {
-    /// Removes the senders whose receiver is gone or closed. Dropping one
-    /// drops no message: the last receiver drops its queue's messages, and a
-    /// closed receiver still holds them.
+    // Removes the senders whose receiver is gone or closed. Dropping one
+    // drops no message: the last receiver drops its queue's messages, and a
+    // closed receiver still holds them.
     fn remove_closed(&mut self) {
         self.senders.retain(|sender| !sender.is_closed());
     }
@@ -203,7 +200,6 @@ impl<T> Drop for Topic<T> {
             subscribers.open = false;
             std::mem::take(&mut subscribers.senders)
         };
-        // Dropping the last sender of each queue closes it.
         drop(senders);
     }
 }

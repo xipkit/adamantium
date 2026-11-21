@@ -228,8 +228,6 @@ fn shared_state_fixture(name: &str) -> String {
 fn shared_state_rewrites_build_pass_check_and_keep_behavior() {
     let source = shared_state_fixture("rewrite.rs");
     let dir = binary(&source);
-    // An actor needs no runtime, so the rewrite works without the `tokio`
-    // feature.
     let manifest = dir.path().join("Cargo.toml");
     let text = fs::read_to_string(&manifest).unwrap();
     let text = text
@@ -336,9 +334,6 @@ fn shared_state_fix_cannot_follow_is_reported_and_left_unchanged() {
 
 #[test]
 fn fixes_that_break_the_build_are_restored() {
-    // Every rewrite here is sound by itself, but the library asserts the
-    // length of a module's source, so any rewrite of that module stops the
-    // build, the way a rewrite that syntax alone can't vet would.
     let module = "pub async fn wait() { tokio::time::sleep(std::time::Duration::ZERO).await; }\n";
     let library = format!(
         "mod wait;\nconst _: () = assert!(include_str!(\"wait.rs\").len() == {}, \"wait.rs changed\");\npub fn value() -> u32 {{ dbg!(7) }}\n",
@@ -372,14 +367,157 @@ fn fixes_that_break_the_build_are_restored() {
     assert_eq!(fs::read_to_string(&wait).unwrap(), module);
 }
 
-/// A project whose only target is a binary with `main` as its main file, so
-/// no other crate can call its functions.
 #[allow(clippy::unwrap_used, reason = "a failed fixture setup fails the test")]
 fn binary(main: &str) -> tempfile::TempDir {
     let dir = project("");
     fs::remove_file(dir.path().join("src/lib.rs")).unwrap();
     fs::write(dir.path().join("src/main.rs"), main).unwrap();
     dir
+}
+
+fn add_random_dependencies(dir: &Path) -> std::io::Result<()> {
+    let manifest = dir.join("Cargo.toml");
+    let text = fs::read_to_string(&manifest)?;
+    let text = text
+        .replace(" }\ntokio", ", default-features = false }\ntokio")
+        .replace(
+            "[profile.release]",
+            "fastrand = \"2\"\nrand = \"0.10\"\nrand_08 = { package = \"rand\", version = \"0.8\" }\n\n[profile.release]",
+        );
+    fs::write(manifest, text)
+}
+
+#[test]
+fn timer_random_and_rwlock_rewrites_keep_behavior_and_are_idempotent() {
+    for (source, draws, output, rewrites) in [
+        (
+            include_str!("fixtures/expression-rewrites/time.rs"),
+            false,
+            "timers completed\n",
+            &[
+                "::adamantium::time::sleep_until(::adamantium::time::now()).await;",
+                "let deadline = ::adamantium::time::now() + Duration::from_millis(1);",
+                "::adamantium::time::sleep_until(deadline).await;",
+                "    adamantium::time::sleep_until(::adamantium::time::now()).await;",
+            ][..],
+        ),
+        (
+            include_str!("fixtures/expression-rewrites/random.rs"),
+            true,
+            "true\n",
+            &[
+                "::adamantium::random::u64()",
+                "::adamantium::random::up_to( /* lower bound */ limit)",
+                "::adamantium::random::up_to(7_u64)",
+                "::adamantium::random::up_to(limit)",
+            ],
+        ),
+        (
+            include_str!("fixtures/shared-state/rwlock.rs"),
+            false,
+            "42 2\n",
+            &[
+                "value: ::adamantium::Actor<u32>",
+                "self.value.with(|value| *value += 1)",
+                "fn fresh() -> ::adamantium::Actor<u32>",
+                "fn read_value(lock: &::adamantium::Actor<u32>)",
+                "lock.read(|lock| *lock)",
+            ],
+        ),
+    ] {
+        let dir = binary(source);
+        if draws {
+            add_random_dependencies(dir.path()).unwrap();
+        }
+        let file = dir.path().join("src/main.rs");
+        assert_eq!(execute(dir.path()), output.as_bytes());
+
+        let preview = run(&["fix", "--dry-run"], dir.path());
+        let stderr = String::from_utf8_lossy(&preview.stderr);
+        assert_eq!(preview.status.code(), Some(1), "{stderr}");
+        assert!(!stderr.contains("std::sync::RwLock::read"), "{stderr}");
+        assert!(!stderr.contains("std::sync::RwLock::write"), "{stderr}");
+        assert!(!preview.stdout.is_empty(), "{stderr}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), source);
+
+        let fixed = run(&["fix"], dir.path());
+        let stderr = String::from_utf8_lossy(&fixed.stderr);
+        assert!(fixed.status.success(), "{stderr}");
+        let after = fs::read_to_string(&file).unwrap();
+        for snippet in rewrites {
+            assert!(after.contains(snippet), "missing {snippet}\n{after}");
+        }
+        assert_eq!(execute(dir.path()), output.as_bytes());
+        let again = run(&["fix", "--dry-run"], dir.path());
+        assert!(again.status.success(), "{after}");
+        assert!(again.stdout.is_empty(), "{after}");
+    }
+}
+
+#[test]
+fn timer_and_random_rewrites_leave_unproved_calls_unchanged() {
+    for (source, draws) in [
+        (
+            include_str!("fixtures/expression-rewrites/time-review.rs"),
+            false,
+        ),
+        (
+            include_str!("fixtures/expression-rewrites/random-review.rs"),
+            true,
+        ),
+        (
+            "pub fn seeded() -> u64 { fastrand::seed(42); fastrand::u64(..) }\n",
+            true,
+        ),
+    ] {
+        let dir = project(source);
+        if draws {
+            add_random_dependencies(dir.path()).unwrap();
+        }
+        let output = run(&["fix"], dir.path());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+            source
+        );
+    }
+}
+
+#[test]
+fn rwlock_rewrites_refuse_guards_with_unproved_reader_behavior() {
+    let source = include_str!("fixtures/shared-state/rwlock-review.rs");
+    let dir = binary(source);
+    let output = run(&["fix"], dir.path());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        source
+    );
+    for (name, reason) in [
+        ("held", "a guard of it lives beyond one statement"),
+        ("nested", "a statement holding its guard takes another lock"),
+        ("borrowed", "its read guard does more than copy the state"),
+        ("calls", "its read guard does more than copy the state"),
+        (
+            "state_method",
+            "its read guard does more than copy the state",
+        ),
+        (
+            "try_read",
+            "it is passed, returned or stored where fix can't follow it",
+        ),
+        (
+            "shadowed",
+            "it is passed, returned or stored where fix can't follow it",
+        ),
+    ] {
+        assert!(
+            stderr.contains(&format!("`{name}` stays an `Arc<RwLock<_>>`: {reason}")),
+            "{stderr}"
+        );
+    }
 }
 
 #[test]
@@ -455,9 +593,6 @@ fn shared_state_fields_fix_cannot_follow_are_reported_and_left_unchanged() {
 
 #[test]
 fn shared_state_whose_function_runs_inside_a_callback_is_left_unchanged() {
-    // Rewriting `hits` would make `count` call an actor inside `total`'s
-    // callback, which panics. In the second, only `bump` locks it, through
-    // its parameter.
     for (source, reports) in [
         (
             "use std::sync::{Arc, Mutex};\n\nfn count() -> u32 {\n    let hits = Arc::new(Mutex::new(0u32));\n    *hits.lock().unwrap() += 1;\n    let value = *hits.lock().unwrap();\n    value\n}\n\nfn main() {\n    let total = adamantium::Actor::new(0u32);\n    total.with(|total| *total += count());\n    println!(\"{}\", total.read(|total| *total));\n}\n",
@@ -501,7 +636,6 @@ fn shared_state_whose_function_runs_inside_a_callback_is_left_unchanged() {
     }
 }
 
-/// Runs a fixture as a user would, including actual future suspension.
 #[allow(
     clippy::unwrap_used,
     reason = "a failed fixture command fails the test"
@@ -739,8 +873,6 @@ fn bounded_async_library_and_callable_or_fake_roots_stay_byte_identical() {
         assert_manual(dir.path(), "src/main.rs", &source, Some("future boundary"));
     }
 
-    // A re-exported real macro is still not a verified dependency/path, nor
-    // does a Tokio annotation on an ordinary function make it the entry.
     for (extra, main) in [
         (
             "mod tokio { pub use real_tokio::*; }",
@@ -882,7 +1014,6 @@ fn bounded_async_cargo_target_identity_is_required() {
         assert_manual(dir.path(), filename, &source, None);
     }
 
-    // The entry is identified by Cargo, not by a conventional filename.
     let dir = binary(&source);
     fs::rename(
         dir.path().join("src/main.rs"),
@@ -908,7 +1039,6 @@ fn bounded_async_cargo_target_identity_is_required() {
     assert_eq!(execute(dir.path()), b"7 11\n");
 }
 
-/// A binary whose Tokio dependency has the `sync` feature that channels need.
 #[allow(clippy::unwrap_used, reason = "a failed fixture setup fails the test")]
 fn channel_binary(main: &str) -> tempfile::TempDir {
     let dir = binary(main);
@@ -933,7 +1063,6 @@ fn channel_fixture(name: &str) -> String {
 
 #[test]
 fn channel_rewrites_keep_behavior_pass_check_and_are_idempotent() {
-    // Only the strict rules report a bounded mpsc channel.
     for (name, rewritten, strict) in [
         ("reply", "::adamantium::Reply::pair()", None),
         ("watch", "::adamantium::Watch::new(0u32);", None),

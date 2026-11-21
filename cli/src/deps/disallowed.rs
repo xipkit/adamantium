@@ -1,7 +1,3 @@
-//! The paths that `clippy.toml` disallows calling, which the audit looks for
-//! in dependencies. Reading them from the same `clippy.toml` that `check`
-//! applies keeps the audit and the rules from drifting apart.
-
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, anyhow};
@@ -121,9 +117,6 @@ pub fn canonical(mut path: Vec<String>) -> Vec<String> {
     path
 }
 
-/// Whether a path names an associated function, which can be called as a
-/// method: its parent is a type, which Rust names in UpperCamelCase, or a
-/// primitive such as `slice`.
 fn names_a_method(path: &[String]) -> bool {
     let parent = path.len().checked_sub(2).and_then(|index| path.get(index));
     parent.is_some_and(|parent| {

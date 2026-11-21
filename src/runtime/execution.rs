@@ -22,8 +22,7 @@ pub(crate) fn current() -> Option<u64> {
 pub(crate) struct Execution;
 
 impl Execution {
-    /// Claims the harness for this OS thread. The scheduler starts each
-    /// execution, including the first, with [`Execution::next`].
+    // The scheduler calls next even for the first execution.
     pub(crate) fn enter() -> Self {
         assert!(
             current().is_none(),
@@ -37,7 +36,6 @@ impl Execution {
         Self
     }
 
-    /// Starts an execution with a fresh identity and a clock at its origin.
     pub(crate) fn next(wall_epoch: SystemTime) {
         Self::claim_identity();
         super::clock::reset(wall_epoch);

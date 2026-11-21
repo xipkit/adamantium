@@ -1,60 +1,3 @@
-//! Deterministic interleaving tests, enabled by the `deterministic` feature.
-//!
-//! Models [`crate::Actor`], [`crate::Channel`], [`crate::Fanout`],
-//! [`crate::Reply`], [`crate::Watch`], [`crate::SingleFlight`],
-//! [`crate::Tasks`] and [`crate::Cancellation`], including concurrent maps and
-//! streams, result claiming, panic transport, scope abort and draining.
-//! [`parallel`] also supplies independent workers. Blocking closures model the
-//! queued/started boundary: abort can prevent entry, but started work finishes.
-//! Replace actual blocking I/O with fixtures using modeled primitives.
-//! [`crate::time`] drives virtual deadlines without wall-clock waits. Time advances
-//! to the earliest pending deadline only when no application task can run.
-//! [`crate::time::wall_now`] starts each execution at [`Config::wall_epoch`] and
-//! advances with virtual time, so expiry checks against absolute timestamps
-//! replay exactly.
-//! OS signals remain unsupported.
-//! Outside a harness execution, enabling the feature leaves production behavior
-//! intact, including ordinary `#[tokio::test]` tests in the same build.
-//!
-//! Create fresh state **inside** the factory. A primitive belongs to the
-//! execution that created it; carrying it into another execution, a native
-//! thread, or back to production is an error. Use `#[test]`: starting the
-//! harness inside a Tokio runtime or another harness panics.
-//!
-//! ```
-//! use adamantium::{Actor, testing::{self, Config}};
-//!
-//! testing::check(Config::default(), || async {
-//!     let count = Actor::new(0);
-//!     let workers = (0..2).map(|_| {
-//!         let count = count.clone();
-//!         async move { count.with(|n| *n += 1); }
-//!     }).collect::<Vec<_>>();
-//!     testing::parallel(workers).await;
-//!     assert_eq!(count.into_inner().ok(), Some(2));
-//! }).unwrap();
-//! ```
-//!
-//! [`check`] defaults to seeded random scheduling. Use [`Config::with_scheduler`]
-//! to select probabilistic concurrency testing (PCT) or bounded depth-first
-//! search (DFS). [`Replay::dfs_status`] reports whether DFS explored every
-//! reachable schedule or reached the execution limit with choices remaining.
-//! Use [`Config::from_env`] to override the default seed or iteration limit
-//! from the shell.
-//!
-//! A failure returns and prints a named task timeline and a payload-free [`Replay`]
-//! with the scheduler, bounds, engine versions and exact schedule. Save records
-//! with [`Replay::save`] and use [`replay_corpus`] to exercise them against one
-//! scenario. Replay requires compatible dependencies, scheduling behavior and
-//! fixture inputs.
-//!
-//! [`crate::random`] draws from the scheduler, so a seed decides the draws and a
-//! replay repeats them. Real I/O, native threads, other clocks (such as
-//! `SystemTime::now`), other randomness and foreign executors are outside the
-//! model: replace them with deterministic fixtures.
-//! Arbitrary foreign futures cannot all be detected. A step limit counts
-//! scheduling operations, not CPU instructions; it cannot stop a CPU-only loop.
-
 #![allow(
     clippy::disallowed_types,
     reason = "scheduler bookkeeping is outside the modeled program"
@@ -85,26 +28,27 @@ use crate::runtime::{
 };
 
 mod duplex;
+mod fault;
 pub use duplex::{
     DuplexConfig, DuplexControl, DuplexStream, LinkConfig, TransportFault, duplex,
     duplex_controlled, duplex_with,
 };
+pub use fault::{FaultInjector, FaultRule, FaultStep, Latency};
 
 const ENGINE: &str = "shuttle=0.9.10;engine=0.1.8;std=0.1.5;schedulers=0.1.1";
 const FORMAT: u32 = 4;
 
-/// Bounds for schedule exploration. Every execution gets fresh factory state.
+/// Bounds for schedule exploration.
+///
+/// `seed` controls random and PCT scheduling. DFS uses a fixed data seed.
+/// `iterations` and `max_steps` must be nonzero.
+/// `wall_epoch` sets the initial [`crate::time::wall_now`] for each execution.
+/// It defaults to 2026-01-01T00:00:00Z and must be at or after the Unix epoch.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
-    /// Seed for random and PCT scheduling. DFS uses a fixed data seed.
     pub seed: u64,
-    /// Maximum number of executions to explore. Must be nonzero.
     pub iterations: usize,
-    /// Scheduling step limit per execution. Must be nonzero.
     pub max_steps: usize,
-    /// What [`crate::time::wall_now`] reports at the start of every execution.
-    /// Must not precede [`SystemTime::UNIX_EPOCH`]. Defaults to
-    /// 2026-01-01T00:00:00Z.
     pub wall_epoch: SystemTime,
 }
 
@@ -186,29 +130,18 @@ impl From<Config> for Exploration {
     }
 }
 
-/// How [`check`] chooses which modeled task runs next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SchedulerMode {
-    /// Choose among runnable tasks using the configured seed.
     Random,
-    /// Probabilistic concurrency testing. Randomize priorities after a calibration execution.
-    Pct {
-        /// At most `depth - 1` sampled priority changes per execution. Must be nonzero.
-        /// An explicit yield may also lower a task's priority.
-        depth: usize,
-    },
-    /// Enumerate task choices in depth-first order with the same random data stream each time.
+    Pct { depth: usize },
     Dfs,
 }
 
-/// Coverage of a DFS check whose explored schedules all passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DfsStatus {
-    /// Every reachable modeled schedule for the fixed inputs passed.
     Complete,
-    /// The execution limit was reached with schedules still to explore.
     IterationLimit,
 }
 
@@ -228,7 +161,6 @@ pub struct Replay {
     max_steps: usize,
     wall_epoch: SystemTime,
     data_seed: u64,
-    // None means a scheduler-owned random draw, Some identifies a logical task.
     steps: Vec<Option<usize>>,
 }
 
@@ -304,7 +236,6 @@ impl Replay {
         }
 
         let bytes = std::fs::read(path)?;
-        // Read the version before requiring fields that older records lack.
         let header: Header = serde_json::from_slice(&bytes).map_err(invalid_replay)?;
         validate_format(header.format)?;
         let record: Self = serde_json::from_slice(&bytes).map_err(invalid_replay)?;
@@ -373,16 +304,11 @@ fn invalid_replay(message: impl fmt::Display) -> io::Error {
     )
 }
 
-/// Why an execution failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailureKind {
-    /// An assertion, primitive misuse or other panic in the scenario.
     Panic,
-    /// Unfinished modeled tasks cannot make progress.
     Deadlock,
-    /// The configured scheduling step budget was exhausted.
     StepLimit,
-    /// The scenario no longer follows the supplied schedule.
     ReplayMismatch,
 }
 
@@ -391,6 +317,7 @@ pub enum FailureKind {
 pub struct Failure {
     kind: FailureKind,
     timeline: Box<Timeline>,
+    shrink_message: Option<String>,
 }
 
 impl Failure {
@@ -423,18 +350,34 @@ impl fmt::Display for Failure {
 
 impl std::error::Error for Failure {}
 
-/// Explores schedules up to [`Config::iterations`] and returns the last successful record.
-/// Stops on the first failure. The factory runs anew inside each execution.
+/// Explores schedules and returns the last successful record or the first failure.
+/// Create fresh state in the factory for each execution. Use modeled primitives
+/// and virtual time in place of real I/O and wall-clock waits.
 ///
-/// Random and PCT checks pass when their execution budget is spent. The first
-/// PCT execution calibrates the scheduler and counts against that budget. If
-/// calibration offers no task choices, the check ends after that execution.
-/// A successful DFS check reports either [`DfsStatus::Complete`] or
-/// [`DfsStatus::IterationLimit`] in its record. Any execution that exceeds
-/// [`Config::max_steps`] fails with [`FailureKind::StepLimit`].
+/// Random and PCT checks stop at the iteration limit. PCT counts calibration
+/// as one execution and stops early if it finds no task choices. Inspect
+/// [`Replay::dfs_status`] to see whether DFS covered every reachable schedule.
+/// Exceeding `max_steps` returns [`FailureKind::StepLimit`]. The limit counts
+/// scheduling operations and cannot stop a CPU-only loop.
 ///
-/// Panics for zero bounds, a [`Config::wall_epoch`] before the Unix epoch, a
-/// nested harness, a current Tokio runtime, or Shuttle environment overrides that would silently change the recorded seed.
+/// # Panics
+///
+/// Panics for zero bounds, a wall epoch before the Unix epoch, a nested
+/// harness, an active Tokio runtime, or Shuttle overrides that change the seed.
+///
+/// ```
+/// use adamantium::{Actor, testing::{self, Config}};
+///
+/// testing::check(Config::default(), || async {
+///     let count = Actor::new(0);
+///     let workers = (0..2).map(|_| {
+///         let count = count.clone();
+///         async move { count.with(|n| *n += 1); }
+///     }).collect::<Vec<_>>();
+///     testing::parallel(workers).await;
+///     assert_eq!(count.into_inner().ok(), Some(2));
+/// }).unwrap();
+/// ```
 pub fn check<F, Fut>(config: impl Into<Exploration>, factory: F) -> Result<Replay, Failure>
 where
     F: Fn() -> Fut + Send + Sync + 'static,
@@ -497,6 +440,114 @@ where
     play(record, ReplayPolicy::Exact, factory).map(|(record, _)| record)
 }
 
+/// Minimizes a failing schedule by removing chunks of steps and simplifying
+/// task switches. It prefers fewer steps, then fewer switches, and stops when
+/// no tried chunk, single-step deletion or switch edit improves the schedule.
+///
+/// Each attempt runs a fresh factory with the original data seed and step
+/// limit. Reductions must reproduce the original failure category and message.
+/// Panics must also end in the same last scheduled task. Failures with opaque panic
+/// payloads are returned unchanged because their identity cannot be compared.
+///
+/// Returns `None` if the record passes or diverges under the factory. Panics
+/// on incompatible metadata, like [`replay`]. The returned record uses the
+/// ordinary replay format and can be passed to [`explain`] or [`Replay::save`].
+pub fn shrink<F, Fut>(record: &Replay, factory: F) -> Option<Replay>
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()>,
+{
+    let validation = record.validate();
+    assert!(validation.is_ok(), "{validation:?}");
+
+    let factory = Arc::new(factory);
+    let probe = |candidate: &Replay| {
+        let factory = Arc::clone(&factory);
+        play(candidate, ReplayPolicy::Shrink, move || factory()).err()
+    };
+    let baseline = probe(record)?;
+    if baseline.kind == FailureKind::ReplayMismatch || baseline.replay() != record {
+        return None;
+    }
+    let Some(message) = baseline.shrink_message.as_deref() else {
+        return Some(record.clone());
+    };
+
+    let mut best = record.clone();
+    loop {
+        let cost = schedule_cost(&best);
+        let improve = |candidate: &Replay| {
+            let failure = probe(candidate)?;
+            let same_task = baseline.kind != FailureKind::Panic
+                || failure.timeline.events.last().map(TimelineEvent::kind)
+                    == baseline.timeline.events.last().map(TimelineEvent::kind);
+            (failure.kind == baseline.kind
+                && failure.shrink_message.as_deref() == Some(message)
+                && same_task
+                && schedule_cost(failure.replay()) < cost)
+                .then_some(failure.timeline.replay)
+        };
+        match reduce_schedule(&best, improve) {
+            Some(reduced) => best = reduced,
+            None => return Some(best),
+        }
+    }
+}
+
+fn schedule_cost(record: &Replay) -> (usize, usize) {
+    let mut previous = None;
+    let switches = record
+        .steps
+        .iter()
+        .flatten()
+        .filter(|&&task| {
+            previous
+                .replace(task)
+                .is_some_and(|previous| previous != task)
+        })
+        .count();
+    (record.steps.len(), switches)
+}
+
+fn reduce_schedule(record: &Replay, improve: impl Fn(&Replay) -> Option<Replay>) -> Option<Replay> {
+    let mut candidate = record.clone();
+    let len = record.steps.len();
+    let mut chunk = len;
+    loop {
+        for start in (0..len).step_by(chunk) {
+            candidate.steps.clone_from(&record.steps);
+            candidate.steps.drain(start..len.min(start + chunk));
+            if let Some(reduced) = improve(&candidate) {
+                return Some(reduced);
+            }
+        }
+        if chunk == 1 {
+            break;
+        }
+        chunk = chunk.div_ceil(2);
+    }
+
+    // Keep the previous task running across a recorded switch when possible.
+    let mut previous = None;
+    for (index, task) in record.steps.iter().enumerate() {
+        let Some(task) = *task else { continue };
+        let Some(previous) = previous.replace(task) else {
+            continue;
+        };
+        if previous == task {
+            continue;
+        }
+        candidate.steps.clone_from(&record.steps);
+        if let Some(choice) = candidate.steps.get_mut(index) {
+            *choice = Some(previous);
+        }
+        if let Some(reduced) = improve(&candidate) {
+            return Some(reduced);
+        }
+    }
+    None
+}
+
 /// A task observed during [`explain`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskInfo {
@@ -553,71 +604,41 @@ impl WaitingTask {
     }
 }
 
-/// An event in a reconstructed execution [`Timeline`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TimelineEventKind {
-    /// The scheduler switched to this task.
     Scheduled {
-        /// The scheduled task's identifier.
         task_id: usize,
-        /// The scheduled task's name, if known.
         task_name: Option<String>,
     },
-    /// A task blocked waiting on an operation.
     Wait {
-        /// The waiting task's identifier.
         task_id: usize,
-        /// The waiting task's name, if known.
         task_name: Option<String>,
-        /// The operation the task is waiting on.
         operation: &'static str,
-        /// The wait instance identifier within the execution.
         wait_id: u64,
     },
-    /// A task or the virtual clock woke one or more waiting tasks.
     Wakeup {
-        /// The task that triggered the wakeup, if known.
         by_task_id: Option<usize>,
-        /// The waking task's name, if known.
         by_task_name: Option<String>,
-        /// The waiting task identifiers targeted by the wakeup.
         target_task_ids: Vec<usize>,
-        /// The waiting task names corresponding to `target_task_ids`.
         target_task_names: Vec<Option<String>>,
-        /// The operation associated with the wakeup.
         operation: &'static str,
-        /// The wait instance identifier within the execution.
         wait_id: u64,
     },
-    /// A task's wait completed and became ready.
     WaitCompleted {
-        /// The task's identifier.
         task_id: usize,
-        /// The task's name, if known.
         task_name: Option<String>,
-        /// The operation that completed.
         operation: &'static str,
-        /// The wait instance identifier within the execution.
         wait_id: u64,
     },
-    /// A task cancelled or dropped an unfinished wait.
     WaitCancelled {
-        /// The task's identifier.
         task_id: usize,
-        /// The task's name, if known.
         task_name: Option<String>,
-        /// The operation that was cancelled.
         operation: &'static str,
-        /// The wait instance identifier within the execution.
         wait_id: u64,
     },
-    /// The execution ended with a failure.
     Failed {
-        /// The failure category.
         kind: FailureKind,
-        /// The last scheduled task before the failure, if known.
         task_id: Option<usize>,
-        /// The last scheduled task's name, if known.
         task_name: Option<String>,
     },
 }
@@ -991,23 +1012,10 @@ fn build_timeline(
     }
 }
 
-/// Why replaying a saved corpus stopped. Each variant identifies the failing file.
 #[derive(Debug)]
 pub enum CorpusError {
-    /// The record could not be read or was incompatible.
-    Load {
-        /// The record's path.
-        path: PathBuf,
-        /// The loading or validation error.
-        source: io::Error,
-    },
-    /// The loaded schedule failed or diverged during replay.
-    Execution {
-        /// The record's path.
-        path: PathBuf,
-        /// The failure reported by the replay.
-        source: Box<Failure>,
-    },
+    Load { path: PathBuf, source: io::Error },
+    Execution { path: PathBuf, source: Box<Failure> },
 }
 
 impl fmt::Display for CorpusError {
@@ -1064,6 +1072,7 @@ where
 enum ReplayPolicy {
     Exact,
     Prefix,
+    Shrink,
 }
 
 fn play<F, Fut>(
@@ -1095,7 +1104,7 @@ impl Playback {
     fn next_step(&mut self) -> Option<Option<usize>> {
         let step = self.steps.next();
         assert!(
-            step.is_some() || matches!(self.policy, ReplayPolicy::Prefix),
+            step.is_some() || !matches!(self.policy, ReplayPolicy::Exact),
             "schedule ended early"
         );
         step
@@ -1125,7 +1134,12 @@ impl Scheduler for Playback {
             );
             return Some(task);
         }
-        // Prefer the next higher task ID, wrapping to the lowest runnable ID.
+        if matches!(self.policy, ReplayPolicy::Shrink)
+            && let Some(current) = current
+            && runnable.iter().any(|task| task.id() == current)
+        {
+            return Some(current);
+        }
         runnable
             .iter()
             .map(|task| task.id())
@@ -1286,30 +1300,39 @@ where
     let kind = if original.is_some_and(|(original, policy)| match policy {
         ReplayPolicy::Exact => original.steps != record.steps,
         ReplayPolicy::Prefix => !record.steps.starts_with(&original.steps),
+        // The candidate may fail before consuming all of its proposed steps.
+        ReplayPolicy::Shrink => false,
     }) {
         FailureKind::ReplayMismatch
     } else {
-        match result {
+        match &result {
             Ok(_) => return Ok((record, collector)),
-            Err(payload) => classify(&*payload, original.is_some()),
+            Err(payload) => classify(&**payload, original.is_some()),
         }
+    };
+    let shrinking = matches!(original, Some((_, ReplayPolicy::Shrink)));
+    let shrink_message = if shrinking {
+        result
+            .as_ref()
+            .err()
+            .and_then(|payload| panic_message(&**payload))
+            .map(str::to_owned)
+    } else {
+        None
     };
     let failure = Failure {
         kind,
+        shrink_message,
         timeline: Box::new(build_timeline(record, Some(kind), collector)),
     };
-    eprintln!("{failure}");
+    if !shrinking {
+        eprintln!("{failure}");
+    }
     Err(failure)
 }
 
-// Shuttle exposes engine failures as panic strings. Keep the prefixes covered by
-// integration tests and version pins. Never serialize payloads.
 fn classify(payload: &(dyn Any + Send), replaying: bool) -> FailureKind {
-    let message = payload
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("");
+    let message = panic_message(payload).unwrap_or("");
     if message.starts_with("exceeded max_steps bound ") {
         FailureKind::StepLimit
     } else if message.starts_with("deadlock! blocked tasks:") {
@@ -1324,6 +1347,13 @@ fn classify(payload: &(dyn Any + Send), replaying: bool) -> FailureKind {
     } else {
         FailureKind::Panic
     }
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> Option<&str> {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
 }
 
 #[cfg(test)]

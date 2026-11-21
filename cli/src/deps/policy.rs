@@ -1,5 +1,3 @@
-//! Comparing complete dependency audits for increases in policy findings.
-
 use std::{collections::BTreeMap, fs, io::Write, path::Path, process::ExitCode};
 
 use anyhow::{Context, Result, bail};
@@ -7,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use super::{Dependency, Report, SCHEMA_VERSION};
 
-/// The parts of an earlier dependency audit needed for comparison.
 #[derive(Deserialize)]
 pub(super) struct Baseline {
     target: String,
@@ -15,7 +12,6 @@ pub(super) struct Baseline {
 }
 
 impl Baseline {
-    /// Reads a complete report written by `deps --format json`.
     pub(super) fn load(path: &Path) -> Result<Self> {
         let text =
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -59,7 +55,6 @@ impl<'a> Package<'a> {
     fn new(dependency: &'a Dependency) -> Result<Self> {
         let source = match (dependency.source.as_deref(), dependency.path.as_deref()) {
             (Some(source), None) if !source.is_empty() => {
-                // Cargo appends the resolved commit to a Git source.
                 let source = if source.starts_with("git+") {
                     source.split_once('#').map_or(source, |(source, _)| source)
                 } else {
@@ -115,7 +110,6 @@ enum Status {
     Error,
 }
 
-/// The outcome of applying the policy and any complete comparison.
 #[derive(Serialize)]
 pub(super) struct Evaluation<'a> {
     status: Status,
@@ -124,7 +118,6 @@ pub(super) struct Evaluation<'a> {
 }
 
 impl Evaluation<'_> {
-    /// The status CI receives for this audit.
     pub(super) fn exit_code(&self) -> ExitCode {
         match self.status {
             Status::Clean => ExitCode::SUCCESS,
@@ -133,7 +126,6 @@ impl Evaluation<'_> {
         }
     }
 
-    /// Prints the policy outcome and the counts that changed.
     pub(super) fn print_text(&self, out: &mut impl Write) -> std::io::Result<()> {
         let Some(changes) = &self.changes else {
             return writeln!(
@@ -169,7 +161,6 @@ impl Evaluation<'_> {
     }
 }
 
-/// Compares observed counts against a baseline, or against zero without one.
 pub(super) fn evaluate<'a>(
     report: &'a Report,
     baseline: Option<&'a Baseline>,
@@ -227,7 +218,6 @@ fn spawn_name(name: &str) -> bool {
     )
 }
 
-/// Called with a resolved path from the bundled disallowed-methods list.
 fn starts_task(path: &str) -> bool {
     path.rsplit("::").next().is_some_and(spawn_name)
         || matches!(path, "async_std::task::Builder::local" | "smol::unblock")
