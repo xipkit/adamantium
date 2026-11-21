@@ -497,7 +497,8 @@ where
 /// Replays one saved execution with fresh state, the original step limit and
 /// the original [`Config::wall_epoch`].
 /// Incompatible metadata panics before the scenario runs. The fixture inputs
-/// must match the original run. A change to the schedule fails explicitly.
+/// must match the original run. A replay that departs from the record runs
+/// to the end of the execution and fails with [`FailureKind::ReplayMismatch`].
 pub fn replay<F, Fut>(record: &Replay, factory: F) -> Result<Replay, Failure>
 where
     F: Fn() -> Fut + Send + Sync + 'static,
@@ -534,7 +535,7 @@ where
         play(candidate, ReplayPolicy::Shrink, move || factory()).err()
     };
     let baseline = probe(record)?;
-    if baseline.kind == FailureKind::ReplayMismatch || baseline.replay() != record {
+    if baseline.replay() != record {
         return None;
     }
     let Some(message) = baseline.shrink_message.as_deref() else {
@@ -1191,22 +1192,19 @@ where
     run(record.clone(), scheduler, Some((record, policy)), factory)
 }
 
+/// Follows a recorded schedule, one step per scheduling decision.
+///
+/// It never panics when the execution departs from the record. A panic here
+/// fails the execution inside Shuttle, which leaks any task suspended partway
+/// through unwinding and leaves the thread panicking. Instead, a step it
+/// can't follow gives way to the fallback order used past the end of the
+/// record, the execution ends normally, and `run` compares the executed steps
+/// with the record.
 struct Playback {
     steps: std::vec::IntoIter<Option<usize>>,
     data: RandomDataSource,
     started: bool,
     policy: ReplayPolicy,
-}
-
-impl Playback {
-    fn next_step(&mut self) -> Option<Option<usize>> {
-        let step = self.steps.next();
-        assert!(
-            step.is_some() || !matches!(self.policy, ReplayPolicy::Exact),
-            "schedule ended early"
-        );
-        step
-    }
 }
 
 impl Scheduler for Playback {
@@ -1223,13 +1221,10 @@ impl Scheduler for Playback {
         current: Option<TaskId>,
         _yielding: bool,
     ) -> Option<TaskId> {
-        let step = self.next_step();
-        assert!(!matches!(step, Some(None)), "expected context switch");
-        if let Some(task) = step.flatten().map(TaskId::from) {
-            assert!(
-                runnable.iter().any(|candidate| candidate.id() == task),
-                "scheduled task is not runnable: {task:?}"
-            );
+        let step = self.steps.next().flatten().map(TaskId::from);
+        if let Some(task) = step
+            && runnable.iter().any(|candidate| candidate.id() == task)
+        {
             return Some(task);
         }
         if matches!(self.policy, ReplayPolicy::Shrink)
@@ -1245,10 +1240,8 @@ impl Scheduler for Playback {
     }
 
     fn next_u64(&mut self) -> u64 {
-        assert!(
-            !matches!(self.next_step(), Some(Some(_))),
-            "expected random choice"
-        );
+        // The value comes from the data seed. The step only marks the draw.
+        self.steps.next();
         self.data.next_u64()
     }
 }
@@ -1417,7 +1410,7 @@ where
     } else {
         match &result {
             Ok(_) => return Ok((record, collector)),
-            Err(payload) => classify(&**payload, original.is_some()),
+            Err(payload) => classify(&**payload),
         }
     };
     let shrinking = matches!(original, Some((_, ReplayPolicy::Shrink)));
@@ -1441,19 +1434,12 @@ where
     Err(failure)
 }
 
-fn classify(payload: &(dyn Any + Send), replaying: bool) -> FailureKind {
+fn classify(payload: &(dyn Any + Send)) -> FailureKind {
     let message = panic_message(payload).unwrap_or("");
     if message.starts_with("exceeded max_steps bound ") {
         FailureKind::StepLimit
     } else if message.starts_with("deadlock! blocked tasks:") {
         FailureKind::Deadlock
-    } else if replaying
-        && (message.starts_with("schedule ended early")
-            || message.starts_with("scheduled task is not runnable")
-            || message.starts_with("expected context switch")
-            || message.starts_with("expected random choice"))
-    {
-        FailureKind::ReplayMismatch
     } else {
         FailureKind::Panic
     }

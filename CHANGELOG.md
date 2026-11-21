@@ -27,6 +27,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   streams with faults and deadlines, wall-clock expiry, seeds in CI, seams for
   code the harness can't run, and choosing a scheduler. Its examples run as
   doctests.
+- `cargo-adamantium fix` rewrites a `rand` draw to `adamantium::random` only
+  when the draw is the argument of a standard `Duration` constructor, such as
+  retry jitter, since it can't tell whether another draw is a key or a token.
+  It names each draw it leaves, with the cryptographic randomness guidance.
+  A draw in a `Duration` no longer needs a `u64` suffix or type argument.
 
 ### Fixed
 
@@ -34,6 +39,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and fixture steps for reproducing the failure through the harness.
 - `cargo-adamantium` limits its replayable randomness recommendation to
   non-cryptographic draws and explains where to keep cryptographic randomness.
+- `adamantium::testing::shrink` reduces failures whose task is still
+  unwinding through modeled drops, such as a watch or an actor dropped after a
+  failed assertion. It used to leave the test thread reporting
+  `std::thread::panicking()`, and so did a `testing::replay` or
+  `testing::replay_corpus` that departed from its record at such a point. Later
+  harness calls in the same test then failed.
 
 ## [0.4.0] - 2026-11-21
 

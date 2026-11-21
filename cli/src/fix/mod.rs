@@ -70,8 +70,19 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
             continue;
         }
         let source = fs::read_to_string(&file)?;
+        let outcome = expressions::plan(&file, &source, &calls);
+        for refusal in &outcome.refusals {
+            eprintln!(
+                "{}:{}: `{}` stays: {}\n  Review {GUIDE}#{}",
+                file.strip_prefix(&root).unwrap_or(&file).display(),
+                refusal.line,
+                refusal.call.path(),
+                expressions::UNPROVED_DRAW,
+                expressions::DRAW_SECTION,
+            );
+        }
         let mut applied = false;
-        for suggestion in expressions::plan(&file, &source, &calls) {
+        for suggestion in outcome.edits {
             applied |= accept(&mut edits, suggestion);
         }
         if applied {
@@ -872,6 +883,7 @@ mod tests {
         ] {
             assert!(anchors.contains(kind.section()), "{}", kind.section());
         }
+        assert!(anchors.contains(expressions::DRAW_SECTION));
     }
 
     #[test]
