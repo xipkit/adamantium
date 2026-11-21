@@ -17,6 +17,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Adamantium's deterministic failure reports show the environment settings
   and fixture steps for reproducing the failure through the harness.
+- `cargo-adamantium` limits its replayable randomness recommendation to
+  non-cryptographic draws and explains where to keep cryptographic randomness.
 
 ## [0.4.0] - 2026-11-21
 
