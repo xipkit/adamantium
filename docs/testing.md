@@ -48,7 +48,7 @@ On failure, the harness prints a JSON replay record. It contains the scheduler m
 2. Load it with `Replay::load`.
 3. Pass it and the same factory to `testing::replay`.
 
-Single-record replay requires an exact schedule. Keep the scheduling behavior, dependencies, and fixture inputs compatible. `Replay::load` reports incompatible metadata by field. The current format is version 3, so regenerate records from earlier versions.
+Single-record replay requires an exact schedule. Keep the scheduling behavior, dependencies, and fixture inputs compatible. `Replay::load` reports incompatible metadata by field. The current format is version 4, so regenerate records from earlier versions.
 
 ## Run a regression corpus
 
