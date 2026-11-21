@@ -8,7 +8,8 @@
 use adamantium::{
     Actor, Cancellation, Channel, Reply, Tasks, TryReceiveError, Watch,
     testing::{
-        self, Config, CorpusError, DfsStatus, FailureKind, Replay, SchedulerMode, TimelineEventKind,
+        self, Config, CorpusError, DfsStatus, FailureKind, Replay, SchedulerMode, TimelineEvent,
+        TimelineEventKind,
     },
     time,
 };
@@ -180,26 +181,103 @@ async fn two_workers() {
 }
 
 #[test]
-fn dfs_distinguishes_a_complete_tree_from_the_iteration_limit() {
-    let dfs = |iterations| {
+fn dfs_fails_if_schedules_remain_at_the_iteration_limit() {
+    let dfs = |scheduler, iterations| {
         Config {
             iterations,
             ..config()
         }
-        .with_scheduler(SchedulerMode::Dfs)
+        .with_scheduler(scheduler)
     };
-    let last = testing::check(dfs(100), two_workers).unwrap();
-    assert!(last.iteration() > 1);
+    let last = testing::check(dfs(SchedulerMode::Dfs, 100), two_workers).unwrap();
+    assert!(last.iteration() > 2);
     assert!(last.iteration() < last.iterations());
     assert_eq!(last.dfs_status(), Some(DfsStatus::Complete));
-    let exact = testing::check(dfs(last.iteration()), two_workers).unwrap();
+    let exact = testing::check(dfs(SchedulerMode::Dfs, last.iteration()), two_workers).unwrap();
     assert_eq!(exact.iteration(), last.iteration());
     assert_eq!(exact.dfs_status(), Some(DfsStatus::Complete));
 
-    let limited = testing::check(dfs(last.iteration() - 1), two_workers).unwrap();
-    assert_eq!(limited.dfs_status(), Some(DfsStatus::IterationLimit));
-    assert_eq!(limited.iteration(), last.iteration() - 1);
-    assert_eq!(testing::replay(&limited, two_workers).unwrap(), limited);
+    let short = last.iteration() - 1;
+    let failure = testing::check(dfs(SchedulerMode::Dfs, short), two_workers).unwrap_err();
+    assert_eq!(failure.kind(), FailureKind::IterationLimit);
+    let record = failure.replay();
+    assert_eq!(record.iteration(), short);
+    assert_eq!(record.dfs_status(), Some(DfsStatus::IterationLimit));
+    // The record holds the last execution explored, which passed.
+    assert_eq!(testing::replay(record, two_workers).unwrap(), *record);
+    assert_eq!(testing::shrink(record, two_workers), None);
+    assert_eq!(
+        failure.to_string(),
+        format!(
+            "adamantium::testing IterationLimit: DFS ran {short} executions and schedules remain. \
+             The last execution took {} scheduling steps.\n\
+             DFS suits scenarios of a handful of steps. For this scenario, use SchedulerMode::Pct. \
+             To finish the search, raise Config::iterations. \
+             To stop after {short} executions without failing, use SchedulerMode::DfsPrefix.",
+            record.steps()
+        )
+    );
+    let one = testing::check(dfs(SchedulerMode::Dfs, 1), two_workers)
+        .unwrap_err()
+        .to_string();
+    assert!(one.contains("DFS ran 1 execution and"), "{one}");
+    assert!(one.contains("To stop after 1 execution without"), "{one}");
+
+    let prefix = testing::check(dfs(SchedulerMode::DfsPrefix, short), two_workers).unwrap();
+    assert_eq!(prefix.scheduler(), SchedulerMode::DfsPrefix);
+    assert_eq!(prefix.iteration(), short);
+    assert_eq!(prefix.dfs_status(), Some(DfsStatus::IterationLimit));
+    let steps = |record: &Replay| serde_json::to_value(record).map(|json| json["steps"].clone());
+    assert_eq!(steps(&prefix).unwrap(), steps(record).unwrap());
+    assert_eq!(testing::replay(&prefix, two_workers).unwrap(), prefix);
+    let path = replay_path("dfs-prefix");
+    prefix.save(&path).unwrap();
+    assert_eq!(Replay::load(&path).unwrap(), prefix);
+    std::fs::remove_file(path).unwrap();
+    let whole = testing::check(dfs(SchedulerMode::DfsPrefix, 100), two_workers).unwrap();
+    assert_eq!(whole.iteration(), last.iteration());
+    assert_eq!(whole.dfs_status(), Some(DfsStatus::Complete));
+}
+
+#[test]
+fn replay_steps_count_task_choices_and_random_draws() {
+    async fn drawing() {
+        two_workers().await;
+        let _draw = adamantium::random::u64();
+    }
+    let plain = testing::check(config(), two_workers).unwrap();
+    let choices: usize = testing::explain(&plain, two_workers)
+        .events()
+        .iter()
+        .filter_map(TimelineEvent::scheduled_steps)
+        .sum();
+    assert!(choices > 1);
+    assert_eq!(plain.steps(), choices);
+
+    let drawn = testing::check(config(), drawing).unwrap();
+    let choices: usize = testing::explain(&drawn, drawing)
+        .events()
+        .iter()
+        .filter_map(TimelineEvent::scheduled_steps)
+        .sum();
+    assert_eq!(drawn.steps(), choices + 1);
+}
+
+#[test]
+fn default_dfs_rejects_a_scenario_too_large_to_finish() {
+    let config = Config::default();
+    let failure =
+        testing::check(config.with_scheduler(SchedulerMode::Dfs), atomic_increment).unwrap_err();
+    assert_eq!(failure.kind(), FailureKind::IterationLimit);
+    assert_eq!(failure.replay().iteration(), config.iterations);
+
+    let prefix = testing::check(
+        config.with_scheduler(SchedulerMode::DfsPrefix),
+        atomic_increment,
+    )
+    .unwrap();
+    assert_eq!(prefix.iteration(), config.iterations);
+    assert_eq!(prefix.dfs_status(), Some(DfsStatus::IterationLimit));
 }
 
 #[test]
@@ -550,7 +628,7 @@ fn trace_files_round_trip_without_payloads_and_validate_versions() {
     old.insert("format".into(), 2.into());
     old.remove("scheduler");
     old.remove("iterations");
-    assert_invalid(old.into(), "format is 2, expected 4");
+    assert_invalid(old.into(), "format is 2, expected 5");
 
     let mut missing_epoch = record.as_object().unwrap().clone();
     missing_epoch.remove("wall_epoch");
@@ -570,7 +648,7 @@ fn trace_files_round_trip_without_payloads_and_validate_versions() {
         (
             "dfs_status",
             "complete".into(),
-            "dfs_status requires the DFS scheduler",
+            "dfs_status requires a DFS scheduler",
         ),
         (
             "scheduler",
@@ -622,7 +700,7 @@ fn corpus_replays_saved_failures_and_identifies_the_first_error() {
     std::fs::write(second, "{\"format\":2}").unwrap();
     let error = testing::replay_corpus(&paths, factory).unwrap_err();
     assert!(matches!(error, CorpusError::Load { path, source }
-        if &path == second && source.to_string().contains("format is 2, expected 4")));
+        if &path == second && source.to_string().contains("format is 2, expected 5")));
     assert_eq!(visits.load(Ordering::Relaxed), 1);
     for path in paths {
         std::fs::remove_file(path).unwrap();
