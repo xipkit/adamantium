@@ -69,7 +69,7 @@ Atomics, and `OnceLock` and `LazyLock` statics, are allowed.
 
 ## Timeouts
 
-The rules do not allow `tokio::time::timeout`. When the time expires, it drops the future in the middle of an `await`.
+The rules do not allow `tokio::time::timeout` or `tokio::time::timeout_at`. When the time expires, they drop the future in the middle of an `await`.
 
 `race` with a timer (`time::sleep` or `time::sleep_until`) is also a timeout: when the timer wins, it drops the other future in the middle of an `await`.
 

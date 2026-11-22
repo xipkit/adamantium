@@ -32,6 +32,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   retry jitter, since it can't tell whether another draw is a key or a token.
   It names each draw it leaves, with the cryptographic randomness guidance.
   A draw in a `Duration` no longer needs a `u64` suffix or type argument.
+- `cargo-adamantium`: Default rules report `tokio::time::timeout_at`, which
+  drops its future when the deadline passes, as `tokio::time::timeout` does.
 
 ### Fixed
 

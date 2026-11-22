@@ -551,12 +551,20 @@ fn check_reports_uncontrolled_randomness_and_allows_owned_seeds() {
 
 #[test]
 fn check_reports_timeouts_and_allows_structured_deadlines() {
-    for finding in check_marked_rules("cancellation", false).unwrap() {
-        assert_eq!(
-            finding["message"], "use of a disallowed method `tokio::time::timeout`",
-            "{finding}"
-        );
-    }
+    let mut methods: Vec<String> = check_marked_rules("cancellation", false)
+        .unwrap()
+        .iter()
+        .map(|finding| finding["message"].as_str().unwrap().to_owned())
+        .collect();
+    methods.sort();
+    methods.dedup();
+    assert_eq!(
+        methods,
+        [
+            "use of a disallowed method `tokio::time::timeout_at`",
+            "use of a disallowed method `tokio::time::timeout`",
+        ]
+    );
 }
 
 #[test]

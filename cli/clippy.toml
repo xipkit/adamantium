@@ -44,6 +44,7 @@ disallowed-types = [
 
 disallowed-methods = [
   { path = "tokio::time::timeout", reason = "drops the future mid-await on expiry; use adamantium::Tasks::run_until with Cancellation and a deadline, or receive_until/send_until for channel operations", allow-invalid = true },
+  { path = "tokio::time::timeout_at", reason = "drops the future mid-await on expiry; use adamantium::Tasks::run_until with Cancellation and a deadline, or receive_until/send_until for channel operations", allow-invalid = true },
   # Tokio 1.44 and later use this in select! expansions with future branches.
   # Lint the helper until the scoped-allowance fix in rust-clippy#17862 reaches stable.
   { path = "tokio::macros::support::poll_budget_available", reason = "tokio::select! drops pending futures; use adamantium::first_ok for the first success, Tasks::run_until with Cancellation for scoped work, or receive_until/send_until for channel operations", allow-invalid = true },

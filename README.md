@@ -169,7 +169,7 @@ Code that follows the rules has these properties:
 | No queue grows without a limit | Unbounded channels are not allowed. Use `Channel`. For a cache or table inside an `Actor`, use `BoundedMap`. |
 | No channel drops messages | Tokio's `broadcast` channel is not allowed. Use `Topic`, or `Fanout` to disconnect a subscriber that falls behind. |
 | No worker thread is blocked | `std::thread::sleep`, `block_in_place`, and `spawn_blocking` are not allowed. Use `blocking`. |
-| No timeout drops a future in the middle of its work | `tokio::time::timeout` is not allowed. Use `Tasks::run_until` or the `_until` methods. |
+| No timeout drops a future in the middle of its work | `tokio::time::timeout` and `timeout_at` are not allowed. Use `Tasks::run_until` or the `_until` methods. |
 | Unstructured selection restricted | The rules report `futures::select!` and, on Tokio 1.44 or later, `tokio::select!` invocations with future branches. Use `first_ok`, `Tasks::run_until` with `Cancellation`, or `receive_until` and `send_until` for channel operations. |
 | No result or future is discarded by accident | A discard must be an explicit `drop`. |
 | No panic from indexing, `unwrap`, or `panic!` | These are not allowed outside tests. |
