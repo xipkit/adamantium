@@ -1,12 +1,14 @@
 use std::{convert::Infallible, future::ready, time::Duration};
 
 use adamantium::{Cancellation, Channel, ReceiveError, ScopeError, SendError, Tasks, time};
-use tokio::time::timeout as deadline;
+use tokio::time::{Instant, timeout as deadline, timeout_at as deadline_at};
 
-pub async fn timeouts() -> Result<u8, tokio::time::error::Elapsed> {
+pub async fn timeouts(at: Instant) -> Result<u8, tokio::time::error::Elapsed> {
     let first = tokio::time::timeout(Duration::from_secs(1), ready(1)).await?; // disallowed_methods
     let second = deadline(Duration::from_secs(1), ready(2)).await?; // disallowed_methods
-    Ok(first + second)
+    let third = tokio::time::timeout_at(at, ready(3)).await?; // disallowed_methods
+    let fourth = deadline_at(at, ready(4)).await?; // disallowed_methods
+    Ok(first + second + third + fourth)
 }
 
 pub async fn scoped_deadline() -> Result<u8, ScopeError<Infallible>> {
