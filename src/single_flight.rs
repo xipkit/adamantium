@@ -155,9 +155,9 @@ where
         F: FnOnce() -> Fut,
         Fut: Future<Output = T> + Send + 'static,
     {
-        let mut caller = self.join(key);
+        let (mut caller, created) = self.join(key);
         let mut held = None;
-        if caller.polling {
+        if created {
             let mut creating = Unwinding::arm(&mut caller);
             // Creating the operation is part of it, so a call it makes for
             // its own key is refused here too.
@@ -172,34 +172,33 @@ where
         poll_fn(move |cx| caller.poll(cx, &mut held, &mut waiter)).await
     }
 
-    fn join(&self, key: K) -> Caller<K, T> {
+    // Returns the caller and whether this call created the flight.
+    fn join(&self, key: K) -> (Caller<K, T>, bool) {
         let mut flights = self.shared.lock("SingleFlight::join");
-        if let Some(flight) = flights.get(&key) {
-            let flight = Arc::clone(flight);
-            if polling_here(&flight) {
-                drop(flights);
-                refuse_self_join();
+        let (flight, created) = match flights.get(&key) {
+            Some(flight) => {
+                let flight = Arc::clone(flight);
+                if polling_here(&flight) {
+                    drop(flights);
+                    refuse_self_join();
+                }
+                flight.lock("SingleFlight::join").callers += 1;
+                (flight, false)
             }
-            flight.lock("SingleFlight::join").callers += 1;
-            drop(flights);
-            return Caller {
-                shared: Arc::clone(&self.shared),
-                key,
-                flight,
-                polling: false,
-                done: false,
-            };
-        }
-        let flight = Arc::new(Flight::new(self.shared.world));
-        flights.insert(key.clone(), Arc::clone(&flight));
+            None => {
+                let flight = Arc::new(Flight::new(self.shared.world));
+                flights.insert(key.clone(), Arc::clone(&flight));
+                (flight, true)
+            }
+        };
         drop(flights);
-        Caller {
+        let caller = Caller {
             shared: Arc::clone(&self.shared),
             key,
             flight,
-            polling: true,
             done: false,
-        }
+        };
+        (caller, created)
     }
 }
 
@@ -284,7 +283,6 @@ struct Caller<K: Hash + Eq, T> {
     shared: Arc<Shared<K, T>>,
     key: K,
     flight: Arc<Flight<T>>,
-    polling: bool,
     done: bool,
 }
 
@@ -337,7 +335,6 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
                 Poll::Ready(output) => return Poll::Ready(self.finish(output)),
                 Poll::Pending => {
                     self.flight.lock("Caller::poll").stage = Stage::Idle(operation);
-                    self.polling = false;
                 }
             }
         }
@@ -359,10 +356,7 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
             }
             Stage::Idle(_) if self.flight.signal.woken.swap(false, Ordering::SeqCst) => {
                 match std::mem::replace(&mut state.stage, Stage::Polling) {
-                    Stage::Idle(operation) => {
-                        self.polling = true;
-                        Taken::Operation(operation)
-                    }
+                    Stage::Idle(operation) => Taken::Operation(operation),
                     other => {
                         state.stage = other;
                         Taken::Nothing
@@ -407,7 +401,6 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
         self.forget(&mut flights);
         drop(state);
         drop(flights);
-        self.polling = false;
         self.done = true;
         self.flight.signal.changed.notify_all();
         output.unwrap_or_else(Arc::unwrap_or_clone)
@@ -421,7 +414,6 @@ impl<K: Hash + Eq, T: Clone> Caller<K, T> {
         self.forget(&mut flights);
         drop(state);
         drop(flights);
-        self.polling = false;
         self.done = true;
         self.flight.signal.changed.notify_all();
     }
