@@ -192,7 +192,7 @@ let event = race((
 - The futures run inside `race`, on the task that awaits it. They can borrow from the caller, and they do not have to be `Send` or `'static`.
 - `race` needs no runtime. It works without the `tokio` feature.
 - `race` polls the futures in the order written. If two futures are ready at the same time, the earlier one wins.
-- When one future finishes, `race` drops the others at the `await` where they wait. Race only futures that lose nothing when dropped, such as a receive or a sleep.
+- When one future finishes, `race` drops the others at the `await` where they wait. Race only futures that lose nothing when dropped, such as a receive, a sleep, or `Signal::notified`.
 - To run work in parallel, or to keep the first success and ignore failures, use `first_ok`.
 
 ### `until`
@@ -201,7 +201,7 @@ With the `tokio` feature, `until(&cancellation, deadline, future)` waits for one
 
 - It returns `Ok(output)` if `future` finishes first, or `Err(UntilError::Cancelled)` / `Err(UntilError::DeadlineExceeded)` if shutdown wins.
 - As with `receive_until` and `Tasks::run_until`, a request already present wins over a ready future, and cancellation wins over an equally ready deadline.
-- When it stops early, `until` drops `future` at its current `await`. Pass only futures that lose nothing when dropped, such as `Channel::receive`, `Receiver::receive`, `ReplyReceiver::receive`, `Reply::closed`, `Feed::receive`, `Watcher::receive`, `Watcher::wait_for`, `time::sleep`, `time::sleep_until`, or `Cancellation::cancelled`. Do not pass `send` futures (use `send_until`).
+- When it stops early, `until` drops `future` at its current `await`. Pass only futures that lose nothing when dropped, such as `Channel::receive`, `Receiver::receive`, `ReplyReceiver::receive`, `Reply::closed`, `Feed::receive`, `Watcher::receive`, `Watcher::wait_for`, `Signal::notified`, `time::sleep`, `time::sleep_until`, or `Cancellation::cancelled`. Do not pass `send` futures (use `send_until`).
 
 ## Actors
 
@@ -488,6 +488,40 @@ Use `Topic` when the sender should wait for a slow subscriber instead, and `Watc
 - The watch closes when the last clone is dropped or when `close()` is called. Each watcher then receives the last value, if it has not seen it, and then `None`.
 
 `Reply` and `Watch` both work with `default-features = false`. Both receivers also have `try_receive()`. With the `tokio` feature, both have `receive_until(&cancellation, deadline)`, which follows the rules of the channel.
+
+## Signal
+
+`Signal` tells a task that there is something to do, such as work in a queue it reads. It holds one pending notification, and its clones share it.
+
+- `notify()` makes a notification pending and never waits. A notification sent while one is pending merges into it.
+- `notified()` waits for a pending notification and takes it. Only one call takes each notification: one that is waiting, or one that starts later.
+- A `notify` that finds nothing pending wakes one waiting call. That call competes with any call that starts before it runs. Waiting calls are served in no particular order.
+- Several notifications can arrive as one, so after each wakeup, handle everything that has arrived, not one item.
+- Dropping `notified()` loses nothing, so it is safe in `race` and `until`. A wakeup it received passes to another waiting call.
+- Nothing closes a signal.
+
+```rust
+use adamantium::{Actor, Signal};
+
+let jobs = Actor::new(Vec::new());
+let arrived = Signal::new();
+
+// A producer:
+jobs.with(|jobs| jobs.push(job));
+arrived.notify();
+
+// The worker:
+loop {
+    arrived.notified().await;
+    for job in jobs.with(std::mem::take) {
+        handle(job).await;
+    }
+}
+```
+
+Tokio's `Notify` delivers differently. `notify_one` hands its permit to the task that has waited longest, so `k` calls wake `k` tasks, and `notify_waiters` wakes every task waiting at that moment and keeps nothing for later. When each notification must cause its own wakeup, send on a `Channel`. When every waiting task must see a change, use `Watch`. For a one-time event that stays set, use `Cancellation`.
+
+`Signal` works with `default-features = false`. With the `tokio` feature, `notified_until(&cancellation, deadline)` follows the rules of the channel. It returns `UntilError::Cancelled` or `UntilError::DeadlineExceeded` when it ends early, and leaves the notification pending.
 
 ## Shutdown and cancellation
 

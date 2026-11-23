@@ -20,6 +20,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   without waiting.
 - `adamantium::testing::Replay::steps` counts the scheduling steps in a
   recorded execution, which shows how large a scenario is.
+- `adamantium::Signal` is a coalescing wakeup. `notify` never waits, and
+  notifications sent while one is pending merge into it. `notified` takes a
+  pending notification and is safe to drop in `race` and `until`, and
+  `notified_until` takes a `Cancellation` and a deadline. It works without
+  Tokio.
 
 ### Changed
 
