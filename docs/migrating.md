@@ -25,7 +25,7 @@ changes behavior in a way to check.
 | Blocking I/O while a lock is held | The I/O, then record | No |
 | Two locks held at once | One actor, or one after the other | No |
 | Two semaphore permits held at once | A `KeyedLimit` inside a `Limit`, or one after the other | No |
-| `Semaphore::acquire_many(n)` | `Limit::weighted(n)?.run(work)` | Mostly |
+| `Semaphore::acquire_many(n)` | `Limit::weighted(n)?.run(work)`, where a weight of zero takes one place | Mostly |
 | `tokio::task::spawn_blocking(f).await.unwrap()` | `blocking(f).await` | Yes |
 | `std::thread::spawn` | `blocking` | Mostly |
 | `tokio::spawn` with the handle awaited in the same function | `Tasks::run` | Mostly |
@@ -506,6 +506,7 @@ handle whose calls each take `n` places, for as long as their work runs.
   so small calls can't starve a large one. A call waits behind every call
   that started waiting before it, even while places are free.
 - `weighted` takes a `usize`, so the `u32` conversion goes away.
+- Tokio's `acquire_many(0)` returns at once. A weight of zero takes one place.
 - A weight above the limit's total returns `Overweight` at once. Tokio would
   wait for `add_permits` to make room. A `Limit` doesn't grow, so such a call
   could never run.

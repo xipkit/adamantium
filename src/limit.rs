@@ -67,9 +67,12 @@ pub struct Limit {
 
 /// Calls under a [`Limit`] that each take the same number of places.
 ///
-/// [`Limit::weighted`] checks the weight once, so a call made here never
-/// fails for asking too much. The handle is `Copy`, to make as many calls
-/// as you like.
+/// The handle holds nothing: it takes no place and no position in the
+/// queue. A call's position is set when its `run` or `run_until` is first
+/// polled. [`Limit::weighted`] checks the weight once, so a call made here
+/// never fails for asking too much. The handle is `Copy`, to make as many
+/// calls as you like.
+#[must_use = "a Weighted handle takes no places until one of its calls runs"]
 #[derive(Clone, Copy, Debug)]
 pub struct Weighted<'a> {
     limit: &'a Limit,
@@ -196,7 +199,13 @@ impl Limit {
     /// Calls that each take `places` places at once. Zero is treated as one.
     ///
     /// Returns [`Overweight`] without waiting when `places` is above the
-    /// limit's total, since no such call could ever run.
+    /// limit's total, since no such call could ever run. The handle takes no
+    /// place and no position in the queue until one of its calls is polled.
+    ///
+    /// The weight is checked here, before the nesting check that runs when a
+    /// call is first polled. Inside work that holds a place, a weight above
+    /// the total returns [`Overweight`], and a call that fits panics when
+    /// polled, as [`run`](Self::run) does.
     pub fn weighted(&self, places: usize) -> Result<Weighted<'_>, Overweight> {
         let places = places.max(1);
         if places > self.places.limit {
