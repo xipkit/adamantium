@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    ops::Range,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -28,29 +29,37 @@ struct Edit {
     replacement: String,
 }
 
+impl Edit {
+    fn new(file: &Path, range: Range<usize>, replacement: String) -> Self {
+        Self {
+            file: file.to_path_buf(),
+            start: range.start,
+            end: range.end,
+            replacement,
+        }
+    }
+}
+
 struct StateSource {
     file: PathBuf,
     source: String,
     locks: state::LockSpans,
 }
 
-/// Applies compiler suggestions and safe migration rewrites, or prints a diff.
-pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<ExitCode> {
-    let root = manifest::root(path)?.canonicalize()?;
-    let mut diagnostics = Vec::new();
-    let report = check::check_with_suggestions(&root, args, false, strict, Some(&mut diagnostics))?;
-    if report.status == check::Status::Error {
-        for error in report.errors {
-            eprintln!("{}", error.message);
-        }
-        bail!("project did not build; no fixes applied");
-    }
+/// The import paths each file's rewrites may have left unused.
+type Imports = BTreeMap<PathBuf, Vec<&'static [&'static str]>>;
+
+fn relative<'a>(file: &'a Path, root: &Path) -> &'a Path {
+    file.strip_prefix(root).unwrap_or(file)
+}
+
+fn plan_edits(diagnostics: &[Value], root: &Path) -> Result<Vec<Edit>> {
     let mut edits = Vec::new();
     let mut fallback = Vec::new();
-    let mut imports: BTreeMap<PathBuf, Vec<&[&str]>> = BTreeMap::new();
-    for diagnostic in &diagnostics {
+    let mut imports = Imports::new();
+    for diagnostic in diagnostics {
         let mut suggestions = Vec::new();
-        machine_suggestions(diagnostic, &root, &mut suggestions);
+        machine_suggestions(diagnostic, root, &mut suggestions);
         if suggestions.is_empty() {
             fallback.push(diagnostic);
         }
@@ -58,10 +67,10 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
             accept(&mut edits, suggestion);
         }
     }
-    for (file, mut calls) in expressions::callees(fallback, &root) {
+    for (file, mut calls) in expressions::callees(fallback, root) {
         for api in [Api::Core, Api::Tokio] {
             if calls.values().any(|call| call.api() == api)
-                && !migration_available(&file, &root, api)?
+                && !migration_available(&file, root, api)?
             {
                 calls.retain(|_, call| call.api() != api);
             }
@@ -74,7 +83,7 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
         for refusal in &outcome.refusals {
             eprintln!(
                 "{}:{}: `{}` stays: {}\n  Review {GUIDE}#{}",
-                file.strip_prefix(&root).unwrap_or(&file).display(),
+                relative(&file, root).display(),
                 refusal.line,
                 refusal.call.path(),
                 expressions::UNPROVED_DRAW,
@@ -93,11 +102,11 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
         }
     }
     let mut packages: BTreeMap<PathBuf, Vec<StateSource>> = BTreeMap::new();
-    for (file, locks) in locks(&diagnostics, &root) {
-        if !migration_available(&file, &root, Api::Core)? {
+    for (file, locks) in locks(diagnostics, root) {
+        if !migration_available(&file, root, Api::Core)? {
             continue;
         }
-        let Some(package) = package(&file, &root) else {
+        let Some(package) = package(&file, root) else {
             continue;
         };
         let source = fs::read_to_string(&file)?;
@@ -117,7 +126,7 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
             for refusal in &outcome.refusals {
                 eprintln!(
                     "{}:{}: `{}` stays an `{}`: {}\n  Review {GUIDE}#{}",
-                    file.strip_prefix(&root).unwrap_or(&file).display(),
+                    relative(&file, root).display(),
                     refusal.line,
                     refusal.name,
                     refusal.kind.description(),
@@ -128,24 +137,18 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
                     refusal.reason.section()
                 );
             }
-            if outcome.edits.is_empty() {
-                continue;
-            }
-            if accept(&mut edits, outcome.edits) {
-                imports
-                    .entry(file)
-                    .or_default()
-                    .extend_from_slice(state::IMPORTS);
-            } else {
-                eprintln!(
-                    "adamantium: {}: shared-state rewrites overlap another fix; run fix again once it applies",
-                    file.display()
-                );
-            }
+            accept_rewrites(
+                &mut edits,
+                &mut imports,
+                file,
+                outcome.edits,
+                state::IMPORTS,
+                "shared-state",
+            );
         }
     }
-    for (file, constructors) in channels(&diagnostics, &root) {
-        if !migration_available(&file, &root, Api::Core)? {
+    for (file, constructors) in channels(diagnostics, root) {
+        if !migration_available(&file, root, Api::Core)? {
             continue;
         }
         let source = fs::read_to_string(&file)?;
@@ -153,7 +156,7 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
         for refusal in &outcome.refusals {
             eprintln!(
                 "{}:{}: `{}` stays {}: {}\n  Review {GUIDE}#{}",
-                file.strip_prefix(&root).unwrap_or(&file).display(),
+                relative(&file, root).display(),
                 refusal.line,
                 refusal.name,
                 refusal.kind.describe(),
@@ -161,20 +164,14 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
                 refusal.kind.section()
             );
         }
-        if outcome.edits.is_empty() {
-            continue;
-        }
-        if accept(&mut edits, outcome.edits) {
-            imports
-                .entry(file)
-                .or_default()
-                .extend_from_slice(channels::IMPORTS);
-        } else {
-            eprintln!(
-                "adamantium: {}: channel rewrites overlap another fix; run fix again once it applies",
-                file.display()
-            );
-        }
+        accept_rewrites(
+            &mut edits,
+            &mut imports,
+            file,
+            outcome.edits,
+            channels::IMPORTS,
+            "channel",
+        );
     }
     for (file, paths) in imports {
         let rewrites: Vec<Edit> = edits
@@ -193,6 +190,31 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
             );
         }
     }
+    Ok(edits)
+}
+
+fn accept_rewrites(
+    edits: &mut Vec<Edit>,
+    imports: &mut Imports,
+    file: PathBuf,
+    rewrites: Vec<Edit>,
+    paths: &'static [&'static [&'static str]],
+    what: &str,
+) {
+    if rewrites.is_empty() {
+        return;
+    }
+    if accept(edits, rewrites) {
+        imports.entry(file).or_default().extend_from_slice(paths);
+    } else {
+        eprintln!(
+            "adamantium: {}: {what} rewrites overlap another fix; run fix again once it applies",
+            file.display()
+        );
+    }
+}
+
+fn changes(mut edits: Vec<Edit>) -> Result<Vec<Change>> {
     edits.sort();
     edits.dedup();
     let mut files: BTreeMap<PathBuf, Vec<Edit>> = BTreeMap::new();
@@ -217,13 +239,24 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
             });
         }
     }
+    Ok(changed)
+}
+
+/// Applies compiler suggestions and safe migration rewrites, or prints a diff.
+pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<ExitCode> {
+    let root = manifest::root(path)?.canonicalize()?;
+    let mut diagnostics = Vec::new();
+    let report = check::check_with_suggestions(&root, args, false, strict, Some(&mut diagnostics))?;
+    if report.status == check::Status::Error {
+        for error in report.errors {
+            eprintln!("{}", error.message);
+        }
+        bail!("project did not build; no fixes applied");
+    }
+    let changed = changes(plan_edits(&diagnostics, &root)?)?;
     if dry_run {
         for change in &changed {
-            diff(
-                change.file.strip_prefix(&root).unwrap_or(&change.file),
-                &change.before,
-                &change.after,
-            );
+            diff(relative(&change.file, &root), &change.before, &change.after);
         }
     } else {
         for change in &changed {
@@ -475,47 +508,17 @@ fn locks(diagnostics: &[Value], root: &Path) -> BTreeMap<PathBuf, state::LockSpa
     files
 }
 
-fn channels(
-    diagnostics: &[Value],
-    root: &Path,
-) -> BTreeMap<PathBuf, BTreeMap<usize, (usize, channels::Kind)>> {
-    let mut files: BTreeMap<PathBuf, BTreeMap<usize, (usize, channels::Kind)>> = BTreeMap::new();
+fn channels(diagnostics: &[Value], root: &Path) -> BTreeMap<PathBuf, channels::Constructors> {
+    let mut files: BTreeMap<PathBuf, channels::Constructors> = BTreeMap::new();
     for diagnostic in diagnostics {
-        let message = diagnostic["message"].as_str().unwrap_or("");
-        let kind = if message.contains("`tokio::sync::oneshot::channel`") {
-            channels::Kind::Oneshot
-        } else if message.contains("`tokio::sync::watch::channel`") {
-            channels::Kind::Watch
-        } else if message.contains("`tokio::sync::mpsc::channel`") {
-            channels::Kind::Mpsc
-        } else {
-            continue;
+        let kind = match disallowed_path(diagnostic, "clippy::disallowed_methods") {
+            Some("tokio::sync::oneshot::channel") => channels::Kind::Oneshot,
+            Some("tokio::sync::watch::channel") => channels::Kind::Watch,
+            Some("tokio::sync::mpsc::channel") => channels::Kind::Mpsc,
+            _ => continue,
         };
-        if diagnostic
-            .get("code")
-            .and_then(|code| code.get("code"))
-            .and_then(Value::as_str)
-            != Some("clippy::disallowed_methods")
-        {
-            continue;
-        }
-        for span in diagnostic["spans"].as_array().into_iter().flatten() {
-            if span["is_primary"] != true || !span["expansion"].is_null() {
-                continue;
-            }
-            let range = span["byte_start"]
-                .as_u64()
-                .zip(span["byte_end"].as_u64())
-                .and_then(|(start, end)| {
-                    Some((usize::try_from(start).ok()?, usize::try_from(end).ok()?))
-                });
-            if let Some(file) = span["file_name"]
-                .as_str()
-                .and_then(|name| source_file(root, name))
-                && let Some((start, end)) = range
-            {
-                files.entry(file).or_default().insert(start, (end, kind));
-            }
+        for (file, (start, end)) in primary_locations(diagnostic, root) {
+            files.entry(file).or_default().insert(start, (end, kind));
         }
     }
     files

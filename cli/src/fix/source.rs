@@ -6,7 +6,7 @@ use std::{
 };
 
 use proc_macro2::{Span, TokenStream, TokenTree};
-use syn::{ItemUse, Lit, UseTree, ext::IdentExt, spanned::Spanned, visit::Visit};
+use syn::{Item, ItemUse, Lit, Pat, UseTree, ext::IdentExt, spanned::Spanned, visit::Visit};
 
 use super::Edit;
 
@@ -40,7 +40,7 @@ pub(super) fn coalesce(mut edits: Vec<Edit>) -> Vec<Edit> {
 
 pub(super) struct Text<'a> {
     pub(super) source: &'a str,
-    pub(super) prefix: usize,
+    prefix: usize,
 }
 
 impl<'a> Text<'a> {
@@ -60,6 +60,16 @@ impl<'a> Text<'a> {
 
     pub(super) fn of<T: Spanned + ?Sized>(&self, node: &T) -> Option<Range<usize>> {
         self.range(node.span())
+    }
+
+    /// The source text of `node`.
+    pub(super) fn slice<T: Spanned + ?Sized>(&self, node: &T) -> Option<&'a str> {
+        self.source.get(self.of(node)?)
+    }
+
+    /// Whether `expr` starts with an attribute.
+    pub(super) fn attributed(&self, expr: &syn::Expr) -> bool {
+        self.slice(expr).is_some_and(|text| text.starts_with('#'))
     }
 
     pub(super) fn get(&self, range: Range<usize>) -> Option<&str> {
@@ -118,8 +128,33 @@ fn is_identifier(name: &str) -> bool {
         && name != "_"
 }
 
+/// Whether `op` is a compound assignment such as `+=`.
+pub(super) fn is_assignment(op: &syn::BinOp) -> bool {
+    matches!(
+        op,
+        syn::BinOp::AddAssign(_)
+            | syn::BinOp::SubAssign(_)
+            | syn::BinOp::MulAssign(_)
+            | syn::BinOp::DivAssign(_)
+            | syn::BinOp::RemAssign(_)
+            | syn::BinOp::BitXorAssign(_)
+            | syn::BinOp::BitAndAssign(_)
+            | syn::BinOp::BitOrAssign(_)
+            | syn::BinOp::ShlAssign(_)
+            | syn::BinOp::ShrAssign(_)
+    )
+}
+
 pub(super) fn bare(ident: &proc_macro2::Ident) -> String {
     ident.unraw().to_string()
+}
+
+/// The value of `literal` when it is a string literal.
+pub(super) fn string_literal(literal: &proc_macro2::Literal) -> Option<String> {
+    match syn::parse2::<Lit>(TokenTree::Literal(literal.clone()).into()) {
+        Ok(Lit::Str(string)) => Some(string.value()),
+        _ => None,
+    }
 }
 
 pub(super) fn names_in(text: &str, name: &str) -> Option<usize> {
@@ -129,15 +164,12 @@ pub(super) fn names_in(text: &str, name: &str) -> Option<usize> {
             .map(|token| match token {
                 TokenTree::Group(group) => count(group.stream(), name),
                 TokenTree::Ident(ident) => usize::from(bare(&ident) == name),
-                TokenTree::Literal(literal) => {
-                    match syn::parse2::<Lit>(TokenTree::Literal(literal).into()) {
-                        Ok(Lit::Str(string)) => format_captures(&string.value())
-                            .iter()
-                            .filter(|capture| *capture == name)
-                            .count(),
-                        _ => 0,
-                    }
-                }
+                TokenTree::Literal(literal) => string_literal(&literal).map_or(0, |string| {
+                    format_captures(&string)
+                        .iter()
+                        .filter(|capture| *capture == name)
+                        .count()
+                }),
                 TokenTree::Punct(_) => 0,
             })
             .sum()
@@ -161,6 +193,13 @@ pub(super) fn prune_imports(
     }
     let text = Text::new(source, &tree);
     coalesce(Imports::prune(&text, file, &tree, edits, paths))
+}
+
+/// What pruning leaves of a use tree.
+enum Pruned {
+    Removed,
+    Unchanged,
+    Rewritten(String),
 }
 
 struct Imports<'t> {
@@ -208,9 +247,9 @@ impl<'t> Imports<'t> {
                 continue;
             }
             let edit = match imports.rewrite(&item.tree, &removed) {
-                Some(Some(tree)) => text.of(&item.tree).map(|range| (range, tree)),
-                Some(None) => None,
-                None => imports.line(item).map(|range| (range, String::new())),
+                Pruned::Rewritten(tree) => text.of(&item.tree).map(|range| (range, tree)),
+                Pruned::Unchanged => None,
+                Pruned::Removed => imports.line(item).map(|range| (range, String::new())),
             };
             match edit {
                 Some((range, replacement)) if replacement.is_empty() => lines.push(range),
@@ -232,12 +271,7 @@ impl<'t> Imports<'t> {
         }
         pruned
             .into_iter()
-            .map(|(range, replacement)| Edit {
-                file: file.to_path_buf(),
-                start: range.start,
-                end: range.end,
-                replacement,
-            })
+            .map(|(range, replacement)| Edit::new(file, range, replacement))
             .collect()
     }
 
@@ -344,35 +378,39 @@ impl<'t> Imports<'t> {
         }
     }
 
-    fn rewrite(&self, tree: &UseTree, removed: &BTreeSet<usize>) -> Option<Option<String>> {
+    fn rewrite(&self, tree: &UseTree, removed: &BTreeSet<usize>) -> Pruned {
         match tree {
-            UseTree::Path(path) => match self.rewrite(&path.tree, removed)? {
-                Some(rest) => Some(Some(format!("{}::{rest}", path.ident))),
-                None => Some(None),
+            UseTree::Path(path) => match self.rewrite(&path.tree, removed) {
+                Pruned::Rewritten(rest) => Pruned::Rewritten(format!("{}::{rest}", path.ident)),
+                whole => whole,
             },
-            UseTree::Name(_) | UseTree::Rename(_) => {
-                let start = self.text.of(tree)?.start;
-                (!removed.contains(&start)).then_some(None)
-            }
-            UseTree::Glob(_) => Some(None),
+            // A leaf whose text can't be found counts as removed.
+            UseTree::Name(_) | UseTree::Rename(_) => match self.text.of(tree) {
+                Some(leaf) if !removed.contains(&leaf.start) => Pruned::Unchanged,
+                _ => Pruned::Removed,
+            },
+            UseTree::Glob(_) => Pruned::Unchanged,
             UseTree::Group(group) => {
                 let mut kept = Vec::new();
                 let mut changed = false;
                 for tree in &group.items {
                     match self.rewrite(tree, removed) {
-                        None => changed = true,
-                        Some(None) => kept.push(self.text.get(self.text.of(tree)?)?.to_owned()),
-                        Some(Some(text)) => {
+                        Pruned::Removed => changed = true,
+                        Pruned::Unchanged => match self.text.slice(tree) {
+                            Some(text) => kept.push(text.to_owned()),
+                            None => return Pruned::Removed,
+                        },
+                        Pruned::Rewritten(text) => {
                             changed = true;
                             kept.push(text);
                         }
                     }
                 }
                 match kept.as_slice() {
-                    _ if !changed => Some(None),
-                    [] => None,
-                    [only] if !only.starts_with("self") => Some(Some(only.clone())),
-                    kept => Some(Some(format!("{{{}}}", kept.join(", ")))),
+                    _ if !changed => Pruned::Unchanged,
+                    [] => Pruned::Removed,
+                    [only] if !only.starts_with("self") => Pruned::Rewritten(only.clone()),
+                    kept => Pruned::Rewritten(format!("{{{}}}", kept.join(", "))),
                 }
             }
         }
@@ -424,5 +462,76 @@ struct Uses<'ast>(Vec<&'ast ItemUse>);
 impl<'ast> Visit<'ast> for Uses<'ast> {
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         self.0.push(item);
+    }
+}
+
+pub(super) fn known_macro(name: &str) -> Option<usize> {
+    match name {
+        "format" | "print" | "println" | "eprint" | "eprintln" | "panic" => Some(0),
+        "assert" | "debug_assert" | "write" | "writeln" => Some(1),
+        "assert_eq" | "assert_ne" | "debug_assert_eq" | "debug_assert_ne" => Some(2),
+        _ => None,
+    }
+}
+
+pub(super) fn item_attributes(item: &Item) -> &[syn::Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+pub(super) fn pattern_names(pat: &Pat, names: &mut Vec<String>) {
+    match pat {
+        Pat::Ident(ident) => {
+            names.push(bare(&ident.ident));
+            if let Some((_, subpat)) = &ident.subpat {
+                pattern_names(subpat, names);
+            }
+        }
+        Pat::Guard(guard) => pattern_names(&guard.pat, names),
+        Pat::Or(or) => {
+            if let Some(first) = or.cases.first() {
+                pattern_names(first, names);
+            }
+        }
+        Pat::Paren(paren) => pattern_names(&paren.pat, names),
+        Pat::Reference(reference) => pattern_names(&reference.pat, names),
+        Pat::Slice(slice) => slice.elems.iter().for_each(|pat| pattern_names(pat, names)),
+        Pat::Struct(fields) => fields
+            .fields
+            .iter()
+            .for_each(|field| pattern_names(&field.pat, names)),
+        Pat::Tuple(tuple) => tuple.elems.iter().for_each(|pat| pattern_names(pat, names)),
+        Pat::TupleStruct(tuple) => tuple.elems.iter().for_each(|pat| pattern_names(pat, names)),
+        Pat::Type(typed) => pattern_names(&typed.pat, names),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_captures_name_variables() {
+        assert_eq!(
+            format_captures("{a} {{b}} {c:?} {:>width$} {d:.prec$} {0}"),
+            ["a", "c", "width", "d", "prec"]
+        );
     }
 }
