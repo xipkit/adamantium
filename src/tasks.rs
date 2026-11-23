@@ -389,29 +389,25 @@ impl<E> Ledger<E> {
 
 struct Receipt(u64);
 
-type Shared<V> = Arc<Lock<V>>;
+type Locked<V> = Arc<Lock<V>>;
 
-fn shared<V>(value: V) -> Shared<V> {
+fn locked<V>(value: V) -> Locked<V> {
     Arc::new(Lock::new(value))
-}
-
-fn lock<'a, V>(shared: &'a Shared<V>, operation: &'static str) -> Guard<'a, V> {
-    shared.lock(operation)
 }
 
 #[allow(
     clippy::expect_used,
     reason = "each registered task starts at most once"
 )]
-fn take_work<W>(task: Shared<Option<W>>) -> W {
-    lock(&task, "Tasks::take_work")
+fn take_work<W>(task: Locked<Option<W>>) -> W {
+    task.lock("Tasks::take_work")
         .take()
         .expect("task starts once")
 }
 
 // If runtime cancellation left the caller holding the last reference, preserve
 // the task's destructor panic just as the runtime would have done.
-fn release_work<E, W>(ledger: &Ledger<E>, retained: Shared<Option<W>>) {
+fn release_work<E, W>(ledger: &Ledger<E>, retained: Locked<Option<W>>) {
     if let Err(payload) = panic::catch_unwind(panic::AssertUnwindSafe(|| drop(retained))) {
         ledger.keep_panic(JoinError::Panic(payload));
     }
@@ -426,26 +422,26 @@ enum Submitter {
 }
 
 struct Registering<'a> {
-    set: &'a Shared<JoinSet>,
+    set: &'a Locked<JoinSet>,
     admitted: bool,
 }
 
 impl Drop for Registering<'_> {
     fn drop(&mut self) {
         if self.admitted {
-            lock(self.set, "JoinSet::finish_spawn").finish_spawn();
+            self.set.lock("JoinSet::finish_spawn").finish_spawn();
         }
     }
 }
 
-async fn join_next(set: &Shared<JoinSet>) -> Option<Result<(), JoinError>> {
-    poll_fn(|cx| lock(set, "JoinSet::poll_join_next").poll_join_next(cx)).await
+async fn join_next(set: &Locked<JoinSet>) -> Option<Result<(), JoinError>> {
+    poll_fn(|cx| set.lock("JoinSet::poll_join_next").poll_join_next(cx)).await
 }
 
-async fn reap<E>(set: &Shared<JoinSet>, ledger: &Ledger<E>) {
+async fn reap<E>(set: &Locked<JoinSet>, ledger: &Ledger<E>) {
     poll_fn(|cx| {
         loop {
-            let next = lock(set, "JoinSet::poll_join_next").poll_join_next(cx);
+            let next = set.lock("JoinSet::poll_join_next").poll_join_next(cx);
             match next {
                 Poll::Ready(Some(result)) => {
                     if ledger.reaped(result) {
@@ -460,7 +456,7 @@ async fn reap<E>(set: &Shared<JoinSet>, ledger: &Ledger<E>) {
     .await
 }
 
-async fn stopped<E>(set: &Shared<JoinSet>, ledger: &Ledger<E>) {
+async fn stopped<E>(set: &Locked<JoinSet>, ledger: &Ledger<E>) {
     let must_stop = async {
         loop {
             if ledger.lock().must_stop() {
@@ -555,11 +551,11 @@ pub struct Tasks<E> {
 /// Only `Tasks` can join, cancel, or claim task results with [`Tasks::value`].
 /// This handle does not limit concurrency or provide sibling-to-sibling waits.
 pub struct Spawner<E> {
-    set: Shared<JoinSet>,
+    set: Locked<JoinSet>,
     world: World,
     ledger: Arc<Ledger<E>>,
     #[cfg(feature = "tracing")]
-    named: Shared<trace::Running>,
+    named: Locked<trace::Running>,
 }
 
 /// The scope has closed admission and the submitted work was not started.
@@ -661,7 +657,7 @@ impl<E: Send + 'static> Spawner<E> {
         &self,
         submitter: Submitter,
         work: W,
-        submit: impl FnOnce(&mut JoinSet, Shared<Option<W>>),
+        submit: impl FnOnce(&mut JoinSet, Locked<Option<W>>),
     ) -> Result<(), SpawnError> {
         self.world.check();
         // Keep registration alive until any synchronously cancelled work
@@ -670,9 +666,9 @@ impl<E: Send + 'static> Spawner<E> {
             set: &self.set,
             admitted: false,
         };
-        let retained = shared(Some(work));
+        let retained = locked(Some(work));
         {
-            let mut set = lock(&self.set, "Tasks::submit");
+            let mut set = self.set.lock("Tasks::submit");
             // The owner already reaped and may still submit after observing
             // a panic, so it can drain the new work before resuming the panic.
             if matches!(submitter, Submitter::Handle) {
@@ -892,11 +888,11 @@ impl<E: Send + 'static> Tasks<E> {
     pub fn new() -> Self {
         Self {
             spawner: Spawner {
-                set: shared(JoinSet::new()),
+                set: locked(JoinSet::new()),
                 world: World::current(),
                 ledger: Arc::new(Ledger::new()),
                 #[cfg(feature = "tracing")]
-                named: shared(trace::Running::default()),
+                named: locked(trace::Running::default()),
             },
             cancellation: None,
         }
@@ -1310,7 +1306,7 @@ impl<E: Send + 'static> Tasks<E> {
                 aborted = true;
             }
             let next = poll_fn(|cx| {
-                let mut set = lock(&self.spawner.set, "Tasks::settle");
+                let mut set = self.spawner.set.lock("Tasks::settle");
                 let next = set.poll_join_next(cx);
                 if matches!(next, Poll::Ready(None)) {
                     set.close();
@@ -1385,7 +1381,7 @@ impl<E: Send + 'static> Tasks<E> {
     /// up work not reflected here; joining waits for those calls as well.
     pub fn len(&self) -> usize {
         self.spawner.world.check();
-        lock(&self.spawner.set, "Tasks::unfinished").unfinished()
+        self.spawner.set.lock("Tasks::unfinished").unfinished()
     }
 
     /// Whether every spawned task has finished, with [`len`](Self::len)'s
@@ -1396,7 +1392,11 @@ impl<E: Send + 'static> Tasks<E> {
 
     fn reap(&mut self) {
         loop {
-            let next = lock(&self.spawner.set, "JoinSet::try_join_next").try_join_next();
+            let next = self
+                .spawner
+                .set
+                .lock("JoinSet::try_join_next")
+                .try_join_next();
             let Some(result) = next else {
                 break;
             };
@@ -1443,7 +1443,7 @@ impl<E: Send + 'static> Tasks<E> {
     }
 
     fn abort(&mut self) {
-        lock(&self.spawner.set, "Tasks::abort").abort_all();
+        self.spawner.set.lock("Tasks::abort").abort_all();
         if let Some(cancellation) = &self.cancellation {
             cancellation.cancel();
         }
@@ -1466,7 +1466,7 @@ impl<E> Drop for Tasks<E> {
         if self.spawner.world.unwinding_in_foreign_world() {
             return;
         }
-        lock(&self.spawner.set, "Tasks::drop").abort_all();
+        self.spawner.set.lock("Tasks::drop").abort_all();
         if let Some(cancellation) = &self.cancellation {
             cancellation.request();
         }
@@ -1483,7 +1483,7 @@ impl<E> fmt::Debug for Tasks<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.spawner.world.check();
         f.debug_struct("Tasks")
-            .field("len", &lock(&self.spawner.set, "Tasks::fmt").len())
+            .field("len", &self.spawner.set.lock("Tasks::fmt").len())
             .finish()
     }
 }
@@ -1551,12 +1551,12 @@ where
         let mut tasks = Tasks::new();
         // Tasks report here rather than through handles, so items that finish
         // behind a slow one leave only their results behind.
-        let finished = shared(Vec::new());
+        let finished = locked(Vec::new());
         let mut started = 0;
         // Fill the window, then wait for a place to open. A task records its
         // error just before it ends, so this stops before taking another item.
         while !tasks.failed() {
-            if lock(&tasks.spawner.set, "JoinSet::len").len() < limit
+            if tasks.spawner.set.lock("JoinSet::len").len() < limit
                 && let Some(item) = items.next()
             {
                 let index = started;
@@ -1565,7 +1565,7 @@ where
                 let finished = Arc::clone(&finished);
                 tasks.spawn(async move {
                     let value = future.await?;
-                    lock(&finished, "Tasks::record_finished").push((index, value));
+                    finished.lock("Tasks::record_finished").push((index, value));
                     Ok(())
                 });
                 continue;
@@ -1583,7 +1583,7 @@ where
             }
         }
         tasks.join(Ok(())).await?;
-        let mut finished = std::mem::take(&mut *lock(&finished, "Tasks::take_finished"));
+        let mut finished = std::mem::take(&mut *finished.lock("Tasks::take_finished"));
         if finished.len() != started {
             no_result();
         }
@@ -1645,15 +1645,15 @@ where
         // Items report here rather than as task errors, which would make the
         // scope abort the others at the first failure.
         let mut tasks = Tasks::<std::convert::Infallible>::new();
-        let outcomes = shared(Outcomes {
+        let outcomes = locked(Outcomes {
             winner: None,
             errors: Vec::new(),
         });
         let mut started = 0;
         // A task reports just before it ends, so this stops before taking
         // another item once one has succeeded.
-        while lock(&outcomes, "Tasks::race").winner.is_none() && !tasks.failed() {
-            if lock(&tasks.spawner.set, "JoinSet::len").len() < limit
+        while outcomes.lock("Tasks::race").winner.is_none() && !tasks.failed() {
+            if tasks.spawner.set.lock("JoinSet::len").len() < limit
                 && let Some(item) = items.next()
             {
                 let index = started;
@@ -1662,7 +1662,7 @@ where
                 let outcomes = Arc::clone(&outcomes);
                 tasks.spawn(async move {
                     let result = future.await;
-                    let mut outcomes = lock(&outcomes, "Tasks::race");
+                    let mut outcomes = outcomes.lock("Tasks::race");
                     match result {
                         Ok(value) => {
                             if outcomes.winner.is_none() {
@@ -1689,7 +1689,7 @@ where
         tasks.abort();
         let Ok(()) = tasks.join(Ok(())).await;
         let (winner, mut errors) = {
-            let mut outcomes = lock(&outcomes, "Tasks::race");
+            let mut outcomes = outcomes.lock("Tasks::race");
             (outcomes.winner.take(), std::mem::take(&mut outcomes.errors))
         };
         if let Some(value) = winner {
@@ -1848,7 +1848,7 @@ mod retention_tests {
             for _ in 0..1_000 {
                 let handles: Vec<_> = (0..100).map(|_| tasks.spawn(async { Ok(()) })).collect();
                 assert!(
-                    lock(&tasks.spawner.set, "JoinSet::len").len() <= 100,
+                    tasks.spawner.set.lock("JoinSet::len").len() <= 100,
                     "completed entries accumulated"
                 );
                 for handle in handles {
@@ -1861,7 +1861,7 @@ mod retention_tests {
                     tasks.spawn_handled(async { Ok::<_, ()>(()) }, |()| {});
                 }
                 assert!(
-                    lock(&tasks.spawner.set, "JoinSet::len").len() <= 100,
+                    tasks.spawner.set.lock("JoinSet::len").len() <= 100,
                     "completed handled entries accumulated"
                 );
                 while !tasks.is_empty() {
@@ -1886,7 +1886,7 @@ mod retention_tests {
                     yield_now().await;
                 }
                 // One task entry and at most one coalesced completion.
-                assert!(lock(&tasks.spawner.set, "JoinSet::len").len() <= 2);
+                assert!(tasks.spawner.set.lock("JoinSet::len").len() <= 2);
             }
         })
         .await
@@ -1939,7 +1939,7 @@ mod retention_tests {
         })
         .await;
         release.send(()).unwrap();
-        while lock(&set, "JoinSet::unfinished").unfinished() != 0 {
+        while set.lock("JoinSet::unfinished").unfinished() != 0 {
             yield_now().await;
         }
 
@@ -1998,8 +1998,7 @@ mod retention_tests {
                     |()| panic!("the connection succeeded"),
                 );
             }
-            while served.snapshot() < 100
-                || !lock(&tasks.spawner.set, "JoinSet::is_empty").is_empty()
+            while served.snapshot() < 100 || !tasks.spawner.set.lock("JoinSet::is_empty").is_empty()
             {
                 crate::time::sleep(std::time::Duration::from_millis(1)).await;
             }
@@ -2085,7 +2084,7 @@ mod retention_tests {
                         yield_now().await;
                     }
                     let trigger = tasks.spawn(async { Ok(()) });
-                    assert_eq!(lock(&tasks.spawner.set, "JoinSet::len").len(), 1);
+                    assert_eq!(tasks.spawner.set.lock("JoinSet::len").len(), 1);
                     // Reaping only releases the scope's bookkeeping. Handles
                     // continue to own their results until value is requested.
                     assert_eq!(tasks.value(retained).await, Ok(42));

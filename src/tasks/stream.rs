@@ -6,7 +6,7 @@ use std::{
 
 use futures_core::Stream;
 
-use super::{Cancellation, ScopeError, Tasks, join_next, lock, no_result, shared};
+use super::{Cancellation, ScopeError, Tasks, join_next, locked, no_result};
 
 /// Maps items concurrently and yields successful results in input order.
 ///
@@ -207,7 +207,7 @@ where
     let world = crate::runtime::World::current();
     let stream = async_stream::stream! {
         let mut tasks = Tasks::new();
-        let results = shared(results);
+        let results = locked(results);
         let mut started = 0usize;
         let mut yielded = 0usize;
         let mut outstanding = 0usize;
@@ -219,9 +219,9 @@ where
             }
             // Join readiness can lag result publication. Bound unjoined handles
             // too, even if their values have already been yielded.
-            let can_start = !exhausted && outstanding < limit && lock(&tasks.spawner.set, "JoinSet::len").len() < limit;
-            let can_yield = lock(&results, "Results::contains").contains(yielded);
-            if lock(&tasks.spawner.set, "JoinSet::is_empty").is_empty() && !can_start && !can_yield {
+            let can_start = !exhausted && outstanding < limit && tasks.spawner.set.lock("JoinSet::len").len() < limit;
+            let can_yield = results.lock("Results::contains").contains(yielded);
+            if tasks.spawner.set.lock("JoinSet::is_empty").is_empty() && !can_start && !can_yield {
                 missing = outstanding != 0;
                 break cancellation.is_cancelled().then_some(ScopeError::Cancelled);
             }
@@ -232,7 +232,7 @@ where
             let () = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => break Some(ScopeError::Cancelled),
-                joined = join_next(&tasks.spawner.set), if !lock(&tasks.spawner.set, "JoinSet::is_empty").is_empty() => {
+                joined = join_next(&tasks.spawner.set), if !tasks.spawner.set.lock("JoinSet::is_empty").is_empty() => {
                     if let Some(Err(error)) = joined {
                         tasks.remember_panic(error);
                         missing = true;
@@ -257,14 +257,14 @@ where
                                 let results = Arc::clone(&results);
                                 tasks.spawn(async move {
                                     let value = future.await?;
-                                    lock(&results, "Results::insert").insert(index, value);
+                                    results.lock("Results::insert").insert(index, value);
                                     Ok(())
                                 });
                             }
                             None => exhausted = true,
                         }
                     } else {
-                        let value = lock(&results, "Results::take").take(yielded);
+                        let value = results.lock("Results::take").take(yielded);
                         if let Some(value) = value {
                             yielded = yielded.wrapping_add(1);
                             outstanding -= 1;
