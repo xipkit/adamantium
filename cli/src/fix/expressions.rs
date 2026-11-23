@@ -160,13 +160,11 @@ impl Planner<'_> {
     }
 
     fn edit(&self, node: &impl syn::spanned::Spanned, replacement: &str) -> Option<Edit> {
-        let range = self.text.of(node)?;
-        Some(Edit {
-            file: self.file.to_path_buf(),
-            start: range.start,
-            end: range.end,
-            replacement: replacement.to_owned(),
-        })
+        Some(Edit::new(
+            self.file,
+            self.text.of(node)?,
+            replacement.to_owned(),
+        ))
     }
 
     fn deadline(&self, expression: &Expr) -> Option<Edit> {
@@ -305,7 +303,7 @@ impl Planner<'_> {
 
 impl<'ast> Visit<'ast> for Planner<'_> {
     fn visit_block(&mut self, block: &'ast syn::Block) {
-        if let Some(text) = self.text.of(block).and_then(|range| self.text.get(range)) {
+        if let Some(text) = self.text.slice(block) {
             for pair in block.stmts.windows(2) {
                 if let Some((wait, now)) = self.local_deadline(pair, text) {
                     self.deadlines.insert(wait, now);

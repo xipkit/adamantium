@@ -329,10 +329,7 @@ fn halves(pat: &Pat) -> Result<[&syn::PatIdent; 2], &'static str> {
 }
 
 fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
-    let pat_text = text
-        .of(&found.local.pat)
-        .and_then(|range| text.get(range))
-        .unwrap_or("channel");
+    let pat_text = text.slice(&found.local.pat).unwrap_or("channel");
     let mut group = Group {
         line: text.line(found.local.let_token.span),
         name: pat_text.to_owned(),
@@ -425,12 +422,7 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
             .map(|(range, replacement)| vec![analysis.edit(range, replacement)]),
         Kind::Mpsc => text
             .of(call)
-            .zip(
-                call.args
-                    .first()
-                    .and_then(|capacity| text.of(capacity))
-                    .and_then(|range| text.get(range)),
-            )
+            .zip(call.args.first().and_then(|capacity| text.slice(capacity)))
             .map(|(range, capacity)| {
                 vec![analysis.edit(
                     range,
@@ -521,7 +513,7 @@ fn watch_statement(
     let Some(Expr::Call(call)) = local.init.as_ref().map(|init| &*init.expr) else {
         return None;
     };
-    let value = text.get(text.of(call.args.first()?)?)?;
+    let value = text.slice(call.args.first()?)?;
     let source = text.source;
     let line_start = source.get(..range.start)?.rfind('\n').map_or(0, |n| n + 1);
     let indent = source.get(line_start..range.start)?;
@@ -533,7 +525,7 @@ fn watch_statement(
         format!("\n{indent}")
     };
     let [sender, receiver] = halves;
-    let name = |ident: &syn::PatIdent| text.of(&ident.ident).and_then(|range| text.get(range));
+    let name = |ident: &syn::PatIdent| text.slice(&ident.ident);
     let sender_name = name(sender)?;
     let receiver_name = name(receiver)?;
     let sender_mut = if sender.mutability.is_some() {
@@ -609,12 +601,7 @@ struct Analysis<'t> {
 
 impl<'t> Analysis<'t> {
     fn edit(&self, range: Range<usize>, replacement: String) -> Edit {
-        Edit {
-            file: self.file.to_path_buf(),
-            start: range.start,
-            end: range.end,
-            replacement,
-        }
+        Edit::new(self.file, range, replacement)
     }
 
     fn replace<T: syn::spanned::Spanned + ?Sized>(&mut self, node: &T, replacement: &str) {
@@ -1145,12 +1132,7 @@ impl<'t> Visit<'t> for Analysis<'t> {
     }
 
     fn visit_expr(&mut self, expr: &'t Expr) {
-        let attributed = self
-            .text
-            .of(expr)
-            .and_then(|range| self.text.get(range))
-            .is_some_and(|text| text.starts_with('#'));
-        if attributed && self.mentions(quote::ToTokens::to_token_stream(expr)) {
+        if self.text.attributed(expr) && self.mentions(quote::ToTokens::to_token_stream(expr)) {
             self.refuse(ATTRIBUTE);
             return;
         }
@@ -1443,11 +1425,7 @@ impl<'t> Analysis<'t> {
                 return true;
             }
         }
-        let Some(receiver) = self
-            .text
-            .of(&call.receiver)
-            .and_then(|range| self.text.get(range))
-        else {
+        let Some(receiver) = self.text.slice(&call.receiver) else {
             self.refuse(UNLOCATED);
             return true;
         };

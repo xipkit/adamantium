@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs,
+    ops::Range,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -26,6 +27,17 @@ struct Edit {
     start: usize,
     end: usize,
     replacement: String,
+}
+
+impl Edit {
+    fn new(file: &Path, range: Range<usize>, replacement: String) -> Self {
+        Self {
+            file: file.to_path_buf(),
+            start: range.start,
+            end: range.end,
+            replacement,
+        }
+    }
 }
 
 struct StateSource {

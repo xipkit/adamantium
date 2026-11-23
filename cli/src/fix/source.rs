@@ -62,6 +62,16 @@ impl<'a> Text<'a> {
         self.range(node.span())
     }
 
+    /// The source text of `node`.
+    pub(super) fn slice<T: Spanned + ?Sized>(&self, node: &T) -> Option<&'a str> {
+        self.source.get(self.of(node)?)
+    }
+
+    /// Whether `expr` starts with an attribute.
+    pub(super) fn attributed(&self, expr: &syn::Expr) -> bool {
+        self.slice(expr).is_some_and(|text| text.starts_with('#'))
+    }
+
     pub(super) fn get(&self, range: Range<usize>) -> Option<&str> {
         self.source.get(range)
     }
@@ -232,12 +242,7 @@ impl<'t> Imports<'t> {
         }
         pruned
             .into_iter()
-            .map(|(range, replacement)| Edit {
-                file: file.to_path_buf(),
-                start: range.start,
-                end: range.end,
-                replacement,
-            })
+            .map(|(range, replacement)| Edit::new(file, range, replacement))
             .collect()
     }
 
@@ -361,7 +366,7 @@ impl<'t> Imports<'t> {
                 for tree in &group.items {
                     match self.rewrite(tree, removed) {
                         None => changed = true,
-                        Some(None) => kept.push(self.text.get(self.text.of(tree)?)?.to_owned()),
+                        Some(None) => kept.push(self.text.slice(tree)?.to_owned()),
                         Some(Some(text)) => {
                             changed = true;
                             kept.push(text);

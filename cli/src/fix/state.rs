@@ -867,12 +867,7 @@ struct Walker<'a> {
 
 impl<'a> Walker<'a> {
     fn edit(&self, range: Range<usize>, replacement: String) -> Edit {
-        Edit {
-            file: self.file.to_path_buf(),
-            start: range.start,
-            end: range.end,
-            replacement,
-        }
+        Edit::new(self.file, range, replacement)
     }
 
     fn refuse(&mut self, var: usize, reason: Reason) {
@@ -966,7 +961,7 @@ impl<'a> Walker<'a> {
     fn holder(&self, var: usize, expr: &Expr) -> Option<String> {
         let var = self.vars.get(var)?;
         if var.field {
-            Some(self.text.get(self.text.of(expr)?)?.to_owned())
+            Some(self.text.slice(expr)?.to_owned())
         } else {
             Some(var.spelling.clone())
         }
@@ -1083,7 +1078,7 @@ impl<'a> Walker<'a> {
     }
 
     fn actor_of(&self, state: &Type) -> Option<String> {
-        Some(format!("{ACTOR}<{}>", self.text.get(self.text.of(state)?)?))
+        Some(format!("{ACTOR}<{}>", self.text.slice(state)?))
     }
 
     fn arc_state<'t>(&self, ty: &'t Type) -> Option<(LockKind, &'t Type)> {
@@ -1160,7 +1155,7 @@ impl<'a> Walker<'a> {
         let kind = self.lock_kind(self.type_prefix(&lock_new.path)?)?;
         let replacement = match (last.ident.to_string().as_str(), lock.args.first()) {
             ("new", Some(state)) if lock.args.len() == 1 => {
-                format!("{ACTOR}::new({})", self.text.get(self.text.of(state)?)?)
+                format!("{ACTOR}::new({})", self.text.slice(state)?)
             }
             ("default", None) => format!("{ACTOR}::default()"),
             _ => return None,
@@ -1841,7 +1836,7 @@ impl<'a> Walker<'a> {
                         self.text.of(expr),
                         matches!(expr, Expr::Assign(_))
                             || matches!(expr, Expr::Binary(binary) if is_assignment(&binary.op)),
-                        self.attributed(expr),
+                        self.text.attributed(expr),
                     ),
                     Full::Macro(mac) => (self.text.of(mac), false, false),
                 };
@@ -1885,7 +1880,7 @@ impl<'a> Walker<'a> {
                 (range, format!("{holder}.{method}(|{name}| {body})"))
             }
             Root::Value(expr) | Root::Condition(expr) => {
-                if self.attributed(expr) {
+                if self.text.attributed(expr) {
                     return Err(Reason::Unfollowed(
                         "a statement holding its guard has attributes",
                     ));
@@ -1916,13 +1911,6 @@ impl<'a> Walker<'a> {
                 }
                 _ => false,
             })
-    }
-
-    fn attributed(&self, expr: &Expr) -> bool {
-        self.text
-            .of(expr)
-            .and_then(|range| self.text.get(range))
-            .is_some_and(|text| text.starts_with('#'))
     }
 
     fn statement_attributes(&self) -> bool {
