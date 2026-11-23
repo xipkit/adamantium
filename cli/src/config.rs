@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, HashSet},
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -8,7 +7,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use toml_edit::{DocumentMut, Item};
 
-use crate::lints::{self, EXPERIMENTAL_LINTS, OVERFLOW_RULE};
+use crate::{
+    lints::{self, EXPERIMENTAL_LINTS, OVERFLOW_RULE},
+    manifest,
+};
 
 /// A project's command defaults and skip list.
 #[derive(Debug)]
@@ -39,11 +41,7 @@ impl Default for Config {
 impl Config {
     /// Reads project settings from the `Cargo.toml` in `root`.
     pub fn load(root: &Path) -> Result<Config> {
-        let path = root.join("Cargo.toml");
-        let doc: DocumentMut = fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?
-            .parse()
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let (_, doc) = manifest::load(root)?;
         Config::parse(&doc, root)
     }
 

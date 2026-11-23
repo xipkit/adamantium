@@ -30,18 +30,20 @@ pub fn root(path: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn read(root: &Path) -> Result<DocumentMut> {
+/// The text of the `Cargo.toml` in `root`, and the document it parses to.
+pub(crate) fn load(root: &Path) -> Result<(String, DocumentMut)> {
     let path = root.join("Cargo.toml");
-    fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let doc = text
         .parse()
-        .with_context(|| format!("parsing {}", path.display()))
+        .with_context(|| format!("parsing {}", path.display()))?;
+    Ok((text, doc))
 }
 
 /// Whether the release profile checks for integer overflow, so that overflow
 /// panics in release builds as it does in debug builds.
 pub fn release_checks_overflow(root: &Path) -> Result<bool> {
-    let doc = read(root)?;
+    let (_, doc) = load(root)?;
     Ok(doc
         .get("profile")
         .and_then(|profile| profile.get("release"))
@@ -64,11 +66,7 @@ pub struct Changes {
 pub fn init(root: &Path, force: bool, config: &Config, strict: bool) -> Result<Changes> {
     let mut changes = Changes::default();
     let manifest_path = root.join("Cargo.toml");
-    let before = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("reading {}", manifest_path.display()))?;
-    let mut doc: DocumentMut = before
-        .parse()
-        .with_context(|| format!("parsing {}", manifest_path.display()))?;
+    let (before, mut doc) = load(root)?;
 
     let is_workspace = doc.contains_key("workspace");
     let has_package = doc.contains_key("package");
