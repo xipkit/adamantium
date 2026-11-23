@@ -1,6 +1,7 @@
-use std::{borrow::Cow, collections::HashMap, fmt};
+use std::{borrow::Cow, collections::HashMap, fmt, io::Write, process::ExitCode};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use clap::ValueEnum;
 use serde::Serialize;
 use toml_edit::{DocumentMut, Item};
 
@@ -944,4 +945,107 @@ pub fn lints_toml(strict: bool) -> String {
         }
     }
     out
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum RulesFormat {
+    Text,
+    Json,
+    #[value(help = "The `[lints]` tables as `cargo adamantium init` writes them into a workspace")]
+    Toml,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum ExplainFormat {
+    Text,
+    Json,
+}
+
+#[derive(Serialize)]
+struct Explanation {
+    schema_version: u32,
+    rule: String,
+    why: &'static str,
+    #[serde(flatten)]
+    example: Example,
+}
+
+impl Explanation {
+    fn for_rule(rule: &str) -> Result<Self> {
+        if is_overflow_rule(rule) {
+            return Ok(Self {
+                schema_version: 1,
+                rule: OVERFLOW_RULE.to_owned(),
+                why: OVERFLOW_WHY,
+                example: OVERFLOW_EXAMPLE,
+            });
+        }
+        let lint = find(rule).ok_or_else(|| {
+            anyhow!("unknown rule `{rule}`; `cargo adamantium rules` lists the lint names")
+        })?;
+        Ok(Self {
+            schema_version: 1,
+            rule: lint.qualified(),
+            why: lint.why,
+            example: lint.example,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct Rules<'a> {
+    schema_version: u32,
+    lints: Vec<&'static Lint>,
+    clippy_toml: &'a str,
+}
+
+/// Prints why `rule` exists and how to replace what it reports.
+pub fn explain(rule: &str, format: ExplainFormat) -> Result<ExitCode> {
+    let explanation = Explanation::for_rule(rule)?;
+    let mut stdout = std::io::stdout().lock();
+    match format {
+        ExplainFormat::Text => {
+            writeln!(stdout, "{}\n\nWhy: {}", explanation.rule, explanation.why)?;
+            writeln!(stdout, "\nReplacement: {}", explanation.example.replacement)?;
+            writeln!(stdout, "\nBefore:\n{}", explanation.example.before)?;
+            writeln!(stdout, "\nAfter:\n{}", explanation.example.after)?;
+        }
+        ExplainFormat::Json => {
+            serde_json::to_writer_pretty(&mut stdout, &explanation)?;
+            writeln!(stdout)?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Prints the rules of the selected tier and the Clippy configuration.
+pub fn print_rules(format: RulesFormat, strict: bool) -> Result<ExitCode> {
+    let mut stdout = std::io::stdout().lock();
+    match format {
+        RulesFormat::Text => {
+            for lint in selected(strict) {
+                writeln!(
+                    stdout,
+                    "{:<6} {:<36} {}",
+                    lint.level.to_string(),
+                    lint.qualified(),
+                    lint.why
+                )?;
+            }
+            writeln!(stdout, "\n# clippy.toml\n\n{}", clippy_toml(strict)?)?;
+        }
+        RulesFormat::Json => {
+            serde_json::to_writer_pretty(
+                &mut stdout,
+                &Rules {
+                    schema_version: 1,
+                    lints: selected(strict).collect(),
+                    clippy_toml: &clippy_toml(strict)?,
+                },
+            )?;
+            writeln!(stdout)?;
+        }
+        RulesFormat::Toml => write!(stdout, "{}", lints_toml(strict))?,
+    }
+    Ok(ExitCode::SUCCESS)
 }

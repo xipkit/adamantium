@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ReportFormat,
     config::Config,
     lints::{self, EXPERIMENTAL_LINTS, OVERFLOW_RULE},
     manifest, paths, sarif,
@@ -77,6 +76,16 @@ pub struct Args {
         help = "Arguments passed on to `cargo clippy`, such as `--release` or `-p name`"
     )]
     cargo_args: Vec<String>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ReportFormat {
+    #[value(help = "Clippy's own output, then a summary, on stderr")]
+    Text,
+    #[value(help = "A report on stdout")]
+    Json,
+    #[value(help = "A SARIF 2.1.0 log on stdout, for GitHub code scanning")]
+    Sarif,
 }
 
 /// What a check found.

@@ -1,8 +1,9 @@
 use std::{
     borrow::Cow,
     fs,
-    io::ErrorKind,
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
+    process::ExitCode,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -51,6 +52,26 @@ pub fn release_checks_overflow(root: &Path) -> Result<bool> {
         .and_then(|release| release.get("overflow-checks"))
         .and_then(Item::as_bool)
         .unwrap_or(false))
+}
+
+/// Writes the rules into the project at `path` and says on stderr what
+/// changed.
+pub fn run_init(path: &Path, force: bool, strict: bool) -> Result<ExitCode> {
+    let root = root(path)?;
+    let config = Config::load(&root)?;
+    let changes = init(&root, force, &config, strict)?;
+    let mut stderr = std::io::stderr().lock();
+    if changes.notes.is_empty() {
+        writeln!(
+            stderr,
+            "adamantium: {} already has the rules",
+            root.display()
+        )?;
+    }
+    for note in changes.notes {
+        writeln!(stderr, "adamantium: {note}")?;
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// What `init` changed, for the user to read.

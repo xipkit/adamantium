@@ -76,27 +76,56 @@ struct Output<'a> {
     policy: Option<policy::Evaluation<'a>>,
 }
 
-/// Audits the dependencies of the workspace at `path` and prints the report.
-/// `cargo_args` go to `cargo metadata` and `cargo tree`, to choose features.
-/// With `deny_new`, the exit status indicates regressions or an incomplete audit.
-pub fn run(
-    path: &Path,
+// No doc comment: clap would show it as the subcommand's long help.
+#[derive(clap::Args)]
+pub struct Args {
+    #[arg(default_value = ".", help = "The project directory, or its Cargo.toml")]
+    path: PathBuf,
+    #[arg(long, value_enum, default_value_t = Format::Text)]
     format: Format,
-    cargo_args: &[String],
+    #[arg(
+        long,
+        help = "Fail on new unsafe code or unscoped task starts, or on scan gaps"
+    )]
     deny_new: bool,
-    baseline: Option<&Path>,
-) -> Result<ExitCode> {
-    let root = manifest::root(path)?;
+    #[arg(
+        long,
+        value_name = "REPORT",
+        requires = "deny_new",
+        help = "Compare against an earlier `deps --format json` report"
+    )]
+    baseline: Option<PathBuf>,
+    #[arg(
+        last = true,
+        help = "Arguments passed on to `cargo metadata` and `cargo tree`, such as `--features` or `--all-features`"
+    )]
+    cargo_args: Vec<String>,
+}
+
+/// Audits the dependencies of the workspace at `args.path` and prints the
+/// report. `args.cargo_args` go to `cargo metadata` and `cargo tree`, to
+/// choose features. With `deny_new`, the exit status indicates regressions
+/// or an incomplete audit.
+pub fn run(args: Args) -> Result<ExitCode> {
+    let Args {
+        path,
+        format,
+        deny_new,
+        baseline,
+        cargo_args,
+    } = args;
+    let root = manifest::root(&path)?;
     let config = Config::load(&root)?;
     let baseline = if deny_new {
         baseline
+            .as_deref()
             .or(config.deps_baseline.as_deref())
             .map(policy::Baseline::load)
             .transpose()?
     } else {
         None
     };
-    let report = audit(&root, cargo_args)?;
+    let report = audit(&root, &cargo_args)?;
     let policy = deny_new
         .then(|| policy::evaluate(&report, baseline.as_ref()))
         .transpose()?;

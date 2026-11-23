@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use crate::sha256_hex;
+use crate::hash::sha256_hex;
 use crate::style::{
     provider::ProviderKind,
     report::{FileReport, FileStatus, Report, ReportStatus, ReviewKey, SCHEMA_VERSION},

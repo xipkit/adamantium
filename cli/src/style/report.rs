@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt, fs::File, io::Read, path::Path};
 
-use crate::sha256_hex;
+use crate::hash::sha256_hex;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
