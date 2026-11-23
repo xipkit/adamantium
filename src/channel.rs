@@ -733,7 +733,7 @@ impl std::error::Error for ReceiveError {}
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        self.queue.drop_endpoint(true, "Sender::drop");
+        self.queue.drop_endpoint(Endpoint::Sender, "Sender::drop");
     }
 }
 
@@ -753,6 +753,12 @@ struct Queue<T> {
 struct State {
     senders: usize,
     receivers: usize,
+}
+
+#[derive(Clone, Copy)]
+enum Endpoint {
+    Sender,
+    Receiver,
 }
 
 impl<T> Queue<T> {
@@ -797,17 +803,16 @@ impl<T> Queue<T> {
         self.space.notify_all();
     }
 
-    fn drop_endpoint(&self, sender: bool, operation: &'static str) {
+    fn drop_endpoint(&self, endpoint: Endpoint, operation: &'static str) {
         #[cfg(feature = "deterministic")]
         if std::thread::panicking() && self.world != World::current() {
             return;
         }
         self.world.step_unless_panicking(operation);
         let mut state = self.state.lock(operation);
-        let count = if sender {
-            &mut state.senders
-        } else {
-            &mut state.receivers
+        let count = match endpoint {
+            Endpoint::Sender => &mut state.senders,
+            Endpoint::Receiver => &mut state.receivers,
         };
         *count -= 1;
         let last = *count == 0;
@@ -818,7 +823,7 @@ impl<T> Queue<T> {
         if self.values.close(operation) {
             self.wake_closed();
         }
-        if !sender {
+        if matches!(endpoint, Endpoint::Receiver) {
             // Wake waiters before dropping messages outside the lock. A destructor
             // can use this channel and must see it closed without deadlocking.
             self.values.clear(operation);
@@ -828,6 +833,7 @@ impl<T> Queue<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.queue.drop_endpoint(false, "Receiver::drop");
+        self.queue
+            .drop_endpoint(Endpoint::Receiver, "Receiver::drop");
     }
 }
