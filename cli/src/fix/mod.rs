@@ -314,11 +314,7 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
         remaining.findings.len(),
         if dry_run { " (before fixes)" } else { "" }
     );
-    Ok(match remaining.status {
-        check::Status::Clean => ExitCode::SUCCESS,
-        check::Status::Findings => ExitCode::from(1),
-        check::Status::Error => ExitCode::from(2),
-    })
+    Ok(remaining.status.exit_code())
 }
 
 struct Change {
