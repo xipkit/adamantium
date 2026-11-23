@@ -123,6 +123,17 @@ pub struct Problem {
     pub line: Option<u64>,
 }
 
+impl Problem {
+    /// A problem that no file is the place of.
+    fn unlocated(message: String) -> Self {
+        Self {
+            message,
+            file: None,
+            line: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Baseline {
     original: String,
@@ -574,24 +585,7 @@ fn check_selected(
         write_clippy_config(conf.path(), strict, diagnostics.is_some())?;
     let reasons = lints::Reasons::parse(&clippy_toml);
 
-    let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-    command
-        .current_dir(root)
-        .env("CLIPPY_CONF_DIR", conf.path())
-        .args(["clippy", "--message-format=json"]);
-    if !selects_targets(cargo_args) {
-        command.arg("--all-targets");
-    }
-    if !selects_packages(cargo_args) {
-        command.arg("--workspace");
-    }
-    command
-        .args(cargo_args)
-        .args(["--", "--cap-lints", "warn", "-A", "clippy::all"]);
-    for lint in lints::selected(strict) {
-        command.args(["-W", &lint.qualified()]);
-    }
-    let mut commands = vec![command];
+    let mut commands = vec![clippy_command(root, conf.path(), cargo_args, strict)];
     let mut sorted = Sorted {
         baseline,
         ..Sorted::default()
@@ -612,11 +606,9 @@ fn check_selected(
     if let Some(result) = dylint {
         match result {
             Ok(command) => commands.push(command),
-            Err(error) => sorted.errors.push(Problem {
-                message: format!("experimental check incomplete: {error:#}"),
-                file: None,
-                line: None,
-            }),
+            Err(error) => sorted.errors.push(Problem::unlocated(format!(
+                "experimental check incomplete: {error:#}"
+            ))),
         }
     }
     let mut rules: HashSet<String> = lints::selected(strict)
@@ -634,95 +626,10 @@ fn check_selected(
         echo,
     };
     let mut complete = true;
-    for mut command in commands {
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                sorted.errors.push(Problem {
-                    message: format!("check incomplete: {error}"),
-                    file: None,
-                    line: None,
-                });
-                complete = false;
-                continue;
-            }
-        };
-        let stdout = child.stdout.take().context("capturing cargo's output")?;
-        let mut built = false;
-        for line in BufReader::new(stdout).lines() {
-            let line = line.context("reading cargo's output")?;
-            let Ok(parsed) = parse_cargo_line(&line) else {
-                continue;
-            };
-            match parsed.reason.as_str() {
-                "compiler-message" => {
-                    if let Some(diagnostic) = parsed.message {
-                        let probe = diagnostics.is_some()
-                            && diagnostic
-                                .code
-                                .as_ref()
-                                .is_some_and(|code| code.code == "clippy::disallowed_methods")
-                            && matches!(
-                                lints::quoted_path(&diagnostic.message),
-                                Some(lints::RWLOCK_READ | lints::RWLOCK_WRITE)
-                            );
-                        let before = sorted.findings.len();
-                        if !probe {
-                            classify(diagnostic, &setting, &mut sorted);
-                        }
-                        if (probe || sorted.findings.len() > before)
-                            && let Some(diagnostics) = diagnostics.as_mut()
-                            && let Ok(raw) = serde_json::from_str::<serde_json::Value>(&line)
-                            && let Some(message) = raw.get("message")
-                        {
-                            diagnostics.push(message.clone());
-                        }
-                    }
-                }
-                "build-finished" => built = parsed.success.unwrap_or(false),
-                _ => {}
-            }
-        }
-        let exit = child.wait().context("waiting for checker")?;
-        if !built || !exit.success() {
-            complete = false;
-            sorted.errors.push(Problem {
-                message: format!(
-                    "check incomplete: compiler or lint driver did not finish successfully ({exit})"
-                ),
-                file: None,
-                line: None,
-            });
-        }
+    for command in commands {
+        complete &= run_checker(command, &setting, &mut sorted, &mut diagnostics)?;
     }
-
-    let overflow_unchecked = !manifest::release_checks_overflow(root)?;
-    if overflow_unchecked && config.skips(OVERFLOW_RULE, "Cargo.toml") {
-        *sorted.skipped.entry(OVERFLOW_RULE.to_owned()).or_insert(0) += 1;
-    } else if overflow_unchecked && !sorted.in_baseline(OVERFLOW_RULE, "Cargo.toml", None) {
-        let message = "[profile.release] does not set overflow-checks = true, so integer overflow wraps silently in release builds; `cargo adamantium init` adds it".to_owned();
-        let remediation = lints::remediation(OVERFLOW_RULE, &message, &reasons);
-        let finding = Finding {
-            rule: OVERFLOW_RULE.to_owned(),
-            message,
-            file: "Cargo.toml".to_owned(),
-            line: None,
-            column: None,
-            source: None,
-            remediation,
-        };
-        if echo {
-            eprintln!(
-                "error: {}\n  --> Cargo.toml\n  = note: {}\n",
-                finding.message, finding.rule
-            );
-        }
-        sorted.findings.push(finding);
-    }
+    overflow_finding(root, config, &reasons, echo, &mut sorted)?;
 
     let Sorted {
         findings,
@@ -751,6 +658,136 @@ fn check_selected(
         warnings,
         errors,
     })
+}
+
+fn clippy_command(root: &Path, conf_dir: &Path, cargo_args: &[String], strict: bool) -> Command {
+    let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    command
+        .current_dir(root)
+        .env("CLIPPY_CONF_DIR", conf_dir)
+        .args(["clippy", "--message-format=json"]);
+    select_everything(&mut command, cargo_args);
+    command
+        .args(cargo_args)
+        .args(["--", "--cap-lints", "warn", "-A", "clippy::all"]);
+    for lint in lints::selected(strict) {
+        command.args(["-W", &lint.qualified()]);
+    }
+    command
+}
+
+/// Selects every target of every workspace member, unless the arguments for
+/// Cargo already choose targets or packages.
+fn select_everything(command: &mut Command, cargo_args: &[String]) {
+    if !selects_targets(cargo_args) {
+        command.arg("--all-targets");
+    }
+    if !selects_packages(cargo_args) {
+        command.arg("--workspace");
+    }
+}
+
+/// Runs one checker and sorts the diagnostics it prints. Returns whether it
+/// started and finished its build. In fix mode, `diagnostics` collects the
+/// raw diagnostic of each finding.
+fn run_checker(
+    mut command: Command,
+    setting: &Setting<'_>,
+    sorted: &mut Sorted<'_>,
+    diagnostics: &mut Option<&mut Vec<Value>>,
+) -> Result<bool> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            sorted
+                .errors
+                .push(Problem::unlocated(format!("check incomplete: {error}")));
+            return Ok(false);
+        }
+    };
+    let stdout = child.stdout.take().context("capturing cargo's output")?;
+    let mut built = false;
+    for line in BufReader::new(stdout).lines() {
+        let line = line.context("reading cargo's output")?;
+        let Ok(parsed) = parse_cargo_line(&line) else {
+            continue;
+        };
+        match parsed.reason.as_str() {
+            "compiler-message" => {
+                if let Some(diagnostic) = parsed.message {
+                    let probe = diagnostics.is_some()
+                        && diagnostic
+                            .code
+                            .as_ref()
+                            .is_some_and(|code| code.code == "clippy::disallowed_methods")
+                        && matches!(
+                            lints::quoted_path(&diagnostic.message),
+                            Some(lints::RWLOCK_READ | lints::RWLOCK_WRITE)
+                        );
+                    let before = sorted.findings.len();
+                    if !probe {
+                        classify(diagnostic, setting, sorted);
+                    }
+                    if (probe || sorted.findings.len() > before)
+                        && let Some(diagnostics) = diagnostics.as_mut()
+                        && let Ok(raw) = serde_json::from_str::<serde_json::Value>(&line)
+                        && let Some(message) = raw.get("message")
+                    {
+                        diagnostics.push(message.clone());
+                    }
+                }
+            }
+            "build-finished" => built = parsed.success.unwrap_or(false),
+            _ => {}
+        }
+    }
+    let exit = child.wait().context("waiting for checker")?;
+    let finished = built && exit.success();
+    if !finished {
+        sorted.errors.push(Problem::unlocated(format!(
+            "check incomplete: compiler or lint driver did not finish successfully ({exit})"
+        )));
+    }
+    Ok(finished)
+}
+
+/// Reports a release profile that doesn't check for integer overflow, unless
+/// the skip list or the baseline leaves the finding out.
+fn overflow_finding(
+    root: &Path,
+    config: &Config,
+    reasons: &lints::Reasons,
+    echo: bool,
+    sorted: &mut Sorted<'_>,
+) -> Result<()> {
+    let overflow_unchecked = !manifest::release_checks_overflow(root)?;
+    if overflow_unchecked && config.skips(OVERFLOW_RULE, "Cargo.toml") {
+        *sorted.skipped.entry(OVERFLOW_RULE.to_owned()).or_insert(0) += 1;
+    } else if overflow_unchecked && !sorted.in_baseline(OVERFLOW_RULE, "Cargo.toml", None) {
+        let message = "[profile.release] does not set overflow-checks = true, so integer overflow wraps silently in release builds; `cargo adamantium init` adds it".to_owned();
+        let remediation = lints::remediation(OVERFLOW_RULE, &message, reasons);
+        let finding = Finding {
+            rule: OVERFLOW_RULE.to_owned(),
+            message,
+            file: "Cargo.toml".to_owned(),
+            line: None,
+            column: None,
+            source: None,
+            remediation,
+        };
+        if echo {
+            eprintln!(
+                "error: {}\n  --> Cargo.toml\n  = note: {}\n",
+                finding.message, finding.rule
+            );
+        }
+        sorted.findings.push(finding);
+    }
+    Ok(())
 }
 
 fn parse_cargo_line(line: &str) -> serde_json::Result<CargoLine> {
@@ -801,12 +838,7 @@ fn dylint_command(
         .args(["dylint", "--no-metadata", "--lib-path"])
         .arg(library)
         .args(["--", "--message-format=json"]);
-    if !selects_targets(cargo_args) {
-        command.arg("--all-targets");
-    }
-    if !selects_packages(cargo_args) {
-        command.arg("--workspace");
-    }
+    select_everything(&mut command, cargo_args);
     command.args(cargo_args);
     let mut flags = String::from("--cap-lints warn");
     for lint in EXPERIMENTAL_LINTS {
@@ -882,30 +914,7 @@ fn selects_targets(args: &[String]) -> bool {
 
 fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted<'_>) {
     let Some(span) = diagnostic.spans.iter().find(|span| span.is_primary) else {
-        let Some(code) = diagnostic.code else {
-            return;
-        };
-        if diagnostic.level != "warning"
-            || !matches!(code.code.as_str(), "E0602" | "renamed_and_removed_lints")
-        {
-            return;
-        }
-        if !sorted.seen.insert(DiagnosticKey::Spanless {
-            code: code.code,
-            message: diagnostic.message.clone(),
-        }) {
-            return;
-        }
-        if setting.echo
-            && let Some(rendered) = &diagnostic.rendered
-        {
-            eprint!("{rendered}");
-        }
-        sorted.warnings.push(Problem {
-            message: diagnostic.message,
-            file: None,
-            line: None,
-        });
+        classify_spanless(diagnostic, setting, sorted);
         return;
     };
     let span = span.call_site();
@@ -971,6 +980,31 @@ fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted<'
         }),
         _ => {}
     }
+}
+
+/// A diagnostic without a primary span is kept only when it warns about an
+/// unknown, renamed or removed lint, once for each code and message.
+fn classify_spanless(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted<'_>) {
+    let Some(code) = diagnostic.code else {
+        return;
+    };
+    if diagnostic.level != "warning"
+        || !matches!(code.code.as_str(), "E0602" | "renamed_and_removed_lints")
+    {
+        return;
+    }
+    if !sorted.seen.insert(DiagnosticKey::Spanless {
+        code: code.code,
+        message: diagnostic.message.clone(),
+    }) {
+        return;
+    }
+    if setting.echo
+        && let Some(rendered) = &diagnostic.rendered
+    {
+        eprint!("{rendered}");
+    }
+    sorted.warnings.push(Problem::unlocated(diagnostic.message));
 }
 
 fn relative<'a>(root: &Path, file: &'a str) -> &'a str {
