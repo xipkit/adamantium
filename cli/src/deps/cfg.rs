@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use proc_macro2::TokenStream;
 
@@ -79,8 +79,7 @@ const UNSET_NAMES: [&str; 4] = ["test", "doc", "doctest", "miri"];
 /// The configuration rustc sets for the host target, from `rustc --print cfg`.
 #[derive(Debug, Default)]
 pub struct Target {
-    options: HashSet<(String, Option<String>)>,
-    names: HashSet<String>,
+    options: HashMap<String, Vec<Option<String>>>,
 }
 
 impl Target {
@@ -97,8 +96,11 @@ impl Target {
                 Some((name, value)) => (name, Some(value.trim_matches('"').to_owned())),
                 None => (line, None),
             };
-            target.names.insert(name.to_owned());
-            target.options.insert((name.to_owned(), value));
+            target
+                .options
+                .entry(name.to_owned())
+                .or_default()
+                .push(value);
         }
         target
     }
@@ -295,14 +297,12 @@ impl Cfg<'_> {
         if PROFILE_NAMES.contains(&name) {
             return Truth::Unknown;
         }
-        let set = self
-            .target
-            .options
-            .contains(&(name.to_owned(), value.map(str::to_owned)));
+        let values = self.target.options.get(name);
+        let set = values.is_some_and(|values| values.iter().any(|set| set.as_deref() == value));
         if name == "target_feature" {
             return if set { Truth::True } else { Truth::Unknown };
         }
-        if TARGET_NAMES.contains(&name) || self.target.names.contains(name) {
+        if TARGET_NAMES.contains(&name) || values.is_some() {
             return Truth::from_bool(set);
         }
         Truth::Unknown
