@@ -7,7 +7,7 @@ use tokio::time::Instant;
 #[cfg(feature = "tokio")]
 use crate::ReceiveError;
 #[cfg(feature = "tokio")]
-use crate::tasks::{Cancellation, Shutdown, shutdown};
+use crate::tasks::{Cancellation, Shutdown, before_shutdown};
 use crate::{
     Closed, TryReceiveError,
     runtime::{Guard, Lock, World},
@@ -85,10 +85,9 @@ impl<T> Shared<T> {
     // Every operation locks, so this is where a handle carried into the
     // deterministic harness is rejected. While unwinding the check is
     // skipped: the execution is already failing, and a second panic would
+    // abort the process.
     fn lock(&self, operation: &'static str) -> Guard<'_, State<T>> {
-        if !std::thread::panicking() {
-            self.world.check();
-        }
+        self.world.check_unless_panicking();
         self.state.lock(operation)
     }
 
@@ -211,10 +210,21 @@ impl<T> Watcher<T> {
     }
 
     fn mark(&mut self) -> Option<Option<()>> {
-        let state = self.shared.lock("Watcher::changed");
+        self.observe("Watcher::changed", |_| ())
+    }
+
+    // Reads an unseen value and marks it seen. The outer `None` means there is
+    // nothing new yet; the inner `None` means the watch closed.
+    fn observe<R>(
+        &mut self,
+        operation: &'static str,
+        read: impl FnOnce(&T) -> R,
+    ) -> Option<Option<R>> {
+        let state = self.shared.lock(operation);
         if state.version != self.seen {
+            let read = read(&state.value);
             self.seen = state.version;
-            Some(Some(()))
+            Some(Some(read))
         } else if state.closed {
             Some(None)
         } else {
@@ -316,34 +326,16 @@ impl<T: Clone> Watcher<T> {
         deadline: Option<Instant>,
     ) -> Result<T, ReceiveError> {
         crate::runtime::in_world(self.shared.world, async move {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "receive_until checks shutdown before marking a watch value seen"
-            )]
-            let reason = tokio::select! {
-                biased;
-                reason = shutdown(cancellation, deadline) => reason,
-                received = self.receive() => return received.ok_or(ReceiveError::Closed),
-            };
-            Err(match reason {
-                Shutdown::Cancelled => ReceiveError::Cancelled,
-                Shutdown::DeadlineExceeded => ReceiveError::DeadlineExceeded,
-            })
+            before_shutdown(cancellation, deadline, self.receive())
+                .await
+                .map_err(Shutdown::receive_error)?
+                .ok_or(ReceiveError::Closed)
         })
         .await
     }
 
     fn check(&mut self, operation: &'static str) -> Option<Option<T>> {
-        let state = self.shared.lock(operation);
-        if state.version != self.seen {
-            let value = state.value.clone();
-            self.seen = state.version;
-            Some(Some(value))
-        } else if state.closed {
-            Some(None)
-        } else {
-            None
-        }
+        self.observe(operation, T::clone)
     }
 }
 
@@ -360,10 +352,7 @@ impl<T> Clone for Watch<T> {
 
 impl<T> Drop for Watch<T> {
     fn drop(&mut self) {
-        if std::thread::panicking()
-            && self.shared.world.is_model()
-            && self.shared.world != World::current()
-        {
+        if self.shared.world.unwinding_in_foreign_world() {
             return;
         }
         let mut state = self.shared.lock("Watch::drop");

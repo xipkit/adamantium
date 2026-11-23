@@ -54,6 +54,19 @@ impl World {
         );
     }
 
+    // A destructor that runs during an unwind must not panic again.
+    pub(crate) fn check_unless_panicking(self) {
+        if !std::thread::panicking() {
+            self.check();
+        }
+    }
+
+    // Whether a failed model execution is dropping a value that belongs to
+    // another execution, which must then be left untouched.
+    pub(crate) fn unwinding_in_foreign_world(self) -> bool {
+        std::thread::panicking() && self.is_model() && self != Self::current()
+    }
+
     pub(crate) fn step(self, _operation: &'static str) {
         self.check();
         #[cfg(feature = "deterministic")]

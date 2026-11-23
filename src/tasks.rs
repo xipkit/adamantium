@@ -17,7 +17,7 @@ use crate::runtime::{
 };
 use tokio::time::Instant;
 
-use crate::{Closed, Reply, ReplyReceiver, Watch, time};
+use crate::{Closed, FeedError, ReceiveError, Reply, ReplyReceiver, UntilError, Watch, time};
 
 mod stream;
 #[cfg(feature = "tracing")]
@@ -143,9 +143,7 @@ impl fmt::Debug for Cancellation {
 #[cfg(feature = "deterministic")]
 impl Drop for Cancellation {
     fn drop(&mut self) {
-        if !std::thread::panicking() {
-            self.world.check();
-        }
+        self.world.check_unless_panicking();
     }
 }
 
@@ -203,6 +201,50 @@ impl Shutdown {
             Self::DeadlineExceeded => ScopeError::DeadlineExceeded,
         }
     }
+
+    pub(crate) fn receive_error(self) -> ReceiveError {
+        match self {
+            Self::Cancelled => ReceiveError::Cancelled,
+            Self::DeadlineExceeded => ReceiveError::DeadlineExceeded,
+        }
+    }
+
+    pub(crate) fn feed_error(self) -> FeedError {
+        match self {
+            Self::Cancelled => FeedError::Cancelled,
+            Self::DeadlineExceeded => FeedError::DeadlineExceeded,
+        }
+    }
+
+    pub(crate) fn until_error(self) -> UntilError {
+        match self {
+            Self::Cancelled => UntilError::Cancelled,
+            Self::DeadlineExceeded => UntilError::DeadlineExceeded,
+        }
+    }
+}
+
+// Waits for `future` unless shutdown is requested first. A request present at
+// any poll wins over a ready future, which is then dropped unpolled.
+#[allow(
+    clippy::future_not_send,
+    reason = "the future is Send when the wrapped future is"
+)]
+pub(crate) async fn before_shutdown<Fut: Future>(
+    cancellation: &Cancellation,
+    deadline: Option<Instant>,
+    future: Fut,
+) -> Result<Fut::Output, Shutdown> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "shutdown is checked before the future is polled"
+    )]
+    let outcome = tokio::select! {
+        biased;
+        reason = shutdown(cancellation, deadline) => Err(reason),
+        output = future => Ok(output),
+    };
+    outcome
 }
 
 pub(crate) async fn shutdown(cancellation: &Cancellation, deadline: Option<Instant>) -> Shutdown {
@@ -774,9 +816,7 @@ impl<E> fmt::Debug for Spawner<E> {
 #[cfg(feature = "deterministic")]
 impl<E> Drop for Spawner<E> {
     fn drop(&mut self) {
-        if !std::thread::panicking() {
-            self.world.check();
-        }
+        self.world.check_unless_panicking();
     }
 }
 
@@ -1425,10 +1465,8 @@ impl<E: Send + 'static> Tasks<E> {
 impl<E> Drop for Tasks<E> {
     fn drop(&mut self) {
         #[cfg(feature = "deterministic")]
-        if !std::thread::panicking() {
-            self.world.check();
-        }
-        if std::thread::panicking() && self.world.is_model() && self.world != World::current() {
+        self.world.check_unless_panicking();
+        if self.world.unwinding_in_foreign_world() {
             return;
         }
         lock(&self.set, "Tasks::drop").abort_all();
@@ -1998,6 +2036,7 @@ mod retention_tests {
 
     // The scope's loop and the next spawn race to reap the same panic.
     // Whichever finds it, the body stops and the sibling is drained.
+    #[cfg(feature = "deterministic")]
     async fn panic_reaped_by_either_scenario() {
         let dropped = crate::Actor::new(false);
         let guard = Dropped(dropped.clone());
