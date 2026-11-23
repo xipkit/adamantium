@@ -1009,7 +1009,6 @@ impl<E: Send + 'static> Tasks<E> {
                 () = stopped(&set, &ledger) => return tasks.fail().await.map_err(ScopeError::Failed),
                 result = body(&mut tasks) => return tasks.join_until(cancellation, deadline, result).await,
             };
-            #[cfg(feature = "tracing")]
             tasks.report_deadline(&reason);
             tasks.abort();
             tasks.join(Ok(())).await.map_err(ScopeError::Failed)?;
@@ -1105,11 +1104,7 @@ impl<E: Send + 'static> Tasks<E> {
             } else {
                 None
             };
-            let value = tasks.result(body).map_err(ScopeError::Failed)?;
-            match reason {
-                Some(reason) => Err(reason.scope_error()),
-                None => Ok(value),
-            }
+            tasks.outcome(body, reason)
         })
         .await
     }
@@ -1296,18 +1291,9 @@ impl<E: Send + 'static> Tasks<E> {
                 () = self.settle(body.is_err()) => None,
             };
             if let Some(reason) = &reason {
-                #[cfg(feature = "tracing")]
-                self.report_deadline(reason);
-                #[cfg(not(feature = "tracing"))]
-                let _ = reason;
-                self.abort();
-                self.drain().await;
+                self.abort_and_drain(reason).await;
             }
-            let value = self.result(body).map_err(ScopeError::Failed)?;
-            match reason {
-                Some(reason) => Err(reason.scope_error()),
-                None => Ok(value),
-            }
+            self.outcome(body, reason)
         })
     }
 
@@ -1353,12 +1339,18 @@ impl<E: Send + 'static> Tasks<E> {
             return Shutdown::Cancelled;
         }
         let reason = Shutdown::DeadlineExceeded;
-        #[cfg(feature = "tracing")]
-        self.report_deadline(&reason);
-        self.abort();
-        self.drain().await;
+        self.abort_and_drain(&reason).await;
         reason
     }
+
+    async fn abort_and_drain(&mut self, reason: &Shutdown) {
+        self.report_deadline(reason);
+        self.abort();
+        self.drain().await;
+    }
+
+    #[cfg(not(feature = "tracing"))]
+    fn report_deadline(&self, _reason: &Shutdown) {}
 
     async fn fail<R>(mut self) -> Result<R, E> {
         self.settle(true).await;
@@ -1366,6 +1358,14 @@ impl<E: Send + 'static> Tasks<E> {
             Some(error) => Err(error),
             // Only a handle can claim an error, and an orphaned one has none.
             None => no_orphan(),
+        }
+    }
+
+    fn outcome<R>(&self, body: Result<R, E>, reason: Option<Shutdown>) -> Result<R, ScopeError<E>> {
+        let value = self.result(body).map_err(ScopeError::Failed)?;
+        match reason {
+            Some(reason) => Err(reason.scope_error()),
+            None => Ok(value),
         }
     }
 
