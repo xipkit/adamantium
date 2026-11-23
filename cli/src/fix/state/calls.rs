@@ -200,7 +200,7 @@ impl<'a> Walker<'a> {
             return None;
         };
         let name = bare(&segment.ident);
-        (self.declared.get(&name).copied() == Some(1)
+        (self.names.declared.get(&name).copied() == Some(1)
             && matches!(self.resolve_name(&name), Resolved::Item))
         .then_some(name)
     }

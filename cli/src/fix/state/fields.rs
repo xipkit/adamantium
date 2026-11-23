@@ -13,16 +13,6 @@ pub(super) struct Field {
 
 impl<'a> Walker<'a> {
     pub(super) fn candidates(&mut self, tree: &'a syn::File) {
-        struct Declared<'w>(&'w mut std::collections::HashMap<String, usize>);
-        impl<'ast> Visit<'ast> for Declared<'_> {
-            fn visit_item(&mut self, item: &'ast Item) {
-                for (name, _) in ItemScope::bindings(item) {
-                    *self.0.entry(name).or_default() += 1;
-                }
-                syn::visit::visit_item(self, item);
-            }
-        }
-        Declared(&mut self.declared).visit_file(tree);
         self.module_candidates(&tree.items);
     }
 
@@ -87,7 +77,7 @@ impl<'a> Walker<'a> {
                     "its state might be unsized, which an actor can't hold",
                 ));
             }
-            if self.declared.get(&name).copied() != Some(1) {
+            if self.names.declared.get(&name).copied() != Some(1) {
                 group.refuse(Reason::Unfollowed(
                     "another item or import in the file has its struct's name",
                 ));
@@ -117,7 +107,7 @@ impl<'a> Walker<'a> {
     fn structure(&self, name: &syn::Ident) -> Option<String> {
         let name = bare(name);
         (self.fields.values().any(|field| field.structure == name)
-            && self.declared.get(&name).copied() == Some(1)
+            && self.names.declared.get(&name).copied() == Some(1)
             && matches!(self.resolve_name(&name), Resolved::Item))
         .then_some(name)
     }

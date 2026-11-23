@@ -191,7 +191,6 @@ pub(super) fn plan(file: &Path, source: &str, locks: &LockSpans, krate: &Crate) 
         owners: Vec::new(),
         functions: Vec::new(),
         links: Vec::new(),
-        declared: HashMap::new(),
         callees: Vec::new(),
         callee_names: HashMap::new(),
         signatures: HashMap::new(),
@@ -470,13 +469,16 @@ struct Names {
     constants: BTreeSet<String>,
     macros: BTreeSet<String>,
     unsized_aliases: BTreeSet<String>,
-    bound: BTreeSet<String>,
+    /// How many items and imports in the file declare each name.
+    declared: HashMap<String, usize>,
 }
 
 impl<'ast> Visit<'ast> for Names {
     fn visit_item(&mut self, item: &'ast Item) {
-        self.bound
-            .extend(ItemScope::bindings(item).into_iter().map(|(name, _)| name));
+        let bindings = ItemScope::bindings(item);
+        for (name, _) in &bindings {
+            *self.declared.entry(name.clone()).or_default() += 1;
+        }
         match item {
             Item::Const(item) => {
                 self.constants.insert(item.ident.to_string());
@@ -491,7 +493,7 @@ impl<'ast> Visit<'ast> for Names {
                 self.unsized_aliases.insert(item.ident.to_string());
             }
             Item::Use(_) => {
-                for (name, _) in ItemScope::bindings(item) {
+                for (name, _) in bindings {
                     self.constants.insert(name.clone());
                     self.macros.insert(name);
                 }
@@ -858,7 +860,6 @@ struct Walker<'a> {
     owners: Vec<Option<String>>,
     functions: Vec<(String, usize)>,
     links: Vec<(usize, usize)>,
-    declared: HashMap<String, usize>,
     callees: Vec<calls::Callee>,
     callee_names: HashMap<String, Option<usize>>,
     signatures: HashMap<usize, usize>,
@@ -1050,7 +1051,7 @@ impl<'a> Walker<'a> {
         }
         (!resolved
             .first()
-            .is_some_and(|first| self.names.bound.contains(first)))
+            .is_some_and(|first| self.names.declared.contains_key(first)))
         .then_some(resolved)
     }
 
