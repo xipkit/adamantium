@@ -84,7 +84,15 @@ pub(super) struct Draft {
     file: PathBuf,
     groups: Vec<Group>,
     links: Vec<(usize, usize)>,
-    callees: Vec<(String, usize, Vec<usize>)>,
+    callees: Vec<Followed>,
+}
+
+/// A function whose parameters or return value `fix` rewrites, with the
+/// number of calls it followed and the groups those rewrites belong to.
+struct Followed {
+    name: String,
+    calls: usize,
+    groups: Vec<usize>,
 }
 
 const ACTOR: &str = "::adamantium::Actor";
@@ -224,7 +232,11 @@ pub(super) fn plan(file: &Path, source: &str, locks: &LockSpans, krate: &Crate) 
         .into_iter()
         .map(|callee| {
             let groups = callee.groups().collect();
-            (callee.name, callee.calls, groups)
+            Followed {
+                name: callee.name,
+                calls: callee.calls,
+                groups,
+            }
         })
         .collect();
     draft
@@ -301,9 +313,9 @@ impl Draft {
                 group.refuse(reason);
             }
         }
-        for (name, calls, groups) in &self.callees {
-            if krate.occurrences(name) != calls + 1 {
-                for &group in groups {
+        for callee in &self.callees {
+            if krate.occurrences(&callee.name) != callee.calls + 1 {
+                for &group in &callee.groups {
                     if let Some(group) = self.groups.get_mut(group) {
                         group.refuse(Reason::Unfollowed(
                             "its function is named somewhere fix doesn't follow as a call",
@@ -320,23 +332,27 @@ impl Draft {
             if groups.iter().any(|group| group.refusal.is_some()) {
                 continue;
             }
-            let locking = groups
-                .iter()
-                .flat_map(|g| g.functions.iter().cloned())
-                .collect();
-            let blocks = groups
-                .iter()
-                .flat_map(|g| g.poll_blocks.iter().cloned())
-                .collect();
-            let boundary = if groups.iter().any(|group| group.escapes) {
-                None
+            let (reason, boundary) = if groups.iter().any(|group| group.escapes) {
+                (
+                    Some(Reason::Nested(
+                        "it is locked in a closure or an async block, which might run inside an actor's callback",
+                    )),
+                    None,
+                )
             } else {
-                krate.poll_hazard(&krate.callers(&locking), &blocks)
-            };
-            let reason = if boundary.is_some() {
-                Some(Reason::Poll)
-            } else {
-                Self::hazard(&groups, krate, callbacks)
+                let locking = groups
+                    .iter()
+                    .flat_map(|g| g.functions.iter().cloned())
+                    .collect();
+                let blocks = groups
+                    .iter()
+                    .flat_map(|g| g.poll_blocks.iter().cloned())
+                    .collect();
+                let reached = krate.callers(&locking);
+                match krate.poll_hazard(&reached, &blocks) {
+                    Some(boundary) => (Some(Reason::Poll), Some(boundary)),
+                    None => (Self::hazard(&reached, krate, callbacks), None),
+                }
             };
             if let Some(reason) = reason
                 && let Some(group) = component
@@ -362,18 +378,12 @@ impl Draft {
             ))
     }
 
-    fn hazard(groups: &[&Group], krate: &Crate, callbacks: &BTreeSet<String>) -> Option<Reason> {
-        if groups.iter().any(|group| group.escapes) {
-            return Some(Reason::Nested(
-                "it is locked in a closure or an async block, which might run inside an actor's callback",
-            ));
-        }
-        let locking: BTreeSet<String> = groups
-            .iter()
-            .flat_map(|group| group.functions.iter().cloned())
-            .collect();
-        let reached = krate.callers(&locking);
-        match krate.hazard(&reached) {
+    fn hazard(
+        reached: &BTreeSet<String>,
+        krate: &Crate,
+        callbacks: &BTreeSet<String>,
+    ) -> Option<Reason> {
+        match krate.hazard(reached) {
             Some(Hazard::Trait) => {
                 return Some(Reason::Nested(
                     "it is locked through a trait method, which might run inside an actor's callback",
