@@ -3,16 +3,26 @@ use std::collections::hash_map::Entry;
 use syn::{Block, Expr, ImplItem, Item, Pat, PathArguments, ReturnType, Stmt, Type, visit::Visit};
 
 use super::{
-    Edit, Group, ItemScope, LockKind, Reason, Resolved, UNLOCATED, Walker, bare,
-    fields::may_be_unsized, item_attributes,
+    Edit, Group, LockKind, Reason, UNLOCATED, Walker, bare,
+    fields::may_be_unsized,
+    item_attributes,
+    resolve::{ItemScope, Resolved},
 };
 use crate::fix::scan::macro_attribute;
+
+/// A parameter `fix` rewrites: its group, and whether it borrows the lock
+/// itself rather than the `Arc` holding it.
+#[derive(Clone, Copy)]
+struct Param {
+    group: usize,
+    lock_ref: bool,
+}
 
 pub(super) struct Callee {
     pub(super) name: String,
     owner: Option<String>,
     receiver: bool,
-    params: Vec<Option<(usize, bool)>>,
+    params: Vec<Option<Param>>,
     returns: Option<usize>,
     pub(super) calls: usize,
 }
@@ -21,7 +31,7 @@ impl Callee {
     pub(super) fn groups(&self) -> impl Iterator<Item = usize> + '_ {
         self.params
             .iter()
-            .filter_map(|param| param.map(|(group, _)| group))
+            .filter_map(|param| param.map(|param| param.group))
             .chain(self.returns)
     }
 }
@@ -114,7 +124,7 @@ impl<'a> Walker<'a> {
                             kind,
                             vec![edit],
                         ));
-                        (group, lock_ref)
+                        Param { group, lock_ref }
                     }),
                 _ => None,
             };
@@ -200,7 +210,7 @@ impl<'a> Walker<'a> {
             return None;
         };
         let name = bare(&segment.ident);
-        (self.declared.get(&name).copied() == Some(1)
+        (self.names.declared.get(&name).copied() == Some(1)
             && matches!(self.resolve_name(&name), Resolved::Item))
         .then_some(name)
     }
@@ -211,7 +221,7 @@ impl<'a> Walker<'a> {
     }
 
     pub(super) fn parameter(&mut self, callee: usize, position: usize, pat: &Pat) {
-        let Some((group, lock_ref)) = self
+        let Some(Param { group, lock_ref }) = self
             .callees
             .get(callee)
             .and_then(|callee| callee.params.get(position).copied().flatten())
@@ -270,6 +280,12 @@ impl<'a> Walker<'a> {
     }
 
     pub(super) fn returned(&mut self, group: usize, expr: &'a Expr) {
+        self.stored(group, expr, RETURNED);
+    }
+
+    /// Follows `expr` into `group`, which it initializes or returns, and
+    /// refuses the group with `otherwise` when the value can't be followed.
+    pub(super) fn stored(&mut self, group: usize, expr: &'a Expr, otherwise: Reason) {
         if let Some((_, constructor)) = self.constructor(expr)
             && let Some(range) = self.text.of(expr)
         {
@@ -289,7 +305,7 @@ impl<'a> Walker<'a> {
             return;
         }
         if let Some(state) = self.groups.get_mut(group) {
-            state.refuse(RETURNED);
+            state.refuse(otherwise);
         }
         self.visit_expr(expr);
     }
@@ -301,9 +317,7 @@ impl<'a> Walker<'a> {
         expr: &Expr,
         replacement: Option<String>,
     ) {
-        if let Some(var) = self.vars.get_mut(source) {
-            var.used = true;
-        }
+        self.mark_used(source);
         if let Some(held) = self.group_of(source) {
             self.links.push((group, held));
         }
@@ -396,7 +410,7 @@ impl<'a> Walker<'a> {
                     .flatten()
             });
             match param {
-                Some((group, _)) => self.argument(group, arg),
+                Some(param) => self.argument(param.group, arg),
                 None => self.visit_expr(arg),
             }
         }

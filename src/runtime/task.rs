@@ -342,9 +342,7 @@ impl JoinSet {
 impl Drop for JoinSet {
     fn drop(&mut self) {
         if self.world != World::current() {
-            if !std::thread::panicking() {
-                self.world.check();
-            }
+            self.world.check_unless_panicking();
             return;
         }
         self.abort_all();
