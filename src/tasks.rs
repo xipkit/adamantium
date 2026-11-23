@@ -13,30 +13,167 @@ use crate::runtime::{
 };
 use tokio::time::Instant;
 
-use crate::{ReplyReceiver, time};
+use crate::{ReplyReceiver, Watch, time};
 
 mod batch;
-mod cancel;
 mod ledger;
 #[cfg(test)]
 mod retention_tests;
 #[cfg(all(test, feature = "deterministic"))]
 mod schedule_tests;
+mod shutdown;
 mod spawner;
 mod stream;
 #[cfg(feature = "tracing")]
 mod trace;
 pub use batch::{concurrently, first_ok};
-pub use cancel::Cancellation;
-use cancel::elapsed;
-pub(crate) use cancel::{Shutdown, before_shutdown, shutdown};
 use ledger::{Ledger, Receipt};
+use shutdown::elapsed;
+pub(crate) use shutdown::{Shutdown, before_shutdown, shutdown};
 pub use spawner::{SpawnError, Spawner};
 use spawner::{Submitter, handled};
 pub use stream::{
     concurrently_ordered, concurrently_ordered_until, concurrently_unordered,
     concurrently_unordered_until,
 };
+
+// The native lints name this type by the module that defines it, so it stays
+// in this file.
+/// A cloneable, one-way shutdown request shared by a caller and its work.
+///
+/// Cancelling any clone wakes all [`cancelled`](Self::cancelled) waiters.
+/// Dropping a clone does not cancel. Use a fresh signal for each scope: a
+/// cancelled signal cannot be reset, and scopes also cancel it on shutdown.
+pub struct Cancellation {
+    world: World,
+    requested: Watch<bool>,
+}
+
+impl Cancellation {
+    /// Creates a signal with no shutdown requested.
+    pub fn new() -> Self {
+        Self {
+            world: World::current(),
+            requested: Watch::new(false),
+        }
+    }
+
+    /// Requests shutdown. Repeated requests have the same effect as one.
+    pub fn cancel(&self) {
+        self.world.check();
+        self.request();
+    }
+
+    // Drop calls this directly to avoid a second panic from cancel's ownership check.
+    fn request(&self) {
+        // This handle keeps the watch open, so the send cannot fail.
+        self.requested.send(true).unwrap_or(());
+    }
+
+    /// Whether shutdown has been requested, including from a blocking thread.
+    pub fn is_cancelled(&self) -> bool {
+        self.world.check();
+        self.requested.get()
+    }
+
+    /// Waits for shutdown, returning immediately if already requested.
+    /// Dropping this future does not lose the request.
+    pub async fn cancelled(&self) {
+        crate::runtime::in_world(self.world, async move {
+            let mut requested = self.requested.subscribe();
+            // Shutdown checks must see a request even at the end of a task's
+            // budget. This watch only ever changes from false to true.
+            if !requested.get() {
+                requested.changed_unbudgeted().await;
+            }
+        })
+        .await
+    }
+
+    /// Requests shutdown on SIGINT or SIGTERM on Unix, or Ctrl-C on Windows.
+    ///
+    /// Requires the opt-in `signal` feature and a Tokio runtime with signal
+    /// handling enabled. Listening starts when this future is first polled;
+    /// registration errors are returned without requesting cancellation.
+    /// It also returns successfully if this signal is cancelled another way.
+    /// An already cancelled signal does not register process handlers.
+    ///
+    /// Await this alongside the work that observes this cancellation, for
+    /// example with `tokio::try_join!`. No background task is spawned. Dropping
+    /// the future stops listening without cancelling, but Tokio's process-wide
+    /// signal handlers remain installed, replacing the default termination
+    /// behavior even after the listener is dropped.
+    #[cfg(all(feature = "signal", any(unix, windows)))]
+    pub async fn cancel_on_signal(&self) -> std::io::Result<()> {
+        crate::runtime::production_only("OS signal handling");
+        #[cfg(unix)]
+        let received = async {
+            use tokio::signal::unix::{SignalKind, signal};
+
+            let mut interrupt = signal(SignalKind::interrupt())?;
+            let mut terminate = signal(SignalKind::terminate())?;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "either Unix signal must trigger scope cancellation"
+            )]
+            let () = tokio::select! {
+                biased;
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
+            };
+            Ok::<(), std::io::Error>(())
+        };
+        #[cfg(windows)]
+        let received = tokio::signal::ctrl_c();
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "scope cancellation ends the signal wait and releases its listeners"
+        )]
+        let result = tokio::select! {
+            biased;
+            () = self.cancelled() => Ok(()),
+            result = received => {
+                result?;
+                self.cancel();
+                Ok(())
+            }
+        };
+        result
+    }
+}
+
+impl fmt::Debug for Cancellation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.world.check();
+        f.debug_struct("Cancellation")
+            .field("requested", &self.requested.get())
+            .finish()
+    }
+}
+
+#[cfg(feature = "deterministic")]
+impl Drop for Cancellation {
+    fn drop(&mut self) {
+        self.world.check_unless_panicking();
+    }
+}
+
+impl Clone for Cancellation {
+    fn clone(&self) -> Self {
+        self.world.check();
+        Self {
+            world: self.world,
+            requested: self.requested.clone(),
+        }
+    }
+}
+
+impl Default for Cancellation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ScopeError<E> {
