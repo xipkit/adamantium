@@ -62,7 +62,7 @@ impl<E> Tasks<E> {
         // Snapshot before cancellation and release the lock before calling a
         // subscriber, which may itself run application code.
         let running_tasks: Vec<_> = {
-            let running = lock(&self.named, "Tasks::report_deadline");
+            let running = lock(&self.spawner.named, "Tasks::report_deadline");
             if running.next == 0 {
                 return;
             }

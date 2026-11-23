@@ -515,12 +515,8 @@ fn no_orphan() -> ! {
 /// [`run`](Self::run) for the common shape, or [`new`](Self::new),
 /// [`spawn`](Self::spawn) and [`join`](Self::join) by hand.
 pub struct Tasks<E> {
-    set: Shared<JoinSet>,
-    world: World,
-    errors: SharedErrors<E>,
+    spawner: Spawner<E>,
     cancellation: Option<Cancellation>,
-    #[cfg(feature = "tracing")]
-    named: Shared<trace::Running>,
 }
 
 /// A cloneable capability to add tasks to one [`Tasks`] scope.
@@ -869,34 +865,29 @@ impl<E: Send + 'static> Tasks<E> {
     /// # Ok(()) }
     /// ```
     pub fn spawner(&self) -> Spawner<E> {
-        self.world.check();
-        Spawner {
-            set: Arc::clone(&self.set),
-            world: self.world,
-            errors: Arc::clone(&self.errors),
-            #[cfg(feature = "tracing")]
-            named: Arc::clone(&self.named),
-        }
+        self.spawner.clone()
     }
 
     /// An empty scope.
     pub fn new() -> Self {
         Self {
-            set: shared(JoinSet::new()),
-            world: World::current(),
-            errors: Arc::new(Ledger {
-                errors: Lock::new(Errors {
-                    next: 0,
-                    recorded: BTreeMap::new(),
-                    panic: None,
-                    orphaned: false,
-                    reaped_cancelled: false,
+            spawner: Spawner {
+                set: shared(JoinSet::new()),
+                world: World::current(),
+                errors: Arc::new(Ledger {
+                    errors: Lock::new(Errors {
+                        next: 0,
+                        recorded: BTreeMap::new(),
+                        panic: None,
+                        orphaned: false,
+                        reaped_cancelled: false,
+                    }),
+                    on_stop: WaitQueue::named("tasks.stop"),
                 }),
-                on_stop: WaitQueue::named("tasks.stop"),
-            }),
+                #[cfg(feature = "tracing")]
+                named: shared(trace::Running::default()),
+            },
             cancellation: None,
-            #[cfg(feature = "tracing")]
-            named: shared(trace::Running::default()),
         }
     }
 
@@ -932,8 +923,8 @@ impl<E: Send + 'static> Tasks<E> {
     {
         crate::runtime::in_world(World::current(), async move {
             let mut tasks = Self::new();
-            let set = Arc::clone(&tasks.set);
-            let errors = Arc::clone(&tasks.errors);
+            let set = Arc::clone(&tasks.spawner.set);
+            let errors = Arc::clone(&tasks.spawner.errors);
             #[expect(
                 clippy::disallowed_methods,
                 reason = "the task scope observes child failure while its body is pending"
@@ -998,8 +989,8 @@ impl<E: Send + 'static> Tasks<E> {
         crate::runtime::in_world(World::current(), async move {
             let mut tasks = Self::new();
             tasks.cancellation = Some(cancellation.clone());
-            let set = Arc::clone(&tasks.set);
-            let errors = Arc::clone(&tasks.errors);
+            let set = Arc::clone(&tasks.spawner.set);
+            let errors = Arc::clone(&tasks.spawner.errors);
             #[expect(
                 clippy::disallowed_methods,
                 reason = "run_until observes shutdown and child failure while its body is pending"
@@ -1073,8 +1064,8 @@ impl<E: Send + 'static> Tasks<E> {
         crate::runtime::in_world(World::current(), async move {
             let mut tasks = Self::new();
             tasks.cancellation = Some(cancellation.clone());
-            let set = Arc::clone(&tasks.set);
-            let errors = Arc::clone(&tasks.errors);
+            let set = Arc::clone(&tasks.spawner.set);
+            let errors = Arc::clone(&tasks.spawner.errors);
             #[expect(
                 clippy::disallowed_methods,
                 reason = "run_with_grace observes shutdown and child failure while its body is pending"
@@ -1087,7 +1078,7 @@ impl<E: Send + 'static> Tasks<E> {
             };
             let Some(body) = body else {
                 let reason = tasks.drain_with_grace(grace, false).await;
-                return match take_oldest(&tasks.errors) {
+                return match take_oldest(&tasks.spawner.errors) {
                     Some(error) => Err(ScopeError::Failed(error)),
                     None => Err(reason.scope_error()),
                 };
@@ -1121,9 +1112,9 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
-        self.world.check();
+        self.spawner.world.check();
         self.reap();
-        owner_submission(self.spawner().submit_future(false, future))
+        owner_submission(self.spawner.submit_future(false, future))
     }
 
     /// Starts a named task. With the `tracing` feature, its future is polled
@@ -1136,7 +1127,7 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
-        let future = self.spawner().name_future(name, future);
+        let future = self.spawner.name_future(name, future);
         self.spawn(future)
     }
 
@@ -1182,10 +1173,10 @@ impl<E: Send + 'static> Tasks<E> {
         F: Future<Output = Result<(), X>> + Send + 'static,
         H: FnOnce(X) + Send + 'static,
     {
-        self.world.check();
+        self.spawner.world.check();
         self.reap();
         owner_submission(
-            self.spawner()
+            self.spawner
                 .submit_handled(false, handled(future, on_error)),
         );
     }
@@ -1206,10 +1197,9 @@ impl<E: Send + 'static> Tasks<E> {
         F: Future<Output = Result<(), X>> + Send + 'static,
         H: FnOnce(X) + Send + 'static,
     {
-        let spawner = self.spawner();
-        let future = spawner.name_future(name, handled(future, on_error));
+        let future = self.spawner.name_future(name, handled(future, on_error));
         self.reap();
-        owner_submission(spawner.submit_handled(false, future));
+        owner_submission(self.spawner.submit_handled(false, future));
     }
 
     /// Registers blocking work directly with this scope.
@@ -1224,9 +1214,9 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
-        self.world.check();
+        self.spawner.world.check();
         self.reap();
-        owner_submission(self.spawner().submit_blocking(false, f))
+        owner_submission(self.spawner.submit_blocking(false, f))
     }
 
     /// Registers named blocking work, with the same cleanup contract as
@@ -1238,14 +1228,14 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
-        let f = self.spawner().name_blocking(name, f);
+        let f = self.spawner.name_blocking(name, f);
         self.spawn_blocking(f)
     }
 
     /// Waits for a task and returns its result. If the task panicked, the
     /// panic is resumed here.
     pub async fn value<T: Send>(&mut self, task: Task<T, E>) -> Result<T, E> {
-        crate::runtime::in_world(self.world, async move {
+        crate::runtime::in_world(self.spawner.world, async move {
             let error = match task.rx.receive().await {
                 Some(Ok(value)) => return Ok(value),
                 Some(Err(receipt)) => claim(&task.errors, receipt),
@@ -1268,7 +1258,7 @@ impl<E: Send + 'static> Tasks<E> {
     /// `body` already took it with [`value`](Self::value), is returned over
     /// a successful body; a failed body's error is returned over a task's.
     pub async fn join<R: Send>(mut self, body: Result<R, E>) -> Result<R, E> {
-        crate::runtime::in_world(self.world, async move {
+        crate::runtime::in_world(self.spawner.world, async move {
             self.settle(body.is_err()).await;
             self.result(body)
         })
@@ -1285,7 +1275,7 @@ impl<E: Send + 'static> Tasks<E> {
         deadline: Option<Instant>,
         body: Result<R, E>,
     ) -> impl Future<Output = Result<R, ScopeError<E>>> + Send {
-        self.world.check();
+        self.spawner.world.check();
         self.cancellation = Some(cancellation.clone());
         crate::runtime::in_world(World::current(), async move {
             #[expect(
@@ -1323,7 +1313,7 @@ impl<E: Send + 'static> Tasks<E> {
                 aborted = true;
             }
             let next = poll_fn(|cx| {
-                let mut set = lock(&self.set, "Tasks::settle");
+                let mut set = lock(&self.spawner.set, "Tasks::settle");
                 let next = set.poll_join_next(cx);
                 if matches!(next, Poll::Ready(None)) {
                     set.close();
@@ -1364,7 +1354,7 @@ impl<E: Send + 'static> Tasks<E> {
 
     async fn fail<R>(mut self) -> Result<R, E> {
         self.settle(true).await;
-        match take_oldest(&self.errors) {
+        match take_oldest(&self.spawner.errors) {
             Some(error) => Err(error),
             // Only a handle can claim an error, and an orphaned one has none.
             None => no_orphan(),
@@ -1372,7 +1362,7 @@ impl<E: Send + 'static> Tasks<E> {
     }
 
     fn result<R>(&self, body: Result<R, E>) -> Result<R, E> {
-        match (body, take_oldest(&self.errors)) {
+        match (body, take_oldest(&self.spawner.errors)) {
             (Err(error), _) => Err(error),
             (Ok(_), Some(error)) => Err(error),
             (Ok(value), None) => Ok(value),
@@ -1383,8 +1373,8 @@ impl<E: Send + 'static> Tasks<E> {
     /// A concurrent [`Spawner::spawn`] call may still be registering or cleaning
     /// up work not reflected here; joining waits for those calls as well.
     pub fn len(&self) -> usize {
-        self.world.check();
-        lock(&self.set, "Tasks::unfinished").unfinished()
+        self.spawner.world.check();
+        lock(&self.spawner.set, "Tasks::unfinished").unfinished()
     }
 
     /// Whether every spawned task has finished, with [`len`](Self::len)'s
@@ -1395,34 +1385,34 @@ impl<E: Send + 'static> Tasks<E> {
 
     fn reap(&mut self) {
         loop {
-            let next = lock(&self.set, "JoinSet::try_join_next").try_join_next();
+            let next = lock(&self.spawner.set, "JoinSet::try_join_next").try_join_next();
             let Some(result) = next else {
                 break;
             };
-            if reaped(&self.errors, result) {
+            if reaped(&self.spawner.errors, result) {
                 self.abort();
             }
         }
     }
 
     fn failed(&self) -> bool {
-        let errors = self.errors.lock();
+        let errors = self.spawner.errors.lock();
         errors.reaped_cancelled || !errors.recorded.is_empty() || errors.panic.is_some()
     }
 
     async fn resume_first_panic<T>(&mut self) -> T {
         let reaped_failure = {
-            let errors = self.errors.lock();
+            let errors = self.spawner.errors.lock();
             errors.reaped_cancelled || errors.panic.is_some()
         };
         if reaped_failure {
             self.abort();
             self.drain().await;
         }
-        while let Some(next) = join_next(&self.set).await {
+        while let Some(next) = join_next(&self.spawner.set).await {
             if let Err(join_error) = next {
                 self.remember_panic(join_error);
-                let panicked = self.errors.lock().panic.is_some();
+                let panicked = self.spawner.errors.lock().panic.is_some();
                 if panicked {
                     self.drain().await;
                 }
@@ -1433,27 +1423,27 @@ impl<E: Send + 'static> Tasks<E> {
 
     // Keep the panic in the scope so it survives a cancelled drain.
     fn remember_panic(&mut self, join_error: JoinError) {
-        if keep_panic(&self.errors, join_error) {
+        if keep_panic(&self.spawner.errors, join_error) {
             self.abort();
         }
     }
 
     fn propagate_panic(&mut self) {
-        let payload = self.errors.lock().panic.take();
+        let payload = self.spawner.errors.lock().panic.take();
         if let Some(payload) = payload {
             panic::resume_unwind(payload);
         }
     }
 
     fn abort(&mut self) {
-        lock(&self.set, "Tasks::abort").abort_all();
+        lock(&self.spawner.set, "Tasks::abort").abort_all();
         if let Some(cancellation) = &self.cancellation {
             cancellation.cancel();
         }
     }
 
     async fn drain(&mut self) {
-        while let Some(next) = join_next(&self.set).await {
+        while let Some(next) = join_next(&self.spawner.set).await {
             if let Err(error) = next {
                 self.remember_panic(error);
             }
@@ -1465,11 +1455,11 @@ impl<E: Send + 'static> Tasks<E> {
 impl<E> Drop for Tasks<E> {
     fn drop(&mut self) {
         #[cfg(feature = "deterministic")]
-        self.world.check_unless_panicking();
-        if self.world.unwinding_in_foreign_world() {
+        self.spawner.world.check_unless_panicking();
+        if self.spawner.world.unwinding_in_foreign_world() {
             return;
         }
-        lock(&self.set, "Tasks::drop").abort_all();
+        lock(&self.spawner.set, "Tasks::drop").abort_all();
         if let Some(cancellation) = &self.cancellation {
             cancellation.request();
         }
@@ -1484,9 +1474,9 @@ impl<E: Send + 'static> Default for Tasks<E> {
 
 impl<E> fmt::Debug for Tasks<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.world.check();
+        self.spawner.world.check();
         f.debug_struct("Tasks")
-            .field("len", &lock(&self.set, "Tasks::fmt").len())
+            .field("len", &lock(&self.spawner.set, "Tasks::fmt").len())
             .finish()
     }
 }
@@ -1559,7 +1549,7 @@ where
         // Fill the window, then wait for a place to open. A task records its
         // error just before it ends, so this stops before taking another item.
         while !tasks.failed() {
-            if lock(&tasks.set, "JoinSet::len").len() < limit
+            if lock(&tasks.spawner.set, "JoinSet::len").len() < limit
                 && let Some(item) = items.next()
             {
                 let index = started;
@@ -1573,7 +1563,7 @@ where
                 });
                 continue;
             }
-            match join_next(&tasks.set).await {
+            match join_next(&tasks.spawner.set).await {
                 Some(Ok(())) => {}
                 Some(Err(join_error)) => {
                     // Nothing here has aborted a task, so a cancellation means
@@ -1656,7 +1646,7 @@ where
         // A task reports just before it ends, so this stops before taking
         // another item once one has succeeded.
         while lock(&outcomes, "Tasks::race").winner.is_none() && !tasks.failed() {
-            if lock(&tasks.set, "JoinSet::len").len() < limit
+            if lock(&tasks.spawner.set, "JoinSet::len").len() < limit
                 && let Some(item) = items.next()
             {
                 let index = started;
@@ -1678,7 +1668,7 @@ where
                 });
                 continue;
             }
-            match join_next(&tasks.set).await {
+            match join_next(&tasks.spawner.set).await {
                 Some(Ok(())) => {}
                 Some(Err(join_error)) => {
                     // Nothing here has aborted a task yet, so a cancellation
@@ -1786,7 +1776,7 @@ mod retention_tests {
                     while !failed.rx.is_closed() {
                         yield_now().await;
                     }
-                    while tasks.errors.lock().panic.is_none() {
+                    while tasks.spawner.errors.lock().panic.is_none() {
                         match reaper {
                             Reap::Spawn => drop(tasks.spawn(async { Ok(()) })),
                             Reap::SpawnBlocking => drop(tasks.spawn_blocking(|| Ok(()))),
@@ -1851,7 +1841,7 @@ mod retention_tests {
             for _ in 0..1_000 {
                 let handles: Vec<_> = (0..100).map(|_| tasks.spawn(async { Ok(()) })).collect();
                 assert!(
-                    lock(&tasks.set, "JoinSet::len").len() <= 100,
+                    lock(&tasks.spawner.set, "JoinSet::len").len() <= 100,
                     "completed entries accumulated"
                 );
                 for handle in handles {
@@ -1864,7 +1854,7 @@ mod retention_tests {
                     tasks.spawn_handled(async { Ok::<_, ()>(()) }, |()| {});
                 }
                 assert!(
-                    lock(&tasks.set, "JoinSet::len").len() <= 100,
+                    lock(&tasks.spawner.set, "JoinSet::len").len() <= 100,
                     "completed handled entries accumulated"
                 );
                 while !tasks.is_empty() {
@@ -1889,7 +1879,7 @@ mod retention_tests {
                     yield_now().await;
                 }
                 // One task entry and at most one coalesced completion.
-                assert!(lock(&tasks.set, "JoinSet::len").len() <= 2);
+                assert!(lock(&tasks.spawner.set, "JoinSet::len").len() <= 2);
             }
         })
         .await
@@ -1928,7 +1918,7 @@ mod retention_tests {
     async fn reaped_error_during_join() {
         let mut tasks = Tasks::<&str>::new();
         let spawner = tasks.spawner();
-        let set = Arc::clone(&tasks.set);
+        let set = Arc::clone(&tasks.spawner.set);
         let (release, released) = Reply::pair();
         let failed = tasks.spawn(async move {
             released.receive().await.unwrap();
@@ -2001,7 +1991,9 @@ mod retention_tests {
                     |()| panic!("the connection succeeded"),
                 );
             }
-            while served.snapshot() < 100 || !lock(&tasks.set, "JoinSet::is_empty").is_empty() {
+            while served.snapshot() < 100
+                || !lock(&tasks.spawner.set, "JoinSet::is_empty").is_empty()
+            {
                 crate::time::sleep(std::time::Duration::from_millis(1)).await;
             }
             Ok(())
@@ -2086,7 +2078,7 @@ mod retention_tests {
                         yield_now().await;
                     }
                     let trigger = tasks.spawn(async { Ok(()) });
-                    assert_eq!(lock(&tasks.set, "JoinSet::len").len(), 1);
+                    assert_eq!(lock(&tasks.spawner.set, "JoinSet::len").len(), 1);
                     // Reaping only releases the scope's bookkeeping. Handles
                     // continue to own their results until value is requested.
                     assert_eq!(tasks.value(retained).await, Ok(42));
@@ -2119,16 +2111,16 @@ mod schedule_tests {
         async fn scenario() {
             let mut tasks = Tasks::<&str>::new();
             let first = tasks.spawn(async { Err::<(), _>("first") });
-            while tasks.errors.lock().recorded.len() != 1 {
+            while tasks.spawner.errors.lock().recorded.len() != 1 {
                 shuttle::future::yield_now().await;
             }
             let second = tasks.spawn(async { Err::<(), _>("second") });
-            while tasks.errors.lock().recorded.len() != 2 {
+            while tasks.spawner.errors.lock().recorded.len() != 2 {
                 shuttle::future::yield_now().await;
             }
             assert_eq!(tasks.value(first).await, Err("first"));
             let third = tasks.spawn(async { Err::<(), _>("third") });
-            while tasks.errors.lock().recorded.len() != 2 {
+            while tasks.spawner.errors.lock().recorded.len() != 2 {
                 shuttle::future::yield_now().await;
             }
             // Retained result handles cannot hide errors from join.

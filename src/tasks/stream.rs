@@ -219,9 +219,9 @@ where
             }
             // Join readiness can lag result publication. Bound unjoined handles
             // too, even if their values have already been yielded.
-            let can_start = !exhausted && outstanding < limit && lock(&tasks.set, "JoinSet::len").len() < limit;
+            let can_start = !exhausted && outstanding < limit && lock(&tasks.spawner.set, "JoinSet::len").len() < limit;
             let can_yield = lock(&results, "Results::contains").contains(yielded);
-            if lock(&tasks.set, "JoinSet::is_empty").is_empty() && !can_start && !can_yield {
+            if lock(&tasks.spawner.set, "JoinSet::is_empty").is_empty() && !can_start && !can_yield {
                 missing = outstanding != 0;
                 break cancellation.is_cancelled().then_some(ScopeError::Cancelled);
             }
@@ -232,7 +232,7 @@ where
             let () = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => break Some(ScopeError::Cancelled),
-                joined = join_next(&tasks.set), if !lock(&tasks.set, "JoinSet::is_empty").is_empty() => {
+                joined = join_next(&tasks.spawner.set), if !lock(&tasks.spawner.set, "JoinSet::is_empty").is_empty() => {
                     if let Some(Err(error)) = joined {
                         tasks.remember_panic(error);
                         missing = true;
