@@ -212,14 +212,17 @@ impl<'t> Finder<'t, '_> {
         (end == range.end).then_some((range.start, kind))
     }
 
-    fn enter(&mut self, attrs: &[Attribute]) -> usize {
+    /// Visits an item, counting it as a hazard when an attribute macro on it
+    /// might rewrite what it contains.
+    fn within(&mut self, attrs: &[Attribute], visit: impl FnOnce(&mut Self)) {
         let hazard = usize::from(
             attrs
                 .iter()
                 .any(|attr| macro_attribute(std::slice::from_ref(attr)) && !runtime_entry(attr)),
         );
         self.hazards += hazard;
-        hazard
+        visit(self);
+        self.hazards -= hazard;
     }
 }
 
@@ -235,39 +238,39 @@ fn runtime_entry(attr: &Attribute) -> bool {
 
 impl<'t> Visit<'t> for Finder<'t, '_> {
     fn visit_item_fn(&mut self, item: &'t syn::ItemFn) {
-        let hazard = self.enter(&item.attrs);
-        syn::visit::visit_item_fn(self, item);
-        self.hazards -= hazard;
+        self.within(&item.attrs, |finder| {
+            syn::visit::visit_item_fn(finder, item)
+        });
     }
 
     fn visit_impl_item_fn(&mut self, item: &'t syn::ImplItemFn) {
-        let hazard = self.enter(&item.attrs);
-        syn::visit::visit_impl_item_fn(self, item);
-        self.hazards -= hazard;
+        self.within(&item.attrs, |finder| {
+            syn::visit::visit_impl_item_fn(finder, item)
+        });
     }
 
     fn visit_trait_item_fn(&mut self, item: &'t syn::TraitItemFn) {
-        let hazard = self.enter(&item.attrs);
-        syn::visit::visit_trait_item_fn(self, item);
-        self.hazards -= hazard;
+        self.within(&item.attrs, |finder| {
+            syn::visit::visit_trait_item_fn(finder, item)
+        });
     }
 
     fn visit_item_impl(&mut self, item: &'t syn::ItemImpl) {
-        let hazard = self.enter(&item.attrs);
-        syn::visit::visit_item_impl(self, item);
-        self.hazards -= hazard;
+        self.within(&item.attrs, |finder| {
+            syn::visit::visit_item_impl(finder, item)
+        });
     }
 
     fn visit_item_trait(&mut self, item: &'t syn::ItemTrait) {
-        let hazard = self.enter(&item.attrs);
-        syn::visit::visit_item_trait(self, item);
-        self.hazards -= hazard;
+        self.within(&item.attrs, |finder| {
+            syn::visit::visit_item_trait(finder, item)
+        });
     }
 
     fn visit_item_mod(&mut self, item: &'t syn::ItemMod) {
-        let hazard = self.enter(&item.attrs);
-        syn::visit::visit_item_mod(self, item);
-        self.hazards -= hazard;
+        self.within(&item.attrs, |finder| {
+            syn::visit::visit_item_mod(finder, item)
+        });
     }
 
     fn visit_block(&mut self, block: &'t Block) {
