@@ -3,11 +3,14 @@ use std::{
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
-    ops::{Bound, Deref, Range, RangeBounds},
+    ops::{Deref, Range, RangeBounds},
     sync::Arc,
 };
 
-use crate::Str;
+use crate::{
+    Str,
+    string::{Selection, select},
+};
 
 /// A byte string with value semantics.
 ///
@@ -64,30 +67,15 @@ impl Bytes {
     /// are valid. Reversed or out-of-bounds ranges return `None`. The window
     /// keeps the backing allocation alive.
     pub fn slice(&self, range: impl RangeBounds<usize>) -> Option<Self> {
-        let (offset, len) = match &self.window {
-            Some(window) => (window.start, window.len()),
-            None => (0, self.storage.len()),
-        };
-        let start = match range.start_bound() {
-            Bound::Included(&start) => start,
-            Bound::Excluded(&start) => start.checked_add(1)?,
-            Bound::Unbounded => 0,
-        };
-        let end = match range.end_bound() {
-            Bound::Included(&end) => end.checked_add(1)?,
-            Bound::Excluded(&end) => end,
-            Bound::Unbounded => len,
-        };
-        if start > end || end > len {
-            return None;
-        }
-        if start == 0 && end == len {
-            return Some(self.clone());
-        }
-        Some(Self {
-            storage: Arc::clone(&self.storage),
-            window: Some((offset + start)..(offset + end)),
-        })
+        Some(
+            match select(self.window.as_ref(), self.storage.len(), range)? {
+                Selection::Whole => self.clone(),
+                Selection::Part(part) => Self {
+                    storage: Arc::clone(&self.storage),
+                    window: Some(part),
+                },
+            },
+        )
     }
 
     /// Mutable access to a `Vec<u8>` containing this value's bytes.

@@ -49,35 +49,20 @@ impl Str {
     /// non-char-boundary ranges return `None`. The window keeps the backing
     /// allocation alive.
     pub fn slice(&self, range: impl RangeBounds<usize>) -> Option<Self> {
-        let (offset, len) = match &self.window {
-            Some(window) => (window.start, window.len()),
-            None => (0, self.storage.len()),
-        };
-        let start = match range.start_bound() {
-            Bound::Included(&start) => start,
-            Bound::Excluded(&start) => start.checked_add(1)?,
-            Bound::Unbounded => 0,
-        };
-        let end = match range.end_bound() {
-            Bound::Included(&end) => end.checked_add(1)?,
-            Bound::Excluded(&end) => end,
-            Bound::Unbounded => len,
-        };
-        if start > end || end > len {
-            return None;
+        match select(self.window.as_ref(), self.storage.len(), range)? {
+            Selection::Whole => Some(self.clone()),
+            Selection::Part(part) => {
+                if !self.storage.is_char_boundary(part.start)
+                    || !self.storage.is_char_boundary(part.end)
+                {
+                    return None;
+                }
+                Some(Self {
+                    storage: Arc::clone(&self.storage),
+                    window: Some(part),
+                })
+            }
         }
-        if start == 0 && end == len {
-            return Some(self.clone());
-        }
-        let abs_start = offset + start;
-        let abs_end = offset + end;
-        if !self.storage.is_char_boundary(abs_start) || !self.storage.is_char_boundary(abs_end) {
-            return None;
-        }
-        Some(Self {
-            storage: Arc::clone(&self.storage),
-            window: Some(abs_start..abs_end),
-        })
     }
 
     /// Mutable access to a `String` containing this value's text.
@@ -277,4 +262,41 @@ impl<'de> serde::Deserialize<'de> for Str {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         String::deserialize(deserializer).map(Self::from)
     }
+}
+
+// What a `slice` call selects from a value.
+pub(crate) enum Selection {
+    Whole,
+    // A range in the backing storage.
+    Part(Range<usize>),
+}
+
+// Resolves `range`, which is relative to a value that shows `window` of a
+// storage of `storage_len` bytes. A reversed or out-of-bounds range is `None`.
+pub(crate) fn select(
+    window: Option<&Range<usize>>,
+    storage_len: usize,
+    range: impl RangeBounds<usize>,
+) -> Option<Selection> {
+    let (offset, len) = match window {
+        Some(window) => (window.start, window.len()),
+        None => (0, storage_len),
+    };
+    let start = match range.start_bound() {
+        Bound::Included(&start) => start,
+        Bound::Excluded(&start) => start.checked_add(1)?,
+        Bound::Unbounded => 0,
+    };
+    let end = match range.end_bound() {
+        Bound::Included(&end) => end.checked_add(1)?,
+        Bound::Excluded(&end) => end,
+        Bound::Unbounded => len,
+    };
+    if start > end || end > len {
+        return None;
+    }
+    if start == 0 && end == len {
+        return Some(Selection::Whole);
+    }
+    Some(Selection::Part((offset + start)..(offset + end)))
 }
