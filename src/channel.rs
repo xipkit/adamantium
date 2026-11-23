@@ -151,13 +151,14 @@ impl<T> Channel<T> {
     /// A channel that holds at most `capacity` messages. A capacity of zero
     /// is treated as one.
     pub fn bounded(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
         let queue = Arc::new(Queue {
             state: Lock::new(State {
                 senders: 1,
                 receivers: 1,
             }),
-            values: Bounded::new(capacity.max(1)),
-            capacity: capacity.max(1),
+            values: Bounded::new(capacity),
+            capacity,
             items: WaitQueue::named("channel.receive"),
             #[cfg(feature = "tokio")]
             streams: WaitQueue::named("channel.stream"),
@@ -310,11 +311,7 @@ impl<T> Clone for Channel<T> {
 
 impl<T> fmt::Debug for Channel<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Channel")
-            .field("len", &self.len())
-            .field("capacity", &self.capacity())
-            .field("closed", &self.is_closed())
-            .finish()
+        self.sender.queue.debug(f, "Channel")
     }
 }
 
@@ -447,12 +444,12 @@ impl<T> Sender<T> {
 
     /// Whether the channel is closed, possibly with messages still queued.
     pub fn is_closed(&self) -> bool {
-        self.queue.values.is_closed("Channel::is_closed")
+        self.queue.is_closed()
     }
 
     /// The number of messages waiting.
     pub fn len(&self) -> usize {
-        self.queue.values.len("Channel::len")
+        self.queue.len()
     }
 
     /// Whether no messages are waiting.
@@ -462,8 +459,7 @@ impl<T> Sender<T> {
 
     /// The most messages the channel holds.
     pub fn capacity(&self) -> usize {
-        self.queue.world.step("Channel::capacity");
-        self.queue.capacity
+        self.queue.capacity()
     }
 }
 
@@ -598,12 +594,12 @@ impl<T> Receiver<T> {
 
     /// Whether the channel is closed, possibly with messages still queued.
     pub fn is_closed(&self) -> bool {
-        self.queue.values.is_closed("Channel::is_closed")
+        self.queue.is_closed()
     }
 
     /// The number of messages waiting.
     pub fn len(&self) -> usize {
-        self.queue.values.len("Channel::len")
+        self.queue.len()
     }
 
     /// Whether no messages are waiting.
@@ -613,8 +609,7 @@ impl<T> Receiver<T> {
 
     /// The most messages the channel holds.
     pub fn capacity(&self) -> usize {
-        self.queue.world.step("Channel::capacity");
-        self.queue.capacity
+        self.queue.capacity()
     }
 }
 
@@ -674,21 +669,13 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> fmt::Debug for Sender<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Sender")
-            .field("len", &self.len())
-            .field("capacity", &self.capacity())
-            .field("closed", &self.is_closed())
-            .finish()
+        self.queue.debug(f, "Sender")
     }
 }
 
 impl<T> fmt::Debug for Receiver<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Receiver")
-            .field("len", &self.len())
-            .field("capacity", &self.capacity())
-            .field("closed", &self.is_closed())
-            .finish()
+        self.queue.debug(f, "Receiver")
     }
 }
 
@@ -772,6 +759,27 @@ impl<T> Queue<T> {
     fn lock(&self, operation: &'static str) -> Guard<'_, State> {
         self.world.step(operation);
         self.state.lock(operation)
+    }
+
+    fn is_closed(&self) -> bool {
+        self.values.is_closed("Channel::is_closed")
+    }
+
+    fn len(&self) -> usize {
+        self.values.len("Channel::len")
+    }
+
+    fn capacity(&self) -> usize {
+        self.world.step("Channel::capacity");
+        self.capacity
+    }
+
+    fn debug(&self, f: &mut fmt::Formatter<'_>, name: &str) -> fmt::Result {
+        f.debug_struct(name)
+            .field("len", &self.len())
+            .field("capacity", &self.capacity())
+            .field("closed", &self.is_closed())
+            .finish()
     }
 
     fn close(&self) -> bool {
