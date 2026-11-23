@@ -738,6 +738,32 @@ enum Resolved {
     Ambiguous,
 }
 
+impl From<&Binding> for Resolved {
+    fn from(binding: &Binding) -> Self {
+        match binding {
+            Binding::Import(path) => Self::Path(path.clone()),
+            Binding::Item => Self::Item,
+            Binding::Parameter => Self::Parameter,
+            Binding::Ambiguous => Self::Ambiguous,
+        }
+    }
+}
+
+const ARC_CRATES: &[&str] = &["std", "alloc"];
+const ARC: &[&str] = &["sync", "Arc"];
+
+/// The names of the first `segments` segments of `path`, when none of them has
+/// generic arguments.
+fn plain_names(path: &syn::Path, segments: usize) -> Option<Vec<String>> {
+    path.segments
+        .iter()
+        .take(segments)
+        .map(|segment| {
+            matches!(segment.arguments, PathArguments::None).then(|| segment.ident.to_string())
+        })
+        .collect()
+}
+
 struct Var {
     name: String,
     spelling: String,
@@ -972,27 +998,17 @@ impl<'a> Walker<'a> {
         let mut scopes = self.items.iter().rev();
         while let Some(scope) = scopes.next() {
             if let Some(binding) = scope.names.get(name) {
-                return match binding {
-                    Binding::Import(path) => Resolved::Path(path.clone()),
-                    Binding::Item => Resolved::Item,
-                    Binding::Parameter => Resolved::Parameter,
-                    Binding::Ambiguous => Resolved::Ambiguous,
-                };
+                return binding.into();
             }
             if scope.module {
                 let parent = scopes.clone().find(|scope| scope.module);
                 let only_super = scope.globs.iter().all(|glob| glob == &["super"]);
                 if !scope.globs.is_empty() {
                     return match parent {
-                        Some(parent) if only_super && parent.globs.is_empty() => {
-                            match parent.names.get(name) {
-                                Some(Binding::Import(path)) => Resolved::Path(path.clone()),
-                                Some(Binding::Item) => Resolved::Item,
-                                Some(Binding::Parameter) => Resolved::Parameter,
-                                Some(Binding::Ambiguous) => Resolved::Ambiguous,
-                                None => Resolved::Prelude,
-                            }
-                        }
+                        Some(parent) if only_super && parent.globs.is_empty() => parent
+                            .names
+                            .get(name)
+                            .map_or(Resolved::Prelude, Resolved::from),
                         _ => Resolved::Ambiguous,
                     };
                 }
@@ -1006,15 +1022,13 @@ impl<'a> Walker<'a> {
     }
 
     fn resolve_path(&self, path: &syn::Path, segments: usize) -> Option<Vec<String>> {
-        let names: Vec<String> = path
-            .segments
-            .iter()
-            .take(segments)
-            .map(|segment| {
-                matches!(segment.arguments, PathArguments::None).then(|| segment.ident.to_string())
-            })
-            .collect::<Option<_>>()?;
-        if path.leading_colon.is_some() {
+        self.resolve_names(path.leading_colon.is_some(), plain_names(path, segments)?)
+    }
+
+    /// Resolves a path given as its segment names; an `absolute` one starts
+    /// with `::`.
+    fn resolve_names(&self, absolute: bool, names: Vec<String>) -> Option<Vec<String>> {
+        if absolute {
             return Some(std::iter::once("::".to_owned()).chain(names).collect());
         }
         let (first, rest) = names.split_first()?;
@@ -1031,17 +1045,18 @@ impl<'a> Walker<'a> {
         let Some(count) = path.segments.len().checked_sub(skip) else {
             return false;
         };
-        self.resolve_path(path, count)
+        self.names_item(self.resolve_path(path, count), ARC_CRATES, ARC)
+    }
+
+    /// Whether `resolved` is the item `tail` of one of the crates `roots`.
+    fn names_item(&self, resolved: Option<Vec<String>>, roots: &[&str], tail: &[&str]) -> bool {
+        resolved
             .and_then(|resolved| self.crate_path(resolved))
             .is_some_and(|resolved| {
-                matches!(
-                    resolved
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .as_slice(),
-                    ["std" | "alloc", "sync", "Arc"]
-                )
+                resolved.split_first().is_some_and(|(root, rest)| {
+                    roots.contains(&root.as_str())
+                        && rest.iter().map(String::as_str).eq(tail.iter().copied())
+                })
             })
     }
 
@@ -1089,12 +1104,17 @@ impl<'a> Walker<'a> {
         if arc.qself.is_some() {
             return None;
         }
-        let PathArguments::AngleBracketed(args) = &arc.path.segments.last()?.arguments else {
+        let last = arc.path.segments.last()?;
+        let PathArguments::AngleBracketed(args) = &last.arguments else {
             return None;
         };
-        let mut prefix = arc.path.clone();
-        prefix.segments.last_mut()?.arguments = PathArguments::None;
-        if args.args.len() != 1 || !self.is_arc(&prefix, 0) {
+        let resolved = plain_names(&arc.path, arc.path.segments.len().saturating_sub(1)).and_then(
+            |mut names| {
+                names.push(last.ident.to_string());
+                self.resolve_names(arc.path.leading_colon.is_some(), names)
+            },
+        );
+        if args.args.len() != 1 || !self.names_item(resolved, ARC_CRATES, ARC) {
             return None;
         }
         let Some(GenericArgument::Type(lock)) = args.args.first() else {
@@ -1546,18 +1566,11 @@ impl<'a> Walker<'a> {
                     && self.lookup("drop").is_none()
                     && matches!(self.resolve_name("drop"), Resolved::Prelude)
             }
-            None => self
-                .resolve_path(&func.path, func.path.segments.len())
-                .and_then(|path| self.crate_path(path))
-                .is_some_and(|path| {
-                    matches!(
-                        path.iter()
-                            .map(String::as_str)
-                            .collect::<Vec<_>>()
-                            .as_slice(),
-                        ["std" | "core", "mem", "drop"]
-                    )
-                }),
+            None => self.names_item(
+                self.resolve_path(&func.path, func.path.segments.len()),
+                &["std", "core"],
+                &["mem", "drop"],
+            ),
         };
         is_drop.then(|| self.tracked(call.args.first()?)).flatten()
     }
