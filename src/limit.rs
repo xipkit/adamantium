@@ -327,20 +327,6 @@ impl Weighted<'_> {
     }
 }
 
-impl Places {
-    // A modeled limit used outside its execution leaves its state alone: its
-    // waiting calls can name tasks of a finished execution.
-    fn is_foreign(&self) -> bool {
-        if self.world == World::current() {
-            return false;
-        }
-        if !std::thread::panicking() {
-            self.world.check();
-        }
-        true
-    }
-}
-
 impl State {
     fn fits(&self, places: usize, limit: usize) -> bool {
         places <= limit.saturating_sub(self.taken)
@@ -400,8 +386,12 @@ impl Queued<'_> {
 
 impl Drop for Queued<'_> {
     fn drop(&mut self) {
+        if self.served {
+            return;
+        }
         let shared = &self.limit.places;
-        if self.served || shared.is_foreign() {
+        shared.world.check_unless_panicking();
+        if shared.world.unwinding_in_foreign_world() {
             return;
         }
         let next = {
@@ -423,7 +413,8 @@ impl Drop for Queued<'_> {
 
 impl Drop for Place {
     fn drop(&mut self) {
-        if self.places.is_foreign() {
+        self.places.world.check_unless_panicking();
+        if self.places.world.unwinding_in_foreign_world() {
             return;
         }
         let next = {
