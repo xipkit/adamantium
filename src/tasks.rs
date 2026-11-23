@@ -1761,6 +1761,27 @@ mod retention_tests {
         SpawnBlocking,
     }
 
+    #[allow(clippy::disallowed_methods, reason = "test watchdog")]
+    fn watchdog<F: Future>(future: F) -> tokio::time::Timeout<F> {
+        tokio::time::timeout(Duration::from_secs(30), future)
+    }
+
+    #[cfg(feature = "deterministic")]
+    fn check_and_replay<F, Fut>(seed: u64, iterations: usize, max_steps: usize, scenario: F)
+    where
+        F: Fn() -> Fut + Copy + Send + Sync + 'static,
+        Fut: Future<Output = ()>,
+    {
+        let config = crate::testing::Config {
+            seed,
+            iterations,
+            max_steps,
+            ..crate::testing::Config::default()
+        };
+        let replay = crate::testing::check(config, scenario).unwrap();
+        assert_eq!(crate::testing::replay(&replay, scenario).unwrap(), replay);
+    }
+
     #[tokio::test]
     async fn aborted_work_stays_unfinished_until_it_is_dropped() {
         let mut tasks = Tasks::<()>::new();
@@ -1823,26 +1844,13 @@ mod retention_tests {
     #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
     #[tokio::test]
     async fn reaped_panics_reach_value_and_join_after_cleanup() {
-        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
-        tokio::time::timeout(std::time::Duration::from_secs(30), panic_scenario())
-            .await
-            .unwrap();
+        watchdog(panic_scenario()).await.unwrap();
     }
 
     #[cfg(feature = "deterministic")]
     #[test]
     fn reaped_panics_survive_deterministic_replay() {
-        let config = crate::testing::Config {
-            seed: 187,
-            iterations: 100,
-            max_steps: 30_000,
-            ..crate::testing::Config::default()
-        };
-        let replay = crate::testing::check(config, panic_scenario).unwrap();
-        assert_eq!(
-            crate::testing::replay(&replay, panic_scenario).unwrap(),
-            replay
-        );
+        check_and_replay(187, 100, 30_000, panic_scenario);
     }
 
     #[tokio::test]
@@ -1881,8 +1889,7 @@ mod retention_tests {
     async fn handled_spawner_reaps_completed_entries_before_join() {
         let tasks = Tasks::<()>::new();
         let spawner = tasks.spawner();
-        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
-        tokio::time::timeout(Duration::from_secs(30), async {
+        watchdog(async {
             for _ in 0..100 {
                 spawner.spawn_handled(async { Err(()) }, |()| {}).unwrap();
                 while !tasks.is_empty() {
@@ -1905,8 +1912,7 @@ mod retention_tests {
         spawner
             .spawn_handled(async { panic!("handled task panic") }, |(): ()| {})
             .unwrap();
-        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
-        tokio::time::timeout(Duration::from_secs(30), async {
+        watchdog(async {
             while !tasks.is_empty() {
                 yield_now().await;
             }
@@ -1964,26 +1970,13 @@ mod retention_tests {
 
     #[tokio::test]
     async fn join_observes_a_child_error_even_when_a_spawner_reaps_its_completion() {
-        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
-        tokio::time::timeout(Duration::from_secs(30), reaped_error_during_join())
-            .await
-            .unwrap();
+        watchdog(reaped_error_during_join()).await.unwrap();
     }
 
     #[cfg(feature = "deterministic")]
     #[test]
     fn join_observes_a_reaped_completion_under_replay() {
-        let config = crate::testing::Config {
-            seed: 224,
-            iterations: 100,
-            max_steps: 10_000,
-            ..crate::testing::Config::default()
-        };
-        let replay = crate::testing::check(config, reaped_error_during_join).unwrap();
-        assert_eq!(
-            crate::testing::replay(&replay, reaped_error_during_join).unwrap(),
-            replay
-        );
+        check_and_replay(224, 100, 10_000, reaped_error_during_join);
     }
 
     // Spawns connections that finish at once, then waits without spawning
@@ -2013,26 +2006,13 @@ mod retention_tests {
 
     #[tokio::test]
     async fn a_running_scope_reaps_tasks_without_another_spawn() {
-        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
-        tokio::time::timeout(std::time::Duration::from_secs(30), idle_server_scenario())
-            .await
-            .unwrap();
+        watchdog(idle_server_scenario()).await.unwrap();
     }
 
     #[cfg(feature = "deterministic")]
     #[test]
     fn a_running_scope_reaps_tasks_without_another_spawn_under_replay() {
-        let config = crate::testing::Config {
-            seed: 195,
-            iterations: 50,
-            max_steps: 100_000,
-            ..crate::testing::Config::default()
-        };
-        let replay = crate::testing::check(config, idle_server_scenario).unwrap();
-        assert_eq!(
-            crate::testing::replay(&replay, idle_server_scenario).unwrap(),
-            replay
-        );
+        check_and_replay(195, 50, 100_000, idle_server_scenario);
     }
 
     // The scope's loop and the next spawn race to reap the same panic.
@@ -2062,17 +2042,7 @@ mod retention_tests {
     #[cfg(feature = "deterministic")]
     #[test]
     fn a_panic_reaped_by_a_spawn_still_stops_the_body() {
-        let config = crate::testing::Config {
-            seed: 195,
-            iterations: 200,
-            max_steps: 30_000,
-            ..crate::testing::Config::default()
-        };
-        let replay = crate::testing::check(config, panic_reaped_by_either_scenario).unwrap();
-        assert_eq!(
-            crate::testing::replay(&replay, panic_reaped_by_either_scenario).unwrap(),
-            replay
-        );
+        check_and_replay(195, 200, 30_000, panic_reaped_by_either_scenario);
     }
 
     #[cfg(feature = "deterministic")]
@@ -2099,14 +2069,7 @@ mod retention_tests {
             .await
             .unwrap();
         }
-        let config = crate::testing::Config {
-            seed: 187,
-            iterations: 20,
-            max_steps: 100_000,
-            ..crate::testing::Config::default()
-        };
-        let replay = crate::testing::check(config, scenario).unwrap();
-        assert_eq!(crate::testing::replay(&replay, scenario).unwrap(), replay);
+        check_and_replay(187, 20, 100_000, scenario);
     }
 }
 
