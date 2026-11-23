@@ -90,8 +90,10 @@ pub(crate) fn elapsed() -> Duration {
 }
 
 pub(crate) fn deadline_after(duration: Duration) -> Instant {
-    let now = now();
-    let mut delay = duration;
+    deadline_from(now(), duration)
+}
+
+pub(crate) fn deadline_from(now: Instant, mut delay: Duration) -> Instant {
     loop {
         if let Some(deadline) = now.checked_add(delay) {
             return deadline;
