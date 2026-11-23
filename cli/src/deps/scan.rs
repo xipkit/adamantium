@@ -740,17 +740,25 @@ impl<'a> Scanner<'a> {
             if scanner.calls_settled() || passes == MAX_PASSES {
                 break;
             }
-            let mut next = Self::new(crates, id, krate, disallowed);
-            next.libraries = mem::take(&mut scanner.libraries);
-            next.sources = mem::take(&mut scanner.sources);
-            next.foreign = mem::take(&mut scanner.foreign);
-            next.dollar_crates = mem::take(&mut scanner.dollar_crates);
-            next.instances = mem::take(&mut scanner.instances);
-            next.macro_paths = mem::take(&mut scanner.macro_paths);
-            next.last_pass = mem::take(&mut scanner.modules);
-            scanner = next;
+            scanner = scanner.next_pass();
         }
         scanner
+    }
+
+    /// A scanner for another reading of the crate. It keeps what the
+    /// readings so far learned about other crates and about which macro
+    /// definition is which, and resolves paths in the modules of the last one.
+    fn next_pass(self) -> Self {
+        Self {
+            libraries: self.libraries,
+            sources: self.sources,
+            foreign: self.foreign,
+            dollar_crates: self.dollar_crates,
+            instances: self.instances,
+            macro_paths: self.macro_paths,
+            last_pass: self.modules,
+            ..Self::new(self.crates, self.id, self.krate, self.disallowed)
+        }
     }
 
     fn calls_settled(&mut self) -> bool {
@@ -817,38 +825,8 @@ impl<'a> Scanner<'a> {
         textual: &mut Textual,
     ) -> Vec<Attribute> {
         let rel = self.relative(path);
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) => {
-                let reason = format!("reading {rel}: {error}");
-                self.unscanned(match from {
-                    Some((file, span)) => Unscanned {
-                        file: file.to_owned(),
-                        line: Some(span.start().line),
-                        reason,
-                    },
-                    None => Unscanned {
-                        file: rel,
-                        line: None,
-                        reason,
-                    },
-                });
-                return Vec::new();
-            }
-        };
-        if !self.visited.insert(path.to_path_buf()) {
+        let Some(mut file) = self.parse_source(path, &rel, from) else {
             return Vec::new();
-        }
-        let mut file = match syn::parse_file(&text) {
-            Ok(file) => file,
-            Err(error) => {
-                self.unscanned(Unscanned {
-                    file: rel,
-                    line: Some(error.span().start().line),
-                    reason: format!("syn could not parse it: {error}"),
-                });
-                return Vec::new();
-            }
         };
         let mut first = FirstSpan(None);
         first.visit_file(&file);
@@ -893,6 +871,44 @@ impl<'a> Scanner<'a> {
             path_dir: dir,
         });
         attrs
+    }
+
+    /// Reads and parses a module's file the first time it is loaded. A file
+    /// that can't be read or parsed is recorded as unscanned.
+    fn parse_source(&mut self, path: &Path, rel: &str, from: Option<(&str, Span)>) -> Option<File> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                let reason = format!("reading {rel}: {error}");
+                self.unscanned(match from {
+                    Some((file, span)) => Unscanned {
+                        file: file.to_owned(),
+                        line: Some(span.start().line),
+                        reason,
+                    },
+                    None => Unscanned {
+                        file: rel.to_owned(),
+                        line: None,
+                        reason,
+                    },
+                });
+                return None;
+            }
+        };
+        if !self.visited.insert(path.to_path_buf()) {
+            return None;
+        }
+        match syn::parse_file(&text) {
+            Ok(file) => Some(file),
+            Err(error) => {
+                self.unscanned(Unscanned {
+                    file: rel.to_owned(),
+                    line: Some(error.span().start().line),
+                    reason: format!("syn could not parse it: {error}"),
+                });
+                None
+            }
+        }
     }
 
     fn index(
@@ -1055,11 +1071,10 @@ impl<'a> Scanner<'a> {
             return;
         }
         let rel = self.file_of(name.span(), place.rel);
-        let unraw = name.unraw().to_string();
         let rules = Rules::parse(item.mac.tokens.clone());
         let instance = self.instance(&rel, name.span());
         let definition = MacroRules {
-            name: unraw.clone(),
+            name: name.unraw().to_string(),
             rules,
             rel,
             span: name.span(),
@@ -1076,66 +1091,79 @@ impl<'a> Scanner<'a> {
             self.crate_spans
                 .extend(definition.rules.iter().flat_map(Rules::crate_spans));
         }
-        let effective = self.krate.cfg.effective(&item.attrs);
+        self.export_macro(&item.attrs, &definition, holds, place.module, scope);
+        textual.macros.push(definition);
+    }
+
+    /// Records a definition that `#[macro_export]` puts at the crate root.
+    fn export_macro(
+        &mut self,
+        attrs: &[Attribute],
+        definition: &MacroRules,
+        holds: Truth,
+        module: &[String],
+        scope: &mut Scope,
+    ) {
+        let effective = self.krate.cfg.effective(attrs);
         let export = effective
             .iter()
             .filter(|(_, meta)| meta.path().is_ident("macro_export"));
         let exported = export
             .clone()
             .fold(Truth::False, |truth, (applies, _)| truth.or(*applies));
-        if exported != Truth::False {
-            let local_inner_macros = export.clone().any(|(_, meta)| {
-                matches!(meta, Meta::List(list) if list
-                    .parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)
-                    .is_ok_and(|args| args.iter().any(|arg| arg == "local_inner_macros")))
+        if exported == Truth::False {
+            return;
+        }
+        let local_inner_macros = export.clone().any(|(_, meta)| {
+            matches!(meta, Meta::List(list) if list
+                .parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)
+                .is_ok_and(|args| args.iter().any(|arg| arg == "local_inner_macros")))
+        });
+        let mut rules = definition.rules.clone();
+        if local_inner_macros && let Some(rules) = &mut rules {
+            rules.local_inner_macros();
+            if self.exports.is_some() {
+                self.crate_spans.extend(rules.crate_spans());
+            }
+        }
+        let defined = definition.defined.and(exported);
+        if let Some(exports) = &mut self.exports {
+            exports.push(Export {
+                name: definition.name.clone(),
+                rules: rules.clone(),
+                rel: definition.rel.clone(),
+                span: definition.span,
+                defined: holds.and(exported),
             });
-            let mut rules = definition.rules.clone();
-            if local_inner_macros && let Some(rules) = &mut rules {
-                rules.local_inner_macros();
-                if self.exports.is_some() {
-                    self.crate_spans.extend(rules.crate_spans());
-                }
+        }
+        let crate_root = [self.krate.name.to_owned()];
+        let path = vec![self.krate.name.to_owned(), definition.name.clone()];
+        let certain = definition.certain && exported == Truth::True;
+        let root = if module.len() == 1 {
+            Some(scope)
+        } else {
+            match self.around.iter_mut().find(|(module, _)| module.len() == 1) {
+                Some((_, root)) => Some(root),
+                None => self.modules.get_mut(crate_root.as_slice()),
             }
-            let defined = definition.defined.and(exported);
-            if let Some(exports) = &mut self.exports {
-                exports.push(Export {
-                    name: unraw.clone(),
-                    rules: rules.clone(),
-                    rel: definition.rel.clone(),
-                    span: name.span(),
-                    defined: holds.and(exported),
-                });
-            }
-            let crate_root = [self.krate.name.to_owned()];
-            let path = vec![self.krate.name.to_owned(), unraw.clone()];
-            let certain = definition.certain && exported == Truth::True;
-            let root = if place.module.len() == 1 {
-                Some(scope)
-            } else {
-                match self.around.iter_mut().find(|(module, _)| module.len() == 1) {
-                    Some((_, root)) => Some(root),
-                    None => self.modules.get_mut(crate_root.as_slice()),
-                }
-            };
-            if let Some(root) = root {
-                root.define(
-                    Namespace::Macros,
-                    unraw,
-                    Binding::Item(None, path.clone()),
-                    certain,
-                );
-            }
-            self.name_macro(
-                path,
-                MacroRules {
-                    rules,
-                    certain,
-                    defined,
-                    ..definition.clone()
-                },
+        };
+        if let Some(root) = root {
+            root.define(
+                Namespace::Macros,
+                definition.name.clone(),
+                Binding::Item(None, path.clone()),
+                certain,
             );
         }
-        textual.macros.push(definition);
+        self.name_macro(
+            path,
+            MacroRules {
+                rules,
+                certain,
+                defined,
+                ..definition.clone()
+            },
+        );
     }
 
     fn use_macros(
@@ -1670,8 +1698,10 @@ impl<'a> Scanner<'a> {
         true
     }
 
-    fn locate(&self, item: &ItemMod, mod_dir: &Path, path_dir: &Path) -> Location {
-        let name = item.ident.unraw().to_string();
+    /// Each place a module's `#[path]` attributes may put it, with the cfg
+    /// that selects it: `None` for the default location. Places whose cfg is
+    /// false are left out.
+    fn path_places(&self, item: &ItemMod) -> Vec<(Option<String>, TokenStream)> {
         let span = item.ident.span();
         let mut places = Vec::new();
         let mut later = Vec::new();
@@ -1698,6 +1728,12 @@ impl<'a> Scanner<'a> {
         }
         places.push((None, cfg_none(later, span)));
         places.retain(|(_, selects)| self.krate.cfg.holds(selects.clone()) != Truth::False);
+        places
+    }
+
+    fn locate(&self, item: &ItemMod, mod_dir: &Path, path_dir: &Path) -> Location {
+        let name = item.ident.unraw().to_string();
+        let places = self.path_places(item);
         let default = || {
             [
                 (mod_dir.join(format!("{name}.rs")), false),
