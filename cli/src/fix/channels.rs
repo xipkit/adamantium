@@ -42,6 +42,9 @@ impl Kind {
     }
 }
 
+/// Where each flagged constructor call starts, with where it ends and its kind.
+pub(super) type Constructors = BTreeMap<usize, (usize, Kind)>;
+
 pub(super) struct Refusal {
     pub(super) line: usize,
     pub(super) name: String,
@@ -96,11 +99,7 @@ const MPSC_METHOD: &str = "a half calls a method that `Channel` lacks or that me
 const READ_IN_PLACE: &str = "`*rx.borrow()` reads the value where it is, as in a comparison, without the copy that `Watcher::get` would make with `Clone`";
 const BORROW_CAPTURED: &str = "`borrow` would become `Watcher::get`, which needs the receiver mutably, inside a closure or async block";
 
-pub(super) fn plan(
-    file: &Path,
-    source: &str,
-    constructors: &BTreeMap<usize, (usize, Kind)>,
-) -> Outcome {
+pub(super) fn plan(file: &Path, source: &str, constructors: &Constructors) -> Outcome {
     let mut outcome = Outcome {
         edits: Vec::new(),
         refusals: Vec::new(),
@@ -198,7 +197,7 @@ struct Found<'a> {
 
 struct Finder<'t, 'c> {
     text: &'t Text<'t>,
-    constructors: &'c BTreeMap<usize, (usize, Kind)>,
+    constructors: &'c Constructors,
     hazards: usize,
     found: Vec<Found<'t>>,
 }
