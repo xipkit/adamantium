@@ -401,6 +401,30 @@ fn dropping_a_call_behind_the_front_keeps_the_others_in_order() {
 }
 
 #[test]
+fn dropping_waiters_in_the_middle_and_at_the_front_while_a_later_call_fits() {
+    let limit = Limit::new(4);
+    let mut holder = pin!(limit.weighted(2).unwrap().run(pending::<()>));
+    assert_eq!(poll_once(holder.as_mut()), Poll::Pending);
+    let mut front = Box::pin(limit.weighted(4).unwrap().run(|| ready(4)));
+    let front_waker = Watched::new();
+    assert_eq!(front_waker.poll(front.as_mut()), Poll::Pending);
+    let mut middle = Box::pin(limit.run(|| ready(1)));
+    assert_eq!(poll_once(middle.as_mut()), Poll::Pending);
+    let mut later = pin!(limit.weighted(2).unwrap().run(|| ready(2)));
+    let later_waker = Watched::new();
+    assert_eq!(later_waker.poll(later.as_mut()), Poll::Pending);
+
+    drop(middle);
+    assert!(!front_waker.woken());
+    assert!(!later_waker.woken());
+    assert_eq!(later_waker.poll(later.as_mut()), Poll::Pending);
+    drop(front);
+    assert!(later_waker.woken());
+    assert_eq!(later_waker.poll(later.as_mut()), Poll::Ready(2));
+    assert_eq!(limit.available(), 2);
+}
+
+#[test]
 fn a_weighted_call_waiting_or_dropped_takes_no_place() {
     let limit = Limit::new(2);
     let mut holder = pin!(limit.run(pending::<()>));

@@ -2,7 +2,7 @@ mod keyed;
 pub use keyed::KeyedLimit;
 
 use std::{
-    collections::VecDeque,
+    collections::BTreeMap,
     fmt,
     future::{Future, poll_fn},
     pin::{Pin, pin},
@@ -98,14 +98,15 @@ struct Places {
 
 struct State {
     taken: usize,
-    // Oldest first. Only the call at the front may take places, so places
-    // freed while it waits stay free until it has enough.
-    waiting: VecDeque<Waiting>,
+    // By ticket, so oldest first, and a call that gives up leaves without a
+    // scan. Only the call at the front may take places, so places freed
+    // while it waits stay free until it has enough.
+    waiting: BTreeMap<u64, Waiting>,
+    // Counts up from zero. A u64 doesn't wrap in any real run.
     next_ticket: u64,
 }
 
 struct Waiting {
-    ticket: u64,
     places: usize,
     turn: Turn,
 }
@@ -130,7 +131,7 @@ impl Limit {
                 limit: places.max(1),
                 state: Lock::new(State {
                     taken: 0,
-                    waiting: VecDeque::new(),
+                    waiting: BTreeMap::new(),
                     next_ticket: 0,
                 }),
                 line: WaitLine::named("limit.acquire"),
@@ -298,12 +299,18 @@ impl State {
     // woken already.
     fn wake_front(&mut self, limit: usize) -> Option<Wake> {
         let free = limit.saturating_sub(self.taken);
-        let front = self.waiting.front_mut()?;
-        if front.places <= free {
-            front.turn.take_wake()
+        let mut front = self.waiting.first_entry()?;
+        if front.get().places <= free {
+            front.get_mut().turn.take_wake()
         } else {
             None
         }
+    }
+
+    fn is_front(&self, ticket: u64) -> bool {
+        self.waiting
+            .first_key_value()
+            .is_some_and(|(&front, _)| front == ticket)
     }
 }
 
@@ -318,27 +325,25 @@ impl Take<'_> {
             }
             let ticket = state.next_ticket;
             state.next_ticket = ticket.wrapping_add(1);
-            state.waiting.push_back(Waiting {
+            state.waiting.insert(
                 ticket,
-                places: self.places,
-                turn: places.line.wait(cx),
-            });
+                Waiting {
+                    places: self.places,
+                    turn: places.line.wait(cx),
+                },
+            );
             self.ticket = Some(ticket);
             return Poll::Pending;
         };
-        let at_front = state
-            .waiting
-            .front()
-            .is_some_and(|front| front.ticket == ticket);
-        if at_front && state.fits(self.places, places.limit) {
-            let served = state.waiting.pop_front();
+        if state.is_front(ticket) && state.fits(self.places, places.limit) {
+            let served = state.waiting.pop_first();
             state.taken = state.taken.saturating_add(self.places);
             let next = state.wake_front(places.limit);
             drop(state);
             self.ticket = None;
             // Held before the wake, so a panic there gives the places back.
             let place = self.place();
-            if let Some(served) = served {
+            if let Some((_, served)) = served {
                 served.turn.complete();
             }
             if let Some(next) = next {
@@ -346,11 +351,7 @@ impl Take<'_> {
             }
             return Poll::Ready(place);
         }
-        if let Some(waiting) = state
-            .waiting
-            .iter_mut()
-            .find(|waiting| waiting.ticket == ticket)
-        {
+        if let Some(waiting) = state.waiting.get_mut(&ticket) {
             waiting.turn.update(cx);
         }
         Poll::Pending
@@ -385,13 +386,10 @@ impl Drop for Take<'_> {
         }
         let (left, next) = {
             let mut state = places.state.lock("Limit::leave");
-            let index = state
-                .waiting
-                .iter()
-                .position(|waiting| waiting.ticket == ticket);
-            let left = index.and_then(|index| state.waiting.remove(index));
+            let was_front = state.is_front(ticket);
+            let left = state.waiting.remove(&ticket);
             // Only the front call can be held back by the places it needs.
-            let next = if index == Some(0) {
+            let next = if was_front {
                 state.wake_front(places.limit)
             } else {
                 None
