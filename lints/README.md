@@ -119,7 +119,8 @@ merely created inside a callback does not inherit its actor context; calling tha
 closure inline does. A future returned for later polling starts a fresh actor
 context. Its body still gets the async blocking check.
 
-`adamantium_nested_limit` checks `Limit::run` and `run_until`, and
+`adamantium_nested_limit` checks `Limit::run` and `run_until`, the same
+methods of the `Weighted` handle from `Limit::weighted`, and
 `KeyedLimit::run` and `run_until`, polled inside the work of a limit: the work
 closure and the future it returns. Limit work may enter a `KeyedLimit`; any other
 nesting panics at runtime and is reported. Only polling enters a limit, so a `run`
