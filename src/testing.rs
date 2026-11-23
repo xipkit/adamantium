@@ -83,27 +83,14 @@ impl Config {
     fn with_env_values(seed: Option<&OsStr>, iterations: Option<&OsStr>) -> io::Result<Self> {
         let mut config = Self::default();
         if let Some(value) = seed {
-            config.seed = value
-                .to_str()
-                .and_then(|value| value.parse().ok())
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "ADAMANTIUM_SEED must be an unsigned 64-bit integer",
-                    )
-                })?;
+            config.seed = parse_env(value, "ADAMANTIUM_SEED must be an unsigned 64-bit integer")?;
         }
         if let Some(value) = iterations {
-            config.iterations = value
-                .to_str()
-                .and_then(|value| value.parse::<std::num::NonZeroUsize>().ok())
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "ADAMANTIUM_ITERATIONS must be a positive integer that fits in usize",
-                    )
-                })?
-                .get();
+            config.iterations = parse_env::<std::num::NonZeroUsize>(
+                value,
+                "ADAMANTIUM_ITERATIONS must be a positive integer that fits in usize",
+            )?
+            .get();
         }
         Ok(config)
     }
@@ -115,6 +102,13 @@ impl Config {
             scheduler,
         }
     }
+}
+
+fn parse_env<T: std::str::FromStr>(value: &OsStr, message: &'static str) -> io::Result<T> {
+    value
+        .to_str()
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, message))
 }
 
 /// The scheduler and its exploration bounds, configured with [`Config::with_scheduler`].
@@ -146,6 +140,12 @@ pub enum SchedulerMode {
     /// Enumerates schedules in the same order as `Dfs`, but passes after
     /// `iterations` executions even when schedules remain.
     DfsPrefix,
+}
+
+impl SchedulerMode {
+    fn is_dfs(self) -> bool {
+        matches!(self, Self::Dfs | Self::DfsPrefix)
+    }
 }
 
 /// How much of the schedule tree a DFS check covered.
@@ -262,6 +262,11 @@ impl Replay {
         Ok(record)
     }
 
+    fn assert_valid(&self) {
+        let validation = self.validate();
+        assert!(validation.is_ok(), "{validation:?}");
+    }
+
     fn validate(&self) -> io::Result<()> {
         validate_format(self.format)?;
         if self.engine != ENGINE {
@@ -285,12 +290,7 @@ impl Replay {
         if let SchedulerMode::Pct { depth: 0 } = self.scheduler {
             return Err(invalid_replay("scheduler.pct.depth must be nonzero"));
         }
-        if self.dfs_status.is_some()
-            && !matches!(
-                self.scheduler,
-                SchedulerMode::Dfs | SchedulerMode::DfsPrefix
-            )
-        {
+        if self.dfs_status.is_some() && !self.scheduler.is_dfs() {
             return Err(invalid_replay("dfs_status requires a DFS scheduler"));
         }
         if self.dfs_status == Some(DfsStatus::IterationLimit) && self.iteration != self.iterations {
@@ -467,23 +467,14 @@ where
         "adamantium::testing uses Config::seed and Replay::save; remove Shuttle environment overrides"
     );
     let record = Replay::new(exploration);
-    let (record, _) = match exploration.scheduler {
-        SchedulerMode::Random => run(
-            record,
-            RandomScheduler::new_from_seed(seed, iterations),
-            None,
-            factory,
-        ),
-        SchedulerMode::Pct { depth } => run(
-            record,
-            PctScheduler::new_from_seed(seed, depth, iterations),
-            None,
-            factory,
-        ),
-        SchedulerMode::Dfs | SchedulerMode::DfsPrefix => {
-            run(record, DfsScheduler::new(None, true), None, factory)
+    let scheduler: Box<dyn Scheduler + Send> = match exploration.scheduler {
+        SchedulerMode::Random => Box::new(RandomScheduler::new_from_seed(seed, iterations)),
+        SchedulerMode::Pct { depth } => {
+            Box::new(PctScheduler::new_from_seed(seed, depth, iterations))
         }
-    }?;
+        SchedulerMode::Dfs | SchedulerMode::DfsPrefix => Box::new(DfsScheduler::new(None, true)),
+    };
+    let (record, _) = run(record, scheduler, None, factory)?;
     if exploration.scheduler == SchedulerMode::Dfs
         && record.dfs_status == Some(DfsStatus::IterationLimit)
     {
@@ -509,8 +500,7 @@ where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()>,
 {
-    let validation = record.validate();
-    assert!(validation.is_ok(), "{validation:?}");
+    record.assert_valid();
     play(record, ReplayPolicy::Exact, factory).map(|(record, _)| record)
 }
 
@@ -531,8 +521,7 @@ where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()>,
 {
-    let validation = record.validate();
-    assert!(validation.is_ok(), "{validation:?}");
+    record.assert_valid();
 
     let factory = Arc::new(factory);
     let probe = |candidate: &Replay| {
@@ -801,23 +790,14 @@ impl fmt::Debug for Timeline {
 impl fmt::Display for Timeline {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.failure {
-            Some(kind) => writeln!(
-                f,
-                "adamantium::testing {kind:?} (scheduler={:?}, seed={}, iteration={}, max_steps={}):",
-                self.replay.scheduler,
-                self.replay.seed,
-                self.replay.iteration,
-                self.replay.max_steps
-            )?,
-            None => writeln!(
-                f,
-                "adamantium::testing Passed (scheduler={:?}, seed={}, iteration={}, max_steps={}):",
-                self.replay.scheduler,
-                self.replay.seed,
-                self.replay.iteration,
-                self.replay.max_steps
-            )?,
+            Some(kind) => write!(f, "adamantium::testing {kind:?}")?,
+            None => write!(f, "adamantium::testing Passed")?,
         }
+        writeln!(
+            f,
+            " (scheduler={:?}, seed={}, iteration={}, max_steps={}):",
+            self.replay.scheduler, self.replay.seed, self.replay.iteration, self.replay.max_steps
+        )?;
         self.fmt_events(f)
     }
 }
@@ -926,8 +906,7 @@ where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()>,
 {
-    let validation = record.validate();
-    assert!(validation.is_ok(), "{validation:?}");
+    record.assert_valid();
 
     match play(record, ReplayPolicy::Exact, factory) {
         Ok((replay, collector)) => build_timeline(replay, None, collector),
@@ -1300,12 +1279,7 @@ impl<S: Scheduler> Scheduler for Recording<S> {
             return None;
         }
         let schedule = self.scheduler.new_execution();
-        if !self.replaying
-            && matches!(
-                trace.scheduler,
-                SchedulerMode::Dfs | SchedulerMode::DfsPrefix
-            )
-        {
+        if !self.replaying && trace.scheduler.is_dfs() {
             // Query before checking the limit so a tree that finishes on the
             // final allowed execution counts as complete.
             if schedule.is_none() {
