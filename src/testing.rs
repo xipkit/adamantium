@@ -24,7 +24,7 @@ use shuttle::scheduler::{
 
 use crate::runtime::{
     execution::Execution,
-    trace::{self, Collector, Guard, RawEvent, Scheduling},
+    trace::{self, Collector, Guard, RawEvent, RawKind, Scheduling},
 };
 
 mod duplex;
@@ -950,115 +950,16 @@ fn build_timeline(
         };
     };
 
-    let names: BTreeMap<usize, String> = collector.names;
-    let name_of = |id: usize| names.get(&id).cloned();
-
-    let mut task_ids: BTreeMap<usize, Option<String>> = names
+    let names = collector.names;
+    let mut seen: BTreeMap<usize, Option<String>> = names
         .iter()
         .map(|(id, name)| (*id, Some(name.clone())))
         .collect();
 
     let mut events = Vec::with_capacity(collector.events.len() + usize::from(failure.is_some()));
     let mut last_timestamp = Duration::ZERO;
-    for raw in collector.events {
-        let (timestamp, kind, scheduling) = match raw {
-            RawEvent::Scheduled {
-                timestamp,
-                task_id,
-                scheduling,
-            } => {
-                task_ids.entry(task_id).or_insert_with(|| name_of(task_id));
-                (
-                    timestamp,
-                    TimelineEventKind::Scheduled {
-                        task_id,
-                        task_name: name_of(task_id),
-                    },
-                    Some(scheduling),
-                )
-            }
-            RawEvent::Wait {
-                timestamp,
-                task_id,
-                operation,
-                wait_id,
-            } => {
-                task_ids.entry(task_id).or_insert_with(|| name_of(task_id));
-                (
-                    timestamp,
-                    TimelineEventKind::Wait {
-                        task_id,
-                        task_name: name_of(task_id),
-                        operation,
-                        wait_id,
-                    },
-                    None,
-                )
-            }
-            RawEvent::Wakeup {
-                timestamp,
-                by_task_id,
-                target_task_ids,
-                operation,
-                wait_id,
-            } => {
-                if let Some(id) = by_task_id {
-                    task_ids.entry(id).or_insert_with(|| name_of(id));
-                }
-                for id in &target_task_ids {
-                    task_ids.entry(*id).or_insert_with(|| name_of(*id));
-                }
-                let target_task_names = target_task_ids.iter().map(|id| name_of(*id)).collect();
-                (
-                    timestamp,
-                    TimelineEventKind::Wakeup {
-                        by_task_id,
-                        by_task_name: by_task_id.and_then(name_of),
-                        target_task_ids,
-                        target_task_names,
-                        operation,
-                        wait_id,
-                    },
-                    None,
-                )
-            }
-            RawEvent::WaitCompleted {
-                timestamp,
-                task_id,
-                operation,
-                wait_id,
-            } => {
-                task_ids.entry(task_id).or_insert_with(|| name_of(task_id));
-                (
-                    timestamp,
-                    TimelineEventKind::WaitCompleted {
-                        task_id,
-                        task_name: name_of(task_id),
-                        operation,
-                        wait_id,
-                    },
-                    None,
-                )
-            }
-            RawEvent::WaitCancelled {
-                timestamp,
-                task_id,
-                operation,
-                wait_id,
-            } => {
-                task_ids.entry(task_id).or_insert_with(|| name_of(task_id));
-                (
-                    timestamp,
-                    TimelineEventKind::WaitCancelled {
-                        task_id,
-                        task_name: name_of(task_id),
-                        operation,
-                        wait_id,
-                    },
-                    None,
-                )
-            }
-        };
+    for RawEvent { timestamp, kind } in collector.events {
+        let (kind, scheduling) = resolve_event(kind, &names, &mut seen);
         last_timestamp = timestamp;
         events.push(TimelineEvent {
             timestamp,
@@ -1069,21 +970,18 @@ fn build_timeline(
 
     if let Some(kind) = failure {
         let task_id = collector.last_scheduled;
-        if let Some(id) = task_id {
-            task_ids.entry(id).or_insert_with(|| name_of(id));
-        }
         events.push(TimelineEvent {
             timestamp: last_timestamp,
             kind: TimelineEventKind::Failed {
                 kind,
                 task_id,
-                task_name: task_id.and_then(name_of),
+                task_name: task_id.and_then(|id| see_task(&names, &mut seen, id)),
             },
             scheduling: None,
         });
     }
 
-    let tasks = task_ids
+    let tasks = seen
         .into_iter()
         .map(|(id, name)| TaskInfo { id, name })
         .collect();
@@ -1100,7 +998,7 @@ fn build_timeline(
         .into_iter()
         .map(|entry| WaitingTask {
             task_id: entry.task_id,
-            task_name: name_of(entry.task_id),
+            task_name: names.get(&entry.task_id).cloned(),
             operation: entry.operation,
             wait_id: entry.wait_id,
             since: entry.since,
@@ -1113,6 +1011,96 @@ fn build_timeline(
         tasks,
         waiting,
         events,
+    }
+}
+
+// Lists the task among those the timeline saw and returns its name.
+fn see_task(
+    names: &BTreeMap<usize, String>,
+    seen: &mut BTreeMap<usize, Option<String>>,
+    id: usize,
+) -> Option<String> {
+    let name = names.get(&id).cloned();
+    seen.entry(id).or_insert_with(|| name.clone());
+    name
+}
+
+fn resolve_event(
+    kind: RawKind,
+    names: &BTreeMap<usize, String>,
+    seen: &mut BTreeMap<usize, Option<String>>,
+) -> (TimelineEventKind, Option<Scheduling>) {
+    let mut see = |id| see_task(names, seen, id);
+    match kind {
+        RawKind::Scheduled {
+            task_id,
+            scheduling,
+        } => (
+            TimelineEventKind::Scheduled {
+                task_id,
+                task_name: see(task_id),
+            },
+            Some(scheduling),
+        ),
+        RawKind::Wait {
+            task_id,
+            operation,
+            wait_id,
+        } => (
+            TimelineEventKind::Wait {
+                task_id,
+                task_name: see(task_id),
+                operation,
+                wait_id,
+            },
+            None,
+        ),
+        RawKind::Wakeup {
+            by_task_id,
+            target_task_ids,
+            operation,
+            wait_id,
+        } => {
+            let by_task_name = by_task_id.and_then(&mut see);
+            let target_task_names = target_task_ids.iter().map(|id| see(*id)).collect();
+            (
+                TimelineEventKind::Wakeup {
+                    by_task_id,
+                    by_task_name,
+                    target_task_ids,
+                    target_task_names,
+                    operation,
+                    wait_id,
+                },
+                None,
+            )
+        }
+        RawKind::WaitCompleted {
+            task_id,
+            operation,
+            wait_id,
+        } => (
+            TimelineEventKind::WaitCompleted {
+                task_id,
+                task_name: see(task_id),
+                operation,
+                wait_id,
+            },
+            None,
+        ),
+        RawKind::WaitCancelled {
+            task_id,
+            operation,
+            wait_id,
+        } => (
+            TimelineEventKind::WaitCancelled {
+                task_id,
+                task_name: see(task_id),
+                operation,
+                wait_id,
+            },
+            None,
+        ),
     }
 }
 

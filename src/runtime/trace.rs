@@ -82,33 +82,33 @@ pub(crate) struct Scheduling {
     pub(crate) steps: usize,
 }
 
-pub(crate) enum RawEvent {
+pub(crate) struct RawEvent {
+    pub(crate) timestamp: Duration,
+    pub(crate) kind: RawKind,
+}
+
+pub(crate) enum RawKind {
     Scheduled {
-        timestamp: Duration,
         task_id: usize,
         scheduling: Scheduling,
     },
     Wait {
-        timestamp: Duration,
         task_id: usize,
         operation: &'static str,
         wait_id: u64,
     },
     Wakeup {
-        timestamp: Duration,
         by_task_id: Option<usize>,
         target_task_ids: Vec<usize>,
         operation: &'static str,
         wait_id: u64,
     },
     WaitCompleted {
-        timestamp: Duration,
         task_id: usize,
         operation: &'static str,
         wait_id: u64,
     },
     WaitCancelled {
-        timestamp: Duration,
         task_id: usize,
         operation: &'static str,
         wait_id: u64,
@@ -221,10 +221,13 @@ pub(crate) fn record_scheduled(task_id: usize, shuttle_name: Option<String>) {
         collector.last_scheduled = Some(task_id);
         let timestamp = clock::elapsed();
         let operation = collector.operations.get(&task_id).copied().flatten();
-        if let Some(RawEvent::Scheduled {
+        if let Some(RawEvent {
             timestamp: previous_time,
-            task_id: previous_task,
-            scheduling,
+            kind:
+                RawKind::Scheduled {
+                    task_id: previous_task,
+                    scheduling,
+                },
         }) = collector.events.last_mut()
             && *previous_task == task_id
             && *previous_time == timestamp
@@ -233,12 +236,14 @@ pub(crate) fn record_scheduled(task_id: usize, shuttle_name: Option<String>) {
             scheduling.steps += 1;
             return;
         }
-        collector.events.push(RawEvent::Scheduled {
+        collector.events.push(RawEvent {
             timestamp,
-            task_id,
-            scheduling: Scheduling {
-                operation,
-                steps: 1,
+            kind: RawKind::Scheduled {
+                task_id,
+                scheduling: Scheduling {
+                    operation,
+                    steps: 1,
+                },
             },
         });
     });
@@ -291,11 +296,13 @@ pub(crate) fn begin_registered_wait(token: u64, operation: &'static str, wait_id
                 since: timestamp,
             },
         );
-        collector.events.push(RawEvent::Wait {
+        collector.events.push(RawEvent {
             timestamp,
-            task_id,
-            operation,
-            wait_id,
+            kind: RawKind::Wait {
+                task_id,
+                operation,
+                wait_id,
+            },
         });
     });
 }
@@ -345,30 +352,36 @@ pub(crate) fn end_wait(token: u64, operation: &'static str, wait_id: u64, cancel
         }
         let timestamp = clock::elapsed();
         if let Some(entry) = entry {
-            let event = if cancelled {
-                RawEvent::WaitCancelled {
-                    timestamp,
-                    task_id: entry.task_id,
-                    operation: entry.operation,
-                    wait_id: entry.wait_id,
+            let WaitEntry {
+                task_id,
+                operation,
+                wait_id,
+                ..
+            } = entry;
+            let kind = if cancelled {
+                RawKind::WaitCancelled {
+                    task_id,
+                    operation,
+                    wait_id,
                 }
             } else {
-                RawEvent::WaitCompleted {
-                    timestamp,
-                    task_id: entry.task_id,
-                    operation: entry.operation,
-                    wait_id: entry.wait_id,
+                RawKind::WaitCompleted {
+                    task_id,
+                    operation,
+                    wait_id,
                 }
             };
-            collector.events.push(event);
+            collector.events.push(RawEvent { timestamp, kind });
         }
         if let Some(target_task_id) = handed_off {
-            collector.events.push(RawEvent::Wakeup {
+            collector.events.push(RawEvent {
                 timestamp,
-                by_task_id,
-                target_task_ids: vec![target_task_id],
-                operation: op,
-                wait_id: queue_id,
+                kind: RawKind::Wakeup {
+                    by_task_id,
+                    target_task_ids: vec![target_task_id],
+                    operation: op,
+                    wait_id: queue_id,
+                },
             });
         }
     });
@@ -401,12 +414,14 @@ pub(crate) fn record_wakeup(operation: &'static str, wait_id: u64, all: bool) {
         if target_task_ids.is_empty() {
             return;
         }
-        collector.events.push(RawEvent::Wakeup {
+        collector.events.push(RawEvent {
             timestamp: clock::elapsed(),
-            by_task_id,
-            target_task_ids,
-            operation,
-            wait_id,
+            kind: RawKind::Wakeup {
+                by_task_id,
+                target_task_ids,
+                operation,
+                wait_id,
+            },
         });
     });
 }
