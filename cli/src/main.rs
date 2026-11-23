@@ -149,7 +149,7 @@ struct Explanation {
 
 impl Explanation {
     fn for_rule(rule: &str) -> Result<Self> {
-        if rule == OVERFLOW_RULE || Some(rule) == OVERFLOW_RULE.strip_prefix("adamantium::") {
+        if lints::is_overflow_rule(rule) {
             return Ok(Self {
                 schema_version: 1,
                 rule: OVERFLOW_RULE.to_owned(),
@@ -157,11 +157,9 @@ impl Explanation {
                 example: OVERFLOW_EXAMPLE,
             });
         }
-        let lint = lints::selected(true)
-            .find(|lint| lint.name == rule || lint.qualified() == rule)
-            .ok_or_else(|| {
-                anyhow!("unknown rule `{rule}`; `cargo adamantium rules` lists the lint names")
-            })?;
+        let lint = lints::find(rule).ok_or_else(|| {
+            anyhow!("unknown rule `{rule}`; `cargo adamantium rules` lists the lint names")
+        })?;
         Ok(Self {
             schema_version: 1,
             rule: lint.qualified(),

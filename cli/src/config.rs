@@ -190,15 +190,14 @@ fn glob(pattern: &str, key: &str) -> Result<Glob> {
 }
 
 fn qualify(name: &str, table: &str) -> Result<String> {
-    if name == OVERFLOW_RULE || Some(name) == OVERFLOW_RULE.strip_prefix("adamantium::") {
+    if lints::is_overflow_rule(name) {
         return Ok(OVERFLOW_RULE.to_owned());
     }
     if EXPERIMENTAL_LINTS.contains(&name) {
         return Ok(name.to_owned());
     }
-    lints::selected(true)
-        .find(|lint| lint.name == name || lint.qualified() == name)
-        .map(|lint| lint.qualified())
+    lints::find(name)
+        .map(lints::Lint::qualified)
         .ok_or_else(|| {
             anyhow!("unknown rule `{name}` in [{table}]; `cargo adamantium rules` lists them")
         })

@@ -37,13 +37,59 @@ pub struct Example {
     pub after: &'static str,
 }
 
-pub const EXPERIMENTAL_LINTS: &[&str] = &[
-    "adamantium_blocking_in_async",
-    "adamantium_blocking_in_actor",
-    "adamantium_nested_actor_access",
-    "adamantium_nested_limit",
-    "adamantium_race_with_timer",
-];
+/// A lint of the experimental native library, the migration guide section
+/// that covers it, and how to replace what it reports.
+struct Experimental {
+    name: &'static str,
+    section: &'static str,
+    replacement: &'static str,
+}
+
+/// Declares the experimental lints once: the names that `check` enables and
+/// the guidance for each.
+macro_rules! experimental_lints {
+    ($(($name:literal, $section:literal, $replacement:literal),)*) => {
+        pub const EXPERIMENTAL_LINTS: &[&str] = &[$($name),*];
+
+        const EXPERIMENTAL: &[Experimental] = &[$(Experimental {
+            name: $name,
+            section: $section,
+            replacement: $replacement,
+        }),*];
+    };
+}
+
+experimental_lints! {
+    (
+        "adamantium_blocking_in_async",
+        "blocking-work",
+        "Use adamantium::blocking or Tasks::spawn_blocking for blocking work."
+    ),
+    (
+        "adamantium_blocking_in_actor",
+        "blocking-work-inside-a-callback",
+        "Do the blocking work before or after the callback, and record its result in the actor."
+    ),
+    (
+        "adamantium_nested_actor_access",
+        "two-locks-at-once",
+        "Access the second actor after the outer callback returns."
+    ),
+    (
+        "adamantium_nested_limit",
+        "two-limits-at-once",
+        "Enter only a KeyedLimit inside Limit work, and other limits after the work finishes."
+    ),
+    (
+        "adamantium_race_with_timer",
+        "the-first-event",
+        "Use adamantium::until or a *_until method, or race only documented drop-safe operations."
+    ),
+}
+
+fn experimental(name: &str) -> Option<&'static Experimental> {
+    EXPERIMENTAL.iter().find(|lint| lint.name == name)
+}
 
 pub const OVERFLOW_RULE: &str = "adamantium::overflow_checks";
 pub const OVERFLOW_WHY: &str = "the release profile must set overflow-checks = true, so integer overflow panics instead of wrapping";
@@ -69,12 +115,7 @@ impl<'a> Hint<'a> {
             "clippy::disallowed_macros" => disallowed(message, DISALLOWED_MACROS),
             "clippy::disallowed_methods" => disallowed(message, DISALLOWED_METHODS),
             "clippy::disallowed_types" => disallowed(message, DISALLOWED_TYPES),
-            "adamantium_blocking_in_async" => Some("blocking-work"),
-            "adamantium_blocking_in_actor" => Some("blocking-work-inside-a-callback"),
-            "adamantium_nested_actor_access" => Some("two-locks-at-once"),
-            "adamantium_nested_limit" => Some("two-limits-at-once"),
-            "adamantium_race_with_timer" => Some("the-first-event"),
-            _ => None,
+            _ => experimental(rule).map(|lint| lint.section),
         };
         section.map_or(Self::Explain(rule), Self::Guide)
     }
@@ -328,27 +369,12 @@ pub fn remediation(rule: &str, message: &str, reasons: &Reasons) -> Option<Strin
 }
 
 fn rule_replacement(rule: &str) -> Option<&'static str> {
-    match rule {
-        OVERFLOW_RULE => Some(OVERFLOW_EXAMPLE.replacement),
-        "adamantium_blocking_in_async" => {
-            Some("Use adamantium::blocking or Tasks::spawn_blocking for blocking work.")
-        }
-        "adamantium_blocking_in_actor" => Some(
-            "Do the blocking work before or after the callback, and record its result in the actor.",
-        ),
-        "adamantium_nested_actor_access" => {
-            Some("Access the second actor after the outer callback returns.")
-        }
-        "adamantium_nested_limit" => Some(
-            "Enter only a KeyedLimit inside Limit work, and other limits after the work finishes.",
-        ),
-        "adamantium_race_with_timer" => Some(
-            "Use adamantium::until or a *_until method, or race only documented drop-safe operations.",
-        ),
-        _ => selected(true)
-            .find(|lint| lint.name == rule || lint.qualified() == rule)
-            .map(|lint| lint.example.replacement),
+    if rule == OVERFLOW_RULE {
+        return Some(OVERFLOW_EXAMPLE.replacement);
     }
+    experimental(rule)
+        .map(|lint| lint.replacement)
+        .or_else(|| find(rule).map(|lint| lint.example.replacement))
 }
 
 fn capitalize(text: &str) -> String {
@@ -860,7 +886,23 @@ pub fn selected(strict: bool) -> impl Iterator<Item = &'static Lint> {
         .chain(STRICT_LINTS.iter().filter(move |_| strict))
 }
 
+/// The lint of either tier with this bare or qualified name.
+pub fn find(name: &str) -> Option<&'static Lint> {
+    selected(true).find(|lint| lint.is_named(name))
+}
+
+/// Whether `name` is the bare or qualified name of the release profile's
+/// overflow check, which is a rule but not a lint.
+pub fn is_overflow_rule(name: &str) -> bool {
+    name == OVERFLOW_RULE || Some(name) == OVERFLOW_RULE.strip_prefix("adamantium::")
+}
+
 impl Lint {
+    fn is_named(&self, name: &str) -> bool {
+        name == self.name
+            || (self.tool == Tool::Clippy && name.strip_prefix("clippy::") == Some(self.name))
+    }
+
     /// The lint's name as Clippy and rustc report it.
     pub fn qualified(&self) -> String {
         match self.tool {
