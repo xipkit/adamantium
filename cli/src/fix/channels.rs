@@ -13,8 +13,7 @@ use syn::{
 use super::{
     Edit,
     scan::macro_attribute,
-    source::{Text, bare, format_captures, is_assignment, string_literal},
-    state::pattern_names,
+    source::{Text, bare, format_captures, is_assignment, pattern_names, string_literal},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

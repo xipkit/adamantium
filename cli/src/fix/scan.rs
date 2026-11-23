@@ -259,7 +259,7 @@ pub(super) fn macro_attribute(attrs: &[Attribute]) -> bool {
 }
 
 fn reads_as_expressions(name: &str) -> bool {
-    super::state::known_macro(name).is_some() || name == "vec"
+    super::source::known_macro(name).is_some() || name == "vec"
 }
 
 fn expression_arguments(
@@ -423,7 +423,7 @@ impl Scan<'_> {
     ) {
         let mut names = Vec::new();
         for pat in pats {
-            super::state::pattern_names(pat, &mut names);
+            super::source::pattern_names(pat, &mut names);
         }
         self.locals.push(Locals {
             names: names.into_iter().collect(),
@@ -435,7 +435,7 @@ impl Scan<'_> {
 
     fn bind(&mut self, pat: &syn::Pat) {
         let mut names = Vec::new();
-        super::state::pattern_names(pat, &mut names);
+        super::source::pattern_names(pat, &mut names);
         if let Some(scope) = self.locals.last_mut() {
             scope.names.extend(names);
         }
@@ -520,7 +520,7 @@ impl Scan<'_> {
 
 impl<'ast> Visit<'ast> for Scan<'_> {
     fn visit_item(&mut self, item: &'ast Item) {
-        if macro_attribute(super::state::item_attributes(item))
+        if macro_attribute(super::source::item_attributes(item))
             && !matches!(item, Item::Fn(f) if self.krate.poll_root(self.file, &f.sig))
         {
             self.krate.opaque_poll = true;

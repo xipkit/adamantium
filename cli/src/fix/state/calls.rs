@@ -3,8 +3,10 @@ use std::collections::hash_map::Entry;
 use syn::{Block, Expr, ImplItem, Item, Pat, PathArguments, ReturnType, Stmt, Type, visit::Visit};
 
 use super::{
-    Edit, Group, ItemScope, LockKind, Reason, Resolved, UNLOCATED, Walker, bare,
-    fields::may_be_unsized, item_attributes,
+    Edit, Group, LockKind, Reason, UNLOCATED, Walker, bare,
+    fields::may_be_unsized,
+    item_attributes,
+    resolve::{ItemScope, Resolved},
 };
 use crate::fix::scan::macro_attribute;
 

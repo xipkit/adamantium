@@ -6,7 +6,7 @@ use std::{
 };
 
 use proc_macro2::{Span, TokenStream, TokenTree};
-use syn::{ItemUse, Lit, UseTree, ext::IdentExt, spanned::Spanned, visit::Visit};
+use syn::{Item, ItemUse, Lit, Pat, UseTree, ext::IdentExt, spanned::Spanned, visit::Visit};
 
 use super::Edit;
 
@@ -462,6 +462,64 @@ struct Uses<'ast>(Vec<&'ast ItemUse>);
 impl<'ast> Visit<'ast> for Uses<'ast> {
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         self.0.push(item);
+    }
+}
+
+pub(super) fn known_macro(name: &str) -> Option<usize> {
+    match name {
+        "format" | "print" | "println" | "eprint" | "eprintln" | "panic" => Some(0),
+        "assert" | "debug_assert" | "write" | "writeln" => Some(1),
+        "assert_eq" | "assert_ne" | "debug_assert_eq" | "debug_assert_ne" => Some(2),
+        _ => None,
+    }
+}
+
+pub(super) fn item_attributes(item: &Item) -> &[syn::Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+pub(super) fn pattern_names(pat: &Pat, names: &mut Vec<String>) {
+    match pat {
+        Pat::Ident(ident) => {
+            names.push(bare(&ident.ident));
+            if let Some((_, subpat)) = &ident.subpat {
+                pattern_names(subpat, names);
+            }
+        }
+        Pat::Guard(guard) => pattern_names(&guard.pat, names),
+        Pat::Or(or) => {
+            if let Some(first) = or.cases.first() {
+                pattern_names(first, names);
+            }
+        }
+        Pat::Paren(paren) => pattern_names(&paren.pat, names),
+        Pat::Reference(reference) => pattern_names(&reference.pat, names),
+        Pat::Slice(slice) => slice.elems.iter().for_each(|pat| pattern_names(pat, names)),
+        Pat::Struct(fields) => fields
+            .fields
+            .iter()
+            .for_each(|field| pattern_names(&field.pat, names)),
+        Pat::Tuple(tuple) => tuple.elems.iter().for_each(|pat| pattern_names(pat, names)),
+        Pat::TupleStruct(tuple) => tuple.elems.iter().for_each(|pat| pattern_names(pat, names)),
+        Pat::Type(typed) => pattern_names(&typed.pat, names),
+        _ => {}
     }
 }
 

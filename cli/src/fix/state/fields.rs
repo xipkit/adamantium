@@ -3,7 +3,10 @@ use std::collections::BTreeSet;
 use proc_macro2::TokenStream;
 use syn::{Expr, ExprField, ExprStruct, Item, Member, Pat, Type, visit::Visit};
 
-use super::{Group, ItemScope, Reason, Resolved, Var, Walker, bare};
+use super::{
+    Group, Reason, Var, Walker, bare,
+    resolve::{ItemScope, Resolved},
+};
 use crate::fix::scan::{idents, macro_attribute};
 
 pub(super) struct Field {
