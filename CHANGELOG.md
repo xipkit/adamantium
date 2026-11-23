@@ -10,6 +10,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `adamantium::Channel` and `Receiver` have `receive_batch_until`, whose linger
+  starts with the first value, and `try_receive_batch` for taking ready values
+  without waiting.
 - `adamantium::testing::Replay::steps` counts the scheduling steps in a
   recorded execution, which shows how large a scenario is.
 
