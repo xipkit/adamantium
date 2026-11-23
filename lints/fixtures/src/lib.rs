@@ -1,5 +1,5 @@
 #![allow(dead_code, unused_must_use)]
-use metal::{Actor, KeyedLimit, Limit, Tasks, blocking};
+use metal::{Actor, KeyedLimit, Limit, Overweight, Tasks, blocking};
 use std::{fs as disk, io::{Cursor, Read, Write}, time::Duration};
 
 type State = Actor<u8>;
@@ -326,6 +326,16 @@ async fn pong(l: &Limit, n: u32) { if n != 0 { Box::pin(ping(l, n - 1)).await } 
 async fn guarded<F: std::future::Future<Output = ()>>(l: &Limit, f: F) { l.run(|| f).await }
 async fn guarded_work<W: FnOnce() -> Fut, Fut: std::future::Future<Output = ()>>(l: &Limit, work: W) { l.run(work).await }
 fn enter_sync(l: &Limit) -> impl std::future::Future<Output = ()> + '_ { l.run(|| async {}) }
+
+pub async fn weighted_limits(outer: &Limit, inner: &Limit) -> Result<(), Overweight> {
+    let heavy = inner.weighted(2)?;
+    outer.run(|| heavy.run(|| async {})).await; // limit
+    heavy.run(|| async { outer.run(|| async {}).await }).await; // limit
+    heavy.run(|| enter(outer)).await; // limit
+    heavy.run(|| async {}).await;
+    outer.run(|| async { let _later = heavy.run(|| async {}); }).await;
+    Ok(())
+}
 
 pub async fn limit_helpers(outer: &Limit, inner: &Limit, keys: &KeyedLimit<u8>) {
     outer.run(|| inner.run(|| async {})).await; // limit
