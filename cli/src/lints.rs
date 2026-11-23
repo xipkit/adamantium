@@ -1,6 +1,7 @@
-use std::{borrow::Cow, fmt};
+use std::{borrow::Cow, collections::HashMap, fmt, io::Write, process::ExitCode};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use clap::ValueEnum;
 use serde::Serialize;
 use toml_edit::{DocumentMut, Item};
 
@@ -37,13 +38,59 @@ pub struct Example {
     pub after: &'static str,
 }
 
-pub const EXPERIMENTAL_LINTS: &[&str] = &[
-    "adamantium_blocking_in_async",
-    "adamantium_blocking_in_actor",
-    "adamantium_nested_actor_access",
-    "adamantium_nested_limit",
-    "adamantium_race_with_timer",
-];
+/// A lint of the experimental native library, the migration guide section
+/// that covers it, and how to replace what it reports.
+struct Experimental {
+    name: &'static str,
+    section: &'static str,
+    replacement: &'static str,
+}
+
+/// Declares the experimental lints once: the names that `check` enables and
+/// the guidance for each.
+macro_rules! experimental_lints {
+    ($(($name:literal, $section:literal, $replacement:literal),)*) => {
+        pub const EXPERIMENTAL_LINTS: &[&str] = &[$($name),*];
+
+        const EXPERIMENTAL: &[Experimental] = &[$(Experimental {
+            name: $name,
+            section: $section,
+            replacement: $replacement,
+        }),*];
+    };
+}
+
+experimental_lints! {
+    (
+        "adamantium_blocking_in_async",
+        "blocking-work",
+        "Use adamantium::blocking or Tasks::spawn_blocking for blocking work."
+    ),
+    (
+        "adamantium_blocking_in_actor",
+        "blocking-work-inside-a-callback",
+        "Do the blocking work before or after the callback, and record its result in the actor."
+    ),
+    (
+        "adamantium_nested_actor_access",
+        "two-locks-at-once",
+        "Access the second actor after the outer callback returns."
+    ),
+    (
+        "adamantium_nested_limit",
+        "two-limits-at-once",
+        "Enter only a KeyedLimit inside Limit work, and other limits after the work finishes."
+    ),
+    (
+        "adamantium_race_with_timer",
+        "the-first-event",
+        "Use adamantium::until or a *_until method, or race only documented drop-safe operations."
+    ),
+}
+
+fn experimental(name: &str) -> Option<&'static Experimental> {
+    EXPERIMENTAL.iter().find(|lint| lint.name == name)
+}
 
 pub const OVERFLOW_RULE: &str = "adamantium::overflow_checks";
 pub const OVERFLOW_WHY: &str = "the release profile must set overflow-checks = true, so integer overflow panics instead of wrapping";
@@ -69,12 +116,7 @@ impl<'a> Hint<'a> {
             "clippy::disallowed_macros" => disallowed(message, DISALLOWED_MACROS),
             "clippy::disallowed_methods" => disallowed(message, DISALLOWED_METHODS),
             "clippy::disallowed_types" => disallowed(message, DISALLOWED_TYPES),
-            "adamantium_blocking_in_async" => Some("blocking-work"),
-            "adamantium_blocking_in_actor" => Some("blocking-work-inside-a-callback"),
-            "adamantium_nested_actor_access" => Some("two-locks-at-once"),
-            "adamantium_nested_limit" => Some("two-limits-at-once"),
-            "adamantium_race_with_timer" => Some("the-first-event"),
-            _ => None,
+            _ => experimental(rule).map(|lint| lint.section),
         };
         section.map_or(Self::Explain(rule), Self::Guide)
     }
@@ -256,21 +298,62 @@ fn disallowed(message: &str, sections: &[(&'static str, &[&str])]) -> Option<&'s
         .map(|(section, _)| *section)
 }
 
+/// The reasons that a Clippy configuration gives for its disallowed macros,
+/// methods and types, read once so that each finding is a lookup.
+#[derive(Debug, Default)]
+pub struct Reasons(HashMap<&'static str, HashMap<String, String>>);
+
+impl Reasons {
+    /// Reads the reasons from the text of a `clippy.toml`. A configuration
+    /// that does not parse has none.
+    pub fn parse(clippy_config: &str) -> Self {
+        let mut reasons = Self::default();
+        let Ok(doc) = clippy_config.parse::<DocumentMut>() else {
+            return reasons;
+        };
+        for list in [
+            "disallowed-macros",
+            "disallowed-methods",
+            "disallowed-types",
+        ] {
+            let Some(entries) = doc.get(list).and_then(Item::as_array) else {
+                continue;
+            };
+            let paths = reasons.0.entry(list).or_default();
+            for entry in entries {
+                let Some(table) = entry.as_inline_table() else {
+                    continue;
+                };
+                let field = |name| table.get(name).and_then(|value| value.as_str());
+                let (Some(path), Some(reason)) = (field("path"), field("reason")) else {
+                    continue;
+                };
+                let reason = reason.trim();
+                // The first entry with a reason wins when a path is listed twice.
+                if !reason.is_empty() && !paths.contains_key(path) {
+                    paths.insert(path.to_owned(), reason.to_owned());
+                }
+            }
+        }
+        reasons
+    }
+
+    fn disallowed(&self, list: &str, message: &str) -> Option<String> {
+        self.0.get(list)?.get(quoted_path(message)?).cloned()
+    }
+}
+
 /// The replacement and migration hint for a finding of `rule` with `message`.
 /// A disallowed macro, method or type gets the specific reason configured for
-/// its path in `clippy_config`, falling back to the rule's general replacement
+/// its path in `reasons`, falling back to the rule's general replacement
 /// when a project's own configuration supplies no reason; other rules get the
 /// replacement from `explain`. The hint points at the migration guide's
 /// section when the guide covers the finding, or at `cargo adamantium explain`.
-pub fn remediation(rule: &str, message: &str, clippy_config: &str) -> Option<String> {
+pub fn remediation(rule: &str, message: &str, reasons: &Reasons) -> Option<String> {
     let replacement = match rule {
-        "clippy::disallowed_macros" => {
-            disallowed_reason(clippy_config, "disallowed-macros", message)
-        }
-        "clippy::disallowed_methods" => {
-            disallowed_reason(clippy_config, "disallowed-methods", message)
-        }
-        "clippy::disallowed_types" => disallowed_reason(clippy_config, "disallowed-types", message),
+        "clippy::disallowed_macros" => reasons.disallowed("disallowed-macros", message),
+        "clippy::disallowed_methods" => reasons.disallowed("disallowed-methods", message),
+        "clippy::disallowed_types" => reasons.disallowed("disallowed-types", message),
         _ => None,
     }
     .or_else(|| rule_replacement(rule).map(str::to_owned))?;
@@ -287,41 +370,12 @@ pub fn remediation(rule: &str, message: &str, clippy_config: &str) -> Option<Str
 }
 
 fn rule_replacement(rule: &str) -> Option<&'static str> {
-    match rule {
-        OVERFLOW_RULE => Some(OVERFLOW_EXAMPLE.replacement),
-        "adamantium_blocking_in_async" => {
-            Some("Use adamantium::blocking or Tasks::spawn_blocking for blocking work.")
-        }
-        "adamantium_blocking_in_actor" => Some(
-            "Do the blocking work before or after the callback, and record its result in the actor.",
-        ),
-        "adamantium_nested_actor_access" => {
-            Some("Access the second actor after the outer callback returns.")
-        }
-        "adamantium_nested_limit" => Some(
-            "Enter only a KeyedLimit inside Limit work, and other limits after the work finishes.",
-        ),
-        "adamantium_race_with_timer" => Some(
-            "Use adamantium::until or a *_until method, or race only documented drop-safe operations.",
-        ),
-        _ => selected(true)
-            .find(|lint| lint.name == rule || lint.qualified() == rule)
-            .map(|lint| lint.example.replacement),
+    if rule == OVERFLOW_RULE {
+        return Some(OVERFLOW_EXAMPLE.replacement);
     }
-}
-
-fn disallowed_reason(clippy_config: &str, list: &str, message: &str) -> Option<String> {
-    let path = quoted_path(message)?;
-    let doc: DocumentMut = clippy_config.parse().ok()?;
-    let entries = doc.get(list)?.as_array()?;
-    entries.iter().find_map(|entry| {
-        let table = entry.as_inline_table()?;
-        if table.get("path")?.as_str()? != path {
-            return None;
-        }
-        let reason = table.get("reason")?.as_str()?.trim();
-        (!reason.is_empty()).then(|| reason.to_owned())
-    })
+    experimental(rule)
+        .map(|lint| lint.replacement)
+        .or_else(|| find(rule).map(|lint| lint.example.replacement))
 }
 
 fn capitalize(text: &str) -> String {
@@ -833,7 +887,23 @@ pub fn selected(strict: bool) -> impl Iterator<Item = &'static Lint> {
         .chain(STRICT_LINTS.iter().filter(move |_| strict))
 }
 
+/// The lint of either tier with this bare or qualified name.
+pub fn find(name: &str) -> Option<&'static Lint> {
+    selected(true).find(|lint| lint.is_named(name))
+}
+
+/// Whether `name` is the bare or qualified name of the release profile's
+/// overflow check, which is a rule but not a lint.
+pub fn is_overflow_rule(name: &str) -> bool {
+    name == OVERFLOW_RULE || Some(name) == OVERFLOW_RULE.strip_prefix("adamantium::")
+}
+
 impl Lint {
+    fn is_named(&self, name: &str) -> bool {
+        name == self.name
+            || (self.tool == Tool::Clippy && name.strip_prefix("clippy::") == Some(self.name))
+    }
+
     /// The lint's name as Clippy and rustc report it.
     pub fn qualified(&self) -> String {
         match self.tool {
@@ -861,19 +931,121 @@ impl fmt::Display for Tool {
     }
 }
 
-/// The lint tables as they appear in a `Cargo.toml`: under `workspace.lints`
-/// for a workspace, under `lints` for a single package.
-pub fn lints_toml(workspace: bool, strict: bool) -> String {
-    let prefix = if workspace { "workspace." } else { "" };
+/// The lint tables as they appear in a workspace's `Cargo.toml`, under
+/// `workspace.lints`.
+pub fn lints_toml(strict: bool) -> String {
     let mut out = String::new();
     for tool in [Tool::Rust, Tool::Clippy] {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&format!("[{prefix}lints.{tool}]\n"));
+        out.push_str(&format!("[workspace.lints.{tool}]\n"));
         for lint in selected(strict).filter(|lint| lint.tool == tool) {
             out.push_str(&format!("{} = \"{}\"\n", lint.name, lint.level));
         }
     }
     out
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum RulesFormat {
+    Text,
+    Json,
+    #[value(help = "The `[lints]` tables as `cargo adamantium init` writes them into a workspace")]
+    Toml,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum ExplainFormat {
+    Text,
+    Json,
+}
+
+#[derive(Serialize)]
+struct Explanation {
+    schema_version: u32,
+    rule: String,
+    why: &'static str,
+    #[serde(flatten)]
+    example: Example,
+}
+
+impl Explanation {
+    fn for_rule(rule: &str) -> Result<Self> {
+        if is_overflow_rule(rule) {
+            return Ok(Self {
+                schema_version: 1,
+                rule: OVERFLOW_RULE.to_owned(),
+                why: OVERFLOW_WHY,
+                example: OVERFLOW_EXAMPLE,
+            });
+        }
+        let lint = find(rule).ok_or_else(|| {
+            anyhow!("unknown rule `{rule}`; `cargo adamantium rules` lists the lint names")
+        })?;
+        Ok(Self {
+            schema_version: 1,
+            rule: lint.qualified(),
+            why: lint.why,
+            example: lint.example,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct Rules<'a> {
+    schema_version: u32,
+    lints: Vec<&'static Lint>,
+    clippy_toml: &'a str,
+}
+
+/// Prints why `rule` exists and how to replace what it reports.
+pub fn explain(rule: &str, format: ExplainFormat) -> Result<ExitCode> {
+    let explanation = Explanation::for_rule(rule)?;
+    let mut stdout = std::io::stdout().lock();
+    match format {
+        ExplainFormat::Text => {
+            writeln!(stdout, "{}\n\nWhy: {}", explanation.rule, explanation.why)?;
+            writeln!(stdout, "\nReplacement: {}", explanation.example.replacement)?;
+            writeln!(stdout, "\nBefore:\n{}", explanation.example.before)?;
+            writeln!(stdout, "\nAfter:\n{}", explanation.example.after)?;
+        }
+        ExplainFormat::Json => {
+            serde_json::to_writer_pretty(&mut stdout, &explanation)?;
+            writeln!(stdout)?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Prints the rules of the selected tier and the Clippy configuration.
+pub fn print_rules(format: RulesFormat, strict: bool) -> Result<ExitCode> {
+    let mut stdout = std::io::stdout().lock();
+    match format {
+        RulesFormat::Text => {
+            for lint in selected(strict) {
+                writeln!(
+                    stdout,
+                    "{:<6} {:<36} {}",
+                    lint.level.to_string(),
+                    lint.qualified(),
+                    lint.why
+                )?;
+            }
+            writeln!(stdout, "\n# clippy.toml\n\n{}", clippy_toml(strict)?)?;
+        }
+        RulesFormat::Json => {
+            serde_json::to_writer_pretty(
+                &mut stdout,
+                &Rules {
+                    schema_version: 1,
+                    lints: selected(strict).collect(),
+                    clippy_toml: &clippy_toml(strict)?,
+                },
+            )?;
+            writeln!(stdout)?;
+        }
+        RulesFormat::Toml => write!(stdout, "{}", lints_toml(strict))?,
+    }
+    Ok(ExitCode::SUCCESS)
 }

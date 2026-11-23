@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fmt, fs::File, io::Read, path::Path};
 
-use crate::sha256_hex;
+use crate::hash::sha256_hex;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -352,6 +352,32 @@ impl FileReport {
         };
         self.input_tokens = evaluation.input_tokens;
         Ok(())
+    }
+}
+
+impl FileStatus {
+    /// Reads a status from its name in a report.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "planned" => Self::Planned,
+            "checked" => Self::Checked,
+            "incomplete" => Self::Incomplete,
+            "error" => Self::Error,
+            "not_checked" => Self::NotChecked,
+            _ => return None,
+        })
+    }
+}
+
+impl ReportStatus {
+    /// Reads a status from its name in a report.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "planned" => Self::Planned,
+            "incomplete" => Self::Incomplete,
+            "complete" => Self::Complete,
+            _ => return None,
+        })
     }
 }
 

@@ -314,11 +314,7 @@ pub fn run(path: &Path, args: &[String], strict: bool, dry_run: bool) -> Result<
         remaining.findings.len(),
         if dry_run { " (before fixes)" } else { "" }
     );
-    Ok(match remaining.status {
-        check::Status::Clean => ExitCode::SUCCESS,
-        check::Status::Findings => ExitCode::from(1),
-        check::Status::Error => ExitCode::from(2),
-    })
+    Ok(remaining.status.exit_code())
 }
 
 struct Change {
@@ -851,6 +847,7 @@ mod tests {
                 ));
             }
         }
+        let reasons = crate::lints::Reasons::parse(&strict_config);
         for (rule, message) in &findings {
             let hint = Hint::new(rule, message);
             match hint {
@@ -859,7 +856,7 @@ mod tests {
                 }
                 Hint::Explain(explained) => assert_eq!(explained, rule, "{message}"),
             }
-            let remediation = crate::lints::remediation(rule, message, &strict_config)
+            let remediation = crate::lints::remediation(rule, message, &reasons)
                 .unwrap_or_else(|| panic!("{rule}: {message} has no remediation"));
             assert!(
                 remediation.ends_with(&format!(" {hint}.")),
