@@ -210,10 +210,21 @@ impl<T> Watcher<T> {
     }
 
     fn mark(&mut self) -> Option<Option<()>> {
-        let state = self.shared.lock("Watcher::changed");
+        self.observe("Watcher::changed", |_| ())
+    }
+
+    // Reads an unseen value and marks it seen. The outer `None` means there is
+    // nothing new yet; the inner `None` means the watch closed.
+    fn observe<R>(
+        &mut self,
+        operation: &'static str,
+        read: impl FnOnce(&T) -> R,
+    ) -> Option<Option<R>> {
+        let state = self.shared.lock(operation);
         if state.version != self.seen {
+            let read = read(&state.value);
             self.seen = state.version;
-            Some(Some(()))
+            Some(Some(read))
         } else if state.closed {
             Some(None)
         } else {
@@ -324,16 +335,7 @@ impl<T: Clone> Watcher<T> {
     }
 
     fn check(&mut self, operation: &'static str) -> Option<Option<T>> {
-        let state = self.shared.lock(operation);
-        if state.version != self.seen {
-            let value = state.value.clone();
-            self.seen = state.version;
-            Some(Some(value))
-        } else if state.closed {
-            Some(None)
-        } else {
-            None
-        }
+        self.observe(operation, T::clone)
     }
 }
 
