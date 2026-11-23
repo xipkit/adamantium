@@ -270,6 +270,12 @@ impl<'a> Walker<'a> {
     }
 
     pub(super) fn returned(&mut self, group: usize, expr: &'a Expr) {
+        self.stored(group, expr, RETURNED);
+    }
+
+    /// Follows `expr` into `group`, which it initializes or returns, and
+    /// refuses the group with `otherwise` when the value can't be followed.
+    pub(super) fn stored(&mut self, group: usize, expr: &'a Expr, otherwise: Reason) {
         if let Some((_, constructor)) = self.constructor(expr)
             && let Some(range) = self.text.of(expr)
         {
@@ -289,7 +295,7 @@ impl<'a> Walker<'a> {
             return;
         }
         if let Some(state) = self.groups.get_mut(group) {
-            state.refuse(RETURNED);
+            state.refuse(otherwise);
         }
         self.visit_expr(expr);
     }

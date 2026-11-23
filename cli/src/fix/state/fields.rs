@@ -233,31 +233,14 @@ impl<'a> Walker<'a> {
     }
 
     fn initializer(&mut self, var: usize, expr: &'a Expr) {
-        if let Some((_, constructor)) = self.constructor(expr)
-            && let Some(range) = self.text.of(expr)
-        {
-            self.visit_expr(expr);
-            let edit = self.edit(range, constructor);
-            self.add_edit(var, edit);
-            return;
+        match self.group_of(var) {
+            Some(group) => self.stored(
+                group,
+                expr,
+                Reason::Unfollowed("a struct literal sets it to a value fix can't follow"),
+            ),
+            None => self.visit_expr(expr),
         }
-        let Some(group) = self.group_of(var) else {
-            self.visit_expr(expr);
-            return;
-        };
-        if let Some((source, replacement)) = self.clone_of(expr) {
-            self.flows(group, source, expr, replacement);
-            return;
-        }
-        if let Some(returned) = self.returned_by(expr) {
-            self.links.push((group, returned));
-            return;
-        }
-        self.refuse(
-            var,
-            Reason::Unfollowed("a struct literal sets it to a value fix can't follow"),
-        );
-        self.visit_expr(expr);
     }
 
     pub(super) fn stray(&mut self, access: &ExprField) {
