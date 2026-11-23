@@ -8,12 +8,9 @@ use std::{
 use anyhow::Result;
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::ToTokens;
-use syn::{
-    Attribute, Expr, Item, Macro, Member, Visibility, ext::IdentExt, punctuated::Punctuated,
-    visit::Visit,
-};
+use syn::{Attribute, Expr, Item, Macro, Member, Visibility, punctuated::Punctuated, visit::Visit};
 
-use super::source::string_literal;
+use super::source::{bare, string_literal};
 
 mod poll;
 
@@ -33,9 +30,9 @@ pub(super) struct Crate {
     fields: HashMap<String, usize>,
     unreadable: Option<&'static str>,
     functions: HashMap<String, Vec<Function>>,
-    deferred: BTreeSet<String>,
-    values: BTreeSet<String>,
-    bare_values: BTreeSet<String>,
+    /// Names used where a call can't be followed: in a closure, an async
+    /// block, a macro or an attribute, or as a value.
+    escaping: BTreeSet<String>,
     renames: HashMap<String, BTreeSet<String>>,
     callbacks: bool,
     library: bool,
@@ -94,10 +91,11 @@ impl Crate {
             self.unreadable(UNPARSED);
             return;
         };
-        if includes(tree.to_token_stream()) {
+        let tokens = tree.to_token_stream();
+        if includes(tokens.clone()) {
             self.unreadable("its package reads source through `include!` or `#[path]`");
         }
-        words(tree.to_token_stream(), &mut self.words);
+        words(tokens, &mut self.words);
         let mut macros = BTreeSet::new();
         for item in &tree.items {
             collect_macro_names(item, &mut macros);
@@ -202,10 +200,7 @@ impl Crate {
         if self.callbacks && !functions.is_empty() {
             return Some(Hazard::Callbacks);
         }
-        if !functions.is_disjoint(&self.deferred)
-            || !functions.is_disjoint(&self.values)
-            || !functions.is_disjoint(&self.bare_values)
-        {
+        if !functions.is_disjoint(&self.escaping) {
             return Some(Hazard::Escapes);
         }
         None
@@ -285,7 +280,7 @@ pub(super) fn idents(tokens: TokenStream, names: &mut BTreeSet<String>) {
         match token {
             TokenTree::Group(group) => idents(group.stream(), names),
             TokenTree::Ident(ident) => {
-                names.insert(ident.unraw().to_string());
+                names.insert(bare(&ident));
             }
             TokenTree::Punct(_) | TokenTree::Literal(_) => {}
         }
@@ -308,7 +303,7 @@ fn words(tokens: TokenStream, counts: &mut HashMap<String, usize>) {
                 }
             }
             TokenTree::Ident(ident) => {
-                *counts.entry(ident.unraw().to_string()).or_default() += 1;
+                *counts.entry(bare(ident)).or_default() += 1;
             }
             TokenTree::Literal(literal) => {
                 if let Some(string) = string_literal(literal) {
@@ -366,7 +361,7 @@ fn collect_macro_names(item: &Item, names: &mut BTreeSet<String>) {
     match item {
         Item::Macro(mac) => {
             if let Some(ident) = &mac.ident {
-                names.insert(ident.unraw().to_string());
+                names.insert(bare(ident));
             }
         }
         Item::Use(_) => {
@@ -475,12 +470,11 @@ impl Scan<'_> {
         for name in &names {
             self.member(name.clone());
         }
-        self.krate.deferred.extend(names);
+        self.krate.escaping.extend(names);
     }
 
     fn function(
         &mut self,
-        name: &syn::Ident,
         sig: &syn::Signature,
         vis: Option<&Visibility>,
         body: TokenStream,
@@ -488,15 +482,16 @@ impl Scan<'_> {
     ) {
         let mut mentions = BTreeSet::new();
         idents(body.clone(), &mut mentions);
-        if macro_attribute(attrs) && !self.krate.poll_root(self.file, sig) {
+        let name = bare(&sig.ident);
+        let wrapped = macro_attribute(attrs) && !self.krate.poll_root(self.file, sig);
+        if wrapped {
             self.krate.opaque_poll = true;
             self.defer(body);
-            self.krate.deferred.insert(name.unraw().to_string());
+            self.krate.escaping.insert(name.clone());
         }
-        let wrapped = macro_attribute(attrs) && !self.krate.poll_root(self.file, sig);
         self.krate
             .functions
-            .entry(name.unraw().to_string())
+            .entry(name)
             .or_default()
             .push(Function {
                 asynchronous: sig.asyncness.is_some(),
@@ -527,7 +522,6 @@ impl<'ast> Visit<'ast> for Scan<'_> {
 
     fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
         self.function(
-            &item.sig.ident,
             &item.sig,
             Some(&item.vis),
             item.block.to_token_stream(),
@@ -556,7 +550,6 @@ impl<'ast> Visit<'ast> for Scan<'_> {
 
     fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
         self.function(
-            &item.sig.ident,
             &item.sig,
             Some(&item.vis),
             item.block.to_token_stream(),
@@ -570,13 +563,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
 
     fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
         if let Some(body) = &item.default {
-            self.function(
-                &item.sig.ident,
-                &item.sig,
-                None,
-                body.to_token_stream(),
-                &item.attrs,
-            );
+            self.function(&item.sig, None, body.to_token_stream(), &item.attrs);
             for attr in &item.attrs {
                 self.visit_attribute(attr);
             }
@@ -683,11 +670,9 @@ impl<'ast> Visit<'ast> for Scan<'_> {
 
     fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
         if let Some(last) = path.path.segments.last() {
-            let name = last.ident.unraw().to_string();
-            if path.path.segments.len() > 1 || path.qself.is_some() {
-                self.krate.values.insert(name);
-            } else if !self.is_local(&name) {
-                self.krate.bare_values.insert(name);
+            let name = bare(&last.ident);
+            if path.path.segments.len() > 1 || path.qself.is_some() || !self.is_local(&name) {
+                self.krate.escaping.insert(name);
             }
         }
         syn::visit::visit_expr_path(self, path);
@@ -696,35 +681,35 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
         self.krate
             .renames
-            .entry(rename.ident.unraw().to_string())
+            .entry(bare(&rename.ident))
             .or_default()
-            .insert(rename.rename.unraw().to_string());
+            .insert(bare(&rename.rename));
     }
 
     fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
         if let Member::Named(name) = &field.member {
-            self.member(name.unraw().to_string());
+            self.member(bare(name));
         }
         syn::visit::visit_expr_field(self, field);
     }
 
     fn visit_field_value(&mut self, field: &'ast syn::FieldValue) {
         if let Member::Named(name) = &field.member {
-            self.member(name.unraw().to_string());
+            self.member(bare(name));
         }
         syn::visit::visit_field_value(self, field);
     }
 
     fn visit_field_pat(&mut self, field: &'ast syn::FieldPat) {
         if let Member::Named(name) = &field.member {
-            self.member(name.unraw().to_string());
+            self.member(bare(name));
         }
         syn::visit::visit_field_pat(self, field);
     }
 
     fn visit_field(&mut self, field: &'ast syn::Field) {
         if let Some(name) = &field.ident {
-            let name = name.unraw().to_string();
+            let name = bare(name);
             *self.krate.fields.entry(name.clone()).or_default() += 1;
             self.member(name);
         }
@@ -733,8 +718,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
 
     fn visit_attribute(&mut self, attr: &'ast Attribute) {
         if !attr.path().is_ident("doc") {
-            strings(attr.to_token_stream(), &mut self.krate.values);
-            strings(attr.to_token_stream(), &mut self.krate.bare_values);
+            strings(attr.to_token_stream(), &mut self.krate.escaping);
         }
         syn::visit::visit_attribute(self, attr);
     }
