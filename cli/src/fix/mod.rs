@@ -848,6 +848,7 @@ mod tests {
                 ));
             }
         }
+        let reasons = crate::lints::Reasons::parse(&strict_config);
         for (rule, message) in &findings {
             let hint = Hint::new(rule, message);
             match hint {
@@ -856,7 +857,7 @@ mod tests {
                 }
                 Hint::Explain(explained) => assert_eq!(explained, rule, "{message}"),
             }
-            let remediation = crate::lints::remediation(rule, message, &strict_config)
+            let remediation = crate::lints::remediation(rule, message, &reasons)
                 .unwrap_or_else(|| panic!("{rule}: {message} has no remediation"));
             assert!(
                 remediation.ends_with(&format!(" {hint}.")),

@@ -563,6 +563,7 @@ fn check_selected(
     let conf = tempfile::tempdir().context("creating a directory for clippy.toml")?;
     let (clippy_config, clippy_toml) =
         write_clippy_config(conf.path(), strict, diagnostics.is_some())?;
+    let reasons = lints::Reasons::parse(&clippy_toml);
 
     let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command
@@ -618,7 +619,7 @@ fn check_selected(
     let setting = Setting {
         root,
         clippy_config: &clippy_config,
-        clippy_toml: &clippy_toml,
+        reasons: &reasons,
         config,
         rules: &rules,
         echo,
@@ -695,7 +696,7 @@ fn check_selected(
         *sorted.skipped.entry(OVERFLOW_RULE.to_owned()).or_insert(0) += 1;
     } else if overflow_unchecked && !sorted.in_baseline(OVERFLOW_RULE, "Cargo.toml", None) {
         let message = "[profile.release] does not set overflow-checks = true, so integer overflow wraps silently in release builds; `cargo adamantium init` adds it".to_owned();
-        let remediation = lints::remediation(OVERFLOW_RULE, &message, &clippy_toml);
+        let remediation = lints::remediation(OVERFLOW_RULE, &message, &reasons);
         let finding = Finding {
             rule: OVERFLOW_RULE.to_owned(),
             message,
@@ -810,7 +811,7 @@ fn dylint_command(
 struct Setting<'a> {
     root: &'a Path,
     clippy_config: &'a Path,
-    clippy_toml: &'a str,
+    reasons: &'a lints::Reasons,
     config: &'a Config,
     rules: &'a HashSet<String>,
     echo: bool,
@@ -938,7 +939,7 @@ fn classify(diagnostic: Diagnostic, setting: &Setting<'_>, sorted: &mut Sorted<'
     };
     match code {
         Some(rule) if setting.rules.contains(&rule) => {
-            let remediation = lints::remediation(&rule, &diagnostic.message, setting.clippy_toml);
+            let remediation = lints::remediation(&rule, &diagnostic.message, setting.reasons);
             sorted.findings.push(Finding {
                 rule,
                 message: diagnostic.message,
@@ -1045,7 +1046,7 @@ mod tests {
         let setting = Setting {
             root,
             clippy_config: Path::new("generated/clippy.toml"),
-            clippy_toml: lints::CLIPPY_TOML,
+            reasons: &lints::Reasons::parse(lints::CLIPPY_TOML),
             config,
             rules: &rules,
             echo: false,
@@ -1254,7 +1255,7 @@ mod tests {
         let setting = Setting {
             root: Path::new("project"),
             clippy_config: Path::new("generated/clippy.toml"),
-            clippy_toml: lints::CLIPPY_TOML,
+            reasons: &lints::Reasons::parse(lints::CLIPPY_TOML),
             config: &config,
             rules: &rules,
             echo: false,

@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt};
+use std::{borrow::Cow, collections::HashMap, fmt};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -256,21 +256,62 @@ fn disallowed(message: &str, sections: &[(&'static str, &[&str])]) -> Option<&'s
         .map(|(section, _)| *section)
 }
 
+/// The reasons that a Clippy configuration gives for its disallowed macros,
+/// methods and types, read once so that each finding is a lookup.
+#[derive(Debug, Default)]
+pub struct Reasons(HashMap<&'static str, HashMap<String, String>>);
+
+impl Reasons {
+    /// Reads the reasons from the text of a `clippy.toml`. A configuration
+    /// that does not parse has none.
+    pub fn parse(clippy_config: &str) -> Self {
+        let mut reasons = Self::default();
+        let Ok(doc) = clippy_config.parse::<DocumentMut>() else {
+            return reasons;
+        };
+        for list in [
+            "disallowed-macros",
+            "disallowed-methods",
+            "disallowed-types",
+        ] {
+            let Some(entries) = doc.get(list).and_then(Item::as_array) else {
+                continue;
+            };
+            let paths = reasons.0.entry(list).or_default();
+            for entry in entries {
+                let Some(table) = entry.as_inline_table() else {
+                    continue;
+                };
+                let field = |name| table.get(name).and_then(|value| value.as_str());
+                let (Some(path), Some(reason)) = (field("path"), field("reason")) else {
+                    continue;
+                };
+                let reason = reason.trim();
+                // The first entry with a reason wins when a path is listed twice.
+                if !reason.is_empty() && !paths.contains_key(path) {
+                    paths.insert(path.to_owned(), reason.to_owned());
+                }
+            }
+        }
+        reasons
+    }
+
+    fn disallowed(&self, list: &str, message: &str) -> Option<String> {
+        self.0.get(list)?.get(quoted_path(message)?).cloned()
+    }
+}
+
 /// The replacement and migration hint for a finding of `rule` with `message`.
 /// A disallowed macro, method or type gets the specific reason configured for
-/// its path in `clippy_config`, falling back to the rule's general replacement
+/// its path in `reasons`, falling back to the rule's general replacement
 /// when a project's own configuration supplies no reason; other rules get the
 /// replacement from `explain`. The hint points at the migration guide's
 /// section when the guide covers the finding, or at `cargo adamantium explain`.
-pub fn remediation(rule: &str, message: &str, clippy_config: &str) -> Option<String> {
+pub fn remediation(rule: &str, message: &str, reasons: &Reasons) -> Option<String> {
     let replacement = match rule {
-        "clippy::disallowed_macros" => {
-            disallowed_reason(clippy_config, "disallowed-macros", message)
-        }
-        "clippy::disallowed_methods" => {
-            disallowed_reason(clippy_config, "disallowed-methods", message)
-        }
-        "clippy::disallowed_types" => disallowed_reason(clippy_config, "disallowed-types", message),
+        "clippy::disallowed_macros" => reasons.disallowed("disallowed-macros", message),
+        "clippy::disallowed_methods" => reasons.disallowed("disallowed-methods", message),
+        "clippy::disallowed_types" => reasons.disallowed("disallowed-types", message),
         _ => None,
     }
     .or_else(|| rule_replacement(rule).map(str::to_owned))?;
@@ -308,20 +349,6 @@ fn rule_replacement(rule: &str) -> Option<&'static str> {
             .find(|lint| lint.name == rule || lint.qualified() == rule)
             .map(|lint| lint.example.replacement),
     }
-}
-
-fn disallowed_reason(clippy_config: &str, list: &str, message: &str) -> Option<String> {
-    let path = quoted_path(message)?;
-    let doc: DocumentMut = clippy_config.parse().ok()?;
-    let entries = doc.get(list)?.as_array()?;
-    entries.iter().find_map(|entry| {
-        let table = entry.as_inline_table()?;
-        if table.get("path")?.as_str()? != path {
-            return None;
-        }
-        let reason = table.get("reason")?.as_str()?.trim();
-        (!reason.is_empty()).then(|| reason.to_owned())
-    })
 }
 
 fn capitalize(text: &str) -> String {

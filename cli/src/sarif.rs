@@ -286,7 +286,8 @@ mod tests {
 
     fn finding(rule: &str, file: &str, line: Option<u64>) -> Finding {
         let message = format!("{rule} broken");
-        let remediation = lints::remediation(rule, &message, lints::CLIPPY_TOML);
+        let remediation =
+            lints::remediation(rule, &message, &lints::Reasons::parse(lints::CLIPPY_TOML));
         Finding {
             rule: rule.to_owned(),
             message,
