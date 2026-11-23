@@ -2,11 +2,49 @@ use adamantium::{Channel, Limit};
 use std::{
     future::{Future, pending, ready},
     pin::{Pin, pin},
-    task::{Context, Poll, Waker},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::{Context, Poll, Wake, Waker},
 };
 
 fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
+}
+
+#[derive(Default)]
+struct Flag(AtomicBool);
+
+impl Wake for Flag {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+// A waker for one call, which records whether the call was woken.
+struct Watched {
+    flag: Arc<Flag>,
+    waker: Waker,
+}
+
+impl Watched {
+    fn new() -> Self {
+        let flag = Arc::new(Flag::default());
+        Self {
+            waker: Waker::from(Arc::clone(&flag)),
+            flag,
+        }
+    }
+
+    fn poll<F: Future>(&self, future: Pin<&mut F>) -> Poll<F::Output> {
+        future.poll(&mut Context::from_waker(&self.waker))
+    }
+
+    // Whether the call was woken since the last check.
+    fn woken(&self) -> bool {
+        self.flag.0.swap(false, Ordering::SeqCst)
+    }
 }
 
 #[test]
@@ -126,6 +164,101 @@ fn a_limit_of_send_work_is_send() {
     let call = limit.run(|| ready(1));
     assert_send(&call);
     assert_send(&limit);
+}
+
+#[test]
+fn a_waiting_call_is_served_before_calls_that_arrive_later() {
+    let limit = Limit::new(1);
+    let mut holder = Box::pin(limit.run(pending::<()>));
+    assert_eq!(poll_once(holder.as_mut()), Poll::Pending);
+    let mut first = pin!(limit.run(|| ready("first")));
+    let first_waker = Watched::new();
+    assert_eq!(first_waker.poll(first.as_mut()), Poll::Pending);
+    let mut second = pin!(limit.run(|| ready("second")));
+    let second_waker = Watched::new();
+    assert_eq!(second_waker.poll(second.as_mut()), Poll::Pending);
+
+    drop(holder);
+    assert!(first_waker.woken());
+    assert!(!second_waker.woken());
+    assert_eq!(second_waker.poll(second.as_mut()), Poll::Pending);
+    assert_eq!(first_waker.poll(first.as_mut()), Poll::Ready("first"));
+    assert!(second_waker.woken());
+    assert_eq!(second_waker.poll(second.as_mut()), Poll::Ready("second"));
+}
+
+#[test]
+fn a_freed_place_wakes_only_the_oldest_waiting_call_and_serving_it_wakes_the_next() {
+    let limit = Limit::new(2);
+    let mut holders = [(); 2].map(|()| Box::pin(limit.run(pending::<()>)));
+    for holder in &mut holders {
+        assert_eq!(poll_once(holder.as_mut()), Poll::Pending);
+    }
+    let release = Channel::<()>::bounded(1);
+    let mut first = pin!(limit.run(|| release.receive()));
+    let first_waker = Watched::new();
+    assert_eq!(first_waker.poll(first.as_mut()), Poll::Pending);
+    let mut second = pin!(limit.run(|| ready(2)));
+    let second_waker = Watched::new();
+    assert_eq!(second_waker.poll(second.as_mut()), Poll::Pending);
+
+    drop(holders);
+    assert!(first_waker.woken());
+    assert!(!second_waker.woken());
+    // The first call takes one place and still runs; the second fits in the
+    // other, so serving the first wakes it.
+    assert_eq!(first_waker.poll(first.as_mut()), Poll::Pending);
+    assert!(second_waker.woken());
+    assert_eq!(limit.available(), 1);
+    assert_eq!(second_waker.poll(second.as_mut()), Poll::Ready(2));
+    release.try_send(()).unwrap();
+    assert_eq!(first_waker.poll(first.as_mut()), Poll::Ready(Some(())));
+    assert_eq!(limit.available(), 2);
+}
+
+#[test]
+fn dropping_a_woken_call_wakes_the_call_behind_it() {
+    let limit = Limit::new(1);
+    let mut holder = Box::pin(limit.run(pending::<()>));
+    assert_eq!(poll_once(holder.as_mut()), Poll::Pending);
+    let mut first = Box::pin(limit.run(|| ready(1)));
+    let first_waker = Watched::new();
+    assert_eq!(first_waker.poll(first.as_mut()), Poll::Pending);
+    let mut second = pin!(limit.run(|| ready(2)));
+    let second_waker = Watched::new();
+    assert_eq!(second_waker.poll(second.as_mut()), Poll::Pending);
+
+    drop(holder);
+    assert!(first_waker.woken());
+    assert!(!second_waker.woken());
+    drop(first);
+    assert!(second_waker.woken());
+    assert_eq!(second_waker.poll(second.as_mut()), Poll::Ready(2));
+}
+
+#[test]
+fn dropping_a_call_behind_the_front_keeps_the_others_in_order() {
+    let limit = Limit::new(1);
+    let mut holder = Box::pin(limit.run(pending::<()>));
+    assert_eq!(poll_once(holder.as_mut()), Poll::Pending);
+    let mut first = pin!(limit.run(|| ready(1)));
+    let first_waker = Watched::new();
+    assert_eq!(first_waker.poll(first.as_mut()), Poll::Pending);
+    let mut dropped = Box::pin(limit.run(|| ready(2)));
+    assert_eq!(poll_once(dropped.as_mut()), Poll::Pending);
+    let mut third = pin!(limit.run(|| ready(3)));
+    let third_waker = Watched::new();
+    assert_eq!(third_waker.poll(third.as_mut()), Poll::Pending);
+
+    drop(dropped);
+    assert!(!first_waker.woken());
+    assert!(!third_waker.woken());
+    drop(holder);
+    assert!(first_waker.woken());
+    assert!(!third_waker.woken());
+    assert_eq!(first_waker.poll(first.as_mut()), Poll::Ready(1));
+    assert!(third_waker.woken());
+    assert_eq!(third_waker.poll(third.as_mut()), Poll::Ready(3));
 }
 
 #[cfg(feature = "tokio")]
@@ -258,4 +391,137 @@ fn no_schedule_runs_more_work_than_the_limit() {
         assert_eq!(limit.available(), 2);
     });
     assert!(checked.is_ok(), "{checked:?}");
+}
+
+#[cfg(feature = "deterministic")]
+mod model {
+    use super::*;
+    use adamantium::{
+        Tasks,
+        testing::{self, Config, TimelineEventKind},
+        time,
+    };
+    use std::time::Duration;
+
+    type Worker = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    fn config(seed: u64) -> Config {
+        Config {
+            seed,
+            iterations: 300,
+            max_steps: 20_000,
+            ..Config::default()
+        }
+    }
+
+    // The holders take both places before the others arrive. Whichever of
+    // them is served first may be the one that waits for the other, so
+    // serving it must wake the other.
+    #[test]
+    fn serving_a_call_wakes_the_next_call_that_fits() {
+        let checked = testing::check(config(260), || async {
+            let limit = Limit::new(2);
+            let signal = Channel::<()>::bounded(1);
+            let holders = [(); 2].map(|()| -> Worker {
+                let limit = limit.clone();
+                Box::pin(async move {
+                    limit.run(|| time::sleep(Duration::from_millis(2))).await;
+                })
+            });
+            let receiver: Worker = Box::pin({
+                let (limit, signal) = (limit.clone(), signal.clone());
+                async move {
+                    time::sleep(Duration::from_millis(1)).await;
+                    limit.run(|| signal.receive()).await;
+                }
+            });
+            let sender: Worker = Box::pin({
+                let (limit, signal) = (limit.clone(), signal.clone());
+                async move {
+                    time::sleep(Duration::from_millis(1)).await;
+                    limit.run(|| signal.send(())).await.unwrap();
+                }
+            });
+            let [first, second] = holders;
+            testing::parallel([first, second, receiver, sender]).await;
+            assert_eq!(limit.available(), 2);
+        });
+        assert!(checked.is_ok(), "{checked:?}");
+    }
+
+    async fn queued_behind_a_holder() {
+        let limit = Limit::new(1);
+        let release = Channel::<()>::bounded(1);
+        let mut tasks = Tasks::<()>::new();
+        let (holder_limit, holder_release) = (limit.clone(), release.clone());
+        tasks.spawn_named("holder", async move {
+            holder_limit.run(|| holder_release.receive()).await;
+            Ok(())
+        });
+        for name in ["first", "second"] {
+            time::sleep(Duration::from_millis(1)).await;
+            let limit = limit.clone();
+            tasks.spawn_named(name, async move {
+                limit.run(|| ready(())).await;
+                Ok(())
+            });
+        }
+        time::sleep(Duration::from_millis(1)).await;
+        release.send(()).await.unwrap();
+        tasks.join(Ok(())).await.unwrap();
+    }
+
+    #[test]
+    fn the_timeline_shows_calls_waiting_for_places_and_who_woke_them() {
+        let record = testing::check(
+            Config {
+                iterations: 1,
+                ..Config::default()
+            },
+            queued_behind_a_holder,
+        )
+        .unwrap();
+        let timeline = testing::explain(&record, queued_behind_a_holder);
+        assert_eq!(timeline.failure(), None);
+        assert!(timeline.waiting().is_empty(), "{timeline}");
+
+        let waits: Vec<Option<String>> = timeline
+            .events()
+            .iter()
+            .filter_map(|event| match event.kind() {
+                TimelineEventKind::Wait {
+                    operation: "limit.acquire",
+                    task_name,
+                    ..
+                } => Some(task_name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            waits,
+            [Some("first".to_owned()), Some("second".to_owned())],
+            "{timeline}"
+        );
+        let wakeups: Vec<(Option<String>, Vec<Option<String>>)> = timeline
+            .events()
+            .iter()
+            .filter_map(|event| match event.kind() {
+                TimelineEventKind::Wakeup {
+                    operation: "limit.acquire",
+                    by_task_name,
+                    target_task_names,
+                    ..
+                } => Some((by_task_name.clone(), target_task_names.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            wakeups,
+            [
+                (Some("holder".to_owned()), vec![Some("first".to_owned())]),
+                (Some("first".to_owned()), vec![Some("second".to_owned())]),
+            ],
+            "{timeline}"
+        );
+    }
 }

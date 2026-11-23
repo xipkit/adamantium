@@ -306,6 +306,41 @@ pub(crate) fn begin_wait(operation: &'static str, wait_id: u64) -> Option<u64> {
     Some(token)
 }
 
+// A wait that its owner wakes by token. It has no listener to hand a
+// notification on, so ending it never wakes another waiter.
+pub(crate) fn begin_turn(operation: &'static str, wait_id: u64) -> Option<u64> {
+    if !is_active() || wait_id == 0 {
+        return None;
+    }
+    current_task_id()?;
+    let token = with_collector(Collector::alloc_id)?;
+    begin_registered_wait(token, operation, wait_id);
+    Some(token)
+}
+
+pub(crate) fn record_turn(token: u64, operation: &'static str, wait_id: u64) {
+    let by_task_id = current_task_id();
+    with_collector(|collector| {
+        if !is_teardown() {
+            collector.teardown_snapshot = None;
+        }
+        let Some(target) = collector
+            .active_waits
+            .get(&token)
+            .map(|entry| entry.task_id)
+        else {
+            return;
+        };
+        collector.events.push(RawEvent::Wakeup {
+            timestamp: clock::elapsed(),
+            by_task_id,
+            target_task_ids: vec![target],
+            operation,
+            wait_id,
+        });
+    });
+}
+
 pub(crate) fn end_wait(token: u64, operation: &'static str, wait_id: u64, cancelled: bool) {
     let teardown = cancelled && is_teardown();
     let by_task_id = current_task_id();

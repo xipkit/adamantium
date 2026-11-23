@@ -18,6 +18,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- `adamantium`: `Limit` and `KeyedLimit` serve waiting calls in the order they
+  started waiting. A call that arrives while others wait queues behind them.
 - Adamantium's deterministic timelines show the operation at modeled scheduling
   points, name parallel workers, and group repeated steps.
 - `adamantium::testing::check` with `SchedulerMode::Dfs` fails with

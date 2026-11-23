@@ -629,9 +629,10 @@ let rows = connections.run(|| query(7)).await;
 
 - `run(work)` waits for a place, runs the work, and returns its output. It calls `work` only when a place is free.
 - The place becomes free when the work finishes or when the future is dropped.
-- Waiting calls do not get places in the order of their arrival.
 - `run_until(&cancellation, deadline, work)` stops the wait or the work on a `Cancellation` or at a deadline. It returns `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExceeded`. It needs the `tokio` feature.
 - `available()` returns the number of free places.
+
+Waiting calls get places in the order they started waiting. A call that arrives while others wait queues behind them.
 
 A call to `Limit` inside another `Limit` panics before waiting. This covers taking the same limit twice and taking two different limits in either order.
 
@@ -639,7 +640,7 @@ To limit the items of one collection, use `concurrently`. It needs no shared lim
 
 ### Per-key exclusion
 
-`KeyedLimit::new()` lets one call run per key. Clones share the table. A server can use a connection limit around a per-session refresh. Re-read the session inside the keyed work so a waiting request sees the token its predecessor rotated.
+`KeyedLimit::new()` lets one call run per key. Clones share the table. Calls for one key run in the order they started waiting. A server can use a connection limit around a per-session refresh. Re-read the session inside the keyed work so a waiting request sees the token its predecessor rotated.
 
 ```rust
 let connections = Limit::new(3);
