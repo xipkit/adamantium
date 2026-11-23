@@ -1998,6 +1998,7 @@ mod retention_tests {
 
     // The scope's loop and the next spawn race to reap the same panic.
     // Whichever finds it, the body stops and the sibling is drained.
+    #[cfg(feature = "deterministic")]
     async fn panic_reaped_by_either_scenario() {
         let dropped = crate::Actor::new(false);
         let guard = Dropped(dropped.clone());
