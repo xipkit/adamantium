@@ -26,7 +26,7 @@ pub(crate) fn is_active() -> bool {
     ACTIVE.get()
 }
 
-pub(crate) fn is_teardown() -> bool {
+fn is_teardown() -> bool {
     std::thread::panicking()
         || ExecutionState::try_with(|state| state.in_cleanup()).unwrap_or(false)
 }
@@ -82,33 +82,33 @@ pub(crate) struct Scheduling {
     pub(crate) steps: usize,
 }
 
-pub(crate) enum RawEvent {
+pub(crate) struct RawEvent {
+    pub(crate) timestamp: Duration,
+    pub(crate) kind: RawKind,
+}
+
+pub(crate) enum RawKind {
     Scheduled {
-        timestamp: Duration,
         task_id: usize,
         scheduling: Scheduling,
     },
     Wait {
-        timestamp: Duration,
         task_id: usize,
         operation: &'static str,
         wait_id: u64,
     },
     Wakeup {
-        timestamp: Duration,
         by_task_id: Option<usize>,
         target_task_ids: Vec<usize>,
         operation: &'static str,
         wait_id: u64,
     },
     WaitCompleted {
-        timestamp: Duration,
         task_id: usize,
         operation: &'static str,
         wait_id: u64,
     },
     WaitCancelled {
-        timestamp: Duration,
         task_id: usize,
         operation: &'static str,
         wait_id: u64,
@@ -139,6 +139,12 @@ impl Collector {
             operations: BTreeMap::new(),
             events: Vec::new(),
             last_scheduled: None,
+        }
+    }
+
+    fn note_activity(&mut self) {
+        if !is_teardown() {
+            self.teardown_snapshot = None;
         }
     }
 
@@ -193,7 +199,7 @@ pub(crate) fn alloc_wait_id() -> u64 {
     with_collector(Collector::alloc_id).unwrap_or(0)
 }
 
-pub(crate) fn record_task_name(task_id: usize, name: &str) {
+fn record_task_name(task_id: usize, name: &str) {
     with_collector(|collector| {
         collector
             .names
@@ -212,19 +218,20 @@ pub(crate) fn record_current_task_name(name: &str) {
 
 pub(crate) fn record_scheduled(task_id: usize, shuttle_name: Option<String>) {
     with_collector(|collector| {
-        if !is_teardown() {
-            collector.teardown_snapshot = None;
-        }
+        collector.note_activity();
         if let Some(name) = shuttle_name {
             collector.names.entry(task_id).or_insert(name);
         }
         collector.last_scheduled = Some(task_id);
         let timestamp = clock::elapsed();
         let operation = collector.operations.get(&task_id).copied().flatten();
-        if let Some(RawEvent::Scheduled {
+        if let Some(RawEvent {
             timestamp: previous_time,
-            task_id: previous_task,
-            scheduling,
+            kind:
+                RawKind::Scheduled {
+                    task_id: previous_task,
+                    scheduling,
+                },
         }) = collector.events.last_mut()
             && *previous_task == task_id
             && *previous_time == timestamp
@@ -233,12 +240,14 @@ pub(crate) fn record_scheduled(task_id: usize, shuttle_name: Option<String>) {
             scheduling.steps += 1;
             return;
         }
-        collector.events.push(RawEvent::Scheduled {
+        collector.events.push(RawEvent {
             timestamp,
-            task_id,
-            scheduling: Scheduling {
-                operation,
-                steps: 1,
+            kind: RawKind::Scheduled {
+                task_id,
+                scheduling: Scheduling {
+                    operation,
+                    steps: 1,
+                },
             },
         });
     });
@@ -250,9 +259,7 @@ pub(crate) fn register_listener(wait_id: u64) -> Option<u64> {
     }
     let task_id = current_task_id()?;
     with_collector(|collector| {
-        if !is_teardown() {
-            collector.teardown_snapshot = None;
-        }
+        collector.note_activity();
         let token = collector.alloc_id();
         collector
             .queue_waiters
@@ -275,9 +282,7 @@ pub(crate) fn begin_registered_wait(token: u64, operation: &'static str, wait_id
         return;
     };
     with_collector(|collector| {
-        if !is_teardown() {
-            collector.teardown_snapshot = None;
-        }
+        collector.note_activity();
         if collector.active_waits.contains_key(&token) {
             return;
         }
@@ -291,11 +296,13 @@ pub(crate) fn begin_registered_wait(token: u64, operation: &'static str, wait_id
                 since: timestamp,
             },
         );
-        collector.events.push(RawEvent::Wait {
+        collector.events.push(RawEvent {
             timestamp,
-            task_id,
-            operation,
-            wait_id,
+            kind: RawKind::Wait {
+                task_id,
+                operation,
+                wait_id,
+            },
         });
     });
 }
@@ -345,30 +352,36 @@ pub(crate) fn end_wait(token: u64, operation: &'static str, wait_id: u64, cancel
         }
         let timestamp = clock::elapsed();
         if let Some(entry) = entry {
-            let event = if cancelled {
-                RawEvent::WaitCancelled {
-                    timestamp,
-                    task_id: entry.task_id,
-                    operation: entry.operation,
-                    wait_id: entry.wait_id,
+            let WaitEntry {
+                task_id,
+                operation,
+                wait_id,
+                ..
+            } = entry;
+            let kind = if cancelled {
+                RawKind::WaitCancelled {
+                    task_id,
+                    operation,
+                    wait_id,
                 }
             } else {
-                RawEvent::WaitCompleted {
-                    timestamp,
-                    task_id: entry.task_id,
-                    operation: entry.operation,
-                    wait_id: entry.wait_id,
+                RawKind::WaitCompleted {
+                    task_id,
+                    operation,
+                    wait_id,
                 }
             };
-            collector.events.push(event);
+            collector.events.push(RawEvent { timestamp, kind });
         }
         if let Some(target_task_id) = handed_off {
-            collector.events.push(RawEvent::Wakeup {
+            collector.events.push(RawEvent {
                 timestamp,
-                by_task_id,
-                target_task_ids: vec![target_task_id],
-                operation: op,
-                wait_id: queue_id,
+                kind: RawKind::Wakeup {
+                    by_task_id,
+                    target_task_ids: vec![target_task_id],
+                    operation: op,
+                    wait_id: queue_id,
+                },
             });
         }
     });
@@ -380,9 +393,7 @@ pub(crate) fn record_wakeup(operation: &'static str, wait_id: u64, all: bool) {
     }
     let by_task_id = current_task_id();
     with_collector(|collector| {
-        if !is_teardown() {
-            collector.teardown_snapshot = None;
-        }
+        collector.note_activity();
         let Some(waiters) = collector.queue_waiters.get_mut(&wait_id) else {
             return;
         };
@@ -401,12 +412,14 @@ pub(crate) fn record_wakeup(operation: &'static str, wait_id: u64, all: bool) {
         if target_task_ids.is_empty() {
             return;
         }
-        collector.events.push(RawEvent::Wakeup {
+        collector.events.push(RawEvent {
             timestamp: clock::elapsed(),
-            by_task_id,
-            target_task_ids,
-            operation,
-            wait_id,
+            kind: RawKind::Wakeup {
+                by_task_id,
+                target_task_ids,
+                operation,
+                wait_id,
+            },
         });
     });
 }
@@ -433,26 +446,21 @@ impl<F: Future> Future for NamedFuture<F> {
     }
 }
 
-#[cfg(not(feature = "tracing"))]
+// The name to record for a task, if this execution captures a timeline.
+pub(crate) fn timeline_name(
+    world: super::World,
+    name: impl FnOnce() -> crate::Str,
+) -> Option<crate::Str> {
+    (world.is_model() && is_active()).then(name)
+}
+
 pub(crate) fn named<F>(
     world: super::World,
     name: impl Into<crate::Str>,
     future: F,
 ) -> NamedFuture<F> {
-    let name = if world.is_model() && is_active() {
-        Some(name.into())
-    } else {
-        None
-    };
-    NamedFuture { name, future }
-}
-
-#[cfg(feature = "tracing")]
-pub(crate) fn named_str<F>(world: super::World, name: crate::Str, future: F) -> NamedFuture<F> {
-    let name = if world.is_model() && is_active() {
-        Some(name)
-    } else {
-        None
-    };
-    NamedFuture { name, future }
+    NamedFuture {
+        name: timeline_name(world, || name.into()),
+        future,
+    }
 }

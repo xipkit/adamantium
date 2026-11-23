@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use crate::sha256_hex;
+use crate::hash::sha256_hex;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 

@@ -634,7 +634,7 @@ fn limit_kind(cx: &LateContext<'_>, function: DefId) -> Option<LimitKind> {
         cx.tcx.type_of(owner).instantiate_identity().skip_norm_wip(),
     )?;
     match owner.as_str() {
-        "adamantium::limit::Limit" => Some(LimitKind::Ordinary),
+        "adamantium::limit::Limit" | "adamantium::limit::Weighted" => Some(LimitKind::Ordinary),
         "adamantium::limit::keyed::KeyedLimit" => Some(LimitKind::Keyed),
         _ => None,
     }

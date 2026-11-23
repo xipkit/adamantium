@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, HashSet},
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -8,7 +7,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use toml_edit::{DocumentMut, Item};
 
-use crate::lints::{self, EXPERIMENTAL_LINTS, OVERFLOW_RULE};
+use crate::{
+    lints::{self, EXPERIMENTAL_LINTS, OVERFLOW_RULE},
+    manifest,
+};
 
 /// A project's command defaults and skip list.
 #[derive(Debug)]
@@ -39,11 +41,7 @@ impl Default for Config {
 impl Config {
     /// Reads project settings from the `Cargo.toml` in `root`.
     pub fn load(root: &Path) -> Result<Config> {
-        let path = root.join("Cargo.toml");
-        let doc: DocumentMut = fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?
-            .parse()
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let (_, doc) = manifest::load(root)?;
         Config::parse(&doc, root)
     }
 
@@ -192,15 +190,14 @@ fn glob(pattern: &str, key: &str) -> Result<Glob> {
 }
 
 fn qualify(name: &str, table: &str) -> Result<String> {
-    if name == OVERFLOW_RULE || Some(name) == OVERFLOW_RULE.strip_prefix("adamantium::") {
+    if lints::is_overflow_rule(name) {
         return Ok(OVERFLOW_RULE.to_owned());
     }
     if EXPERIMENTAL_LINTS.contains(&name) {
         return Ok(name.to_owned());
     }
-    lints::selected(true)
-        .find(|lint| lint.name == name || lint.qualified() == name)
-        .map(|lint| lint.qualified())
+    lints::find(name)
+        .map(lints::Lint::qualified)
         .ok_or_else(|| {
             anyhow!("unknown rule `{name}` in [{table}]; `cargo adamantium rules` lists them")
         })

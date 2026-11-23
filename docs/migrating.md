@@ -25,6 +25,7 @@ changes behavior in a way to check.
 | Blocking I/O while a lock is held | The I/O, then record | No |
 | Two locks held at once | One actor, or one after the other | No |
 | Two semaphore permits held at once | A `KeyedLimit` inside a `Limit`, or one after the other | No |
+| `Semaphore::acquire_many(n)` | `Limit::weighted(n)?.run(work)`, where a weight of zero takes one place | Mostly |
 | `tokio::sync::OnceCell` | `Once` | Mostly |
 | `tokio::task::spawn_blocking(f).await.unwrap()` | `blocking(f).await` | Yes |
 | `std::thread::spawn` | `blocking` | Mostly |
@@ -493,6 +494,61 @@ async fn main() {
     let exports = Limit::new(1);
     // panics: limit work can't enter another Limit
     connections.run(|| exports.run(|| async {})).await;
+}
+```
+
+### Weighted permits
+
+A budget whose calls cost different amounts, such as bytes in flight, takes
+`n` permits at once with `acquire_many(n)`. `Limit::weighted(n)` returns a
+handle whose calls each take `n` places, for as long as their work runs.
+
+- Like Tokio's, waiting calls are served in the order they started waiting,
+  so small calls can't starve a large one. A call waits behind every call
+  that started waiting before it, even while places are free.
+- `weighted` takes a `usize`, so the `u32` conversion goes away.
+- Tokio's `acquire_many(0)` returns at once. A weight of zero takes one place.
+- A weight above the limit's total returns `Overweight` at once. Tokio would
+  wait for `add_permits` to make room. A `Limit` doesn't grow, so such a call
+  could never run.
+- The places stay with one call. Code that keeps permits beyond a call, moves
+  them to another task, or resizes the semaphore needs a scoped exception.
+
+Before:
+
+```rust
+use tokio::sync::Semaphore;
+
+async fn upload(body: &[u8]) -> usize {
+    body.len()
+}
+
+#[tokio::main]
+async fn main() {
+    let in_flight = Semaphore::new(64 * 1024);
+    let body = vec![0u8; 4096];
+    let bytes = u32::try_from(body.len()).unwrap();
+    let _permits = in_flight.acquire_many(bytes).await.unwrap();
+    assert_eq!(upload(&body).await, 4096);
+}
+```
+
+After:
+
+```rust
+use adamantium::{Limit, Overweight};
+
+async fn upload(body: &[u8]) -> usize {
+    body.len()
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Overweight> {
+    let in_flight = Limit::new(64 * 1024);
+    let body = vec![0u8; 4096];
+    let sent = in_flight.weighted(body.len())?.run(|| upload(&body)).await;
+    assert_eq!(sent, 4096);
+    Ok(())
 }
 ```
 

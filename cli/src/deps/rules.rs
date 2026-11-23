@@ -134,7 +134,7 @@ fn tree_len(trees: &[TokenTree], at: usize) -> usize {
     token(trees, at).map_or(1, |(_, len)| len)
 }
 
-fn is_punct(tree: Option<&TokenTree>, ch: char) -> bool {
+pub(super) fn is_punct(tree: Option<&TokenTree>, ch: char) -> bool {
     matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == ch)
 }
 

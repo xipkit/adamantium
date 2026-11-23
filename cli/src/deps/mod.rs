@@ -76,27 +76,56 @@ struct Output<'a> {
     policy: Option<policy::Evaluation<'a>>,
 }
 
-/// Audits the dependencies of the workspace at `path` and prints the report.
-/// `cargo_args` go to `cargo metadata` and `cargo tree`, to choose features.
-/// With `deny_new`, the exit status indicates regressions or an incomplete audit.
-pub fn run(
-    path: &Path,
+// No doc comment: clap would show it as the subcommand's long help.
+#[derive(clap::Args)]
+pub struct Args {
+    #[arg(default_value = ".", help = "The project directory, or its Cargo.toml")]
+    path: PathBuf,
+    #[arg(long, value_enum, default_value_t = Format::Text)]
     format: Format,
-    cargo_args: &[String],
+    #[arg(
+        long,
+        help = "Fail on new unsafe code or unscoped task starts, or on scan gaps"
+    )]
     deny_new: bool,
-    baseline: Option<&Path>,
-) -> Result<ExitCode> {
-    let root = manifest::root(path)?;
+    #[arg(
+        long,
+        value_name = "REPORT",
+        requires = "deny_new",
+        help = "Compare against an earlier `deps --format json` report"
+    )]
+    baseline: Option<PathBuf>,
+    #[arg(
+        last = true,
+        help = "Arguments passed on to `cargo metadata` and `cargo tree`, such as `--features` or `--all-features`"
+    )]
+    cargo_args: Vec<String>,
+}
+
+/// Audits the dependencies of the workspace at `args.path` and prints the
+/// report. `args.cargo_args` go to `cargo metadata` and `cargo tree`, to
+/// choose features. With `deny_new`, the exit status indicates regressions
+/// or an incomplete audit.
+pub fn run(args: Args) -> Result<ExitCode> {
+    let Args {
+        path,
+        format,
+        deny_new,
+        baseline,
+        cargo_args,
+    } = args;
+    let root = manifest::root(&path)?;
     let config = Config::load(&root)?;
     let baseline = if deny_new {
         baseline
+            .as_deref()
             .or(config.deps_baseline.as_deref())
             .map(policy::Baseline::load)
             .transpose()?
     } else {
         None
     };
-    let report = audit(&root, cargo_args)?;
+    let report = audit(&root, &cargo_args)?;
     let policy = deny_new
         .then(|| policy::evaluate(&report, baseline.as_ref()))
         .transpose()?;
@@ -147,31 +176,7 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
         .enumerate()
         .map(|(index, dependency)| (dependency.id.as_str(), index))
         .collect();
-    let crates: Vec<Crate> = resolved
-        .iter()
-        .filter_map(|dependency| {
-            let lib = dependency.lib.as_ref()?;
-            let externs = externs.get(dependency.id.as_str())?;
-            let dependencies = dependency
-                .externs
-                .iter()
-                .filter_map(|(name, dep)| Some((name.clone(), *indices.get(dep.id.as_str())?)))
-                .collect();
-            Some(Crate {
-                name: &lib.name,
-                root: &dependency.root,
-                src: &lib.src_path,
-                edition_2015: lib.edition == "2015",
-                externs,
-                dependencies,
-                cfg: Cfg {
-                    target: &target,
-                    features: &dependency.features,
-                    proc_macro: lib.proc_macro,
-                },
-            })
-        })
-        .collect();
+    let crates = crates(&resolved, &externs, &indices, &target);
     let mut dependencies = Vec::new();
     for dependency in &resolved {
         let scan = match indices.get(dependency.id.as_str()).copied() {
@@ -202,20 +207,10 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
             name: dependency.name.clone(),
             version: dependency.version.clone(),
             source: dependency.source.clone(),
-            path: dependency.source.is_none().then(|| {
-                let dir = dependency
-                    .root
-                    .strip_prefix(root)
-                    .unwrap_or(&dependency.root);
-                let path = dir.to_string_lossy();
-                if path.is_empty() {
-                    ".".to_owned()
-                } else if cfg!(windows) {
-                    path.replace('\\', "/")
-                } else {
-                    path.into_owned()
-                }
-            }),
+            path: dependency
+                .source
+                .is_none()
+                .then(|| reported_path(&dependency.root, root)),
             kind: dependency.kind,
             forbids_unsafe: scan.forbids_unsafe,
             unsafe_code: scan.unsafe_code,
@@ -232,6 +227,55 @@ fn audit(root: &Path, cargo_args: &[String]) -> Result<Report> {
     })
 }
 
+/// The libraries to scan, in the order of `indices`, each with the names it
+/// gives its dependencies.
+fn crates<'a>(
+    resolved: &'a [metadata::Dependency],
+    externs: &'a HashMap<&str, BTreeMap<String, String>>,
+    indices: &HashMap<&str, usize>,
+    target: &'a Target,
+) -> Vec<Crate<'a>> {
+    resolved
+        .iter()
+        .filter_map(|dependency| {
+            let lib = dependency.lib.as_ref()?;
+            let externs = externs.get(dependency.id.as_str())?;
+            let dependencies = dependency
+                .externs
+                .iter()
+                .filter_map(|(name, dep)| Some((name.clone(), *indices.get(dep.id.as_str())?)))
+                .collect();
+            Some(Crate {
+                name: &lib.name,
+                root: &dependency.root,
+                src: &lib.src_path,
+                edition_2015: lib.edition == "2015",
+                externs,
+                dependencies,
+                cfg: Cfg {
+                    target,
+                    features: &dependency.features,
+                    proc_macro: lib.proc_macro,
+                },
+            })
+        })
+        .collect()
+}
+
+/// A path dependency's directory as the report gives it: relative to the
+/// audit root when inside it, with forward slashes.
+fn reported_path(dir: &Path, root: &Path) -> String {
+    let dir = dir.strip_prefix(root).unwrap_or(dir);
+    let path = dir.to_string_lossy();
+    if path.is_empty() {
+        ".".to_owned()
+    } else if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.into_owned()
+    }
+}
+
 fn print_text(out: &mut impl Write, report: &Report) -> io::Result<()> {
     writeln!(
         out,
@@ -239,6 +283,12 @@ fn print_text(out: &mut impl Write, report: &Report) -> io::Result<()> {
         report.root.display(),
         report.target
     )?;
+    print_table(out, report)?;
+    print_details(out, report)?;
+    print_summary(out, report)
+}
+
+fn print_table(out: &mut impl Write, report: &Report) -> io::Result<()> {
     for (kind, title) in [
         (Kind::Runtime, "Runtime"),
         (
@@ -281,7 +331,10 @@ fn print_text(out: &mut impl Write, report: &Report) -> io::Result<()> {
             writeln!(out)?;
         }
     }
+    Ok(())
+}
 
+fn print_details(out: &mut impl Write, report: &Report) -> io::Result<()> {
     for dependency in &report.dependencies {
         if dependency.calls.is_empty()
             && dependency.unresolved.is_empty()
@@ -315,7 +368,10 @@ fn print_text(out: &mut impl Write, report: &Report) -> io::Result<()> {
             }
         }
     }
+    Ok(())
+}
 
+fn print_summary(out: &mut impl Write, report: &Report) -> io::Result<()> {
     let count = |test: fn(&Dependency) -> bool| {
         report
             .dependencies
