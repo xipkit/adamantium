@@ -313,6 +313,10 @@ Close and failure:
 - `Err(TryReceiveError::Empty)` while the channel is open and empty
 - `Err(TryReceiveError::Closed)` after the channel is closed and drained
 
+`Receiver::try_receive_batch(max)` and `Channel::try_receive_batch(max)` return
+up to `max` ready values in a `Vec`, or the same errors if no values are ready.
+A zero limit returns an empty `Vec` immediately.
+
 These operations work with `default-features = false`, without Tokio:
 
 ```rust
@@ -333,6 +337,56 @@ With the default `tokio` feature, `receive_until(&cancellation, deadline)` and `
 - A send ends with `SendError::Closed(value)`, `Cancelled(value)`, or `DeadlineExceeded(value)`. Every failure returns the value.
 - As with `Tasks::run_until`, a request that is already present wins over a ready channel.
 - Cancellation wins over a deadline that is ready at the same time.
+
+### Batch receives
+
+With the `tokio` feature, `receive_batch_until(&cancellation, max, linger, &mut batch)`
+works on both `Receiver` and `Channel`. It waits for the first value without a
+deadline, then appends up to `max` values to the supplied `Vec`. The linger
+starts with the first value and uses `adamantium::time`, including virtual time
+under the deterministic harness. A zero linger returns after the first value.
+A zero limit returns an empty slice immediately.
+
+The call returns the newly appended slice when the batch fills, the linger
+expires, the channel closes and drains, or cancellation is requested. If it
+receives nothing before cancellation or before the channel closes and drains,
+it returns `ReceiveError::Cancelled` or `ReceiveError::Closed`, respectively.
+Dropping the receive future also leaves the messages it took in the supplied
+buffer.
+
+A batching writer can flush once per batch and reuse the buffer for the next
+receive. This example uses Tokio's `io-util` feature.
+
+```rust
+use adamantium::{Cancellation, ReceiveError, Receiver};
+use std::{io, time::Duration};
+use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
+
+async fn write_batches<W: AsyncWrite + Unpin>(
+    receiver: &Receiver<Vec<u8>>,
+    shutdown: &Cancellation,
+    writer: W,
+) -> io::Result<()> {
+    let mut writer = BufWriter::new(writer);
+    let mut batch = Vec::new();
+    loop {
+        match receiver
+            .receive_batch_until(shutdown, 64, Duration::from_millis(20), &mut batch)
+            .await
+        {
+            Ok(lines) => {
+                for line in lines {
+                    writer.write_all(line).await?;
+                }
+                writer.flush().await?;
+                batch.clear();
+            }
+            Err(ReceiveError::Closed | ReceiveError::Cancelled) => return Ok(()),
+            Err(error) => return Err(io::Error::other(error)),
+        }
+    }
+}
+```
 
 ### Receiver as a stream
 

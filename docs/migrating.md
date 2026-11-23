@@ -36,6 +36,7 @@ changes behavior in a way to check.
 | `tokio::sync::watch` | `Watch::new` and `subscribe` | Mostly |
 | `tokio::sync::broadcast` | `Topic` | Mostly |
 | `tokio::sync::broadcast` whose sender must not wait for a slow receiver | `Fanout` | Mostly |
+| A loop racing channel receives against a timer to fill a batch | [`receive_batch_until`](library.md#batch-receives) with a reusable buffer | Mostly |
 | A detached worker fed by a channel | A worker task in the scope that sends to it | No |
 | `JoinHandle::abort` on a long-lived task | `Tasks::run_until` with a `Cancellation` | No |
 | `tokio::spawn` inside a task | A scope inside the task | No |

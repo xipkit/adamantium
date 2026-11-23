@@ -271,7 +271,7 @@ impl Interval {
     }
 }
 
-fn add_capped(base: Instant, offset: Duration) -> Instant {
+pub(crate) fn add_capped(base: Instant, offset: Duration) -> Instant {
     base.checked_add(offset)
         .or_else(|| base.checked_add(offset.min(MAX_DELAY)))
         .unwrap_or(base)
