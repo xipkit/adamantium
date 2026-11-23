@@ -40,7 +40,7 @@ pub(super) fn coalesce(mut edits: Vec<Edit>) -> Vec<Edit> {
 
 pub(super) struct Text<'a> {
     pub(super) source: &'a str,
-    pub(super) prefix: usize,
+    prefix: usize,
 }
 
 impl<'a> Text<'a> {
@@ -434,5 +434,18 @@ struct Uses<'ast>(Vec<&'ast ItemUse>);
 impl<'ast> Visit<'ast> for Uses<'ast> {
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         self.0.push(item);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_captures_name_variables() {
+        assert_eq!(
+            format_captures("{a} {{b}} {c:?} {:>width$} {d:.prec$} {0}"),
+            ["a", "c", "width", "d", "prec"]
+        );
     }
 }

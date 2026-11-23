@@ -121,7 +121,7 @@ pub(super) fn plan(file: &Path, source: &str, constructors: &Constructors) -> Ou
         seen.insert(found.start);
         groups.push(group(file, &text, &found));
     }
-    for (&start, &(_, kind)) in constructors {
+    for (&start, &(end, kind)) in constructors {
         if !seen.contains(&start) {
             let line = source
                 .get(..start)
@@ -129,7 +129,7 @@ pub(super) fn plan(file: &Path, source: &str, constructors: &Constructors) -> Ou
             groups.push(Group {
                 line,
                 name: source
-                    .get(start..constructors.get(&start).map_or(start, |(end, _)| *end))
+                    .get(start..end)
                     .map_or_else(|| "channel".to_owned(), |callee| format!("{callee}(..)")),
                 kind,
                 edits: Vec::new(),

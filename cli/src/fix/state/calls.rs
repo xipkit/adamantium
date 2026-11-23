@@ -307,9 +307,7 @@ impl<'a> Walker<'a> {
         expr: &Expr,
         replacement: Option<String>,
     ) {
-        if let Some(var) = self.vars.get_mut(source) {
-            var.used = true;
-        }
+        self.mark_used(source);
         if let Some(held) = self.group_of(source) {
             self.links.push((group, held));
         }

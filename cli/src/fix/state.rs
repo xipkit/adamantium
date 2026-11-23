@@ -907,6 +907,12 @@ impl<'a> Walker<'a> {
         }
     }
 
+    fn mark_used(&mut self, var: usize) {
+        if let Some(var) = self.vars.get_mut(var) {
+            var.used = true;
+        }
+    }
+
     fn group_of(&self, var: usize) -> Option<usize> {
         self.vars.get(var).and_then(|var| var.group)
     }
@@ -965,9 +971,7 @@ impl<'a> Walker<'a> {
 
     fn mention(&mut self, name: &str, reason: Reason) {
         if let Some(var) = self.lookup(name) {
-            if let Some(var) = self.vars.get_mut(var) {
-                var.used = true;
-            }
+            self.mark_used(var);
             self.refuse(var, reason);
         }
     }
@@ -1286,9 +1290,7 @@ impl<'a> Walker<'a> {
                 return;
             }
             if let Some((source, replacement)) = self.clone_of(init) {
-                if let Some(var) = self.vars.get_mut(source) {
-                    var.used = true;
-                }
+                self.mark_used(source);
                 let group = self.group_of(source);
                 match (ty_edit, self.text.of(init)) {
                     (Some(ty_edit), Some(range)) => {
@@ -1747,9 +1749,7 @@ impl<'a> Walker<'a> {
     }
 
     fn guard(&mut self, var: usize, guard: &'a Expr, held: &Expr, access: Option<Mode>) {
-        if let Some(entry) = self.vars.get_mut(var) {
-            entry.used = true;
-        }
+        self.mark_used(var);
         match self.guard_edit(var, guard, held, access) {
             Ok((edit, runs)) => {
                 self.lock_site(var, runs);
@@ -2248,9 +2248,7 @@ impl<'a> Visit<'a> for Walker<'a> {
             return;
         }
         if let Some((var, replacement)) = self.unwrapped(expr) {
-            if let Some(entry) = self.vars.get_mut(var) {
-                entry.used = true;
-            }
+            self.mark_used(var);
             match self.text.of(expr) {
                 Some(range) => {
                     let edit = self.edit(range, replacement);
@@ -2261,9 +2259,7 @@ impl<'a> Visit<'a> for Walker<'a> {
             return;
         }
         if let Some(var) = self.dropped(expr) {
-            if let Some(entry) = self.vars.get_mut(var) {
-                entry.used = true;
-            }
+            self.mark_used(var);
             return;
         }
         if let Expr::Assign(assign) = expr {
@@ -3275,14 +3271,6 @@ fn hits() -> u32 {
             "struct S;\nimpl std::ops::Add<&mut i32> for S { type Output = i32; fn add(self, x: &mut i32) -> i32 { *x } }\nfn f(mut n: i32) -> i32 { let m = Arc::new(Mutex::new(&mut n)); let x = S + *m.lock().unwrap(); x }",
             "m",
             Reason::Calls,
-        );
-    }
-
-    #[test]
-    fn format_captures_name_variables() {
-        assert_eq!(
-            format_captures("{a} {{b}} {c:?} {:>width$} {d:.prec$} {0}"),
-            ["a", "c", "width", "d", "prec"]
         );
     }
 }

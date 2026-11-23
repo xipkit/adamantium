@@ -26,6 +26,16 @@ pub(super) enum Call {
 }
 
 impl Call {
+    const ALL: [Self; 7] = [
+        Self::Sleep,
+        Self::SleepUntil,
+        Self::Now,
+        Self::Blocking,
+        Self::Rand,
+        Self::RandRange,
+        Self::Fastrand,
+    ];
+
     pub(super) fn api(self) -> Api {
         match self {
             Self::Rand | Self::RandRange | Self::Fastrand => Api::Core,
@@ -95,15 +105,12 @@ pub(super) fn callees(diagnostics: Vec<&Value>, root: &Path) -> BTreeMap<PathBuf
     });
     let mut files: BTreeMap<PathBuf, Calls> = BTreeMap::new();
     for diagnostic in diagnostics {
-        let call = match disallowed_path(diagnostic, "clippy::disallowed_methods") {
-            Some("tokio::time::sleep") => Call::Sleep,
-            Some("tokio::time::sleep_until") => Call::SleepUntil,
-            Some("tokio::time::Instant::now") => Call::Now,
-            Some("tokio::task::spawn_blocking") => Call::Blocking,
-            Some("rand::random") => Call::Rand,
-            Some("rand::random_range") => Call::RandRange,
-            Some("fastrand::u64") if !uses_fastrand_state => Call::Fastrand,
-            _ => continue,
+        let call = disallowed_path(diagnostic, "clippy::disallowed_methods")
+            .and_then(|path| Call::ALL.into_iter().find(|call| call.path() == path));
+        let call = match call {
+            Some(Call::Fastrand) if uses_fastrand_state => continue,
+            Some(call) => call,
+            None => continue,
         };
         for (file, range) in primary_locations(diagnostic, root) {
             files.entry(file).or_default().insert(range, call);
