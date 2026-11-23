@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -104,43 +105,8 @@ pub fn init(root: &Path, force: bool, config: &Config, strict: bool) -> Result<C
     }
 
     let clippy_path = root.join("clippy.toml");
-    let existing_clippy = match fs::read(&clippy_path) {
-        Ok(contents) => Some(contents),
-        Err(error) if error.kind() == ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(error).with_context(|| format!("reading {}", clippy_path.display()));
-        }
-    };
-    let strict_clippy = lints::clippy_toml(true)?;
-    let strict = strict || existing_clippy.as_deref() == Some(strict_clippy.as_bytes());
-    let clippy_toml = if strict { &strict_clippy } else { CLIPPY_TOML };
-    let write_clippy = existing_clippy.as_deref() != Some(clippy_toml.as_bytes());
-    if write_clippy
-        && !force
-        && existing_clippy
-            .as_deref()
-            .is_some_and(|contents| contents != CLIPPY_TOML.as_bytes())
-    {
-        bail!(
-            "{} exists and differs from adamantium's; pass --force to replace it",
-            clippy_path.display()
-        );
-    }
-
-    for tool in [Tool::Rust, Tool::Clippy] {
-        let name = tool.to_string();
-        let table = table_in(lints, &name, false)?;
-        for lint in lints::selected(strict).filter(|lint| lint.tool == tool) {
-            if config.adopted(&lint.qualified()) {
-                table.insert(lint.name, value(lint.level.to_string()));
-            } else {
-                table.remove(lint.name);
-            }
-        }
-        if table.is_empty() {
-            lints.remove(&name);
-        }
-    }
+    let clippy = ClippyPlan::new(&clippy_path, force, strict)?;
+    write_lint_tables(lints, config, clippy.strict)?;
 
     let document = doc.as_table_mut();
     if is_workspace && has_package {
@@ -182,14 +148,79 @@ pub fn init(root: &Path, force: bool, config: &Config, strict: bool) -> Result<C
         }
     }
 
-    if write_clippy {
-        fs::write(&clippy_path, clippy_toml)
+    if clippy.write {
+        fs::write(&clippy_path, clippy.contents.as_bytes())
             .with_context(|| format!("writing {}", clippy_path.display()))?;
         changes
             .notes
             .push(format!("wrote {}", clippy_path.display()));
     }
     Ok(changes)
+}
+
+/// What `init` does about `clippy.toml`.
+struct ClippyPlan {
+    /// Whether the project is on the strict tier: asked for now, or already
+    /// installed.
+    strict: bool,
+    contents: Cow<'static, str>,
+    write: bool,
+}
+
+impl ClippyPlan {
+    fn new(clippy_path: &Path, force: bool, strict: bool) -> Result<Self> {
+        let existing = match fs::read(clippy_path) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", clippy_path.display()));
+            }
+        };
+        let strict_clippy = lints::clippy_toml(true)?;
+        let strict = strict || existing.as_deref() == Some(strict_clippy.as_bytes());
+        let contents = if strict {
+            strict_clippy
+        } else {
+            Cow::Borrowed(CLIPPY_TOML)
+        };
+        let write = existing.as_deref() != Some(contents.as_bytes());
+        if write
+            && !force
+            && existing
+                .as_deref()
+                .is_some_and(|contents| contents != CLIPPY_TOML.as_bytes())
+        {
+            bail!(
+                "{} exists and differs from adamantium's; pass --force to replace it",
+                clippy_path.display()
+            );
+        }
+        Ok(Self {
+            strict,
+            contents,
+            write,
+        })
+    }
+}
+
+/// Sets the level of each lint the project applies everywhere, and removes
+/// the ones its skip list scopes.
+fn write_lint_tables(lints: &mut Table, config: &Config, strict: bool) -> Result<()> {
+    for tool in [Tool::Rust, Tool::Clippy] {
+        let name = tool.to_string();
+        let table = table_in(lints, &name, false)?;
+        for lint in lints::selected(strict).filter(|lint| lint.tool == tool) {
+            if config.adopted(&lint.qualified()) {
+                table.insert(lint.name, value(lint.level.to_string()));
+            } else {
+                table.remove(lint.name);
+            }
+        }
+        if table.is_empty() {
+            lints.remove(&name);
+        }
+    }
+    Ok(())
 }
 
 fn table_in<'a>(parent: &'a mut Table, key: &str, implicit: bool) -> Result<&'a mut Table> {

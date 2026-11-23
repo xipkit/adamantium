@@ -273,7 +273,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     )?;
                     writeln!(stdout)?;
                 }
-                RulesFormat::Toml => write!(stdout, "{}", lints_toml(true, strict))?,
+                RulesFormat::Toml => write!(stdout, "{}", lints_toml(strict))?,
             }
             Ok(ExitCode::SUCCESS)
         }

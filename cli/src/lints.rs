@@ -930,16 +930,15 @@ impl fmt::Display for Tool {
     }
 }
 
-/// The lint tables as they appear in a `Cargo.toml`: under `workspace.lints`
-/// for a workspace, under `lints` for a single package.
-pub fn lints_toml(workspace: bool, strict: bool) -> String {
-    let prefix = if workspace { "workspace." } else { "" };
+/// The lint tables as they appear in a workspace's `Cargo.toml`, under
+/// `workspace.lints`.
+pub fn lints_toml(strict: bool) -> String {
     let mut out = String::new();
     for tool in [Tool::Rust, Tool::Clippy] {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&format!("[{prefix}lints.{tool}]\n"));
+        out.push_str(&format!("[workspace.lints.{tool}]\n"));
         for lint in selected(strict).filter(|lint| lint.tool == tool) {
             out.push_str(&format!("{} = \"{}\"\n", lint.name, lint.level));
         }
