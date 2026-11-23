@@ -26,7 +26,7 @@ pub(crate) fn is_active() -> bool {
     ACTIVE.get()
 }
 
-pub(crate) fn is_teardown() -> bool {
+fn is_teardown() -> bool {
     std::thread::panicking()
         || ExecutionState::try_with(|state| state.in_cleanup()).unwrap_or(false)
 }
@@ -142,6 +142,12 @@ impl Collector {
         }
     }
 
+    fn note_activity(&mut self) {
+        if !is_teardown() {
+            self.teardown_snapshot = None;
+        }
+    }
+
     fn alloc_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -193,7 +199,7 @@ pub(crate) fn alloc_wait_id() -> u64 {
     with_collector(Collector::alloc_id).unwrap_or(0)
 }
 
-pub(crate) fn record_task_name(task_id: usize, name: &str) {
+fn record_task_name(task_id: usize, name: &str) {
     with_collector(|collector| {
         collector
             .names
@@ -212,9 +218,7 @@ pub(crate) fn record_current_task_name(name: &str) {
 
 pub(crate) fn record_scheduled(task_id: usize, shuttle_name: Option<String>) {
     with_collector(|collector| {
-        if !is_teardown() {
-            collector.teardown_snapshot = None;
-        }
+        collector.note_activity();
         if let Some(name) = shuttle_name {
             collector.names.entry(task_id).or_insert(name);
         }
@@ -255,9 +259,7 @@ pub(crate) fn register_listener(wait_id: u64) -> Option<u64> {
     }
     let task_id = current_task_id()?;
     with_collector(|collector| {
-        if !is_teardown() {
-            collector.teardown_snapshot = None;
-        }
+        collector.note_activity();
         let token = collector.alloc_id();
         collector
             .queue_waiters
@@ -280,9 +282,7 @@ pub(crate) fn begin_registered_wait(token: u64, operation: &'static str, wait_id
         return;
     };
     with_collector(|collector| {
-        if !is_teardown() {
-            collector.teardown_snapshot = None;
-        }
+        collector.note_activity();
         if collector.active_waits.contains_key(&token) {
             return;
         }
@@ -393,9 +393,7 @@ pub(crate) fn record_wakeup(operation: &'static str, wait_id: u64, all: bool) {
     }
     let by_task_id = current_task_id();
     with_collector(|collector| {
-        if !is_teardown() {
-            collector.teardown_snapshot = None;
-        }
+        collector.note_activity();
         let Some(waiters) = collector.queue_waiters.get_mut(&wait_id) else {
             return;
         };
