@@ -18,6 +18,8 @@ use crate::{
     manifest, sarif,
 };
 
+pub use crate::status::Status;
+
 const SCHEMA_VERSION: u32 = 3;
 
 /// Arguments for `cargo adamantium check`.
@@ -89,14 +91,6 @@ pub struct Report {
     pub baseline_unmatched: Option<usize>,
     pub warnings: Vec<Problem>,
     pub errors: Vec<Problem>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Status {
-    Clean,
-    Findings,
-    Error,
 }
 
 /// One broken rule at one place.
@@ -334,16 +328,6 @@ fn replace_baseline(path: &Path, original: &str, report: &Value) -> Result<()> {
     }
     updated.persist(&path)?;
     Ok(())
-}
-
-impl Status {
-    fn exit_code(self) -> ExitCode {
-        match self {
-            Status::Clean => ExitCode::SUCCESS,
-            Status::Findings => ExitCode::from(1),
-            Status::Error => ExitCode::from(2),
-        }
-    }
 }
 
 /// Runs the check, applies any baseline options, and prints the report.

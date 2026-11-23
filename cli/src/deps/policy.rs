@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::{Dependency, Report, SCHEMA_VERSION};
+use crate::status::Status;
 
 #[derive(Deserialize)]
 pub(super) struct Baseline {
@@ -102,14 +103,6 @@ struct Changes<'a> {
     removed: Vec<Change<'a>>,
 }
 
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum Status {
-    Clean,
-    Findings,
-    Error,
-}
-
 #[derive(Serialize)]
 pub(super) struct Evaluation<'a> {
     status: Status,
@@ -119,11 +112,7 @@ pub(super) struct Evaluation<'a> {
 
 impl Evaluation<'_> {
     pub(super) fn exit_code(&self) -> ExitCode {
-        match self.status {
-            Status::Clean => ExitCode::SUCCESS,
-            Status::Findings => ExitCode::from(1),
-            Status::Error => ExitCode::from(2),
-        }
+        self.status.exit_code()
     }
 
     pub(super) fn print_text(&self, out: &mut impl Write) -> std::io::Result<()> {

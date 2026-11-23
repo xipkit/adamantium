@@ -6,6 +6,7 @@ mod fix;
 mod lints;
 mod manifest;
 mod sarif;
+mod status;
 mod style;
 
 use std::{io::Write, path::PathBuf, process::ExitCode};
