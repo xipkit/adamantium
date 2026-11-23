@@ -56,7 +56,7 @@ enum Set {
     #[cfg(feature = "deterministic")]
     Model {
         tasks: Vec<model::Task<()>>,
-        changed: std::sync::Arc<super::wait::WaitQueue>,
+        changed: Arc<super::wait::WaitQueue>,
         // Kept across polls, so a task that finishes between them wakes
         // the next one.
         waiter: Option<super::wait::Waiter>,
@@ -103,30 +103,28 @@ impl<F: FnOnce()> Counted<F> {
     }
 }
 
-impl JoinSet {
-    pub(crate) fn new() -> Self {
-        let world = World::current();
+impl Set {
+    fn new() -> Self {
         #[cfg(feature = "deterministic")]
         if super::execution::current().is_some() {
-            return Self {
-                world,
-                inner: Set::Model {
-                    tasks: Vec::new(),
-                    changed: std::sync::Arc::new(super::wait::WaitQueue::named("task.join")),
-                    waiter: None,
-                },
-                reaped_completion: None,
-                idle: None,
-                closed: false,
-                registering: 0,
+            return Self::Model {
+                tasks: Vec::new(),
+                changed: Arc::new(super::wait::WaitQueue::named("task.join")),
+                waiter: None,
             };
         }
+        Self::Production {
+            tasks: tokio::task::JoinSet::new(),
+            unfinished: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl JoinSet {
+    pub(crate) fn new() -> Self {
         Self {
-            world,
-            inner: Set::Production {
-                tasks: tokio::task::JoinSet::new(),
-                unfinished: Arc::new(AtomicUsize::new(0)),
-            },
+            world: World::current(),
+            inner: Set::new(),
             reaped_completion: None,
             idle: None,
             closed: false,
@@ -186,17 +184,10 @@ impl JoinSet {
                 };
                 tasks.spawn_blocking(move || counted.run());
             }
-            // Queue before entering the closure, as a blocking pool does. Once
-            // entered, f runs synchronously to completion even if a modeled
-            // lock switches tasks inside it; abort cannot interrupt that poll.
             #[cfg(feature = "deterministic")]
-            Set::Model { tasks, changed, .. } => tasks.push(model::spawn(
-                async move {
-                    shuttle::future::yield_now().await;
-                    f()
-                },
-                changed.clone(),
-            )),
+            Set::Model { tasks, changed, .. } => {
+                tasks.push(model::spawn_blocking(f, changed.clone()));
+            }
         }
         self.wake_idle();
     }
@@ -275,13 +266,9 @@ impl JoinSet {
             }
             #[cfg(feature = "deterministic")]
             Set::Model { tasks, .. } => {
-                for (index, task) in tasks.iter().enumerate() {
-                    if let Some(result) = task.take() {
-                        drop(tasks.swap_remove(index));
-                        return Some(result);
-                    }
-                }
-                None
+                let (index, result) = model::first_finished(tasks)?;
+                drop(tasks.swap_remove(index));
+                Some(result)
             }
         }
     }
@@ -314,11 +301,7 @@ impl JoinSet {
                 // Listen before looking, so a task that finishes in between
                 // still wakes this poll.
                 let listener = waiter.get_or_insert_with(|| changed.listen());
-                let finished = tasks
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, task)| task.take().map(|result| (index, result)));
-                if let Some((index, result)) = finished {
+                if let Some((index, result)) = model::first_finished(tasks) {
                     tasks.remove(index);
                     *waiter = None;
                     break Poll::Ready(Some(result));
@@ -373,12 +356,9 @@ pub(crate) fn spawn_blocking<T: Send + 'static>(
 ) -> Blocking<T> {
     #[cfg(feature = "deterministic")]
     if super::execution::current().is_some() {
-        return Blocking::Model(model::spawn(
-            async move {
-                shuttle::future::yield_now().await;
-                f()
-            },
-            std::sync::Arc::new(super::wait::WaitQueue::named("blocking.join")),
+        return Blocking::Model(model::spawn_blocking(
+            f,
+            Arc::new(super::wait::WaitQueue::named("blocking.join")),
         ));
     }
     // WASI has one thread, so the closure runs inside a task of its own.
@@ -490,6 +470,30 @@ mod model {
                 self.finish(Err(JoinError::Cancelled));
             }
         }
+    }
+
+    // Takes the result of the first finished task, leaving the task in place.
+    pub(super) fn first_finished<T>(tasks: &[Task<T>]) -> Option<(usize, Result<T, JoinError>)> {
+        tasks
+            .iter()
+            .enumerate()
+            .find_map(|(index, task)| task.take().map(|result| (index, result)))
+    }
+
+    // Queues before entering the closure, as a blocking pool does. Once
+    // entered, f runs synchronously to completion even if a modeled lock
+    // switches tasks inside it; abort cannot interrupt that poll.
+    pub(super) fn spawn_blocking<T: Send + 'static>(
+        f: impl FnOnce() -> T + Send + 'static,
+        changed: Arc<WaitQueue>,
+    ) -> Task<T> {
+        spawn(
+            async move {
+                shuttle::future::yield_now().await;
+                f()
+            },
+            changed,
+        )
     }
 
     pub(super) fn spawn<F>(future: F, changed: Arc<WaitQueue>) -> Task<F::Output>
