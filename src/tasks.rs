@@ -738,7 +738,7 @@ impl<E: Send + 'static> Spawner<E> {
         #[cfg(feature = "tracing")]
         let name = name.into();
         #[cfg(all(feature = "tracing", feature = "deterministic"))]
-        let future = crate::runtime::trace::named_str(self.world, name.clone(), future);
+        let future = crate::runtime::trace::named(self.world, name.clone(), future);
         #[cfg(feature = "tracing")]
         let future = trace::instrument(&self.named, name, future);
         #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
@@ -761,19 +761,11 @@ impl<E: Send + 'static> Spawner<E> {
         #[cfg(feature = "tracing")]
         let name = name.into();
         #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
-        let name = if self.world.is_model() && crate::runtime::trace::is_active() {
-            Some(name.into())
-        } else {
-            None
-        };
+        let name = crate::runtime::trace::timeline_name(self.world, || name.into());
         #[cfg(feature = "tracing")]
         {
             #[cfg(feature = "deterministic")]
-            let trace_name = if self.world.is_model() && crate::runtime::trace::is_active() {
-                Some(name.clone())
-            } else {
-                None
-            };
+            let trace_name = crate::runtime::trace::timeline_name(self.world, || name.clone());
             let (running, span) = trace::track(&self.named, name);
             let dispatch = tracing::dispatcher::get_default(Clone::clone);
             move || {

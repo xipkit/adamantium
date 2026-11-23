@@ -448,26 +448,21 @@ impl<F: Future> Future for NamedFuture<F> {
     }
 }
 
-#[cfg(not(feature = "tracing"))]
+// The name to record for a task, if this execution captures a timeline.
+pub(crate) fn timeline_name(
+    world: super::World,
+    name: impl FnOnce() -> crate::Str,
+) -> Option<crate::Str> {
+    (world.is_model() && is_active()).then(name)
+}
+
 pub(crate) fn named<F>(
     world: super::World,
     name: impl Into<crate::Str>,
     future: F,
 ) -> NamedFuture<F> {
-    let name = if world.is_model() && is_active() {
-        Some(name.into())
-    } else {
-        None
-    };
-    NamedFuture { name, future }
-}
-
-#[cfg(feature = "tracing")]
-pub(crate) fn named_str<F>(world: super::World, name: crate::Str, future: F) -> NamedFuture<F> {
-    let name = if world.is_model() && is_active() {
-        Some(name)
-    } else {
-        None
-    };
-    NamedFuture { name, future }
+    NamedFuture {
+        name: timeline_name(world, || name.into()),
+        future,
+    }
 }
