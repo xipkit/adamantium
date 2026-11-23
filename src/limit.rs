@@ -5,15 +5,11 @@ use std::{
     collections::BTreeMap,
     fmt,
     future::{Future, poll_fn},
-    pin::{Pin, pin},
+    pin::pin,
     sync::Arc,
-    task::{Context, Poll},
 };
 
-use crate::runtime::{
-    Lock, World,
-    wait::{Turn, WaitLine, Wake},
-};
+use crate::runtime::{Lock, World, wait::WaitQueue};
 
 #[cfg(feature = "tokio")]
 use crate::{Cancellation, ScopeError, race, tasks::shutdown};
@@ -93,7 +89,7 @@ pub struct Overweight {
 struct Places {
     limit: usize,
     state: Lock<State>,
-    line: WaitLine,
+    world: World,
 }
 
 struct State {
@@ -108,14 +104,23 @@ struct State {
 
 struct Waiting {
     places: usize,
-    turn: Turn,
+    // Only this call listens, so notify_one wakes exactly it.
+    woken: Arc<WaitQueue>,
 }
 
-struct Take<'a> {
+enum Entered<'a> {
+    Taken(Place),
+    Waiting(Queued<'a>),
+}
+
+// A call's place in the queue. Dropping it before the call is served
+// leaves the queue.
+struct Queued<'a> {
     limit: &'a Limit,
+    ticket: u64,
     places: usize,
-    // Set while the call waits.
-    ticket: Option<u64>,
+    woken: Arc<WaitQueue>,
+    served: bool,
 }
 
 struct Place {
@@ -134,7 +139,7 @@ impl Limit {
                     waiting: BTreeMap::new(),
                     next_ticket: 0,
                 }),
-                line: WaitLine::named("limit.acquire"),
+                world: World::current(),
             }),
         }
     }
@@ -216,11 +221,49 @@ impl Limit {
             .saturating_sub(self.places.state.lock("Limit::available").taken)
     }
 
-    fn take(&self, places: usize) -> Take<'_> {
-        Take {
+    async fn take(&self, places: usize) -> Place {
+        self.places
+            .world
+            .cooperative(async {
+                match self.enter(places) {
+                    Entered::Taken(place) => place,
+                    Entered::Waiting(queued) => queued.wait().await,
+                }
+            })
+            .await
+    }
+
+    // Takes the places at once only when nobody waits and they fit.
+    // Otherwise the call joins the back of the queue.
+    fn enter(&self, places: usize) -> Entered<'_> {
+        let mut state = self.places.state.lock("Limit::take");
+        if state.waiting.is_empty() && state.fits(places, self.places.limit) {
+            state.taken = state.taken.saturating_add(places);
+            return Entered::Taken(self.place(places));
+        }
+        let ticket = state.next_ticket;
+        state.next_ticket = ticket.wrapping_add(1);
+        let woken = Arc::new(WaitQueue::named("limit.acquire"));
+        state.waiting.insert(
+            ticket,
+            Waiting {
+                places,
+                woken: Arc::clone(&woken),
+            },
+        );
+        Entered::Waiting(Queued {
             limit: self,
+            ticket,
             places,
-            ticket: None,
+            woken,
+            served: false,
+        })
+    }
+
+    fn place(&self, weight: usize) -> Place {
+        Place {
+            places: Arc::clone(&self.places),
+            weight,
         }
     }
 }
@@ -276,15 +319,14 @@ impl Weighted<'_> {
 }
 
 impl Places {
-    // A modeled limit used outside its execution leaves its state alone: the
-    // wakers in its line can name tasks of a finished execution.
+    // A modeled limit used outside its execution leaves its state alone: its
+    // waiting calls can name tasks of a finished execution.
     fn is_foreign(&self) -> bool {
-        let world = self.line.world();
-        if world == World::current() {
+        if self.world == World::current() {
             return false;
         }
         if !std::thread::panicking() {
-            world.check();
+            self.world.check();
         }
         true
     }
@@ -295,16 +337,12 @@ impl State {
         places <= limit.saturating_sub(self.taken)
     }
 
-    // The front call's wake, once its places are free and unless it was
-    // woken already.
-    fn wake_front(&mut self, limit: usize) -> Option<Wake> {
-        let free = limit.saturating_sub(self.taken);
-        let mut front = self.waiting.first_entry()?;
-        if front.get().places <= free {
-            front.get_mut().turn.take_wake()
-        } else {
-            None
-        }
+    // The front call's queue, once its places are free. Notify it after
+    // releasing the lock, since notify_one is a scheduling step.
+    fn front_to_wake(&self, limit: usize) -> Option<Arc<WaitQueue>> {
+        let (_, front) = self.waiting.first_key_value()?;
+        self.fits(front.places, limit)
+            .then(|| Arc::clone(&front.woken))
     }
 
     fn is_front(&self, ticket: u64) -> bool {
@@ -314,91 +352,62 @@ impl State {
     }
 }
 
-impl Take<'_> {
-    fn poll_take(&mut self, cx: &Context<'_>) -> Poll<Place> {
-        let places = &self.limit.places;
-        let mut state = places.state.lock("Limit::take");
-        let Some(ticket) = self.ticket else {
-            if state.waiting.is_empty() && state.fits(self.places, places.limit) {
-                state.taken = state.taken.saturating_add(self.places);
-                return Poll::Ready(self.place());
+impl Queued<'_> {
+    // Checks again after listening, as WaitQueue::wait_for does, so a wake
+    // between the check and the listen isn't lost.
+    async fn wait(mut self) -> Place {
+        loop {
+            if let Some(place) = self.try_serve() {
+                return place;
             }
-            let ticket = state.next_ticket;
-            state.next_ticket = ticket.wrapping_add(1);
-            state.waiting.insert(
-                ticket,
-                Waiting {
-                    places: self.places,
-                    turn: places.line.wait(cx),
-                },
-            );
-            self.ticket = Some(ticket);
-            return Poll::Pending;
-        };
-        if state.is_front(ticket) && state.fits(self.places, places.limit) {
-            let served = state.waiting.pop_first();
+            let waiter = self.woken.listen();
+            if let Some(place) = self.try_serve() {
+                return place;
+            }
+            waiter.await;
+        }
+    }
+
+    fn try_serve(&mut self) -> Option<Place> {
+        let shared = &self.limit.places;
+        let next = {
+            let mut state = shared.state.lock("Limit::take");
+            if !(state.is_front(self.ticket) && state.fits(self.places, shared.limit)) {
+                return None;
+            }
+            drop(state.waiting.pop_first());
             state.taken = state.taken.saturating_add(self.places);
-            let next = state.wake_front(places.limit);
-            drop(state);
-            self.ticket = None;
-            // Held before the wake, so a panic there gives the places back.
-            let place = self.place();
-            if let Some((_, served)) = served {
-                served.turn.complete();
-            }
-            if let Some(next) = next {
-                places.line.wake(next);
-            }
-            return Poll::Ready(place);
-        }
-        if let Some(waiting) = state.waiting.get_mut(&ticket) {
-            waiting.turn.update(cx);
-        }
-        Poll::Pending
-    }
-
-    fn place(&self) -> Place {
-        Place {
-            places: Arc::clone(&self.limit.places),
-            weight: self.places,
-        }
-    }
-}
-
-impl Future for Take<'_> {
-    type Output = Place;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Place> {
-        let take = self.get_mut();
-        let world = take.limit.places.line.world();
-        world.poll_cooperative(cx, |cx| take.poll_take(cx))
-    }
-}
-
-impl Drop for Take<'_> {
-    fn drop(&mut self) {
-        let Some(ticket) = self.ticket.take() else {
-            return;
+            state.front_to_wake(shared.limit)
         };
-        let places = &self.limit.places;
-        if places.is_foreign() {
+        self.served = true;
+        // Held before the wake, so a panic there gives the places back.
+        let place = self.limit.place(self.places);
+        if let Some(next) = next {
+            next.notify_one();
+        }
+        Some(place)
+    }
+}
+
+impl Drop for Queued<'_> {
+    fn drop(&mut self) {
+        let shared = &self.limit.places;
+        if self.served || shared.is_foreign() {
             return;
         }
-        let (left, next) = {
-            let mut state = places.state.lock("Limit::leave");
-            let was_front = state.is_front(ticket);
-            let left = state.waiting.remove(&ticket);
+        let next = {
+            let mut state = shared.state.lock("Limit::leave");
+            let was_front = state.is_front(self.ticket);
+            drop(state.waiting.remove(&self.ticket));
             // Only the front call can be held back by the places it needs.
-            let next = if was_front {
-                state.wake_front(places.limit)
+            if was_front {
+                state.front_to_wake(shared.limit)
             } else {
                 None
-            };
-            (left, next)
+            }
         };
-        drop(left);
         if let Some(next) = next {
-            places.line.wake(next);
+            next.notify_one();
         }
     }
 }
@@ -411,10 +420,10 @@ impl Drop for Place {
         let next = {
             let mut state = self.places.state.lock("Place::drop");
             state.taken = state.taken.saturating_sub(self.weight);
-            state.wake_front(self.places.limit)
+            state.front_to_wake(self.places.limit)
         };
         if let Some(next) = next {
-            self.places.line.wake(next);
+            next.notify_one();
         }
     }
 }
