@@ -5,6 +5,7 @@ mod deps;
 mod fix;
 mod lints;
 mod manifest;
+mod paths;
 mod sarif;
 mod status;
 mod style;

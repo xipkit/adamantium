@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     env, fs,
     io::{self, BufRead, BufReader, Write},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
 };
 
@@ -15,7 +15,7 @@ use crate::{
     ReportFormat,
     config::Config,
     lints::{self, EXPERIMENTAL_LINTS, OVERFLOW_RULE},
-    manifest, sarif,
+    manifest, paths, sarif,
 };
 
 pub use crate::status::Status;
@@ -984,19 +984,7 @@ fn portable_path(root: &Path, file: &str) -> String {
 /// file that two targets include under different spellings, such as
 /// `tests/../examples/shared.rs`, is reported once under one name.
 pub fn normalize(path: &str) -> String {
-    let mut parts: Vec<Component<'_>> = Vec::new();
-    for component in Path::new(path).components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir if matches!(parts.last(), Some(Component::Normal(_))) => {
-                parts.pop();
-            }
-            other => parts.push(other),
-        }
-    }
-    parts
-        .iter()
-        .collect::<PathBuf>()
+    paths::lexical(Path::new(path))
         .to_string_lossy()
         .into_owned()
 }

@@ -23,6 +23,8 @@ use syn::{
 };
 use toml_edit::DocumentMut;
 
+use crate::paths;
+
 use super::{
     cfg::{Cfg, Truth},
     disallowed::{Disallowed, canonical},
@@ -1728,18 +1730,7 @@ impl<'a> Scanner<'a> {
     }
 
     fn relative(&self, path: &Path) -> String {
-        let mut normal = PathBuf::new();
-        for component in path.components() {
-            match component {
-                Component::CurDir => {}
-                Component::ParentDir
-                    if matches!(normal.components().next_back(), Some(Component::Normal(_))) =>
-                {
-                    normal.pop();
-                }
-                component => normal.push(component),
-            }
-        }
+        let normal = paths::lexical(path);
         let path = normal.strip_prefix(self.krate.root).unwrap_or(&normal);
         path.components()
             .map(|component| match component {
