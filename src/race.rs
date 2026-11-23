@@ -30,8 +30,8 @@ pub trait Race {
 /// one wins and the later one is dropped without being polled again.
 ///
 /// A future that loses is dropped at the await where it was waiting. Race
-/// only futures that lose nothing by that: a receive, a sleep, or
-/// `Cancellation::cancelled`. A future that has taken a message or written
+/// only futures that lose nothing by that: a receive, a sleep,
+/// [`Signal::notified`](crate::Signal::notified), or `Cancellation::cancelled`. A future that has taken a message or written
 /// part of a reply loses that work. To give a single drop-safe future a
 /// `Cancellation` or a deadline, use [`until`](crate::until).
 ///
@@ -141,14 +141,16 @@ impl std::error::Error for UntilError {}
 /// - [`Channel::receive`](crate::Channel::receive) and [`Receiver::receive`](crate::Receiver::receive)
 /// - [`ReplyReceiver::receive`](crate::ReplyReceiver::receive) and [`Reply::closed`](crate::Reply::closed)
 /// - [`Watcher::receive`](crate::Watcher::receive) and [`Watcher::wait_for`](crate::Watcher::wait_for)
+/// - [`Signal::notified`](crate::Signal::notified)
 /// - [`time::sleep`](crate::time::sleep) and [`time::sleep_until`](crate::time::sleep_until)
 /// - [`Cancellation::cancelled`](crate::Cancellation::cancelled) (and `Cancellation::cancel_on_signal` with the `signal` feature)
 ///
 /// Sending (`Channel::send`, `Sender::send`, `Topic::send`, `AsyncActor::send`)
 /// is not safe to drop because dropping the future drops the unsent value;
 /// use `send_until` instead. Operations with their own `_until` methods
-/// (`receive_until`, `send_until`, `Tasks::run_until`, `Limit::run_until`,
-/// `KeyedLimit::run_until`, `RateLimit::run_until`, `SingleFlight::run_until`)
+/// (`receive_until`, `send_until`, `Signal::notified_until`, `Tasks::run_until`,
+/// `Limit::run_until`, `KeyedLimit::run_until`, `RateLimit::run_until`,
+/// `SingleFlight::run_until`)
 /// already accept a `Cancellation` and deadline directly.
 ///
 /// ```

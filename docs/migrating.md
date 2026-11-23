@@ -38,6 +38,7 @@ changes behavior in a way to check.
 | `tokio::sync::watch` | `Watch::new` and `subscribe` | Mostly |
 | `tokio::sync::broadcast` | `Topic` | Mostly |
 | `tokio::sync::broadcast` whose sender must not wait for a slow receiver | `Fanout` | Mostly |
+| `tokio::sync::Notify` waking a worker with `notify_one` | `Signal` | Mostly |
 | A loop racing channel receives against a timer to fill a batch | [`receive_batch_until`](library.md#batch-receives) with a reusable buffer | Mostly |
 | A detached worker fed by a channel | A worker task in the scope that sends to it | No |
 | `JoinHandle::abort` on a long-lived task | `Tasks::run_until` with a `Cancellation` | No |
@@ -1549,6 +1550,98 @@ async fn main() {
         lines.push(line);
     }
     assert_eq!(lines, ["a", "b"]);
+}
+```
+
+### A wakeup
+
+The strict rules report Tokio's `Notify`. The replacement depends on what a
+notification means:
+
+- To tell a worker that there is work, where notifications sent before it
+  waits must not be lost but can merge into one, use `Signal`. `notify_one`
+  becomes `notify`, and `notified().await` stays the same. A `Signal` is
+  shared by cloning it, so the `Arc` around it goes.
+- For shutdown, a one-time event that stays set, use `Cancellation`.
+- For a change that every waiting task must see, which is what
+  `notify_waiters` is for, use `Watch`.
+
+`Signal` keeps one pending notification, as `Notify` keeps one permit, and
+behaves the same with one waiting task. With several, check what the code
+relies on:
+
+- `notify_one` hands its permit to the task that has waited longest, and a
+  task that starts waiting later can't take it. `notify` wakes one waiting
+  task, which competes with any task that starts waiting before it runs.
+- `k` calls to `notify_one` wake `k` waiting tasks. `k` calls to `notify` can
+  wake one, so the task must handle everything that has arrived after each
+  wakeup. When each notification must cause its own wakeup, send on a
+  `Channel`.
+- A notification sent before a wait begins stays pending until a wait takes
+  it, so `Notified::enable` and making the `notified()` future before
+  checking a condition aren't needed.
+
+`fix` leaves `Notify` as it is, since the replacement depends on what the
+code means.
+
+Before:
+
+```rust
+use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
+
+#[tokio::main]
+async fn main() {
+    let jobs = Arc::new(Mutex::new(Vec::new()));
+    let arrived = Arc::new(Notify::new());
+    let worker = tokio::spawn({
+        let (jobs, arrived) = (jobs.clone(), arrived.clone());
+        async move {
+            let mut handled = Vec::new();
+            while handled.len() < 3 {
+                arrived.notified().await;
+                handled.extend(std::mem::take(&mut *jobs.lock().unwrap()));
+            }
+            handled
+        }
+    });
+    for job in 1..=3 {
+        jobs.lock().unwrap().push(job);
+        arrived.notify_one();
+    }
+    assert_eq!(worker.await.unwrap(), [1, 2, 3]);
+}
+```
+
+After:
+
+```rust
+use adamantium::{Actor, Signal, Tasks};
+
+#[tokio::main]
+async fn main() {
+    let jobs = Actor::new(Vec::new());
+    let arrived = Signal::new();
+    let handled = Tasks::<()>::run(async |t| {
+        let worker = t.spawn({
+            let (jobs, arrived) = (jobs.clone(), arrived.clone());
+            async move {
+                let mut handled = Vec::new();
+                while handled.len() < 3 {
+                    arrived.notified().await;
+                    handled.extend(jobs.with(std::mem::take));
+                }
+                Ok(handled)
+            }
+        });
+        for job in 1..=3 {
+            jobs.with(|jobs| jobs.push(job));
+            arrived.notify();
+        }
+        t.value(worker).await
+    })
+    .await;
+    assert_eq!(handled, Ok(vec![1, 2, 3]));
 }
 ```
 

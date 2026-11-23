@@ -942,6 +942,11 @@ mod tests {
             ),
             (
                 "clippy::disallowed_types",
+                kind("tokio::sync::Notify"),
+                Hint::Guide("a-wakeup"),
+            ),
+            (
+                "clippy::disallowed_types",
                 kind("tokio::sync::OnceCell"),
                 Hint::Guide("a-value-initialized-once"),
             ),

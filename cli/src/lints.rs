@@ -280,6 +280,7 @@ pub const DISALLOWED_TYPES: &[(&str, &[&str])] = &[
         &["tokio::sync::watch::Sender", "tokio::sync::watch::Receiver"],
     ),
     ("results-as-they-finish", &["tokio::task::JoinSet"]),
+    ("a-wakeup", &["tokio::sync::Notify"]),
     (
         "a-value-initialized-once",
         &[
