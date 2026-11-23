@@ -20,6 +20,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   without waiting.
 - `adamantium::testing::Replay::steps` counts the scheduling steps in a
   recorded execution, which shows how large a scenario is.
+- `adamantium`: `Limit::weighted(places)` returns a `Weighted` handle whose
+  `run` and `run_until` take several places at once, for a budget whose calls
+  cost different amounts, such as bytes in flight. It replaces Tokio's
+  `acquire_many`. A weight above the limit's total returns `Overweight`
+  without waiting.
 - `adamantium::Signal` is a coalescing wakeup. `notify` never waits, and
   notifications sent while one is pending merge into it. `notified` takes a
   pending notification and is safe to drop in `race` and `until`, and
@@ -28,6 +33,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- `adamantium`: `Limit` and `KeyedLimit` serve waiting calls in the order they
+  started waiting, so small calls can't starve a large weighted one. A call
+  that arrives while others wait queues behind them, even when places are
+  free.
 - Adamantium's deterministic timelines show the operation at modeled scheduling
   points, name parallel workers, and group repeated steps.
 - `adamantium::testing::check` with `SchedulerMode::Dfs` fails with

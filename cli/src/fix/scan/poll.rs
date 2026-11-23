@@ -211,7 +211,7 @@ struct Edges<'p> {
 
 impl Edges<'_> {
     fn function(&mut self, sig: &syn::Signature, body: &syn::Block) {
-        let caller = self.caller.replace(sig.ident.unraw().to_string());
+        let caller = self.caller.replace(bare(&sig.ident));
         let boundary = self.boundary.take();
         self.visit_block(body);
         self.caller = caller;
@@ -241,16 +241,12 @@ impl<'ast> Visit<'ast> for Edges<'_> {
         }
         let name = match &*expr.base {
             Expr::Call(call) if call.attrs.is_empty() => match &*call.func {
-                Expr::Path(path) if path.qself.is_none() => path
-                    .path
-                    .segments
-                    .last()
-                    .map(|s| s.ident.unraw().to_string()),
+                Expr::Path(path) if path.qself.is_none() => {
+                    path.path.segments.last().map(|s| bare(&s.ident))
+                }
                 _ => None,
             },
-            Expr::MethodCall(call) if call.attrs.is_empty() => {
-                Some(call.method.unraw().to_string())
-            }
+            Expr::MethodCall(call) if call.attrs.is_empty() => Some(bare(&call.method)),
             _ => None,
         };
         if expr.attrs.is_empty()

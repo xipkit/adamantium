@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use super::{Shared, Shutdown, Tasks, lock};
+use super::{Locked, Shutdown, Tasks};
 use crate::Str;
 
 #[derive(Default)]
@@ -10,22 +10,20 @@ pub(super) struct Running {
 }
 
 pub(super) struct Registration {
-    tasks: Shared<Running>,
+    tasks: Locked<Running>,
     id: u64,
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        lock(&self.tasks, "Registration::drop")
-            .names
-            .remove(&self.id);
+        self.tasks.lock("Registration::drop").names.remove(&self.id);
     }
 }
 
-pub(super) fn track(tasks: &Shared<Running>, name: Str) -> (Registration, tracing::Span) {
+pub(super) fn track(tasks: &Locked<Running>, name: Str) -> (Registration, tracing::Span) {
     let span = tracing::info_span!("adamantium.task", task.name = %name).or_current();
     let id = {
-        let mut running = lock(tasks, "trace::track");
+        let mut running = tasks.lock("trace::track");
         let id = running.next;
         running.next += 1;
         running.names.insert(id, name);
@@ -39,7 +37,7 @@ pub(super) fn track(tasks: &Shared<Running>, name: Str) -> (Registration, tracin
 }
 
 pub(super) fn instrument<F: Future + Send>(
-    tasks: &Shared<Running>,
+    tasks: &Locked<Running>,
     name: Str,
     future: F,
 ) -> impl Future<Output = F::Output> + Send + use<F> {
@@ -62,7 +60,7 @@ impl<E> Tasks<E> {
         // Snapshot before cancellation and release the lock before calling a
         // subscriber, which may itself run application code.
         let running_tasks: Vec<_> = {
-            let running = lock(&self.named, "Tasks::report_deadline");
+            let running = self.spawner.named.lock("Tasks::report_deadline");
             if running.next == 0 {
                 return;
             }

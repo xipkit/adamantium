@@ -3,7 +3,10 @@ use std::collections::BTreeSet;
 use proc_macro2::TokenStream;
 use syn::{Expr, ExprField, ExprStruct, Item, Member, Pat, Type, visit::Visit};
 
-use super::{Group, ItemScope, Reason, Resolved, Var, Walker, bare};
+use super::{
+    Group, Reason, Var, Walker, bare,
+    resolve::{ItemScope, Resolved},
+};
 use crate::fix::scan::{idents, macro_attribute};
 
 pub(super) struct Field {
@@ -13,16 +16,6 @@ pub(super) struct Field {
 
 impl<'a> Walker<'a> {
     pub(super) fn candidates(&mut self, tree: &'a syn::File) {
-        struct Declared<'w>(&'w mut std::collections::HashMap<String, usize>);
-        impl<'ast> Visit<'ast> for Declared<'_> {
-            fn visit_item(&mut self, item: &'ast Item) {
-                for (name, _) in ItemScope::bindings(item) {
-                    *self.0.entry(name).or_default() += 1;
-                }
-                syn::visit::visit_item(self, item);
-            }
-        }
-        Declared(&mut self.declared).visit_file(tree);
         self.module_candidates(&tree.items);
     }
 
@@ -87,7 +80,7 @@ impl<'a> Walker<'a> {
                     "its state might be unsized, which an actor can't hold",
                 ));
             }
-            if self.declared.get(&name).copied() != Some(1) {
+            if self.names.declared.get(&name).copied() != Some(1) {
                 group.refuse(Reason::Unfollowed(
                     "another item or import in the file has its struct's name",
                 ));
@@ -117,7 +110,7 @@ impl<'a> Walker<'a> {
     fn structure(&self, name: &syn::Ident) -> Option<String> {
         let name = bare(name);
         (self.fields.values().any(|field| field.structure == name)
-            && self.declared.get(&name).copied() == Some(1)
+            && self.names.declared.get(&name).copied() == Some(1)
             && matches!(self.resolve_name(&name), Resolved::Item))
         .then_some(name)
     }
@@ -243,31 +236,14 @@ impl<'a> Walker<'a> {
     }
 
     fn initializer(&mut self, var: usize, expr: &'a Expr) {
-        if let Some((_, constructor)) = self.constructor(expr)
-            && let Some(range) = self.text.of(expr)
-        {
-            self.visit_expr(expr);
-            let edit = self.edit(range, constructor);
-            self.add_edit(var, edit);
-            return;
+        match self.group_of(var) {
+            Some(group) => self.stored(
+                group,
+                expr,
+                Reason::Unfollowed("a struct literal sets it to a value fix can't follow"),
+            ),
+            None => self.visit_expr(expr),
         }
-        let Some(group) = self.group_of(var) else {
-            self.visit_expr(expr);
-            return;
-        };
-        if let Some((source, replacement)) = self.clone_of(expr) {
-            self.flows(group, source, expr, replacement);
-            return;
-        }
-        if let Some(returned) = self.returned_by(expr) {
-            self.links.push((group, returned));
-            return;
-        }
-        self.refuse(
-            var,
-            Reason::Unfollowed("a struct literal sets it to a value fix can't follow"),
-        );
-        self.visit_expr(expr);
     }
 
     pub(super) fn stray(&mut self, access: &ExprField) {

@@ -171,6 +171,11 @@ impl DuplexStream {
         }
     }
 
+    fn clear_read_wait(&mut self) {
+        self.read_waiter = None;
+        self.read_timer = None;
+    }
+
     /// Returns the total bytes delivered so far on the inbound direction.
     pub fn bytes_read(&self) -> usize {
         self.inbound
@@ -223,8 +228,7 @@ impl AsyncRead for DuplexStream {
             let mut state = this.inbound.lock("DuplexStream::poll_read");
             if let Some(kind) = state.fault {
                 drop(state);
-                this.read_waiter = None;
-                this.read_timer = None;
+                this.clear_read_wait();
                 return Poll::Ready(Err(io::Error::from(kind)));
             }
 
@@ -233,8 +237,7 @@ impl AsyncRead for DuplexStream {
             {
                 let result = apply_disconnect_fault(&mut state, fault);
                 drop(state);
-                this.read_waiter = None;
-                this.read_timer = None;
+                this.clear_read_wait();
                 this.inbound.writable.notify_all();
                 return Poll::Ready(result);
             }
@@ -253,8 +256,7 @@ impl AsyncRead for DuplexStream {
                 let copied = drain_into_read_buf(&mut state.ready, buf, limit);
                 state.bytes_delivered += copied;
                 drop(state);
-                this.read_waiter = None;
-                this.read_timer = None;
+                this.clear_read_wait();
                 this.inbound.writable.notify_one();
                 return Poll::Ready(Ok(()));
             }
@@ -296,8 +298,7 @@ impl AsyncRead for DuplexStream {
 
             if state.write_closed {
                 drop(state);
-                this.read_waiter = None;
-                this.read_timer = None;
+                this.clear_read_wait();
                 return Poll::Ready(Ok(()));
             }
 
@@ -543,12 +544,8 @@ fn delivery_deadline(latency: Duration) -> Instant {
     if World::current().is_model() {
         return crate::runtime::clock::deadline_after(latency);
     }
-    let now = crate::time::now();
-    let mut delay = latency.min(Duration::from_secs(86400 * 365 * 30));
-    loop {
-        if let Some(deadline) = now.checked_add(delay) {
-            return deadline;
-        }
-        delay /= 2;
-    }
+    crate::runtime::clock::deadline_from(
+        crate::time::now(),
+        latency.min(Duration::from_secs(86400 * 365 * 30)),
+    )
 }

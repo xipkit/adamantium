@@ -10,8 +10,9 @@ use tokio::time::Instant;
 
 /// Runs at most one call per key. Clones share the same set of keys.
 ///
-/// Different keys can run concurrently. Waiting calls have no guaranteed
-/// order. A key is removed when its last running or waiting call ends.
+/// Different keys can run concurrently. Calls for one key run in the order
+/// they started waiting. A key is removed when its last running or waiting
+/// call ends.
 /// Work may run on its own or inside a [`Limit`]. While holding a key,
 /// it cannot enter any [`Limit`] or [`KeyedLimit`]. These checks apply
 /// to direct calls. Avoid waiting on a spawned task that needs a held place.
@@ -111,7 +112,7 @@ impl<K: Clone + Eq + Hash> KeyedLimit<K> {
             entry.limit.clone()
         };
         let registration = Registration { table: self, key };
-        let place = limit.take().await;
+        let place = limit.take(1).await;
         (place, registration)
     }
 }

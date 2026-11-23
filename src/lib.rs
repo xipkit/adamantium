@@ -47,7 +47,7 @@ pub use deque::Deque;
 #[cfg(feature = "tokio")]
 pub use fanout::FeedError;
 pub use fanout::{Ended, Fanout, Feed, Sent};
-pub use limit::{KeyedLimit, Limit};
+pub use limit::{KeyedLimit, Limit, Overweight, Weighted};
 pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
 pub use race::{Race, race};
 #[cfg(feature = "tokio")]
