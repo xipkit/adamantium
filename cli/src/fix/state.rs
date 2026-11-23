@@ -15,7 +15,7 @@ use quote::ToTokens;
 use super::{
     Edit,
     scan::{Crate, Hazard, macro_attribute},
-    source::{Text, bare, coalesce, format_captures, names_in},
+    source::{Text, bare, coalesce, format_captures, names_in, string_literal},
 };
 
 mod calls;
@@ -2048,10 +2048,8 @@ impl<'a> Walker<'a> {
                     self.mention_field(&name, Reason::Unfollowed("it is used in a macro"));
                 }
                 TokenTree::Literal(literal) => {
-                    if let Ok(Lit::Str(string)) =
-                        syn::parse2::<Lit>(TokenTree::Literal(literal).into())
-                    {
-                        for name in format_captures(&string.value()) {
+                    if let Some(string) = string_literal(&literal) {
+                        for name in format_captures(&string) {
                             self.mention(&name, Reason::Unfollowed("it is used in a macro"));
                         }
                     }

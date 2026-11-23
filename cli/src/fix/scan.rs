@@ -13,6 +13,8 @@ use syn::{
     visit::Visit,
 };
 
+use super::source::string_literal;
+
 mod poll;
 
 struct Function {
@@ -309,11 +311,8 @@ fn words(tokens: TokenStream, counts: &mut HashMap<String, usize>) {
                 *counts.entry(ident.unraw().to_string()).or_default() += 1;
             }
             TokenTree::Literal(literal) => {
-                if let Ok(syn::Lit::Str(string)) =
-                    syn::parse2::<syn::Lit>(TokenTree::Literal(literal.clone()).into())
-                {
+                if let Some(string) = string_literal(literal) {
                     for word in string
-                        .value()
                         .split(|c: char| !(c.is_alphanumeric() || c == '_'))
                         .filter(|word| !word.is_empty())
                     {
@@ -760,9 +759,8 @@ fn strings(tokens: TokenStream, names: &mut BTreeSet<String>) {
         match token {
             TokenTree::Group(group) => strings(group.stream(), names),
             TokenTree::Literal(literal) => {
-                if let Ok(syn::Lit::Str(string)) =
-                    syn::parse2::<syn::Lit>(TokenTree::Literal(literal).into())
-                    && let Ok(tokens) = TokenStream::from_str(&string.value())
+                if let Some(string) = string_literal(&literal)
+                    && let Ok(tokens) = TokenStream::from_str(&string)
                 {
                     idents(tokens, names);
                 }

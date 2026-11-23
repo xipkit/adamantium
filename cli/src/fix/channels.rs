@@ -13,7 +13,7 @@ use syn::{
 use super::{
     Edit,
     scan::macro_attribute,
-    source::{Text, bare, format_captures},
+    source::{Text, bare, format_captures, string_literal},
     state::pattern_names,
 };
 
@@ -952,14 +952,11 @@ impl<'t> Analysis<'t> {
         tokens.into_iter().any(|token| match token {
             TokenTree::Group(group) => self.mentions(group.stream()),
             TokenTree::Ident(ident) => self.lookup(&bare(&ident)).is_some(),
-            TokenTree::Literal(literal) => {
-                matches!(
-                    syn::parse2::<Lit>(TokenTree::Literal(literal).into()),
-                    Ok(Lit::Str(string)) if format_captures(&string.value())
-                        .iter()
-                        .any(|name| self.lookup(name).is_some())
-                )
-            }
+            TokenTree::Literal(literal) => string_literal(&literal).is_some_and(|string| {
+                format_captures(&string)
+                    .iter()
+                    .any(|name| self.lookup(name).is_some())
+            }),
             TokenTree::Punct(_) => false,
         })
     }

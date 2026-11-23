@@ -132,6 +132,14 @@ pub(super) fn bare(ident: &proc_macro2::Ident) -> String {
     ident.unraw().to_string()
 }
 
+/// The value of `literal` when it is a string literal.
+pub(super) fn string_literal(literal: &proc_macro2::Literal) -> Option<String> {
+    match syn::parse2::<Lit>(TokenTree::Literal(literal.clone()).into()) {
+        Ok(Lit::Str(string)) => Some(string.value()),
+        _ => None,
+    }
+}
+
 pub(super) fn names_in(text: &str, name: &str) -> Option<usize> {
     fn count(tokens: TokenStream, name: &str) -> usize {
         tokens
@@ -139,15 +147,12 @@ pub(super) fn names_in(text: &str, name: &str) -> Option<usize> {
             .map(|token| match token {
                 TokenTree::Group(group) => count(group.stream(), name),
                 TokenTree::Ident(ident) => usize::from(bare(&ident) == name),
-                TokenTree::Literal(literal) => {
-                    match syn::parse2::<Lit>(TokenTree::Literal(literal).into()) {
-                        Ok(Lit::Str(string)) => format_captures(&string.value())
-                            .iter()
-                            .filter(|capture| *capture == name)
-                            .count(),
-                        _ => 0,
-                    }
-                }
+                TokenTree::Literal(literal) => string_literal(&literal).map_or(0, |string| {
+                    format_captures(&string)
+                        .iter()
+                        .filter(|capture| *capture == name)
+                        .count()
+                }),
                 TokenTree::Punct(_) => 0,
             })
             .sum()
