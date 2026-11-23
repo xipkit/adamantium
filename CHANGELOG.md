@@ -15,6 +15,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `BoundedMap::ttl`, and `BoundedMap::remove_expired`. Expiry reads
   `time::now()`, ignores expired entries on read, iteration, and `len`, and
   removes them lazily on access and before evicting live entries on insert.
+- `adamantium::Channel` and `Receiver` have `receive_batch_until`, whose linger
+  starts with the first value, and `try_receive_batch` for taking ready values
+  without waiting.
 - `adamantium::testing::Replay::steps` counts the scheduling steps in a
   recorded execution, which shows how large a scenario is.
 

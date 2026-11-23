@@ -7,6 +7,7 @@ use crate::runtime::{Guard, Lock, World, queue::Bounded, wait::WaitQueue};
 use std::{
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 #[cfg(feature = "tokio")]
@@ -237,6 +238,12 @@ impl<T> Channel<T> {
         self.receiver.try_receive()
     }
 
+    /// Receives up to `max` queued values without waiting. See
+    /// [`Receiver::try_receive_batch`].
+    pub fn try_receive_batch(&self, max: usize) -> Result<Vec<T>, TryReceiveError> {
+        self.receiver.try_receive_batch(max)
+    }
+
     /// Receives the next value, waiting while the channel is empty, until
     /// `cancellation` is requested or `deadline` passes. See
     /// [`Receiver::receive_until`].
@@ -247,6 +254,21 @@ impl<T> Channel<T> {
         deadline: Option<Instant>,
     ) -> Result<T, ReceiveError> {
         self.receiver.receive_until(cancellation, deadline).await
+    }
+
+    /// Appends up to `max` values to `batch`, waiting at most `linger` after
+    /// the first value. See [`Receiver::receive_batch_until`].
+    #[cfg(feature = "tokio")]
+    pub async fn receive_batch_until<'a>(
+        &self,
+        cancellation: &Cancellation,
+        max: usize,
+        linger: Duration,
+        batch: &'a mut Vec<T>,
+    ) -> Result<&'a [T], ReceiveError> {
+        self.receiver
+            .receive_batch_until(cancellation, max, linger, batch)
+            .await
     }
 
     /// Closes the channel. Sends fail from now on; receives drain what is
@@ -476,6 +498,25 @@ impl<T> Receiver<T> {
         Ok(value)
     }
 
+    /// Receives up to `max` queued values without waiting. Returns the
+    /// values received in queue order, even if fewer than `max` were ready.
+    /// With no values ready, returns [`TryReceiveError::Empty`] while open
+    /// or [`TryReceiveError::Closed`] after closure. A `max` of zero returns
+    /// an empty batch immediately.
+    pub fn try_receive_batch(&self, max: usize) -> Result<Vec<T>, TryReceiveError> {
+        if max == 0 {
+            return Ok(Vec::new());
+        }
+        let mut batch = vec![self.try_receive()?];
+        while batch.len() < max {
+            let Ok(value) = self.try_receive() else {
+                break;
+            };
+            batch.push(value);
+        }
+        Ok(batch)
+    }
+
     /// Receives the next value, waiting while the channel is empty, until
     /// `cancellation` is requested or the absolute `deadline` passes. Pass
     /// `None` for no deadline. A deadline uses [`crate::time`].
@@ -521,6 +562,40 @@ impl<T> Receiver<T> {
             Shutdown::Cancelled => ReceiveError::Cancelled,
             Shutdown::DeadlineExceeded => ReceiveError::DeadlineExceeded,
         })
+    }
+
+    /// Appends up to `max` values to `batch` and returns the newly appended slice.
+    /// The first value has no deadline. After it arrives, `linger` sets one
+    /// deadline for the rest of the batch using [`crate::time`]. A zero linger
+    /// returns after the first value, and a zero `max` returns an empty slice
+    /// immediately.
+    ///
+    /// When the linger expires, the channel has closed and drained, or
+    /// `cancellation` is requested, returns any values appended by this call.
+    /// Before the first value, cancellation returns [`ReceiveError::Cancelled`]
+    /// and a closed and drained channel returns [`ReceiveError::Closed`].
+    /// A cancellation that is already requested at a poll takes precedence.
+    /// Dropping the future leaves any values it has received in `batch`.
+    #[cfg(feature = "tokio")]
+    pub async fn receive_batch_until<'a>(
+        &self,
+        cancellation: &Cancellation,
+        max: usize,
+        linger: Duration,
+        batch: &'a mut Vec<T>,
+    ) -> Result<&'a [T], ReceiveError> {
+        let start = batch.len();
+        if max > 0 {
+            batch.push(self.receive_until(cancellation, None).await?);
+            let deadline = crate::time::add_capped(crate::time::now(), linger);
+            for _ in 1..max {
+                let Ok(value) = self.receive_until(cancellation, Some(deadline)).await else {
+                    break;
+                };
+                batch.push(value);
+            }
+        }
+        Ok(batch.get(start..).unwrap_or_default())
     }
 
     /// Closes the channel for every handle and wakes pending operations.
