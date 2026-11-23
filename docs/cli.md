@@ -596,9 +596,9 @@ steps:
   - uses: dtolnay/rust-toolchain@stable
     with:
       components: clippy
-  - uses: xipkit/adamantium@v0.4.0 # Pin the action to a commit in production.
+  - uses: xipkit/adamantium@v0.5.0 # Pin the action to a commit in production.
     with:
-      version: '0.4.0'
+      version: '0.5.0'
       # working-directory: path/to/project
 ```
 

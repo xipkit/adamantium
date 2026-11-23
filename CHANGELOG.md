@@ -8,6 +8,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-23
+
 ### Added
 
 - `adamantium`: `BoundedMap` supports optional entry expiry behind the `tokio`
@@ -17,7 +19,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   removes them lazily on access and before evicting live entries on insert.
 - `adamantium::Channel` and `Receiver` have `receive_batch_until`, whose linger
   starts with the first value, and `try_receive_batch` for taking ready values
-  without waiting.
+  without waiting. Both append to a caller-owned buffer, so dequeued values
+  remain available even if the receive future is dropped.
 - `adamantium::testing::Replay::steps` counts the scheduling steps in a
   recorded execution, which shows how large a scenario is.
 - `adamantium`: `Limit::weighted(places)` returns a `Weighted` handle whose
@@ -324,7 +327,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and `style` for reviewing code against the Google Rust style guide. Checks
   support text, JSON, SARIF, baselines, and an optional strict lint tier.
 
-[Unreleased]: https://github.com/xipkit/adamantium/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/xipkit/adamantium/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/xipkit/adamantium/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/xipkit/adamantium/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/xipkit/adamantium/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/xipkit/adamantium/compare/v0.1.1...v0.2.0
