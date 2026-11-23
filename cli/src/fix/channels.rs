@@ -339,44 +339,36 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
         edits: Vec::new(),
         refusal: found.refusal,
     };
-    if group.refusal.is_some() {
-        return group;
+    if group.refusal.is_none() {
+        match rewrite(file, text, found) {
+            Ok(edits) => group.edits = edits,
+            Err(reason) => group.refusal = Some(reason),
+        }
     }
+    group
+}
+
+/// The edits that turn the channel `found` and its uses into their Adamantium
+/// forms, or the first reason they can't be made.
+fn rewrite(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Result<Vec<Edit>, &'static str> {
     let call = match found.local.init.as_ref() {
         Some(init) if init.diverge.is_none() => match &*init.expr {
             Expr::Call(call) => call,
-            _ => {
-                group.refusal = Some(UNBOUND);
-                return group;
-            }
+            _ => return Err(UNBOUND),
         },
-        _ => {
-            group.refusal = Some(UNBOUND);
-            return group;
-        }
+        _ => return Err(UNBOUND),
     };
-    let halves = match halves(&found.local.pat) {
-        Ok(halves) => halves,
-        Err(reason) => {
-            group.refusal = Some(reason);
-            return group;
-        }
-    };
+    let halves = halves(&found.local.pat)?;
     let arguments = match found.kind {
         Kind::Oneshot => 0,
         Kind::Watch | Kind::Mpsc => 1,
     };
-    let Some(turbofish) = turbofish(text, &call.func) else {
-        group.refusal = Some(UNBOUND);
-        return group;
-    };
+    let turbofish = turbofish(text, &call.func).ok_or(UNBOUND)?;
     if call.args.len() != arguments {
-        group.refusal = Some(UNBOUND);
-        return group;
+        return Err(UNBOUND);
     }
     if found.kind == Kind::Mpsc && !call.args.first().is_some_and(positive_capacity) {
-        group.refusal = Some(CAPACITY);
-        return group;
+        return Err(CAPACITY);
     }
     let mut analysis = Analysis {
         text,
@@ -413,8 +405,7 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
         analysis.refuse(WATCH_UNWATCHED);
     }
     if let Some(reason) = analysis.refusal {
-        group.refusal = Some(reason);
-        return group;
+        return Err(reason);
     }
     let constructor = match found.kind {
         Kind::Oneshot => text
@@ -432,11 +423,7 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
                 )]
             }),
     };
-    let Some(constructor) = constructor else {
-        group.refusal = Some(UNLOCATED);
-        return group;
-    };
-    let mut edits = constructor;
+    let mut edits = constructor.ok_or(UNLOCATED)?;
     edits.append(&mut analysis.edits);
     for (index, var) in analysis.vars.iter().enumerate() {
         if found.kind == Kind::Watch && index < 2 {
@@ -452,8 +439,7 @@ fn group(file: &Path, text: &Text<'_>, found: &Found<'_>) -> Group {
             _ => {}
         }
     }
-    group.edits = edits;
-    group
+    Ok(edits)
 }
 
 fn positive_capacity(capacity: &Expr) -> bool {
