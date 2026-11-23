@@ -130,9 +130,7 @@ impl Drop for Waiter {
             if let Some(listener) = self.listener.take() {
                 listener.discard();
             }
-            if !std::thread::panicking() {
-                self.world.check();
-            }
+            self.world.check_unless_panicking();
             return;
         }
         self.world.step_unless_panicking("Waiter::drop");

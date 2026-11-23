@@ -143,9 +143,7 @@ impl fmt::Debug for Cancellation {
 #[cfg(feature = "deterministic")]
 impl Drop for Cancellation {
     fn drop(&mut self) {
-        if !std::thread::panicking() {
-            self.world.check();
-        }
+        self.world.check_unless_panicking();
     }
 }
 
@@ -774,9 +772,7 @@ impl<E> fmt::Debug for Spawner<E> {
 #[cfg(feature = "deterministic")]
 impl<E> Drop for Spawner<E> {
     fn drop(&mut self) {
-        if !std::thread::panicking() {
-            self.world.check();
-        }
+        self.world.check_unless_panicking();
     }
 }
 
@@ -1425,10 +1421,8 @@ impl<E: Send + 'static> Tasks<E> {
 impl<E> Drop for Tasks<E> {
     fn drop(&mut self) {
         #[cfg(feature = "deterministic")]
-        if !std::thread::panicking() {
-            self.world.check();
-        }
-        if std::thread::panicking() && self.world.is_model() && self.world != World::current() {
+        self.world.check_unless_panicking();
+        if self.world.unwinding_in_foreign_world() {
             return;
         }
         lock(&self.set, "Tasks::drop").abort_all();

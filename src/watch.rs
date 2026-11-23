@@ -85,10 +85,9 @@ impl<T> Shared<T> {
     // Every operation locks, so this is where a handle carried into the
     // deterministic harness is rejected. While unwinding the check is
     // skipped: the execution is already failing, and a second panic would
+    // abort the process.
     fn lock(&self, operation: &'static str) -> Guard<'_, State<T>> {
-        if !std::thread::panicking() {
-            self.world.check();
-        }
+        self.world.check_unless_panicking();
         self.state.lock(operation)
     }
 
@@ -360,10 +359,7 @@ impl<T> Clone for Watch<T> {
 
 impl<T> Drop for Watch<T> {
     fn drop(&mut self) {
-        if std::thread::panicking()
-            && self.shared.world.is_model()
-            && self.shared.world != World::current()
-        {
+        if self.shared.world.unwinding_in_foreign_world() {
             return;
         }
         let mut state = self.shared.lock("Watch::drop");

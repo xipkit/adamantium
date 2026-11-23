@@ -252,9 +252,7 @@ impl<K, T> Shared<K, T> {
     // harness execution is rejected. While unwinding the check is skipped,
     // so that a dropped call can still leave its flight.
     fn lock(&self, operation: &'static str) -> Guard<'_, HashMap<K, Arc<Flight<T>>>> {
-        if !std::thread::panicking() {
-            self.world.check();
-        }
+        self.world.check_unless_panicking();
         self.flights.lock(operation)
     }
 }
@@ -277,9 +275,7 @@ impl<T> Flight<T> {
     }
 
     fn lock(&self, operation: &'static str) -> Guard<'_, State<T>> {
-        if !std::thread::panicking() {
-            self.world.check();
-        }
+        self.world.check_unless_panicking();
         self.state.lock(operation)
     }
 }
