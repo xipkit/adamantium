@@ -5,7 +5,7 @@ disallowed-types = [
   { path = "tokio::sync::mpsc::Sender", reason = "use adamantium::Sender from Channel::bounded(capacity).split() for modeled async backpressure", allow-invalid = true },
   { path = "tokio::sync::mpsc::Receiver", reason = "use adamantium::Receiver from Channel::bounded(capacity).split() for a modeled async queue", allow-invalid = true },
   { path = "tokio::sync::Notify", reason = "use adamantium::Cancellation for shutdown, Watch for state changes, or a capacity-one Channel for a coalescing signal", allow-invalid = true },
-  { path = "tokio::sync::Semaphore", reason = "use adamantium::Limit::run for a shared concurrency limit or concurrently for one batch", allow-invalid = true },
+  { path = "tokio::sync::Semaphore", reason = "use adamantium::Limit::run for a shared concurrency limit, Limit::weighted for weighted permits, or concurrently for one batch", allow-invalid = true },
   { path = "tokio::sync::SemaphorePermit", reason = "use adamantium::Limit::run to scope a place to one call", allow-invalid = true },
   { path = "tokio::sync::OwnedSemaphorePermit", reason = "use adamantium::Limit::run to scope a place to one call", allow-invalid = true },
 ]

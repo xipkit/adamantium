@@ -36,7 +36,7 @@ Adamantium's synchronization primitives use the deterministic runtime's schedule
 | Tokio `oneshot` | Default | Use `Reply::pair()`. Sending consumes the reply and returns the payload in `Closed<T>` if the receiver closed. Use `receive().await` for an `Option<T>` in place of awaiting the Tokio receiver for a `Result`. |
 | Tokio `watch` | Default | Use `Watch` and `Watcher` for latest-value state. A watcher reads cloned snapshots. Adamantium replaces the whole value and retains updates even with zero watchers. Check any use of borrowed reads, in-place mutations, or Tokio's failed `send` when its last receiver goes away. |
 | Tokio `Notify` | Strict | Use `Cancellation` for sticky shutdown, `Watch` for a change in state, or `Channel::bounded(1)` with `try_send(())` for a coalescing single-consumer signal. Handle a full channel as an already pending signal. Tokio's stored single permit and its wake-all operation for existing waiters have different delivery semantics, so choose by intent. |
-| Tokio `Semaphore` | Strict | Use `Limit::run` for a shared concurrency limit and `concurrently` for one batch. `Limit` scopes each place to one call and, like Tokio, serves waiting calls in the order they started waiting. Code that needs weighted, transferable, or dynamically adjustable permits needs a scoped exception. |
+| Tokio `Semaphore` | Strict | Use `Limit::run` for a shared concurrency limit, `Limit::weighted(n)` in place of `acquire_many(n)`, and `concurrently` for one batch. `Limit` scopes its places to one call and, like Tokio, serves waiting calls in the order they started waiting. A weight above the limit's total returns `Overweight` instead of waiting. Code that needs transferable or dynamically adjustable permits needs a scoped exception. |
 | `std::sync::mpsc::sync_channel` | Default | Use `Channel::bounded(n).split()` for positive-capacity queues with async send and receive. Std can block the caller and supports a zero-capacity rendezvous. Adamantium treats zero as one. Keep a genuine blocking rendezvous at a blocking boundary with a scoped exception. |
 
 ## Allowed, and why
@@ -47,6 +47,7 @@ The default tier allows Tokio's `Semaphore`. A task can hold a permit across an 
 
 - To limit how many items run at one time, use `concurrently` or the streaming variants.
 - To share one limit between tasks, use `Limit`. Its work may enter one `KeyedLimit` for per-key exclusion. All other direct nesting of these limits panics before waiting.
+- For a budget whose calls cost different amounts, such as bytes in flight, use `Limit::weighted`. Each call takes as many places as it costs.
 - Do not acquire a second permit while you hold one. Two tasks that do so in opposite orders deadlock.
 
 ### Tests

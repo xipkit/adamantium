@@ -1,4 +1,4 @@
-use adamantium::{Channel, Limit};
+use adamantium::{Channel, Limit, Overweight};
 use std::{
     future::{Future, pending, ready},
     pin::{Pin, pin},
@@ -217,6 +217,145 @@ fn a_freed_place_wakes_only_the_oldest_waiting_call_and_serving_it_wakes_the_nex
 }
 
 #[test]
+fn later_small_calls_wait_behind_a_large_call_even_while_places_are_free() {
+    let limit = Limit::new(3);
+    let mut holder = Box::pin(limit.run(pending::<()>));
+    assert_eq!(poll_once(holder.as_mut()), Poll::Pending);
+    let mut large = pin!(limit.weighted(3).unwrap().run(|| ready("large")));
+    let large_waker = Watched::new();
+    assert_eq!(large_waker.poll(large.as_mut()), Poll::Pending);
+
+    let mut started = false;
+    {
+        let mut small = pin!(limit.run(|| {
+            started = true;
+            ready("small")
+        }));
+        let small_waker = Watched::new();
+        assert_eq!(small_waker.poll(small.as_mut()), Poll::Pending);
+        assert_eq!(limit.available(), 2);
+
+        drop(holder);
+        assert!(large_waker.woken());
+        assert!(!small_waker.woken());
+        assert_eq!(small_waker.poll(small.as_mut()), Poll::Pending);
+        assert_eq!(large_waker.poll(large.as_mut()), Poll::Ready("large"));
+        assert!(small_waker.woken());
+        assert_eq!(small_waker.poll(small.as_mut()), Poll::Ready("small"));
+    }
+    assert!(started);
+    assert_eq!(limit.available(), 3);
+}
+
+#[test]
+fn a_waiting_call_is_not_woken_until_all_its_places_are_free() {
+    let limit = Limit::new(3);
+    let mut first = Box::pin(limit.run(pending::<()>));
+    assert_eq!(poll_once(first.as_mut()), Poll::Pending);
+    let mut second = Box::pin(limit.run(pending::<()>));
+    assert_eq!(poll_once(second.as_mut()), Poll::Pending);
+    let mut large = pin!(limit.weighted(3).unwrap().run(|| ready(3)));
+    let large_waker = Watched::new();
+    assert_eq!(large_waker.poll(large.as_mut()), Poll::Pending);
+
+    drop(first);
+    assert!(!large_waker.woken());
+    drop(second);
+    assert!(large_waker.woken());
+    assert_eq!(large_waker.poll(large.as_mut()), Poll::Ready(3));
+}
+
+#[test]
+fn mixed_weights_share_the_places() {
+    let limit = Limit::new(4);
+    let mut three = Box::pin(limit.weighted(3).unwrap().run(pending::<()>));
+    assert_eq!(poll_once(three.as_mut()), Poll::Pending);
+    assert_eq!(limit.available(), 1);
+    assert_eq!(poll_once(pin!(limit.run(|| ready(1)))), Poll::Ready(1));
+
+    let mut two = pin!(limit.weighted(2).unwrap().run(|| ready(2)));
+    let two_waker = Watched::new();
+    assert_eq!(two_waker.poll(two.as_mut()), Poll::Pending);
+    assert_eq!(limit.available(), 1);
+
+    drop(three);
+    assert!(two_waker.woken());
+    assert_eq!(limit.available(), 4);
+    assert_eq!(two_waker.poll(two.as_mut()), Poll::Ready(2));
+    assert_eq!(limit.available(), 4);
+}
+
+#[test]
+fn a_running_weighted_call_frees_all_its_places_when_dropped() {
+    let limit = Limit::new(5);
+    {
+        let mut call = pin!(limit.weighted(4).unwrap().run(pending::<()>));
+        assert_eq!(poll_once(call.as_mut()), Poll::Pending);
+        assert_eq!(limit.available(), 1);
+    }
+    assert_eq!(limit.available(), 5);
+}
+
+#[test]
+fn a_weight_above_the_total_is_rejected_without_waiting() {
+    let limit = Limit::new(4);
+    let mut holder = pin!(limit.run(pending::<()>));
+    assert_eq!(poll_once(holder.as_mut()), Poll::Pending);
+
+    let rejected = limit.weighted(5).map(|weighted| weighted.places());
+    assert_eq!(
+        rejected,
+        Err(Overweight {
+            places: 5,
+            limit: 4
+        })
+    );
+    assert_eq!(
+        Overweight {
+            places: 5,
+            limit: 4
+        }
+        .to_string(),
+        "a call of 5 places can never run under a limit of 4"
+    );
+    assert_eq!(limit.weighted(4).map(|weighted| weighted.places()), Ok(4));
+    assert_eq!(limit.available(), 3);
+}
+
+#[test]
+fn a_weight_of_zero_is_a_weight_of_one() {
+    let limit = Limit::new(0);
+    assert_eq!(limit.weighted(0).map(|weighted| weighted.places()), Ok(1));
+    assert_eq!(
+        limit.weighted(2).map(|weighted| weighted.places()),
+        Err(Overweight {
+            places: 2,
+            limit: 1
+        })
+    );
+    let mut call = pin!(limit.weighted(0).unwrap().run(pending::<()>));
+    assert_eq!(poll_once(call.as_mut()), Poll::Pending);
+    assert_eq!(limit.available(), 0);
+}
+
+#[test]
+fn dropping_the_waiting_front_call_wakes_the_call_behind_it() {
+    let limit = Limit::new(3);
+    let mut holder = pin!(limit.run(pending::<()>));
+    assert_eq!(poll_once(holder.as_mut()), Poll::Pending);
+    let mut large = Box::pin(limit.weighted(3).unwrap().run(|| ready(())));
+    assert_eq!(poll_once(large.as_mut()), Poll::Pending);
+    let mut small = pin!(limit.weighted(2).unwrap().run(|| ready(2)));
+    let small_waker = Watched::new();
+    assert_eq!(small_waker.poll(small.as_mut()), Poll::Pending);
+
+    drop(large);
+    assert!(small_waker.woken());
+    assert_eq!(small_waker.poll(small.as_mut()), Poll::Ready(2));
+    assert_eq!(limit.available(), 2);
+}
+
+#[test]
 fn dropping_a_woken_call_wakes_the_call_behind_it() {
     let limit = Limit::new(1);
     let mut holder = Box::pin(limit.run(pending::<()>));
@@ -259,6 +398,54 @@ fn dropping_a_call_behind_the_front_keeps_the_others_in_order() {
     assert_eq!(first_waker.poll(first.as_mut()), Poll::Ready(1));
     assert!(third_waker.woken());
     assert_eq!(third_waker.poll(third.as_mut()), Poll::Ready(3));
+}
+
+#[test]
+fn a_weighted_call_waiting_or_dropped_takes_no_place() {
+    let limit = Limit::new(2);
+    let mut holder = pin!(limit.run(pending::<()>));
+    assert_eq!(poll_once(holder.as_mut()), Poll::Pending);
+    {
+        let mut waiting = pin!(limit.weighted(2).unwrap().run(|| ready(())));
+        assert_eq!(poll_once(waiting.as_mut()), Poll::Pending);
+        assert_eq!(limit.available(), 1);
+    }
+    assert_eq!(limit.available(), 1);
+    assert_eq!(poll_once(pin!(limit.run(|| ready(1)))), Poll::Ready(1));
+}
+
+#[test]
+#[should_panic(expected = "already holds a place under a limit")]
+fn weighted_work_cannot_call_a_limit() {
+    let limit = Limit::new(4);
+    let inner = limit.clone();
+    let mut call = pin!(
+        limit
+            .weighted(2)
+            .unwrap()
+            .run(|| async move { inner.run(|| ready(())).await })
+    );
+    assert!(poll_once(call.as_mut()).is_pending());
+}
+
+#[test]
+#[should_panic(expected = "already holds a place under a limit")]
+fn work_cannot_make_a_weighted_call() {
+    let outer = Limit::new(1);
+    let inner = Limit::new(4);
+    let mut call =
+        pin!(outer.run(|| async move { inner.weighted(2).unwrap().run(|| ready(())).await }));
+    assert!(poll_once(call.as_mut()).is_pending());
+}
+
+#[test]
+fn a_weighted_call_of_send_work_is_send() {
+    fn assert_send<T: Send>(_: &T) {}
+    let limit = Limit::new(2);
+    let weighted = limit.weighted(2).unwrap();
+    let call = weighted.run(|| ready(1));
+    assert_send(&call);
+    assert_send(&weighted);
 }
 
 #[cfg(feature = "tokio")]
@@ -351,6 +538,83 @@ mod until {
         assert!(most.load(Ordering::SeqCst) <= 3);
         assert_eq!(limit.available(), 3);
     }
+
+    #[tokio::test]
+    async fn a_weighted_call_until_returns_the_result_of_its_work() {
+        let limit = Limit::new(3);
+        let weighted = limit.weighted(2).unwrap();
+        let stop = Cancellation::new();
+        let done = weighted.run_until(&stop, None, || ready(Ok::<_, ()>(2)));
+        assert_eq!(done.await, Ok(2));
+        let failed = weighted.run_until(&stop, None, || ready(Err::<(), _>("no")));
+        assert_eq!(failed.await, Err(ScopeError::Failed("no")));
+        assert_eq!(limit.available(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_weighted_wait_lets_the_call_behind_it_run() {
+        let limit = Limit::new(2);
+        let mut holder = pin!(limit.run(pending::<()>));
+        assert_eq!(poll_once(holder.as_mut()), Poll::Pending);
+        let stop = Cancellation::new();
+        let mut large = pin!(
+            limit
+                .weighted(2)
+                .unwrap()
+                .run_until(&stop, None, || { ready(Ok::<_, ()>(())) })
+        );
+        assert_eq!(poll_once(large.as_mut()), Poll::Pending);
+        let mut small = pin!(limit.run(|| ready(1)));
+        let small_waker = Watched::new();
+        assert_eq!(small_waker.poll(small.as_mut()), Poll::Pending);
+
+        stop.cancel();
+        assert_eq!(large.await, Err(ScopeError::Cancelled));
+        assert!(small_waker.woken());
+        assert_eq!(small_waker.poll(small.as_mut()), Poll::Ready(1));
+        assert_eq!(limit.available(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_deadline_ends_a_weighted_wait_and_lets_the_call_behind_it_run() {
+        let limit = Limit::new(3);
+        let mut holder = pin!(limit.run(pending::<()>));
+        assert_eq!(poll_once(holder.as_mut()), Poll::Pending);
+        let deadline = time::now() + Duration::from_millis(20);
+        let stop = Cancellation::new();
+        let mut large = pin!(limit.weighted(3).unwrap().run_until(
+            &stop,
+            Some(deadline),
+            || ready(Ok::<_, ()>(()))
+        ));
+        assert_eq!(poll_once(large.as_mut()), Poll::Pending);
+        let mut small = pin!(limit.weighted(2).unwrap().run(|| ready(2)));
+        let small_waker = Watched::new();
+        assert_eq!(small_waker.poll(small.as_mut()), Poll::Pending);
+
+        assert_eq!(large.await, Err(ScopeError::DeadlineExceeded));
+        assert!(small_waker.woken());
+        assert_eq!(small_waker.poll(small.as_mut()), Poll::Ready(2));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_weighted_call_takes_no_place_and_starts_no_work() {
+        let limit = Limit::new(2);
+        let cancellation = Cancellation::new();
+        cancellation.cancel();
+        let mut started = false;
+        let result = limit
+            .weighted(2)
+            .unwrap()
+            .run_until(&cancellation, None, || {
+                started = true;
+                ready(Ok::<_, ()>(1))
+            })
+            .await;
+        assert_eq!(result, Err(ScopeError::Cancelled));
+        assert!(!started);
+        assert_eq!(limit.available(), 2);
+    }
 }
 
 #[cfg(feature = "deterministic")]
@@ -397,7 +661,7 @@ fn no_schedule_runs_more_work_than_the_limit() {
 mod model {
     use super::*;
     use adamantium::{
-        Tasks,
+        Actor, Cancellation, ScopeError, Tasks,
         testing::{self, Config, TimelineEventKind},
         time,
     };
@@ -412,6 +676,108 @@ mod model {
             max_steps: 20_000,
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn no_schedule_runs_more_weight_than_the_limit() {
+        let checked = testing::check(config(257), || async {
+            let limit = Limit::new(3);
+            let running = Actor::new((0_usize, 0_usize));
+            let workers = [1, 3, 2, 1, 2].map(|weight| {
+                let (limit, running) = (limit.clone(), running.clone());
+                async move {
+                    limit
+                        .weighted(weight)
+                        .unwrap()
+                        .run(|| async {
+                            running.with(|(now, most)| {
+                                *now += weight;
+                                *most = (*most).max(*now);
+                            });
+                            running.with(|(now, _)| *now -= weight);
+                        })
+                        .await;
+                }
+            });
+            testing::parallel(workers).await;
+            let (now, most) = running.read(|state| *state);
+            assert_eq!(now, 0);
+            assert!(most <= 3, "{most} places taken at once");
+            assert_eq!(limit.available(), 3);
+        });
+        assert!(checked.is_ok(), "{checked:?}");
+    }
+
+    // The holder can't finish until the small call runs, and the small call
+    // can queue behind the large one, so only the large call giving up its
+    // wait lets everything finish.
+    #[test]
+    fn a_large_call_that_gives_up_waiting_lets_the_calls_behind_it_run() {
+        let checked = testing::check(config(258), || async {
+            let limit = Limit::new(2);
+            let stop = Cancellation::new();
+            let signal = Channel::<()>::bounded(1);
+            let holder: Worker = Box::pin({
+                let (limit, signal) = (limit.clone(), signal.clone());
+                async move {
+                    limit.run(|| signal.receive()).await;
+                }
+            });
+            let large: Worker = Box::pin({
+                let (limit, stop) = (limit.clone(), stop.clone());
+                async move {
+                    let result = limit
+                        .weighted(2)
+                        .unwrap()
+                        .run_until(&stop, None, || ready(Ok::<_, ()>(())))
+                        .await;
+                    assert!(matches!(result, Ok(()) | Err(ScopeError::Cancelled)));
+                }
+            });
+            let small: Worker = Box::pin({
+                let (limit, signal) = (limit.clone(), signal.clone());
+                async move {
+                    limit.run(|| signal.send(())).await.unwrap();
+                }
+            });
+            let canceller: Worker = Box::pin(async move { stop.cancel() });
+            testing::parallel([holder, large, small, canceller]).await;
+            assert_eq!(limit.available(), 2);
+        });
+        assert!(checked.is_ok(), "{checked:?}");
+    }
+
+    #[test]
+    fn a_woken_call_that_gives_up_passes_its_turn_on() {
+        let checked = testing::check(config(259), || async {
+            let limit = Limit::new(2);
+            let stop = Cancellation::new();
+            let holder: Worker = Box::pin({
+                let limit = limit.clone();
+                async move {
+                    limit.weighted(2).unwrap().run(tokio::task::yield_now).await;
+                }
+            });
+            let quitter: Worker = Box::pin({
+                let (limit, stop) = (limit.clone(), stop.clone());
+                async move {
+                    let result = limit
+                        .weighted(2)
+                        .unwrap()
+                        .run_until(&stop, None, || ready(Ok::<_, ()>(())))
+                        .await;
+                    assert!(matches!(result, Ok(()) | Err(ScopeError::Cancelled)));
+                }
+            });
+            let last: Worker = Box::pin({
+                let limit = limit.clone();
+                async move { limit.run(|| ready(())).await }
+            });
+            let canceller: Worker = Box::pin(async move { stop.cancel() });
+            testing::parallel([holder, quitter, last, canceller]).await;
+            assert_eq!(limit.available(), 2);
+        });
+        assert!(checked.is_ok(), "{checked:?}");
     }
 
     // The holders take both places before the others arrive. Whichever of

@@ -632,7 +632,18 @@ let rows = connections.run(|| query(7)).await;
 - `run_until(&cancellation, deadline, work)` stops the wait or the work on a `Cancellation` or at a deadline. It returns `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExceeded`. It needs the `tokio` feature.
 - `available()` returns the number of free places.
 
-Waiting calls get places in the order they started waiting. A call that arrives while others wait queues behind them.
+For a budget whose calls cost different amounts, such as bytes in flight, `weighted(places)` returns a handle whose calls each take `places` places:
+
+```rust
+let in_flight = Limit::new(64 * 1024);
+let sent = in_flight.weighted(body.len())?.run(|| upload(&body)).await;
+```
+
+- The handle's `run` and `run_until` work as the limit's do. They take all their places at once and free them together.
+- A weight of zero counts as one.
+- A weight above the limit's total returns `Overweight` at once, since no call could ever take it.
+
+Waiting calls get their places in the order they started waiting, whatever their weights, so small calls can't starve a large one. A call that arrives while others wait queues behind them, even when enough places are free for it. While a large call waits for its places, the calls after it wait too.
 
 A call to `Limit` inside another `Limit` panics before waiting. This covers taking the same limit twice and taking two different limits in either order.
 

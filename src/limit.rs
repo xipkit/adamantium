@@ -20,20 +20,29 @@ use crate::{Cancellation, ScopeError, race, tasks::shutdown};
 #[cfg(feature = "tokio")]
 use tokio::time::Instant;
 
-/// Lets at most a number of calls run at the same time.
+/// Lets calls run at the same time while together they take at most a
+/// number of places.
 ///
 /// Clones share one limit, so hand a clone to each task that should count
 /// against it. [`run`](Self::run) waits for a place, runs the work, and
-/// frees the place when the work finishes or is dropped. Waiting calls are
-/// served in the order they started waiting, and a call that arrives while
-/// others wait queues behind them.
+/// frees the place when the work finishes or is dropped. A call made through
+/// [`weighted`](Self::weighted) takes several places at once, for a budget
+/// whose calls cost different amounts, such as bytes in flight.
+///
+/// Waiting calls are served in the order they started waiting, whatever
+/// their weights, so small calls can't starve a large one. The price is that
+/// a call queues behind the calls already waiting, even when enough places
+/// are free for it: while a large call waits for its places, the calls that
+/// come after it wait too.
 ///
 /// Work may enter a [`KeyedLimit`]. Starting another [`Limit`] inside the work
 /// panics. A task that holds a place while it waits for a second one can
 /// deadlock with a task that takes them in the other order, and a limit of
 /// one deadlocks with itself. The check sees only a call made by the work
 /// itself. A task that the work spawns and waits for is not checked, so
-/// don't let such a task use a limit that the work already holds.
+/// don't let such a task use a limit that the work already holds. It would
+/// queue behind any call already waiting, even while places are free, and
+/// that call can wait for the places the work holds.
 ///
 /// To limit the items of one collection, use `concurrently`, which needs no
 /// shared limit.
@@ -41,16 +50,44 @@ use tokio::time::Instant;
 /// ```
 /// use adamantium::Limit;
 /// # async fn query(n: u32) -> u32 { n }
+/// # async fn upload(bytes: &[u8]) -> usize { bytes.len() }
 ///
-/// # async fn example() {
+/// # async fn example() -> Result<(), adamantium::Overweight> {
 /// let connections = Limit::new(4);
 /// let rows = connections.run(|| query(7)).await;
 /// assert_eq!(rows, 7);
+///
+/// let in_flight = Limit::new(64 * 1024);
+/// let body = vec![0; 4096];
+/// let sent = in_flight.weighted(body.len())?.run(|| upload(&body)).await;
+/// assert_eq!(sent, 4096);
+/// # Ok(())
 /// # }
 /// ```
 #[derive(Clone)]
 pub struct Limit {
     places: Arc<Places>,
+}
+
+/// Calls under a [`Limit`] that each take the same number of places.
+///
+/// [`Limit::weighted`] checks the weight once, so a call made here never
+/// fails for asking too much. The handle is `Copy`, to make as many calls
+/// as you like.
+#[derive(Clone, Copy, Debug)]
+pub struct Weighted<'a> {
+    limit: &'a Limit,
+    places: usize,
+}
+
+/// Returned by [`Limit::weighted`] for a weight above the limit's total,
+/// which no call could ever take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Overweight {
+    /// The places a call asked for.
+    pub places: usize,
+    /// The places of the limit.
+    pub limit: usize,
 }
 
 struct Places {
@@ -150,7 +187,28 @@ impl Limit {
             .await
     }
 
+    /// Calls that each take `places` places at once. Zero is treated as one.
+    ///
+    /// Returns [`Overweight`] without waiting when `places` is above the
+    /// limit's total, since no such call could ever run.
+    pub fn weighted(&self, places: usize) -> Result<Weighted<'_>, Overweight> {
+        let places = places.max(1);
+        if places > self.places.limit {
+            return Err(Overweight {
+                places,
+                limit: self.places.limit,
+            });
+        }
+        Ok(Weighted {
+            limit: self,
+            places,
+        })
+    }
+
     /// The number of places that are free now.
+    ///
+    /// A new call can't take them while another call waits, even when they
+    /// are enough for it.
     pub fn available(&self) -> usize {
         self.places
             .limit
@@ -163,6 +221,56 @@ impl Limit {
             places,
             ticket: None,
         }
+    }
+}
+
+impl Weighted<'_> {
+    /// The places each call takes.
+    pub fn places(self) -> usize {
+        self.places
+    }
+
+    /// Waits until the places are free, runs `work`, and returns its output.
+    ///
+    /// `work` is called only once the places are taken. Dropping the future
+    /// frees them, or gives up the wait for them.
+    ///
+    /// # Panics
+    ///
+    /// Panics when polled inside work holding a [`Limit`] or a [`KeyedLimit`].
+    #[allow(
+        clippy::future_not_send,
+        reason = "the future is Send when the work and its future are"
+    )]
+    pub async fn run<F, Fut>(self, work: F) -> Fut::Output
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future,
+    {
+        Kind::Ordinary.run(self.limit.take(self.places), work).await
+    }
+
+    /// Runs like [`run`](Self::run), but waits and works only until
+    /// `cancellation` is requested or `deadline` passes, with the results of
+    /// [`Limit::run_until`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when polled inside work holding a [`Limit`] or a [`KeyedLimit`].
+    #[cfg(feature = "tokio")]
+    pub async fn run_until<F, Fut, T, E>(
+        self,
+        cancellation: &Cancellation,
+        deadline: Option<Instant>,
+        work: F,
+    ) -> Result<T, ScopeError<E>>
+    where
+        F: FnOnce() -> Fut + Send,
+        Fut: Future<Output = Result<T, E>> + Send,
+    {
+        Kind::Ordinary
+            .run_until(self.limit.take(self.places), cancellation, deadline, work)
+            .await
     }
 }
 
@@ -321,6 +429,18 @@ impl fmt::Debug for Limit {
             .finish()
     }
 }
+
+impl fmt::Display for Overweight {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "a call of {} places can never run under a limit of {}",
+            self.places, self.limit
+        )
+    }
+}
+
+impl std::error::Error for Overweight {}
 
 #[derive(Clone, Copy)]
 enum Kind {
