@@ -584,6 +584,14 @@ enum OpKind<'a> {
     Changed,
 }
 
+/// A receiver's `borrow` or `borrow_and_update` call; only the second marks
+/// the value seen.
+struct Borrow<'e> {
+    call: &'e ExprMethodCall,
+    var: usize,
+    marks_seen: bool,
+}
+
 struct Analysis<'t> {
     text: &'t Text<'t>,
     file: &'t Path,
@@ -1387,19 +1395,22 @@ impl<'t> Analysis<'t> {
         true
     }
 
-    fn borrowed<'e>(&self, borrowed: &'e Expr) -> Option<(&'e ExprMethodCall, usize, bool)> {
+    fn borrowed<'e>(&self, borrowed: &'e Expr) -> Option<Borrow<'e>> {
         if self.kind != Kind::Watch {
             return None;
         }
         let Expr::MethodCall(call) = borrowed else {
             return None;
         };
-        match self.method(borrowed, "borrow_and_update", Role::Receiver) {
-            Some(var) => Some((call, var, true)),
-            None => self
-                .method(borrowed, "borrow", Role::Receiver)
-                .map(|var| (call, var, false)),
-        }
+        let (var, marks_seen) = match self.method(borrowed, "borrow_and_update", Role::Receiver) {
+            Some(var) => (var, true),
+            None => (self.method(borrowed, "borrow", Role::Receiver)?, false),
+        };
+        Some(Borrow {
+            call,
+            var,
+            marks_seen,
+        })
     }
 
     fn value(&mut self, expr: &'t Expr) {
@@ -1414,10 +1425,15 @@ impl<'t> Analysis<'t> {
     }
 
     fn read(&mut self, whole: &'t Expr, borrowed: &'t Expr) -> bool {
-        let Some((call, var, marks)) = self.borrowed(borrowed) else {
+        let Some(Borrow {
+            call,
+            var,
+            marks_seen,
+        }) = self.borrowed(borrowed)
+        else {
             return false;
         };
-        if !marks {
+        if !marks_seen {
             self.borrows = true;
             if self.captured > 0 {
                 self.refuse(BORROW_CAPTURED);

@@ -8,11 +8,19 @@ use super::{
 };
 use crate::fix::scan::macro_attribute;
 
+/// A parameter `fix` rewrites: its group, and whether it borrows the lock
+/// itself rather than the `Arc` holding it.
+#[derive(Clone, Copy)]
+struct Param {
+    group: usize,
+    lock_ref: bool,
+}
+
 pub(super) struct Callee {
     pub(super) name: String,
     owner: Option<String>,
     receiver: bool,
-    params: Vec<Option<(usize, bool)>>,
+    params: Vec<Option<Param>>,
     returns: Option<usize>,
     pub(super) calls: usize,
 }
@@ -21,7 +29,7 @@ impl Callee {
     pub(super) fn groups(&self) -> impl Iterator<Item = usize> + '_ {
         self.params
             .iter()
-            .filter_map(|param| param.map(|(group, _)| group))
+            .filter_map(|param| param.map(|param| param.group))
             .chain(self.returns)
     }
 }
@@ -114,7 +122,7 @@ impl<'a> Walker<'a> {
                             kind,
                             vec![edit],
                         ));
-                        (group, lock_ref)
+                        Param { group, lock_ref }
                     }),
                 _ => None,
             };
@@ -211,7 +219,7 @@ impl<'a> Walker<'a> {
     }
 
     pub(super) fn parameter(&mut self, callee: usize, position: usize, pat: &Pat) {
-        let Some((group, lock_ref)) = self
+        let Some(Param { group, lock_ref }) = self
             .callees
             .get(callee)
             .and_then(|callee| callee.params.get(position).copied().flatten())
@@ -400,7 +408,7 @@ impl<'a> Walker<'a> {
                     .flatten()
             });
             match param {
-                Some((group, _)) => self.argument(group, arg),
+                Some(param) => self.argument(param.group, arg),
                 None => self.visit_expr(arg),
             }
         }

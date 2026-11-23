@@ -178,6 +178,13 @@ pub(super) fn prune_imports(
     coalesce(Imports::prune(&text, file, &tree, edits, paths))
 }
 
+/// What pruning leaves of a use tree.
+enum Pruned {
+    Removed,
+    Unchanged,
+    Rewritten(String),
+}
+
 struct Imports<'t> {
     text: &'t Text<'t>,
     paths: &'t [&'t [&'t str]],
@@ -223,9 +230,9 @@ impl<'t> Imports<'t> {
                 continue;
             }
             let edit = match imports.rewrite(&item.tree, &removed) {
-                Some(Some(tree)) => text.of(&item.tree).map(|range| (range, tree)),
-                Some(None) => None,
-                None => imports.line(item).map(|range| (range, String::new())),
+                Pruned::Rewritten(tree) => text.of(&item.tree).map(|range| (range, tree)),
+                Pruned::Unchanged => None,
+                Pruned::Removed => imports.line(item).map(|range| (range, String::new())),
             };
             match edit {
                 Some((range, replacement)) if replacement.is_empty() => lines.push(range),
@@ -354,35 +361,39 @@ impl<'t> Imports<'t> {
         }
     }
 
-    fn rewrite(&self, tree: &UseTree, removed: &BTreeSet<usize>) -> Option<Option<String>> {
+    fn rewrite(&self, tree: &UseTree, removed: &BTreeSet<usize>) -> Pruned {
         match tree {
-            UseTree::Path(path) => match self.rewrite(&path.tree, removed)? {
-                Some(rest) => Some(Some(format!("{}::{rest}", path.ident))),
-                None => Some(None),
+            UseTree::Path(path) => match self.rewrite(&path.tree, removed) {
+                Pruned::Rewritten(rest) => Pruned::Rewritten(format!("{}::{rest}", path.ident)),
+                whole => whole,
             },
-            UseTree::Name(_) | UseTree::Rename(_) => {
-                let start = self.text.of(tree)?.start;
-                (!removed.contains(&start)).then_some(None)
-            }
-            UseTree::Glob(_) => Some(None),
+            // A leaf whose text can't be found counts as removed.
+            UseTree::Name(_) | UseTree::Rename(_) => match self.text.of(tree) {
+                Some(leaf) if !removed.contains(&leaf.start) => Pruned::Unchanged,
+                _ => Pruned::Removed,
+            },
+            UseTree::Glob(_) => Pruned::Unchanged,
             UseTree::Group(group) => {
                 let mut kept = Vec::new();
                 let mut changed = false;
                 for tree in &group.items {
                     match self.rewrite(tree, removed) {
-                        None => changed = true,
-                        Some(None) => kept.push(self.text.slice(tree)?.to_owned()),
-                        Some(Some(text)) => {
+                        Pruned::Removed => changed = true,
+                        Pruned::Unchanged => match self.text.slice(tree) {
+                            Some(text) => kept.push(text.to_owned()),
+                            None => return Pruned::Removed,
+                        },
+                        Pruned::Rewritten(text) => {
                             changed = true;
                             kept.push(text);
                         }
                     }
                 }
                 match kept.as_slice() {
-                    _ if !changed => Some(None),
-                    [] => None,
-                    [only] if !only.starts_with("self") => Some(Some(only.clone())),
-                    kept => Some(Some(format!("{{{}}}", kept.join(", ")))),
+                    _ if !changed => Pruned::Unchanged,
+                    [] => Pruned::Removed,
+                    [only] if !only.starts_with("self") => Pruned::Rewritten(only.clone()),
+                    kept => Pruned::Rewritten(format!("{{{}}}", kept.join(", "))),
                 }
             }
         }

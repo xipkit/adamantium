@@ -405,7 +405,13 @@ struct Scan<'c> {
     file: &'c Path,
     macros: &'c BTreeSet<String>,
     trait_depth: usize,
-    locals: Vec<(BTreeSet<String>, bool)>,
+    locals: Vec<Locals>,
+}
+
+/// The names one scope binds; an item's scope hides the scopes around it.
+struct Locals {
+    names: BTreeSet<String>,
+    item: bool,
 }
 
 impl Scan<'_> {
@@ -419,7 +425,10 @@ impl Scan<'_> {
         for pat in pats {
             super::state::pattern_names(pat, &mut names);
         }
-        self.locals.push((names.into_iter().collect(), item));
+        self.locals.push(Locals {
+            names: names.into_iter().collect(),
+            item,
+        });
         f(self);
         self.locals.pop();
     }
@@ -427,17 +436,17 @@ impl Scan<'_> {
     fn bind(&mut self, pat: &syn::Pat) {
         let mut names = Vec::new();
         super::state::pattern_names(pat, &mut names);
-        if let Some((scope, _)) = self.locals.last_mut() {
-            scope.extend(names);
+        if let Some(scope) = self.locals.last_mut() {
+            scope.names.extend(names);
         }
     }
 
     fn is_local(&self, name: &str) -> bool {
-        for (scope, item) in self.locals.iter().rev() {
-            if scope.contains(name) {
+        for scope in self.locals.iter().rev() {
+            if scope.names.contains(name) {
                 return true;
             }
-            if *item {
+            if scope.item {
                 break;
             }
         }

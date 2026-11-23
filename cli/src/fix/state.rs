@@ -833,7 +833,7 @@ enum Node<'a> {
 
 #[derive(Clone, Copy)]
 enum Root<'a> {
-    Statement(Full<'a>, bool),
+    Statement { full: Full<'a>, semi: bool },
     Let(&'a Local, &'a Expr),
     Value(&'a Expr),
     Condition(&'a Expr),
@@ -848,7 +848,7 @@ enum Full<'a> {
 impl<'a> Root<'a> {
     fn full(self) -> Full<'a> {
         match self {
-            Self::Statement(full, _) => full,
+            Self::Statement { full, .. } => full,
             Self::Let(_, expr) | Self::Value(expr) | Self::Condition(expr) => Full::Expr(expr),
         }
     }
@@ -1636,7 +1636,12 @@ impl<'a> Walker<'a> {
                             _ => Err(Reason::Unfollowed("a guard is in a `let`-`else`")),
                         };
                     }
-                    Stmt::Expr(_, Some(_)) => return Ok(Root::Statement(Full::Expr(child), true)),
+                    Stmt::Expr(_, Some(_)) => {
+                        return Ok(Root::Statement {
+                            full: Full::Expr(child),
+                            semi: true,
+                        });
+                    }
                     Stmt::Expr(_, None) => {
                         let Some(Node::Block(block, kind)) = index
                             .checked_sub(1)
@@ -1650,7 +1655,10 @@ impl<'a> Walker<'a> {
                             .last()
                             .is_some_and(|last| std::ptr::eq(last, stmt));
                         if !tail {
-                            return Ok(Root::Statement(Full::Expr(child), false));
+                            return Ok(Root::Statement {
+                                full: Full::Expr(child),
+                                semi: false,
+                            });
                         }
                         if kind == BlockKind::Body {
                             return Ok(Root::Value(child));
@@ -1670,10 +1678,10 @@ impl<'a> Walker<'a> {
                                 "a guard is in a macro whose value ends a block",
                             ));
                         }
-                        return Ok(Root::Statement(
-                            Full::Macro(&mac.mac),
-                            mac.semi_token.is_some(),
-                        ));
+                        return Ok(Root::Statement {
+                            full: Full::Macro(&mac.mac),
+                            semi: mac.semi_token.is_some(),
+                        });
                     }
                     Stmt::Item(_) => return Err(Reason::Unfollowed("a guard is in an item")),
                 },
@@ -1839,7 +1847,7 @@ impl<'a> Walker<'a> {
         }
         let method = access.unwrap_or(plan.mode).method();
         let (range, replacement) = match plan.root {
-            Root::Statement(full, semi) => {
+            Root::Statement { full, semi } => {
                 let (range, assignment, attributed) = match full {
                     Full::Expr(expr) => (
                         self.text.of(expr),
