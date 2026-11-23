@@ -149,7 +149,7 @@ pub fn scan(crates: &[Crate], entry: usize, disallowed: &Disallowed) -> Scan {
             };
             let mut visitor = FileVisitor {
                 scanner: &mut scanner,
-                file: at.0,
+                file: at.file,
                 module: deferred.module,
                 mod_dir: deferred.mod_dir,
                 path_dir: deferred.path_dir,
@@ -488,24 +488,63 @@ struct Scanner<'a> {
     files: Vec<Loaded>,
     modules: HashMap<Vec<String>, Scope>,
     definitions: HashMap<Vec<String>, usize>,
-    expanded: HashSet<(String, usize, usize)>,
+    expanded: HashSet<DefinitionSite>,
     unexpanded: HashSet<String>,
-    deferred: BTreeMap<(String, usize, usize), Deferred>,
+    deferred: BTreeMap<DefinitionSite, Deferred>,
     sources: HashMap<String, String>,
     expansions: usize,
     prelude: Vec<Imported>,
     libraries: HashMap<usize, Scanner<'a>>,
     around: Vec<(Vec<String>, Scope)>,
     foreign: HashSet<String>,
-    dollar_crates: HashMap<(String, usize, usize), usize>,
+    dollar_crates: HashMap<SpanStart, usize>,
     exports: Option<Vec<Export>>,
     crate_spans: Vec<Span>,
     macro_paths: HashMap<Vec<String>, Vec<MacroRules>>,
     last_pass: HashMap<Vec<String>, Scope>,
     path_calls: Vec<PathCall>,
-    instances: HashMap<(String, usize, usize, usize), usize>,
-    read_at: HashMap<(String, usize, usize), usize>,
-    hidden: HashMap<(String, usize, usize), HashSet<String>>,
+    instances: HashMap<(DefinitionSite, usize), usize>,
+    read_at: HashMap<DefinitionSite, usize>,
+    hidden: HashMap<SpanStart, HashSet<String>>,
+}
+
+/// Where a span starts, by the name proc-macro2 gives its source file.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SpanStart {
+    file: String,
+    line: usize,
+    column: usize,
+}
+
+impl SpanStart {
+    fn of(span: Span) -> Self {
+        let start = span.start();
+        Self {
+            file: span.file(),
+            line: start.line,
+            column: start.column,
+        }
+    }
+}
+
+/// Where a macro definition starts, by its file's path in the report. The
+/// order is by file, then line, then column.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct DefinitionSite {
+    file: String,
+    line: usize,
+    column: usize,
+}
+
+impl DefinitionSite {
+    fn new(file: String, span: Span) -> Self {
+        let start = span.start();
+        Self {
+            file,
+            line: start.line,
+            column: start.column,
+        }
+    }
 }
 
 struct PathCall {
@@ -760,10 +799,9 @@ impl<'a> Scanner<'a> {
     }
 
     fn instance(&mut self, rel: &str, span: Span) -> usize {
-        let start = span.start();
-        let place = (rel.to_owned(), start.line, start.column);
+        let place = DefinitionSite::new(rel.to_owned(), span);
         let before = self.read_at.entry(place.clone()).or_default();
-        let key = (place.0, place.1, place.2, *before);
+        let key = (place, *before);
         *before += 1;
         let next = self.instances.len();
         *self.instances.entry(key).or_insert(next)
@@ -1245,10 +1283,7 @@ impl<'a> Scanner<'a> {
                 self.dollar_crates.entry(key).or_insert(dollar_id);
             }
             for span in mem::take(&mut reader.crate_spans) {
-                let start = span.start();
-                self.dollar_crates
-                    .entry((span.file(), start.line, start.column))
-                    .or_insert(id);
+                self.dollar_crates.entry(SpanStart::of(span)).or_insert(id);
             }
             self.libraries.insert(id, reader);
         }
@@ -1613,13 +1648,12 @@ impl<'a> Scanner<'a> {
                     }
                 }
             }
-            let start = span.start();
-            let at = (candidate.rel.to_owned(), start.line, start.column);
+            let at = DefinitionSite::new(candidate.rel.to_owned(), span);
             expansions.push((items, at, candidate.instance.is_none(), defined));
         }
         self.expansions += 1;
         for (mut items, at, foreign, defined) in expansions {
-            let rel = at.0.clone();
+            let rel = at.file.clone();
             if !foreign {
                 self.expanded.insert(at);
             }
@@ -1833,10 +1867,8 @@ impl<'a> Scanner<'a> {
         if ident != "crate" {
             return None;
         }
-        let span = ident.span();
-        let start = span.start();
         self.dollar_crates
-            .get(&(span.file(), start.line, start.column))
+            .get(&SpanStart::of(ident.span()))
             .copied()
     }
 
@@ -2439,10 +2471,8 @@ impl Scanner<'_> {
     }
 }
 
-fn call_site(mac: &Macro) -> (String, usize, usize) {
-    let span = mac.bang_token.span;
-    let start = span.start();
-    (span.file(), start.line, start.column)
+fn call_site(mac: &Macro) -> SpanStart {
+    SpanStart::of(mac.bang_token.span)
 }
 
 fn is_bare(path: &syn::Path) -> bool {
@@ -3359,8 +3389,8 @@ impl<'ast> Visit<'ast> for FileVisitor<'_, '_> {
         }
         match &item.ident {
             Some(name) => {
-                let site = self.site(name.span());
-                let at = (site.file, site.line, name.span().start().column);
+                let file = self.scanner.file_of(name.span(), &self.file);
+                let at = DefinitionSite::new(file, name.span());
                 if self.scanner.expanded.contains(&at) {
                     let deferred = Deferred {
                         name: name.unraw().to_string(),
