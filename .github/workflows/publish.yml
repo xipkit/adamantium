@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: crates-io-publish
+  group: crates-io-publish-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -82,7 +82,13 @@ jobs:
               fi
             done
           else
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes "${assets[@]}"
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes --draft "${assets[@]}"
+          fi
+          if [[ $(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft) == true ]]; then
+            release_id=$(gh release view "$GITHUB_REF_NAME" --json databaseId --jq .databaseId)
+            # Let GitHub choose latest by date and version, even when runs finish out of order.
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+              -F draft=false -f make_latest=legacy >/dev/null
           fi
       - name: Verify the public downloads against the build outputs
         working-directory: deep

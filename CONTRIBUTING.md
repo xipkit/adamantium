@@ -51,9 +51,11 @@ Prepare each release in a pull request:
    archive must contain `CHANGELOG.md`. Edit only the root changelog:
    `cli/CHANGELOG.md` is a symlink to it, which
    [Cargo packages as a regular file](https://doc.rust-lang.org/cargo/commands/cargo-package.html#description).
-5. After the release pull request merges, push the matching `v<version>` tag.
-   If you create a GitHub release after publishing succeeds, use that version's
-   changelog entry as its release notes, including any link definitions it uses.
+5. After the release pull request merges, push the matching `v<version>` tag and
+   send Mauricio the publish workflow run link. Each tag waits for its own
+   `crates-io` approval. If you create a GitHub release after publishing
+   succeeds, use that version's changelog entry as its release notes, including
+   any link definitions it uses.
 
 Pull requests run `cargo publish --dry-run` for each crate to verify that its
 archive builds independently of this checkout. To inspect the archives locally:
