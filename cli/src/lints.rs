@@ -239,6 +239,14 @@ pub const DISALLOWED_TYPES: &[(&str, &[&str])] = &[
     ),
     ("results-as-they-finish", &["tokio::task::JoinSet"]),
     (
+        "a-value-initialized-once",
+        &[
+            "tokio::sync::OnceCell",
+            "async_once_cell::OnceCell",
+            "async_once_cell::Lazy",
+        ],
+    ),
+    (
         "a-bounded-queue",
         &["tokio::sync::mpsc::Sender", "tokio::sync::mpsc::Receiver"],
     ),

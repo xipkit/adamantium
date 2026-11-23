@@ -25,6 +25,7 @@ changes behavior in a way to check.
 | Blocking I/O while a lock is held | The I/O, then record | No |
 | Two locks held at once | One actor, or one after the other | No |
 | Two semaphore permits held at once | A `KeyedLimit` inside a `Limit`, or one after the other | No |
+| `tokio::sync::OnceCell` | `Once` | Mostly |
 | `tokio::task::spawn_blocking(f).await.unwrap()` | `blocking(f).await` | Yes |
 | `std::thread::spawn` | `blocking` | Mostly |
 | `tokio::spawn` with the handle awaited in the same function | `Tasks::run` | Mostly |
@@ -492,6 +493,81 @@ async fn main() {
     let exports = Limit::new(1);
     // panics: limit work can't enter another Limit
     connections.run(|| exports.run(|| async {})).await;
+}
+```
+
+### A value initialized once
+
+The strict rules report Tokio's `OnceCell`, and the `OnceCell` and `Lazy` of
+`async_once_cell`. Use `Once` for a value that async work makes once and then
+keeps, such as a connection or a fetched key set. `get_or_init`,
+`get_or_try_init` and `get` take and return what Tokio's do, so most calls
+stay the same. Check these differences:
+
+- A `Once` is shared by cloning it, so the `Arc` around the cell goes.
+  `Once::new` isn't `const`, so a `static` cell becomes a field of the state
+  that the tasks share.
+- A clone of a `Once` can move to another task only when the value is both
+  `Send` and `Sync`.
+- `set`, `get_mut`, `take`, `into_inner` and `initialized` have no
+  counterpart. For a value that one task sets and others wait for, use a
+  `Watch` that holds an `Option`.
+- An initializer that calls `get_or_init` on its own cell panics, where
+  Tokio's waits forever.
+- `async_once_cell`'s `get_or_init` takes a future, so it becomes a closure
+  that returns one. A `Lazy` becomes a `Once`, and each use passes the
+  initializer to `get_or_init`.
+
+When making the value never awaits, `std::sync::OnceLock` is enough, and the
+rules allow it. Its `get_or_init` blocks other threads that call it while the
+first one runs, so keep its closure short and free of blocking I/O.
+
+`fix` leaves these cells as they are.
+
+Before:
+
+```rust
+use std::sync::Arc;
+use tokio::sync::OnceCell;
+
+async fn fetch_keys() -> Result<Vec<u32>, String> {
+    Ok(vec![1, 2, 3])
+}
+
+#[tokio::main]
+async fn main() {
+    let keys = Arc::new(OnceCell::new());
+    let mut checks = Vec::new();
+    for _ in 0..3 {
+        let keys = Arc::clone(&keys);
+        checks.push(tokio::spawn(async move {
+            keys.get_or_try_init(fetch_keys).await.map(Vec::len)
+        }));
+    }
+    for check in checks {
+        assert_eq!(check.await.unwrap(), Ok(3));
+    }
+}
+```
+
+After:
+
+```rust
+use adamantium::{Once, concurrently};
+
+async fn fetch_keys() -> Result<Vec<u32>, String> {
+    Ok(vec![1, 2, 3])
+}
+
+#[tokio::main]
+async fn main() {
+    let keys = Once::new();
+    let counts = concurrently(0..3, 3, |_| {
+        let keys = keys.clone();
+        async move { keys.get_or_try_init(fetch_keys).await.map(Vec::len) }
+    })
+    .await;
+    assert_eq!(counts, Ok(vec![3, 3, 3]));
 }
 ```
 

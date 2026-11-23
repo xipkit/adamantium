@@ -408,7 +408,7 @@ cargo adamantium init --strict
 cargo adamantium rules --strict              # also supports --format json or toml
 ```
 
-The strict tier includes [`arithmetic_side_effects`](https://clippy.rust-lang.org/master/index.html#arithmetic_side_effects). This lint reports arithmetic operators that can overflow or panic, including integer division and negation. Strict mode also reports [bounded Tokio `mpsc`, `Notify`, and `Semaphore`](rules.md#synchronization).
+The strict tier includes [`arithmetic_side_effects`](https://clippy.rust-lang.org/master/index.html#arithmetic_side_effects). This lint reports arithmetic operators that can overflow or panic, including integer division and negation. Strict mode also reports [bounded Tokio `mpsc`, `Notify`, `Semaphore`, and `OnceCell`, and the cells of `async_once_cell`](rules.md#synchronization).
 
 To state the behavior that you intend, use methods such as `checked_add`, `checked_div`, `saturating_add`, or `wrapping_add`.
 

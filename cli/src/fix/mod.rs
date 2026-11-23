@@ -941,6 +941,16 @@ mod tests {
                 Hint::Guide("rwlock"),
             ),
             (
+                "clippy::disallowed_types",
+                kind("tokio::sync::OnceCell"),
+                Hint::Guide("a-value-initialized-once"),
+            ),
+            (
+                "clippy::disallowed_types",
+                kind("async_once_cell::Lazy"),
+                Hint::Guide("a-value-initialized-once"),
+            ),
+            (
                 "clippy::await_holding_lock",
                 "this `MutexGuard` is held across an await point".to_owned(),
                 Hint::Guide("a-lock-held-across-an-await"),

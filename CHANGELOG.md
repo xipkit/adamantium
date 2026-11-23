@@ -49,6 +49,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   A draw in a `Duration` no longer needs a `u64` suffix or type argument.
 - `cargo-adamantium`: Default rules report `tokio::time::timeout_at`, which
   drops its future when the deadline passes, as `tokio::time::timeout` does.
+- `cargo-adamantium`: The strict tier reports `tokio::sync::OnceCell` and the
+  `OnceCell` and `Lazy` of `async_once_cell`, points at `adamantium::Once`,
+  and links the migration guide's section on a value initialized once.
 
 ### Fixed
 
