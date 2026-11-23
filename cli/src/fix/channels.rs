@@ -13,7 +13,7 @@ use syn::{
 use super::{
     Edit,
     scan::macro_attribute,
-    source::{Text, bare, format_captures, string_literal},
+    source::{Text, bare, format_captures, is_assignment, string_literal},
     state::pattern_names,
 };
 
@@ -570,6 +570,17 @@ enum Shape {
     Discard,
 }
 
+impl Shape {
+    /// Why a result of this shape can't be used where fix doesn't follow it.
+    fn misuse(self) -> &'static str {
+        if self == Self::Discard {
+            WATCH_SEND
+        } else {
+            RESULT
+        }
+    }
+}
+
 struct Op<'a> {
     var: usize,
     shape: Shape,
@@ -958,6 +969,19 @@ impl<'t> Analysis<'t> {
         }
     }
 
+    /// Visits `expr`, adapting `pat` when it takes apart the result of a send
+    /// or receive.
+    fn destructured(&mut self, expr: &'t Expr, pat: &Pat) {
+        match self.op(expr) {
+            Some(op) => {
+                if !self.patterns(&op, &[pat]) {
+                    self.refuse(RESULT);
+                }
+            }
+            None => self.visit_expr(expr),
+        }
+    }
+
     fn mentions(&self, tokens: TokenStream) -> bool {
         tokens.into_iter().any(|token| match token {
             TokenTree::Group(group) => self.mentions(group.stream()),
@@ -1013,14 +1037,7 @@ impl<'t> Analysis<'t> {
                 }
             }
             (pat, Some((_, diverge))) => {
-                match self.op(&init.expr) {
-                    Some(op) => {
-                        if !self.patterns(&op, &[pat]) {
-                            self.refuse(RESULT);
-                        }
-                    }
-                    None => self.visit_expr(&init.expr),
-                }
+                self.destructured(&init.expr, pat);
                 self.visit_expr(diverge);
             }
             (pat, None) if binds_whole(pat) => self.value(&init.expr),
@@ -1148,58 +1165,12 @@ impl<'t> Visit<'t> for Analysis<'t> {
             return;
         }
         if let Some(op) = self.op(expr) {
-            self.refuse(if op.shape == Shape::Discard {
-                WATCH_SEND
-            } else {
-                RESULT
-            });
+            self.refuse(op.shape.misuse());
             return;
         }
         match expr {
-            Expr::MethodCall(call) => {
-                if self.consumer(call) {
-                    return;
-                }
-                if let Some(op) = self.op(&call.receiver) {
-                    self.refuse(if op.shape == Shape::Discard {
-                        WATCH_SEND
-                    } else {
-                        RESULT
-                    });
-                    return;
-                }
-                if call.method == "clone"
-                    && call.args.is_empty()
-                    && call.turbofish.is_none()
-                    && self.read(expr, &call.receiver)
-                {
-                    return;
-                }
-                if self.half_method(call) {
-                    return;
-                }
-                self.visit_expr(&call.receiver);
-                for arg in &call.args {
-                    self.value(arg);
-                }
-            }
-            Expr::Await(awaited) => {
-                if self.kind == Kind::Mpsc
-                    && awaited.attrs.is_empty()
-                    && self.method(&awaited.base, "recv", Role::Receiver).is_some()
-                    && let Expr::MethodCall(call) = &*awaited.base
-                {
-                    self.replace(&call.method, "receive");
-                    return;
-                }
-                if self.kind == Kind::Oneshot
-                    && awaited.attrs.is_empty()
-                    && self.method(&awaited.base, "closed", Role::Sender).is_some()
-                {
-                    return;
-                }
-                syn::visit::visit_expr_await(self, awaited);
-            }
+            Expr::MethodCall(call) => self.method_call(expr, call),
+            Expr::Await(awaited) => self.awaited(awaited),
             Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
                 if self.borrowed(&unary.expr).is_some() {
                     self.refuse(READ_IN_PLACE);
@@ -1245,49 +1216,9 @@ impl<'t> Visit<'t> for Analysis<'t> {
                 self.visit_expr(&assign.left);
                 self.value(&assign.right);
             }
-            Expr::Binary(binary) if binary.attrs.is_empty() => {
-                use syn::BinOp;
-                match binary.op {
-                    BinOp::Add(_)
-                    | BinOp::Sub(_)
-                    | BinOp::Mul(_)
-                    | BinOp::Div(_)
-                    | BinOp::Rem(_)
-                    | BinOp::And(_)
-                    | BinOp::Or(_)
-                    | BinOp::BitXor(_)
-                    | BinOp::BitAnd(_)
-                    | BinOp::BitOr(_)
-                    | BinOp::Shl(_)
-                    | BinOp::Shr(_) => {
-                        self.value(&binary.left);
-                        self.value(&binary.right);
-                    }
-                    BinOp::AddAssign(_)
-                    | BinOp::SubAssign(_)
-                    | BinOp::MulAssign(_)
-                    | BinOp::DivAssign(_)
-                    | BinOp::RemAssign(_)
-                    | BinOp::BitXorAssign(_)
-                    | BinOp::BitAndAssign(_)
-                    | BinOp::BitOrAssign(_)
-                    | BinOp::ShlAssign(_)
-                    | BinOp::ShrAssign(_) => {
-                        self.visit_expr(&binary.left);
-                        self.value(&binary.right);
-                    }
-                    _ => syn::visit::visit_expr_binary(self, binary),
-                }
-            }
+            Expr::Binary(binary) if binary.attrs.is_empty() => self.binary(binary),
             Expr::Let(binding) => {
-                match self.op(&binding.expr) {
-                    Some(op) => {
-                        if !self.patterns(&op, &[&binding.pat]) {
-                            self.refuse(RESULT);
-                        }
-                    }
-                    None => self.visit_expr(&binding.expr),
-                }
+                self.destructured(&binding.expr, &binding.pat);
                 self.declare(&binding.pat);
             }
             Expr::Match(matched) => match self.op(&matched.expr) {
@@ -1323,32 +1254,8 @@ impl<'t> Visit<'t> for Analysis<'t> {
                     this.visit_block(&looped.body);
                 });
             }
-            Expr::Closure(closure) => {
-                if closure.capture.is_some() {
-                    self.capture(quote::ToTokens::to_token_stream(&closure.body));
-                }
-                self.captured += 1;
-                self.nested += 1;
-                self.scoped(|this| {
-                    for input in &closure.inputs {
-                        this.declare(input);
-                    }
-                    this.value(&closure.body);
-                });
-                self.captured -= 1;
-                self.nested -= 1;
-            }
-            Expr::Async(block) => {
-                if block.capture.is_some() {
-                    self.capture(quote::ToTokens::to_token_stream(&block.block));
-                }
-                let borrowing = block.capture.is_none();
-                self.captured += usize::from(borrowing);
-                self.nested += 1;
-                self.visit_block(&block.block);
-                self.captured -= usize::from(borrowing);
-                self.nested -= 1;
-            }
+            Expr::Closure(closure) => self.closure(closure),
+            Expr::Async(block) => self.async_block(block),
             _ => syn::visit::visit_expr(self, expr),
         }
     }
@@ -1357,6 +1264,102 @@ impl<'t> Visit<'t> for Analysis<'t> {
 const RECEIVER: usize = 1;
 
 impl<'t> Analysis<'t> {
+    fn method_call(&mut self, expr: &'t Expr, call: &'t ExprMethodCall) {
+        if self.consumer(call) {
+            return;
+        }
+        if let Some(op) = self.op(&call.receiver) {
+            self.refuse(op.shape.misuse());
+            return;
+        }
+        if call.method == "clone"
+            && call.args.is_empty()
+            && call.turbofish.is_none()
+            && self.read(expr, &call.receiver)
+        {
+            return;
+        }
+        if self.half_method(call) {
+            return;
+        }
+        self.visit_expr(&call.receiver);
+        for arg in &call.args {
+            self.value(arg);
+        }
+    }
+
+    fn awaited(&mut self, awaited: &'t syn::ExprAwait) {
+        if self.kind == Kind::Mpsc
+            && awaited.attrs.is_empty()
+            && self.method(&awaited.base, "recv", Role::Receiver).is_some()
+            && let Expr::MethodCall(call) = &*awaited.base
+        {
+            self.replace(&call.method, "receive");
+            return;
+        }
+        if self.kind == Kind::Oneshot
+            && awaited.attrs.is_empty()
+            && self.method(&awaited.base, "closed", Role::Sender).is_some()
+        {
+            return;
+        }
+        syn::visit::visit_expr_await(self, awaited);
+    }
+
+    fn binary(&mut self, binary: &'t syn::ExprBinary) {
+        use syn::BinOp;
+        match binary.op {
+            BinOp::Add(_)
+            | BinOp::Sub(_)
+            | BinOp::Mul(_)
+            | BinOp::Div(_)
+            | BinOp::Rem(_)
+            | BinOp::And(_)
+            | BinOp::Or(_)
+            | BinOp::BitXor(_)
+            | BinOp::BitAnd(_)
+            | BinOp::BitOr(_)
+            | BinOp::Shl(_)
+            | BinOp::Shr(_) => {
+                self.value(&binary.left);
+                self.value(&binary.right);
+            }
+            op if is_assignment(&op) => {
+                self.visit_expr(&binary.left);
+                self.value(&binary.right);
+            }
+            _ => syn::visit::visit_expr_binary(self, binary),
+        }
+    }
+
+    fn closure(&mut self, closure: &'t syn::ExprClosure) {
+        if closure.capture.is_some() {
+            self.capture(quote::ToTokens::to_token_stream(&closure.body));
+        }
+        self.captured += 1;
+        self.nested += 1;
+        self.scoped(|this| {
+            for input in &closure.inputs {
+                this.declare(input);
+            }
+            this.value(&closure.body);
+        });
+        self.captured -= 1;
+        self.nested -= 1;
+    }
+
+    fn async_block(&mut self, block: &'t syn::ExprAsync) {
+        if block.capture.is_some() {
+            self.capture(quote::ToTokens::to_token_stream(&block.block));
+        }
+        let borrowing = block.capture.is_none();
+        self.captured += usize::from(borrowing);
+        self.nested += 1;
+        self.visit_block(&block.block);
+        self.captured -= usize::from(borrowing);
+        self.nested -= 1;
+    }
+
     fn capture(&mut self, tokens: TokenStream) {
         fn names(analysis: &Analysis<'_>, tokens: TokenStream) -> bool {
             tokens.into_iter().any(|token| match token {

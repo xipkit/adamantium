@@ -128,6 +128,23 @@ fn is_identifier(name: &str) -> bool {
         && name != "_"
 }
 
+/// Whether `op` is a compound assignment such as `+=`.
+pub(super) fn is_assignment(op: &syn::BinOp) -> bool {
+    matches!(
+        op,
+        syn::BinOp::AddAssign(_)
+            | syn::BinOp::SubAssign(_)
+            | syn::BinOp::MulAssign(_)
+            | syn::BinOp::DivAssign(_)
+            | syn::BinOp::RemAssign(_)
+            | syn::BinOp::BitXorAssign(_)
+            | syn::BinOp::BitAndAssign(_)
+            | syn::BinOp::BitOrAssign(_)
+            | syn::BinOp::ShlAssign(_)
+            | syn::BinOp::ShrAssign(_)
+    )
+}
+
 pub(super) fn bare(ident: &proc_macro2::Ident) -> String {
     ident.unraw().to_string()
 }

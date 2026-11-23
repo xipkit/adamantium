@@ -15,7 +15,7 @@ use quote::ToTokens;
 use super::{
     Edit,
     scan::{Crate, Hazard, macro_attribute},
-    source::{Text, bare, coalesce, format_captures, names_in, string_literal},
+    source::{Text, bare, coalesce, format_captures, is_assignment, names_in, string_literal},
 };
 
 mod calls;
@@ -1462,22 +1462,6 @@ fn is_comparison(op: &BinOp) -> bool {
     )
 }
 
-fn is_assignment(op: &BinOp) -> bool {
-    matches!(
-        op,
-        BinOp::AddAssign(_)
-            | BinOp::SubAssign(_)
-            | BinOp::MulAssign(_)
-            | BinOp::DivAssign(_)
-            | BinOp::RemAssign(_)
-            | BinOp::BitXorAssign(_)
-            | BinOp::BitAndAssign(_)
-            | BinOp::BitOrAssign(_)
-            | BinOp::ShlAssign(_)
-            | BinOp::ShrAssign(_)
-    )
-}
-
 impl<'a> Walker<'a> {
     fn guard_access<'e>(&self, expr: &'e Expr) -> Option<(usize, &'e Expr, Option<Mode>)> {
         let Expr::MethodCall(unwrap) = expr else {
@@ -1980,6 +1964,19 @@ impl<'a> Walker<'a> {
         self.scopes.pop();
     }
 
+    /// Visits `expr` where it is the whole body of a closure or an `else`,
+    /// so a plain block's last expression is the body's value.
+    fn body(&mut self, expr: &'a Expr) {
+        match expr {
+            Expr::Block(body) if body.attrs.is_empty() && body.label.is_none() => {
+                self.stack.push(Node::Expr(expr));
+                self.block(&body.block, BlockKind::Body);
+                self.stack.pop();
+            }
+            body => self.visit_expr(body),
+        }
+    }
+
     fn generic(&mut self, generics: &syn::Generics, f: impl FnOnce(&mut Self)) {
         let mut scope = ItemScope::new([], false);
         for param in &generics.params {
@@ -2302,14 +2299,7 @@ impl<'a> Visit<'a> for Walker<'a> {
                     for input in &closure.inputs {
                         walker.declare_pattern(input);
                     }
-                    match &*closure.body {
-                        Expr::Block(body) if body.attrs.is_empty() && body.label.is_none() => {
-                            walker.stack.push(Node::Expr(&closure.body));
-                            walker.block(&body.block, BlockKind::Body);
-                            walker.stack.pop();
-                        }
-                        body => walker.visit_expr(body),
-                    }
+                    walker.body(&closure.body);
                 });
                 self.returns.pop();
             }
@@ -2324,14 +2314,7 @@ impl<'a> Visit<'a> for Walker<'a> {
                     walker.block(&branch.then_branch, BlockKind::Body);
                 });
                 if let Some((_, other)) = &branch.else_branch {
-                    match &**other {
-                        Expr::Block(block) if block.attrs.is_empty() && block.label.is_none() => {
-                            self.stack.push(Node::Expr(other));
-                            self.block(&block.block, BlockKind::Body);
-                            self.stack.pop();
-                        }
-                        other => self.visit_expr(other),
-                    }
+                    self.body(other);
                 }
             }
             Expr::While(lp) => self.scoped(|walker| {
