@@ -1,32 +1,44 @@
 use std::{
-    any::Any,
-    collections::BTreeMap,
     fmt,
     future::{Future, poll_fn},
     panic,
-    pin::pin,
     sync::Arc,
     task::Poll,
     time::Duration,
 };
 
 use crate::runtime::{
-    Guard, Lock, World,
+    Lock, World,
     task::{JoinError, JoinSet},
-    wait::WaitQueue,
 };
 use tokio::time::Instant;
 
-use crate::{Closed, FeedError, ReceiveError, Reply, ReplyReceiver, UntilError, Watch, time};
+use crate::{ReplyReceiver, Watch, time};
 
+mod batch;
+mod ledger;
+#[cfg(test)]
+mod retention_tests;
+#[cfg(all(test, feature = "deterministic"))]
+mod schedule_tests;
+mod shutdown;
+mod spawner;
 mod stream;
 #[cfg(feature = "tracing")]
 mod trace;
+pub use batch::{concurrently, first_ok};
+use ledger::{Ledger, Receipt};
+use shutdown::elapsed;
+pub(crate) use shutdown::{Shutdown, before_shutdown, shutdown};
+pub use spawner::{SpawnError, Spawner};
+use spawner::{Submitter, handled};
 pub use stream::{
     concurrently_ordered, concurrently_ordered_until, concurrently_unordered,
     concurrently_unordered_until,
 };
 
+// The native lints name this type by the module that defines it, so it stays
+// in this file.
 /// A cloneable, one-way shutdown request shared by a caller and its work.
 ///
 /// Cancelling any clone wakes all [`cancelled`](Self::cancelled) waiters.
@@ -189,237 +201,23 @@ impl<E: std::error::Error + 'static> std::error::Error for ScopeError<E> {
     }
 }
 
-pub(crate) enum Shutdown {
-    Cancelled,
-    DeadlineExceeded,
-}
+type Locked<V> = Arc<Lock<V>>;
 
-impl Shutdown {
-    pub(crate) fn scope_error<E>(self) -> ScopeError<E> {
-        match self {
-            Self::Cancelled => ScopeError::Cancelled,
-            Self::DeadlineExceeded => ScopeError::DeadlineExceeded,
-        }
-    }
-
-    pub(crate) fn receive_error(self) -> ReceiveError {
-        match self {
-            Self::Cancelled => ReceiveError::Cancelled,
-            Self::DeadlineExceeded => ReceiveError::DeadlineExceeded,
-        }
-    }
-
-    pub(crate) fn feed_error(self) -> FeedError {
-        match self {
-            Self::Cancelled => FeedError::Cancelled,
-            Self::DeadlineExceeded => FeedError::DeadlineExceeded,
-        }
-    }
-
-    pub(crate) fn until_error(self) -> UntilError {
-        match self {
-            Self::Cancelled => UntilError::Cancelled,
-            Self::DeadlineExceeded => UntilError::DeadlineExceeded,
-        }
-    }
-}
-
-// Waits for `future` unless shutdown is requested first. A request present at
-// any poll wins over a ready future, which is then dropped unpolled.
-#[allow(
-    clippy::future_not_send,
-    reason = "the future is Send when the wrapped future is"
-)]
-pub(crate) async fn before_shutdown<Fut: Future>(
-    cancellation: &Cancellation,
-    deadline: Option<Instant>,
-    future: Fut,
-) -> Result<Fut::Output, Shutdown> {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "shutdown is checked before the future is polled"
-    )]
-    let outcome = tokio::select! {
-        biased;
-        reason = shutdown(cancellation, deadline) => Err(reason),
-        output = future => Ok(output),
-    };
-    outcome
-}
-
-pub(crate) async fn shutdown(cancellation: &Cancellation, deadline: Option<Instant>) -> Shutdown {
-    let mut cancelled = pin!(cancellation.cancelled());
-    let mut elapsed = pin!(elapsed(deadline));
-    std::future::poll_fn(|cx| {
-        if cancelled.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Shutdown::Cancelled);
-        }
-        if elapsed.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Shutdown::DeadlineExceeded);
-        }
-        Poll::Pending
-    })
-    .await
-}
-
-async fn elapsed(deadline: Option<Instant>) {
-    let Some(deadline) = deadline else {
-        return std::future::pending().await;
-    };
-    let mut sleep = pin!(time::sleep_until(deadline));
-    // Tokio rounds timers up. Check the clock so expired deadlines win this poll.
-    poll_fn(|cx| {
-        if deadline <= time::now() || sleep.as_mut().poll(cx).is_ready() {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    })
-    .await
-}
-
-// Record errors even when no handle remains. Keep an observed panic until
-// cleanup finishes, including when cancellation interrupts the drain.
-struct Errors<E> {
-    next: u64,
-    recorded: BTreeMap<u64, E>,
-    panic: Option<Box<dyn Any + Send>>,
-    orphaned: bool,
-    // Whether reaping found a task cancelled that the scope never aborted.
-    // Its runtime is shutting down, and its result is gone.
-    reaped_cancelled: bool,
-}
-
-impl<E> Errors<E> {
-    fn must_stop(&self) -> bool {
-        self.orphaned || self.panic.is_some()
-    }
-}
-
-struct Ledger<E> {
-    errors: Lock<Errors<E>>,
-    on_stop: WaitQueue,
-}
-
-impl<E> Ledger<E> {
-    fn lock(&self) -> Guard<'_, Errors<E>> {
-        self.errors.lock("Ledger::lock")
-    }
-}
-
-struct Receipt(u64);
-
-type Shared<V> = Arc<Lock<V>>;
-
-type SharedErrors<E> = Arc<Ledger<E>>;
-
-fn shared<V>(value: V) -> Shared<V> {
+fn locked<V>(value: V) -> Locked<V> {
     Arc::new(Lock::new(value))
 }
 
-fn lock<'a, V>(shared: &'a Shared<V>, operation: &'static str) -> Guard<'a, V> {
-    shared.lock(operation)
+async fn join_next(set: &Locked<JoinSet>) -> Option<Result<(), JoinError>> {
+    poll_fn(|cx| set.lock("JoinSet::poll_join_next").poll_join_next(cx)).await
 }
 
-#[allow(
-    clippy::expect_used,
-    reason = "each registered task starts at most once"
-)]
-fn take_work<W>(task: Shared<Option<W>>) -> W {
-    lock(&task, "Tasks::take_work")
-        .take()
-        .expect("task starts once")
-}
-
-// If runtime cancellation left the caller holding the last reference, preserve
-// the task's destructor panic just as the runtime would have done.
-fn release_work<E, W>(errors: &SharedErrors<E>, retained: Shared<Option<W>>) {
-    if let Err(payload) = panic::catch_unwind(panic::AssertUnwindSafe(|| drop(retained))) {
-        keep_panic(errors, JoinError::Panic(payload));
-    }
-}
-
-struct Registering<'a> {
-    set: &'a Shared<JoinSet>,
-    admitted: bool,
-}
-
-impl Drop for Registering<'_> {
-    fn drop(&mut self) {
-        if self.admitted {
-            lock(self.set, "JoinSet::finish_spawn").finish_spawn();
-        }
-    }
-}
-
-fn record<E>(errors: &SharedErrors<E>, error: E) -> Receipt {
-    let mut errors = errors.lock();
-    let place = errors.next;
-    errors.next += 1;
-    errors.recorded.insert(place, error);
-    Receipt(place)
-}
-
-fn claim<E>(errors: &SharedErrors<E>, receipt: Receipt) -> Option<E> {
-    errors.lock().recorded.remove(&receipt.0)
-}
-
-fn take_oldest<E>(errors: &SharedErrors<E>) -> Option<E> {
-    errors.lock().recorded.pop_first().map(|(_, error)| error)
-}
-
-fn orphan<E>(errors: &SharedErrors<E>) {
-    let first = {
-        let mut errors = errors.lock();
-        let first = !errors.must_stop();
-        errors.orphaned = true;
-        first
-    };
-    if first {
-        errors.on_stop.notify_all();
-    }
-}
-
-fn keep_panic<E>(errors: &SharedErrors<E>, join_error: JoinError) -> bool {
-    let Ok(payload) = join_error.try_into_panic() else {
-        return false;
-    };
-    let first = {
-        let mut errors = errors.lock();
-        let first = !errors.must_stop();
-        if errors.panic.is_none() {
-            errors.panic = Some(payload);
-        }
-        first
-    };
-    if first {
-        errors.on_stop.notify_all();
-    }
-    true
-}
-
-fn reaped<E>(errors: &SharedErrors<E>, result: Result<(), JoinError>) -> bool {
-    match result {
-        Ok(()) => false,
-        Err(JoinError::Cancelled) => {
-            errors.lock().reaped_cancelled = true;
-            false
-        }
-        Err(join_error) => keep_panic(errors, join_error),
-    }
-}
-
-async fn join_next(set: &Shared<JoinSet>) -> Option<Result<(), JoinError>> {
-    poll_fn(|cx| lock(set, "JoinSet::poll_join_next").poll_join_next(cx)).await
-}
-
-async fn reap<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
+async fn reap<E>(set: &Locked<JoinSet>, ledger: &Ledger<E>) {
     poll_fn(|cx| {
         loop {
-            let next = lock(set, "JoinSet::poll_join_next").poll_join_next(cx);
+            let next = set.lock("JoinSet::poll_join_next").poll_join_next(cx);
             match next {
                 Poll::Ready(Some(result)) => {
-                    if reaped(errors, result) {
+                    if ledger.reaped(result) {
                         return Poll::Ready(());
                     }
                 }
@@ -431,15 +229,15 @@ async fn reap<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
     .await
 }
 
-async fn stopped<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
+async fn stopped<E>(set: &Locked<JoinSet>, ledger: &Ledger<E>) {
     let must_stop = async {
         loop {
-            if errors.lock().must_stop() {
+            if ledger.lock().must_stop() {
                 return;
             }
             // Register before the second check so a concurrent failure wakes the wait.
-            let listener = errors.on_stop.listen();
-            if errors.lock().must_stop() {
+            let listener = ledger.on_stop.listen();
+            if ledger.lock().must_stop() {
                 return;
             }
             listener.await;
@@ -452,26 +250,8 @@ async fn stopped<E>(set: &Shared<JoinSet>, errors: &SharedErrors<E>) {
     let () = tokio::select! {
         biased;
         () = must_stop => {},
-        () = reap(set, errors) => {},
+        () = reap(set, ledger) => {},
     };
-}
-
-// Sends a task's result to its handle. An error the handle is no longer
-// there to take stays recorded, now orphaned.
-fn deliver<T, E>(
-    errors: &SharedErrors<E>,
-    tx: Reply<Result<T, Receipt>>,
-    result: Result<T, Receipt>,
-) {
-    if let Err(Closed(Err(_))) = tx.send(result) {
-        orphan(errors);
-    }
-}
-
-async fn handled<X>(future: impl Future<Output = Result<(), X>>, on_error: impl FnOnce(X)) {
-    if let Err(error) = future.await {
-        on_error(error);
-    }
 }
 
 #[allow(
@@ -515,309 +295,8 @@ fn no_orphan() -> ! {
 /// [`run`](Self::run) for the common shape, or [`new`](Self::new),
 /// [`spawn`](Self::spawn) and [`join`](Self::join) by hand.
 pub struct Tasks<E> {
-    set: Shared<JoinSet>,
-    world: World,
-    errors: SharedErrors<E>,
+    spawner: Spawner<E>,
     cancellation: Option<Cancellation>,
-    #[cfg(feature = "tracing")]
-    named: Shared<trace::Running>,
-}
-
-/// A cloneable capability to add tasks to one [`Tasks`] scope.
-///
-/// Obtain one with [`Tasks::spawner`]. Registered children can add siblings
-/// even after the body returns successfully. Idle handles do not keep the
-/// scope alive: joining closes admission when the last registered task has
-/// been drained. Failure shutdown and owner drop also close admission.
-/// A spawn racing closure either joins the scope or returns [`SpawnError`].
-///
-/// Only `Tasks` can join, cancel, or claim task results with [`Tasks::value`].
-/// This handle does not limit concurrency or provide sibling-to-sibling waits.
-pub struct Spawner<E> {
-    set: Shared<JoinSet>,
-    world: World,
-    errors: SharedErrors<E>,
-    #[cfg(feature = "tracing")]
-    named: Shared<trace::Running>,
-}
-
-/// The scope has closed admission and the submitted work was not started.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SpawnError;
-
-impl fmt::Display for SpawnError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("task scope is closed")
-    }
-}
-
-impl std::error::Error for SpawnError {}
-
-impl<E: Send + 'static> Spawner<E> {
-    /// Starts `future` in this scope, or drops it without polling if the
-    /// scope has closed admission. Dropping rejected work happens outside
-    /// the admission lock, so its cleanup may safely attempt another spawn.
-    ///
-    /// Errors and panics follow [`Tasks::spawn`]'s rules. The returned handle
-    /// can be sent to the owner for [`Tasks::value`], or dropped to leave its
-    /// result to the scope. `SpawnError` is returned to the caller rather
-    /// than recorded as a task failure.
-    pub fn spawn<T, F>(&self, future: F) -> Result<Task<T, E>, SpawnError>
-    where
-        T: Send + 'static,
-        F: Future<Output = Result<T, E>> + Send + 'static,
-    {
-        self.submit_future(true, future)
-    }
-
-    /// Starts a named task as in [`Tasks::spawn_named`], with tracing spans
-    /// and deterministic timeline names when the corresponding features are enabled.
-    pub fn spawn_named<T, F>(
-        &self,
-        name: impl Into<crate::Str>,
-        future: F,
-    ) -> Result<Task<T, E>, SpawnError>
-    where
-        T: Send + 'static,
-        F: Future<Output = Result<T, E>> + Send + 'static,
-    {
-        self.spawn(self.name_future(name, future))
-    }
-
-    /// Starts a task whose error goes to the handler, as in [`Tasks::spawn_handled`].
-    /// If admission has closed, neither the future nor the handler runs.
-    pub fn spawn_handled<X, F, H>(&self, future: F, on_error: H) -> Result<(), SpawnError>
-    where
-        X: 'static,
-        F: Future<Output = Result<(), X>> + Send + 'static,
-        H: FnOnce(X) + Send + 'static,
-    {
-        self.submit_handled(true, handled(future, on_error))
-    }
-
-    /// Starts a named task whose error goes to the handler, as in [`Tasks::spawn_handled_named`].
-    pub fn spawn_handled_named<X, F, H>(
-        &self,
-        name: impl Into<crate::Str>,
-        future: F,
-        on_error: H,
-    ) -> Result<(), SpawnError>
-    where
-        X: 'static,
-        F: Future<Output = Result<(), X>> + Send + 'static,
-        H: FnOnce(X) + Send + 'static,
-    {
-        self.submit_handled(true, self.name_future(name, handled(future, on_error)))
-    }
-
-    /// Registers blocking work as in [`Tasks::spawn_blocking`].
-    /// Scope shutdown waits for admitted closures that have started.
-    pub fn spawn_blocking<T, F>(&self, f: F) -> Result<Task<T, E>, SpawnError>
-    where
-        T: Send + 'static,
-        F: FnOnce() -> Result<T, E> + Send + 'static,
-    {
-        self.submit_blocking(true, f)
-    }
-
-    /// Registers named blocking work as in [`Tasks::spawn_blocking_named`].
-    pub fn spawn_blocking_named<T, F>(
-        &self,
-        name: impl Into<crate::Str>,
-        f: F,
-    ) -> Result<Task<T, E>, SpawnError>
-    where
-        T: Send + 'static,
-        F: FnOnce() -> Result<T, E> + Send + 'static,
-    {
-        self.spawn_blocking(self.name_blocking(name, f))
-    }
-
-    fn register<W: Send + 'static>(
-        &self,
-        require_open: bool,
-        work: W,
-        submit: impl FnOnce(&mut JoinSet, Shared<Option<W>>),
-    ) -> Result<(), SpawnError> {
-        self.world.check();
-        // Keep registration alive until any synchronously cancelled work
-        // has been destroyed outside the set lock.
-        let mut registering = Registering {
-            set: &self.set,
-            admitted: false,
-        };
-        let retained = shared(Some(work));
-        {
-            let mut set = lock(&self.set, "Tasks::submit");
-            // The owner already reaped and may still submit after observing
-            // a panic, so it can drain the new work before resuming the panic.
-            if require_open {
-                if !set.begin_spawn() {
-                    return Err(SpawnError);
-                }
-                registering.admitted = true;
-                set.reap_finished();
-            }
-            submit(&mut set, Arc::clone(&retained));
-        }
-        release_work(&self.errors, retained);
-        Ok(())
-    }
-
-    fn submit_future<T, F>(&self, require_open: bool, future: F) -> Result<Task<T, E>, SpawnError>
-    where
-        T: Send + 'static,
-        F: Future<Output = Result<T, E>> + Send + 'static,
-    {
-        self.world.check();
-        let (tx, rx) = Reply::pair();
-        let errors = Arc::clone(&self.errors);
-        self.submit_handled(require_open, async move {
-            let result = future.await.map_err(|error| record(&errors, error));
-            deliver(&errors, tx, result);
-        })?;
-        Ok(self.task(rx))
-    }
-
-    fn submit_handled(
-        &self,
-        require_open: bool,
-        future: impl Future<Output = ()> + Send + 'static,
-    ) -> Result<(), SpawnError> {
-        self.register(require_open, future, |set, work| {
-            set.spawn(async move { take_work(work).await });
-        })
-    }
-
-    fn submit_blocking<T, F>(&self, require_open: bool, f: F) -> Result<Task<T, E>, SpawnError>
-    where
-        T: Send + 'static,
-        F: FnOnce() -> Result<T, E> + Send + 'static,
-    {
-        self.world.check();
-        let (tx, rx) = Reply::pair();
-        let errors = Arc::clone(&self.errors);
-        self.register(
-            require_open,
-            move || {
-                let result = f().map_err(|error| record(&errors, error));
-                deliver(&errors, tx, result);
-            },
-            |set, work| set.spawn_blocking(move || take_work(work)()),
-        )?;
-        Ok(self.task(rx))
-    }
-
-    fn task<T>(&self, rx: ReplyReceiver<Result<T, Receipt>>) -> Task<T, E> {
-        Task {
-            world: self.world,
-            rx,
-            errors: Arc::clone(&self.errors),
-        }
-    }
-
-    fn name_future<F: Future + Send + 'static, N: Into<crate::Str>>(
-        &self,
-        name: N,
-        future: F,
-    ) -> impl Future<Output = F::Output> + Send + 'static + use<F, N, E> {
-        self.world.check();
-        #[cfg(feature = "tracing")]
-        let name = name.into();
-        #[cfg(all(feature = "tracing", feature = "deterministic"))]
-        let future = crate::runtime::trace::named_str(self.world, name.clone(), future);
-        #[cfg(feature = "tracing")]
-        let future = trace::instrument(&self.named, name, future);
-        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
-        let future = crate::runtime::trace::named(self.world, name, future);
-        #[cfg(all(not(feature = "tracing"), not(feature = "deterministic")))]
-        let _ = name;
-        future
-    }
-
-    fn name_blocking<T, F, N: Into<crate::Str>>(
-        &self,
-        name: N,
-        f: F,
-    ) -> impl FnOnce() -> Result<T, E> + Send + 'static + use<T, F, N, E>
-    where
-        T: 'static,
-        F: FnOnce() -> Result<T, E> + Send + 'static,
-    {
-        self.world.check();
-        #[cfg(feature = "tracing")]
-        let name = name.into();
-        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
-        let name = if self.world.is_model() && crate::runtime::trace::is_active() {
-            Some(name.into())
-        } else {
-            None
-        };
-        #[cfg(feature = "tracing")]
-        {
-            #[cfg(feature = "deterministic")]
-            let trace_name = if self.world.is_model() && crate::runtime::trace::is_active() {
-                Some(name.clone())
-            } else {
-                None
-            };
-            let (running, span) = trace::track(&self.named, name);
-            let dispatch = tracing::dispatcher::get_default(Clone::clone);
-            move || {
-                #[cfg(feature = "deterministic")]
-                if let Some(trace_name) = trace_name {
-                    crate::runtime::trace::record_current_task_name(&trace_name);
-                }
-                tracing::dispatcher::with_default(&dispatch, move || {
-                    span.in_scope(move || {
-                        let _running = running;
-                        f()
-                    })
-                })
-            }
-        }
-        #[cfg(all(not(feature = "tracing"), feature = "deterministic"))]
-        {
-            move || {
-                if let Some(name) = name {
-                    crate::runtime::trace::record_current_task_name(&name);
-                }
-                f()
-            }
-        }
-        #[cfg(all(not(feature = "tracing"), not(feature = "deterministic")))]
-        {
-            let _ = name;
-            f
-        }
-    }
-}
-
-impl<E> Clone for Spawner<E> {
-    fn clone(&self) -> Self {
-        self.world.check();
-        Self {
-            set: Arc::clone(&self.set),
-            world: self.world,
-            errors: Arc::clone(&self.errors),
-            #[cfg(feature = "tracing")]
-            named: Arc::clone(&self.named),
-        }
-    }
-}
-
-impl<E> fmt::Debug for Spawner<E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.world.check();
-        f.debug_struct("Spawner").finish_non_exhaustive()
-    }
-}
-
-#[cfg(feature = "deterministic")]
-impl<E> Drop for Spawner<E> {
-    fn drop(&mut self) {
-        self.world.check_unless_panicking();
-    }
 }
 
 /// The handle to a task spawned in a [`Tasks`] scope.
@@ -839,7 +318,7 @@ impl<E> Drop for Spawner<E> {
 pub struct Task<T, E> {
     world: World,
     rx: ReplyReceiver<Result<T, Receipt>>,
-    errors: SharedErrors<E>,
+    ledger: Arc<Ledger<E>>,
 }
 
 impl<E: Send + 'static> Tasks<E> {
@@ -869,34 +348,20 @@ impl<E: Send + 'static> Tasks<E> {
     /// # Ok(()) }
     /// ```
     pub fn spawner(&self) -> Spawner<E> {
-        self.world.check();
-        Spawner {
-            set: Arc::clone(&self.set),
-            world: self.world,
-            errors: Arc::clone(&self.errors),
-            #[cfg(feature = "tracing")]
-            named: Arc::clone(&self.named),
-        }
+        self.spawner.clone()
     }
 
     /// An empty scope.
     pub fn new() -> Self {
         Self {
-            set: shared(JoinSet::new()),
-            world: World::current(),
-            errors: Arc::new(Ledger {
-                errors: Lock::new(Errors {
-                    next: 0,
-                    recorded: BTreeMap::new(),
-                    panic: None,
-                    orphaned: false,
-                    reaped_cancelled: false,
-                }),
-                on_stop: WaitQueue::named("tasks.stop"),
-            }),
+            spawner: Spawner {
+                set: locked(JoinSet::new()),
+                world: World::current(),
+                ledger: Arc::new(Ledger::new()),
+                #[cfg(feature = "tracing")]
+                named: locked(trace::Running::default()),
+            },
             cancellation: None,
-            #[cfg(feature = "tracing")]
-            named: shared(trace::Running::default()),
         }
     }
 
@@ -932,15 +397,15 @@ impl<E: Send + 'static> Tasks<E> {
     {
         crate::runtime::in_world(World::current(), async move {
             let mut tasks = Self::new();
-            let set = Arc::clone(&tasks.set);
-            let errors = Arc::clone(&tasks.errors);
+            let set = Arc::clone(&tasks.spawner.set);
+            let ledger = Arc::clone(&tasks.spawner.ledger);
             #[expect(
                 clippy::disallowed_methods,
                 reason = "the task scope observes child failure while its body is pending"
             )]
             let () = tokio::select! {
                 biased;
-                () = stopped(&set, &errors) => {},
+                () = stopped(&set, &ledger) => {},
                 result = body(&mut tasks) => return tasks.join(result).await,
             };
             tasks.fail().await
@@ -998,8 +463,8 @@ impl<E: Send + 'static> Tasks<E> {
         crate::runtime::in_world(World::current(), async move {
             let mut tasks = Self::new();
             tasks.cancellation = Some(cancellation.clone());
-            let set = Arc::clone(&tasks.set);
-            let errors = Arc::clone(&tasks.errors);
+            let set = Arc::clone(&tasks.spawner.set);
+            let ledger = Arc::clone(&tasks.spawner.ledger);
             #[expect(
                 clippy::disallowed_methods,
                 reason = "run_until observes shutdown and child failure while its body is pending"
@@ -1007,10 +472,9 @@ impl<E: Send + 'static> Tasks<E> {
             let reason = tokio::select! {
                 biased;
                 reason = shutdown(&cancellation, deadline) => reason,
-                () = stopped(&set, &errors) => return tasks.fail().await.map_err(ScopeError::Failed),
+                () = stopped(&set, &ledger) => return tasks.fail().await.map_err(ScopeError::Failed),
                 result = body(&mut tasks) => return tasks.join_until(cancellation, deadline, result).await,
             };
-            #[cfg(feature = "tracing")]
             tasks.report_deadline(&reason);
             tasks.abort();
             tasks.join(Ok(())).await.map_err(ScopeError::Failed)?;
@@ -1073,8 +537,8 @@ impl<E: Send + 'static> Tasks<E> {
         crate::runtime::in_world(World::current(), async move {
             let mut tasks = Self::new();
             tasks.cancellation = Some(cancellation.clone());
-            let set = Arc::clone(&tasks.set);
-            let errors = Arc::clone(&tasks.errors);
+            let set = Arc::clone(&tasks.spawner.set);
+            let ledger = Arc::clone(&tasks.spawner.ledger);
             #[expect(
                 clippy::disallowed_methods,
                 reason = "run_with_grace observes shutdown and child failure while its body is pending"
@@ -1082,12 +546,12 @@ impl<E: Send + 'static> Tasks<E> {
             let body = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => None,
-                () = stopped(&set, &errors) => return tasks.fail().await.map_err(ScopeError::Failed),
+                () = stopped(&set, &ledger) => return tasks.fail().await.map_err(ScopeError::Failed),
                 result = body(&mut tasks) => Some(result),
             };
             let Some(body) = body else {
                 let reason = tasks.drain_with_grace(grace, false).await;
-                return match take_oldest(&tasks.errors) {
+                return match tasks.spawner.ledger.take_oldest() {
                     Some(error) => Err(ScopeError::Failed(error)),
                     None => Err(reason.scope_error()),
                 };
@@ -1106,11 +570,7 @@ impl<E: Send + 'static> Tasks<E> {
             } else {
                 None
             };
-            let value = tasks.result(body).map_err(ScopeError::Failed)?;
-            match reason {
-                Some(reason) => Err(reason.scope_error()),
-                None => Ok(value),
-            }
+            tasks.outcome(body, reason)
         })
         .await
     }
@@ -1121,9 +581,9 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
-        self.world.check();
+        self.spawner.world.check();
         self.reap();
-        owner_submission(self.spawner().submit_future(false, future))
+        owner_submission(self.spawner.submit_future(Submitter::Owner, future))
     }
 
     /// Starts a named task. With the `tracing` feature, its future is polled
@@ -1136,7 +596,7 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
-        let future = self.spawner().name_future(name, future);
+        let future = self.spawner.name_future(name, future);
         self.spawn(future)
     }
 
@@ -1182,11 +642,11 @@ impl<E: Send + 'static> Tasks<E> {
         F: Future<Output = Result<(), X>> + Send + 'static,
         H: FnOnce(X) + Send + 'static,
     {
-        self.world.check();
+        self.spawner.world.check();
         self.reap();
         owner_submission(
-            self.spawner()
-                .submit_handled(false, handled(future, on_error)),
+            self.spawner
+                .submit_handled(Submitter::Owner, handled(future, on_error)),
         );
     }
 
@@ -1206,10 +666,9 @@ impl<E: Send + 'static> Tasks<E> {
         F: Future<Output = Result<(), X>> + Send + 'static,
         H: FnOnce(X) + Send + 'static,
     {
-        let spawner = self.spawner();
-        let future = spawner.name_future(name, handled(future, on_error));
+        let future = self.spawner.name_future(name, handled(future, on_error));
         self.reap();
-        owner_submission(spawner.submit_handled(false, future));
+        owner_submission(self.spawner.submit_handled(Submitter::Owner, future));
     }
 
     /// Registers blocking work directly with this scope.
@@ -1224,9 +683,9 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
-        self.world.check();
+        self.spawner.world.check();
         self.reap();
-        owner_submission(self.spawner().submit_blocking(false, f))
+        owner_submission(self.spawner.submit_blocking(Submitter::Owner, f))
     }
 
     /// Registers named blocking work, with the same cleanup contract as
@@ -1238,17 +697,17 @@ impl<E: Send + 'static> Tasks<E> {
         T: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
-        let f = self.spawner().name_blocking(name, f);
+        let f = self.spawner.name_blocking(name, f);
         self.spawn_blocking(f)
     }
 
     /// Waits for a task and returns its result. If the task panicked, the
     /// panic is resumed here.
     pub async fn value<T: Send>(&mut self, task: Task<T, E>) -> Result<T, E> {
-        crate::runtime::in_world(self.world, async move {
+        crate::runtime::in_world(self.spawner.world, async move {
             let error = match task.rx.receive().await {
                 Some(Ok(value)) => return Ok(value),
-                Some(Err(receipt)) => claim(&task.errors, receipt),
+                Some(Err(receipt)) => task.ledger.claim(receipt),
                 None => None,
             };
             match error {
@@ -1268,7 +727,7 @@ impl<E: Send + 'static> Tasks<E> {
     /// `body` already took it with [`value`](Self::value), is returned over
     /// a successful body; a failed body's error is returned over a task's.
     pub async fn join<R: Send>(mut self, body: Result<R, E>) -> Result<R, E> {
-        crate::runtime::in_world(self.world, async move {
+        crate::runtime::in_world(self.spawner.world, async move {
             self.settle(body.is_err()).await;
             self.result(body)
         })
@@ -1285,7 +744,7 @@ impl<E: Send + 'static> Tasks<E> {
         deadline: Option<Instant>,
         body: Result<R, E>,
     ) -> impl Future<Output = Result<R, ScopeError<E>>> + Send {
-        self.world.check();
+        self.spawner.world.check();
         self.cancellation = Some(cancellation.clone());
         crate::runtime::in_world(World::current(), async move {
             #[expect(
@@ -1298,18 +757,9 @@ impl<E: Send + 'static> Tasks<E> {
                 () = self.settle(body.is_err()) => None,
             };
             if let Some(reason) = &reason {
-                #[cfg(feature = "tracing")]
-                self.report_deadline(reason);
-                #[cfg(not(feature = "tracing"))]
-                let _ = reason;
-                self.abort();
-                self.drain().await;
+                self.abort_and_drain(reason).await;
             }
-            let value = self.result(body).map_err(ScopeError::Failed)?;
-            match reason {
-                Some(reason) => Err(reason.scope_error()),
-                None => Ok(value),
-            }
+            self.outcome(body, reason)
         })
     }
 
@@ -1323,7 +773,7 @@ impl<E: Send + 'static> Tasks<E> {
                 aborted = true;
             }
             let next = poll_fn(|cx| {
-                let mut set = lock(&self.set, "Tasks::settle");
+                let mut set = self.spawner.set.lock("Tasks::settle");
                 let next = set.poll_join_next(cx);
                 if matches!(next, Poll::Ready(None)) {
                     set.close();
@@ -1355,24 +805,38 @@ impl<E: Send + 'static> Tasks<E> {
             return Shutdown::Cancelled;
         }
         let reason = Shutdown::DeadlineExceeded;
-        #[cfg(feature = "tracing")]
-        self.report_deadline(&reason);
-        self.abort();
-        self.drain().await;
+        self.abort_and_drain(&reason).await;
         reason
     }
 
+    async fn abort_and_drain(&mut self, reason: &Shutdown) {
+        self.report_deadline(reason);
+        self.abort();
+        self.drain().await;
+    }
+
+    #[cfg(not(feature = "tracing"))]
+    fn report_deadline(&self, _reason: &Shutdown) {}
+
     async fn fail<R>(mut self) -> Result<R, E> {
         self.settle(true).await;
-        match take_oldest(&self.errors) {
+        match self.spawner.ledger.take_oldest() {
             Some(error) => Err(error),
             // Only a handle can claim an error, and an orphaned one has none.
             None => no_orphan(),
         }
     }
 
+    fn outcome<R>(&self, body: Result<R, E>, reason: Option<Shutdown>) -> Result<R, ScopeError<E>> {
+        let value = self.result(body).map_err(ScopeError::Failed)?;
+        match reason {
+            Some(reason) => Err(reason.scope_error()),
+            None => Ok(value),
+        }
+    }
+
     fn result<R>(&self, body: Result<R, E>) -> Result<R, E> {
-        match (body, take_oldest(&self.errors)) {
+        match (body, self.spawner.ledger.take_oldest()) {
             (Err(error), _) => Err(error),
             (Ok(_), Some(error)) => Err(error),
             (Ok(value), None) => Ok(value),
@@ -1383,8 +847,8 @@ impl<E: Send + 'static> Tasks<E> {
     /// A concurrent [`Spawner::spawn`] call may still be registering or cleaning
     /// up work not reflected here; joining waits for those calls as well.
     pub fn len(&self) -> usize {
-        self.world.check();
-        lock(&self.set, "Tasks::unfinished").unfinished()
+        self.spawner.world.check();
+        self.spawner.set.lock("Tasks::unfinished").unfinished()
     }
 
     /// Whether every spawned task has finished, with [`len`](Self::len)'s
@@ -1395,34 +859,34 @@ impl<E: Send + 'static> Tasks<E> {
 
     fn reap(&mut self) {
         loop {
-            let next = lock(&self.set, "JoinSet::try_join_next").try_join_next();
+            let next = self
+                .spawner
+                .set
+                .lock("JoinSet::try_join_next")
+                .try_join_next();
             let Some(result) = next else {
                 break;
             };
-            if reaped(&self.errors, result) {
+            if self.spawner.ledger.reaped(result) {
                 self.abort();
             }
         }
     }
 
     fn failed(&self) -> bool {
-        let errors = self.errors.lock();
-        errors.reaped_cancelled || !errors.recorded.is_empty() || errors.panic.is_some()
+        self.spawner.ledger.lock().failed()
     }
 
     async fn resume_first_panic<T>(&mut self) -> T {
-        let reaped_failure = {
-            let errors = self.errors.lock();
-            errors.reaped_cancelled || errors.panic.is_some()
-        };
+        let reaped_failure = self.spawner.ledger.lock().reaped_failure();
         if reaped_failure {
             self.abort();
             self.drain().await;
         }
-        while let Some(next) = join_next(&self.set).await {
+        while let Some(next) = join_next(&self.spawner.set).await {
             if let Err(join_error) = next {
                 self.remember_panic(join_error);
-                let panicked = self.errors.lock().panic.is_some();
+                let panicked = self.spawner.ledger.lock().panic.is_some();
                 if panicked {
                     self.drain().await;
                 }
@@ -1433,27 +897,27 @@ impl<E: Send + 'static> Tasks<E> {
 
     // Keep the panic in the scope so it survives a cancelled drain.
     fn remember_panic(&mut self, join_error: JoinError) {
-        if keep_panic(&self.errors, join_error) {
+        if self.spawner.ledger.keep_panic(join_error) {
             self.abort();
         }
     }
 
     fn propagate_panic(&mut self) {
-        let payload = self.errors.lock().panic.take();
+        let payload = self.spawner.ledger.lock().panic.take();
         if let Some(payload) = payload {
             panic::resume_unwind(payload);
         }
     }
 
     fn abort(&mut self) {
-        lock(&self.set, "Tasks::abort").abort_all();
+        self.spawner.set.lock("Tasks::abort").abort_all();
         if let Some(cancellation) = &self.cancellation {
             cancellation.cancel();
         }
     }
 
     async fn drain(&mut self) {
-        while let Some(next) = join_next(&self.set).await {
+        while let Some(next) = join_next(&self.spawner.set).await {
             if let Err(error) = next {
                 self.remember_panic(error);
             }
@@ -1465,11 +929,11 @@ impl<E: Send + 'static> Tasks<E> {
 impl<E> Drop for Tasks<E> {
     fn drop(&mut self) {
         #[cfg(feature = "deterministic")]
-        self.world.check_unless_panicking();
-        if self.world.unwinding_in_foreign_world() {
+        self.spawner.world.check_unless_panicking();
+        if self.spawner.world.unwinding_in_foreign_world() {
             return;
         }
-        lock(&self.set, "Tasks::drop").abort_all();
+        self.spawner.set.lock("Tasks::drop").abort_all();
         if let Some(cancellation) = &self.cancellation {
             cancellation.request();
         }
@@ -1484,9 +948,9 @@ impl<E: Send + 'static> Default for Tasks<E> {
 
 impl<E> fmt::Debug for Tasks<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.world.check();
+        self.spawner.world.check();
         f.debug_struct("Tasks")
-            .field("len", &lock(&self.set, "Tasks::fmt").len())
+            .field("len", &self.spawner.set.lock("Tasks::fmt").len())
             .finish()
     }
 }
@@ -1499,7 +963,7 @@ impl<T, E> Drop for Task<T, E> {
         // Close before taking the receipt. Later failures orphan their own errors.
         self.rx.close();
         if let Ok(Err(_)) = self.rx.try_receive() {
-            orphan(&self.errors);
+            self.ledger.orphan();
         }
     }
 }
@@ -1509,201 +973,6 @@ impl<T, E> fmt::Debug for Task<T, E> {
         self.world.check();
         f.write_str("Task")
     }
-}
-
-/// Runs `f` on every item, at most `limit` at a time, and returns the
-/// results in input order, whatever order the items finish in. A `limit` of
-/// zero means one. The first error to happen ends the whole operation, even
-/// with earlier items still pending: no further item is taken, the running
-/// items are aborted and drained, then the error is returned. A panic in an
-/// item's future does the same and is resumed here.
-///
-/// Apart from calling `into_iter`, nothing happens until the returned future
-/// is first polled, and a future that is never polled never calls `f`. Each
-/// poll takes an item and calls `f` only while fewer than `limit` items are
-/// unfinished, so at most `limit` of `f`'s futures exist at once however long
-/// the input is. Finished results are held until the end, so they still take
-/// memory in proportion to the items completed.
-///
-/// The iterator and `f` live in the returned future, which is why they must
-/// be `Send`; `I` and the items need not be. Both run inside the future's
-/// poll rather than in a task, so a slow iterator or `f` holds up whoever is
-/// awaiting, including noticing that an item failed: put slow work in the
-/// future `f` returns. A panic in the iterator or in `f` itself unwinds
-/// through the poll and aborts the running items without waiting for them.
-///
-/// Each item runs as a task in its own scope, so polling needs a Tokio
-/// runtime, and panics at the first item without one.
-pub fn concurrently<I, F, Fut, T, E>(
-    items: I,
-    limit: usize,
-    mut f: F,
-) -> impl Future<Output = Result<Vec<T>, E>> + Send
-where
-    I: IntoIterator,
-    I::IntoIter: Send,
-    F: FnMut(I::Item) -> Fut + Send,
-    Fut: Future<Output = Result<T, E>> + Send + 'static,
-    T: Send + 'static,
-    E: Send + 'static,
-{
-    // Stop reading the iterator after None. It may resume or panic.
-    let mut items = items.into_iter().fuse();
-    let limit = limit.max(1);
-    crate::runtime::in_world(World::current(), async move {
-        let mut tasks = Tasks::new();
-        // Tasks report here rather than through handles, so items that finish
-        // behind a slow one leave only their results behind.
-        let finished = shared(Vec::new());
-        let mut started = 0;
-        // Fill the window, then wait for a place to open. A task records its
-        // error just before it ends, so this stops before taking another item.
-        while !tasks.failed() {
-            if lock(&tasks.set, "JoinSet::len").len() < limit
-                && let Some(item) = items.next()
-            {
-                let index = started;
-                started += 1;
-                let future = f(item);
-                let finished = Arc::clone(&finished);
-                tasks.spawn(async move {
-                    let value = future.await?;
-                    lock(&finished, "Tasks::record_finished").push((index, value));
-                    Ok(())
-                });
-                continue;
-            }
-            match join_next(&tasks.set).await {
-                Some(Ok(())) => {}
-                Some(Err(join_error)) => {
-                    // Nothing here has aborted a task, so a cancellation means
-                    // its runtime shut down, and that item will have no result.
-                    tasks.remember_panic(join_error);
-                    tasks.abort();
-                    break;
-                }
-                None => break,
-            }
-        }
-        tasks.join(Ok(())).await?;
-        let mut finished = std::mem::take(&mut *lock(&finished, "Tasks::take_finished"));
-        if finished.len() != started {
-            no_result();
-        }
-        finished.sort_unstable_by_key(|(index, _)| *index);
-        let mut values: Vec<T> = finished.into_iter().map(|(_, value)| value).collect();
-        values.shrink_to_fit();
-        Ok(values)
-    })
-}
-
-struct Outcomes<T, E> {
-    winner: Option<T>,
-    errors: Vec<(usize, E)>,
-}
-
-/// Runs `f` on items, at most `limit` at a time, and returns the first
-/// success to happen. A `limit` of zero means one. With a limit of one this
-/// tries the items in turn until one succeeds; with a limit as long as the
-/// input it races them all.
-///
-/// A failure only frees a place for the next item. The first success ends
-/// the whole operation: no further item is taken, the running items are
-/// aborted and drained, then the value is returned. A success that lands
-/// while they drain is dropped. If every item fails, all of their errors
-/// come back in input order, so the error at index `i` is item `i`'s; an
-/// empty input fails with no errors. A panic in an item's future aborts and
-/// drains the others and is resumed here, even after a success.
-///
-/// Laziness, the `Send` bounds, where the iterator and `f` run, and the need
-/// for a Tokio runtime are as for [`concurrently`].
-///
-/// ```
-/// use adamantium::first_ok;
-/// # async fn fetch(mirror: &str) -> Result<String, String> {
-/// #     if mirror == "a.example.com" { Err(format!("{mirror} is down")) } else { Ok(mirror.to_owned()) }
-/// # }
-/// # #[tokio::main] async fn main() -> Result<(), Vec<String>> {
-/// let mirrors = ["a.example.com", "b.example.com", "c.example.com"];
-/// let page = first_ok(mirrors, 1, fetch).await?;
-/// assert_eq!(page, "b.example.com");
-/// # Ok(()) }
-/// ```
-pub fn first_ok<I, F, Fut, T, E>(
-    items: I,
-    limit: usize,
-    mut f: F,
-) -> impl Future<Output = Result<T, Vec<E>>> + Send
-where
-    I: IntoIterator,
-    I::IntoIter: Send,
-    F: FnMut(I::Item) -> Fut + Send,
-    Fut: Future<Output = Result<T, E>> + Send + 'static,
-    T: Send + 'static,
-    E: Send + 'static,
-{
-    let mut items = items.into_iter().fuse();
-    let limit = limit.max(1);
-    crate::runtime::in_world(World::current(), async move {
-        // Items report here rather than as task errors, which would make the
-        // scope abort the others at the first failure.
-        let mut tasks = Tasks::<std::convert::Infallible>::new();
-        let outcomes = shared(Outcomes {
-            winner: None,
-            errors: Vec::new(),
-        });
-        let mut started = 0;
-        // A task reports just before it ends, so this stops before taking
-        // another item once one has succeeded.
-        while lock(&outcomes, "Tasks::race").winner.is_none() && !tasks.failed() {
-            if lock(&tasks.set, "JoinSet::len").len() < limit
-                && let Some(item) = items.next()
-            {
-                let index = started;
-                started += 1;
-                let future = f(item);
-                let outcomes = Arc::clone(&outcomes);
-                tasks.spawn(async move {
-                    let result = future.await;
-                    let mut outcomes = lock(&outcomes, "Tasks::race");
-                    match result {
-                        Ok(value) => {
-                            if outcomes.winner.is_none() {
-                                outcomes.winner = Some(value);
-                            }
-                        }
-                        Err(error) => outcomes.errors.push((index, error)),
-                    }
-                    Ok(())
-                });
-                continue;
-            }
-            match join_next(&tasks.set).await {
-                Some(Ok(())) => {}
-                Some(Err(join_error)) => {
-                    // Nothing here has aborted a task yet, so a cancellation
-                    // means its runtime shut down, and that item has no result.
-                    tasks.remember_panic(join_error);
-                    break;
-                }
-                None => break,
-            }
-        }
-        tasks.abort();
-        let Ok(()) = tasks.join(Ok(())).await;
-        let (winner, mut errors) = {
-            let mut outcomes = lock(&outcomes, "Tasks::race");
-            (outcomes.winner.take(), std::mem::take(&mut outcomes.errors))
-        };
-        if let Some(value) = winner {
-            return Ok(value);
-        }
-        if errors.len() != started {
-            no_result();
-        }
-        errors.sort_unstable_by_key(|(index, _)| *index);
-        Err(errors.into_iter().map(|(_, error)| error).collect())
-    })
 }
 
 /// Runs `f` on a thread meant for blocking work and returns its result. Use
@@ -1731,426 +1000,4 @@ where
         }
     })
     .await
-}
-
-#[cfg(test)]
-mod retention_tests {
-    use super::*;
-    use futures_util::FutureExt;
-    use std::panic::AssertUnwindSafe;
-
-    async fn yield_now() {
-        #[cfg(feature = "deterministic")]
-        if World::current().is_model() {
-            shuttle::future::yield_now().await;
-            return;
-        }
-        tokio::task::yield_now().await;
-    }
-
-    struct Dropped(crate::Actor<bool>);
-
-    impl Drop for Dropped {
-        fn drop(&mut self) {
-            self.0.with(|dropped| *dropped = true);
-        }
-    }
-
-    enum Reap {
-        Spawn,
-        SpawnBlocking,
-    }
-
-    #[tokio::test]
-    async fn aborted_work_stays_unfinished_until_it_is_dropped() {
-        let mut tasks = Tasks::<()>::new();
-        tasks.spawn(std::future::pending::<Result<(), ()>>());
-        tasks.spawn(std::future::pending::<Result<(), ()>>());
-        assert_eq!(tasks.len(), 2);
-        tasks.abort();
-        assert_eq!(tasks.len(), 2);
-        tasks.drain().await;
-        assert!(tasks.is_empty());
-    }
-
-    async fn panic_scenario() {
-        for blocking in [false, true] {
-            for through_value in [false, true] {
-                for reaper in [Reap::Spawn, Reap::SpawnBlocking] {
-                    let mut tasks = Tasks::<&str>::new();
-                    let failed = if blocking {
-                        tasks.spawn_blocking::<(), _>(|| panic!("reaped panic"))
-                    } else {
-                        tasks.spawn::<(), _>(async { panic!("reaped panic") })
-                    };
-                    while !failed.rx.is_closed() {
-                        yield_now().await;
-                    }
-                    while tasks.errors.lock().panic.is_none() {
-                        match reaper {
-                            Reap::Spawn => drop(tasks.spawn(async { Ok(()) })),
-                            Reap::SpawnBlocking => drop(tasks.spawn_blocking(|| Ok(()))),
-                        }
-                        yield_now().await;
-                    }
-
-                    // Work added after reaping must also be drained before the
-                    // saved panic is resumed.
-                    let dropped = crate::Actor::new(false);
-                    let guard = Dropped(dropped.clone());
-                    tasks.spawn(async move {
-                        let _guard = guard;
-                        std::future::pending::<()>().await;
-                        Ok(())
-                    });
-                    let panic = AssertUnwindSafe(async move {
-                        if through_value {
-                            tasks.value(failed).await
-                        } else {
-                            tasks.join(Err::<(), _>("body error")).await
-                        }
-                    })
-                    .catch_unwind()
-                    .await
-                    .unwrap_err();
-                    assert_eq!(panic.downcast_ref::<&str>(), Some(&"reaped panic"));
-                    assert!(dropped.snapshot());
-                }
-            }
-        }
-    }
-
-    #[cfg_attr(target_os = "wasi", ignore = "WASI aborts on panic")]
-    #[tokio::test]
-    async fn reaped_panics_reach_value_and_join_after_cleanup() {
-        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
-        tokio::time::timeout(std::time::Duration::from_secs(30), panic_scenario())
-            .await
-            .unwrap();
-    }
-
-    #[cfg(feature = "deterministic")]
-    #[test]
-    fn reaped_panics_survive_deterministic_replay() {
-        let config = crate::testing::Config {
-            seed: 187,
-            iterations: 100,
-            max_steps: 30_000,
-            ..crate::testing::Config::default()
-        };
-        let replay = crate::testing::check(config, panic_scenario).unwrap();
-        assert_eq!(
-            crate::testing::replay(&replay, panic_scenario).unwrap(),
-            replay
-        );
-    }
-
-    #[tokio::test]
-    async fn spawning_keeps_retained_entries_bounded_across_100_000_tasks() {
-        Tasks::<()>::run(async |tasks| {
-            for _ in 0..1_000 {
-                let handles: Vec<_> = (0..100).map(|_| tasks.spawn(async { Ok(()) })).collect();
-                assert!(
-                    lock(&tasks.set, "JoinSet::len").len() <= 100,
-                    "completed entries accumulated"
-                );
-                for handle in handles {
-                    tasks.value(handle).await?;
-                }
-            }
-            assert_eq!(tasks.len(), 0);
-            for _ in 0..1_000 {
-                for _ in 0..100 {
-                    tasks.spawn_handled(async { Ok::<_, ()>(()) }, |()| {});
-                }
-                assert!(
-                    lock(&tasks.set, "JoinSet::len").len() <= 100,
-                    "completed handled entries accumulated"
-                );
-                while !tasks.is_empty() {
-                    yield_now().await;
-                }
-            }
-            Ok(())
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn handled_spawner_reaps_completed_entries_before_join() {
-        let tasks = Tasks::<()>::new();
-        let spawner = tasks.spawner();
-        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
-        tokio::time::timeout(Duration::from_secs(30), async {
-            for _ in 0..100 {
-                spawner.spawn_handled(async { Err(()) }, |()| {}).unwrap();
-                while !tasks.is_empty() {
-                    yield_now().await;
-                }
-                // One task entry and at most one coalesced completion.
-                assert!(lock(&tasks.set, "JoinSet::len").len() <= 2);
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(tasks.join(Ok(())).await, Ok(()));
-    }
-
-    #[cfg(not(target_os = "wasi"))]
-    #[tokio::test]
-    async fn spawner_reaping_leaves_panics_for_scope_shutdown() {
-        let tasks = Tasks::<()>::new();
-        let spawner = tasks.spawner();
-        spawner
-            .spawn_handled(async { panic!("handled task panic") }, |(): ()| {})
-            .unwrap();
-        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
-        tokio::time::timeout(Duration::from_secs(30), async {
-            while !tasks.is_empty() {
-                yield_now().await;
-            }
-            spawner
-                .spawn_handled(std::future::pending(), |(): ()| {})
-                .unwrap();
-            // The second submission reaps the first task. Joining must
-            // still see its panic and abort the pending sibling.
-            let panic = AssertUnwindSafe(tasks.join(Ok(())))
-                .catch_unwind()
-                .await
-                .unwrap_err();
-            assert_eq!(panic.downcast_ref::<&str>(), Some(&"handled task panic"));
-        })
-        .await
-        .unwrap();
-    }
-
-    async fn reaped_error_during_join() {
-        let mut tasks = Tasks::<&str>::new();
-        let spawner = tasks.spawner();
-        let set = Arc::clone(&tasks.set);
-        let (release, released) = Reply::pair();
-        let failed = tasks.spawn(async move {
-            released.receive().await.unwrap();
-            Err::<(), _>("child failed")
-        });
-
-        let mut join = pin!(tasks.join(Ok(())));
-        poll_fn(|cx| {
-            assert!(join.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        release.send(()).unwrap();
-        while lock(&set, "JoinSet::unfinished").unfinished() != 0 {
-            yield_now().await;
-        }
-
-        let dropped = crate::Actor::new(false);
-        let guard = Dropped(dropped.clone());
-        spawner
-            .spawn_handled(
-                async move {
-                    let _guard = guard;
-                    std::future::pending::<Result<(), ()>>().await
-                },
-                |()| {},
-            )
-            .unwrap();
-        assert_eq!(join.await, Err("child failed"));
-        assert!(dropped.snapshot());
-        drop(failed);
-    }
-
-    #[tokio::test]
-    async fn join_observes_a_child_error_even_when_a_spawner_reaps_its_completion() {
-        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
-        tokio::time::timeout(Duration::from_secs(30), reaped_error_during_join())
-            .await
-            .unwrap();
-    }
-
-    #[cfg(feature = "deterministic")]
-    #[test]
-    fn join_observes_a_reaped_completion_under_replay() {
-        let config = crate::testing::Config {
-            seed: 224,
-            iterations: 100,
-            max_steps: 10_000,
-            ..crate::testing::Config::default()
-        };
-        let replay = crate::testing::check(config, reaped_error_during_join).unwrap();
-        assert_eq!(
-            crate::testing::replay(&replay, reaped_error_during_join).unwrap(),
-            replay
-        );
-    }
-
-    // Spawns connections that finish at once, then waits without spawning
-    // again: only the running scope's own reaping can let go of them.
-    async fn idle_server_scenario() {
-        Tasks::<()>::run(async |tasks| {
-            let served = crate::Actor::new(0);
-            for _ in 0..100 {
-                let served = served.clone();
-                tasks.spawn_handled(
-                    async move {
-                        served.with(|served| *served += 1);
-                        Ok::<_, ()>(())
-                    },
-                    |()| panic!("the connection succeeded"),
-                );
-            }
-            while served.snapshot() < 100 || !lock(&tasks.set, "JoinSet::is_empty").is_empty() {
-                crate::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
-            Ok(())
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_running_scope_reaps_tasks_without_another_spawn() {
-        #[allow(clippy::disallowed_methods, reason = "test watchdog")]
-        tokio::time::timeout(std::time::Duration::from_secs(30), idle_server_scenario())
-            .await
-            .unwrap();
-    }
-
-    #[cfg(feature = "deterministic")]
-    #[test]
-    fn a_running_scope_reaps_tasks_without_another_spawn_under_replay() {
-        let config = crate::testing::Config {
-            seed: 195,
-            iterations: 50,
-            max_steps: 100_000,
-            ..crate::testing::Config::default()
-        };
-        let replay = crate::testing::check(config, idle_server_scenario).unwrap();
-        assert_eq!(
-            crate::testing::replay(&replay, idle_server_scenario).unwrap(),
-            replay
-        );
-    }
-
-    // The scope's loop and the next spawn race to reap the same panic.
-    // Whichever finds it, the body stops and the sibling is drained.
-    #[cfg(feature = "deterministic")]
-    async fn panic_reaped_by_either_scenario() {
-        let dropped = crate::Actor::new(false);
-        let guard = Dropped(dropped.clone());
-        let scope = Tasks::<()>::run(async move |tasks| {
-            tasks.spawn(async move {
-                let _guard = guard;
-                std::future::pending::<()>().await;
-                Ok(())
-            });
-            let failed = tasks.spawn::<(), _>(async { panic!("reaped panic") });
-            while !failed.rx.is_closed() {
-                yield_now().await;
-            }
-            drop(tasks.spawn(async { Ok(()) }));
-            std::future::pending::<Result<(), ()>>().await
-        });
-        let panic = AssertUnwindSafe(scope).catch_unwind().await.unwrap_err();
-        assert_eq!(panic.downcast_ref::<&str>(), Some(&"reaped panic"));
-        assert!(dropped.snapshot());
-    }
-
-    #[cfg(feature = "deterministic")]
-    #[test]
-    fn a_panic_reaped_by_a_spawn_still_stops_the_body() {
-        let config = crate::testing::Config {
-            seed: 195,
-            iterations: 200,
-            max_steps: 30_000,
-            ..crate::testing::Config::default()
-        };
-        let replay = crate::testing::check(config, panic_reaped_by_either_scenario).unwrap();
-        assert_eq!(
-            crate::testing::replay(&replay, panic_reaped_by_either_scenario).unwrap(),
-            replay
-        );
-    }
-
-    #[cfg(feature = "deterministic")]
-    #[test]
-    fn finished_tasks_are_reaped_across_many_modeled_batches() {
-        async fn scenario() {
-            Tasks::<()>::run(async |tasks| {
-                for _ in 0..100 {
-                    let retained = tasks.spawn(async { Ok(42) });
-                    let blocking = tasks.spawn_blocking(|| Ok(7));
-                    while !tasks.is_empty() {
-                        yield_now().await;
-                    }
-                    let trigger = tasks.spawn(async { Ok(()) });
-                    assert_eq!(lock(&tasks.set, "JoinSet::len").len(), 1);
-                    // Reaping only releases the scope's bookkeeping. Handles
-                    // continue to own their results until value is requested.
-                    assert_eq!(tasks.value(retained).await, Ok(42));
-                    assert_eq!(tasks.value(blocking).await, Ok(7));
-                    assert_eq!(tasks.value(trigger).await, Ok(()));
-                }
-                Ok(())
-            })
-            .await
-            .unwrap();
-        }
-        let config = crate::testing::Config {
-            seed: 187,
-            iterations: 20,
-            max_steps: 100_000,
-            ..crate::testing::Config::default()
-        };
-        let replay = crate::testing::check(config, scenario).unwrap();
-        assert_eq!(crate::testing::replay(&replay, scenario).unwrap(), replay);
-    }
-}
-
-#[cfg(all(test, feature = "deterministic"))]
-mod schedule_tests {
-    use super::*;
-    use crate::testing::{self, Config};
-
-    #[test]
-    fn oldest_unclaimed_error_and_body_precedence_survive_replay() {
-        async fn scenario() {
-            let mut tasks = Tasks::<&str>::new();
-            let first = tasks.spawn(async { Err::<(), _>("first") });
-            while tasks.errors.lock().recorded.len() != 1 {
-                shuttle::future::yield_now().await;
-            }
-            let second = tasks.spawn(async { Err::<(), _>("second") });
-            while tasks.errors.lock().recorded.len() != 2 {
-                shuttle::future::yield_now().await;
-            }
-            assert_eq!(tasks.value(first).await, Err("first"));
-            let third = tasks.spawn(async { Err::<(), _>("third") });
-            while tasks.errors.lock().recorded.len() != 2 {
-                shuttle::future::yield_now().await;
-            }
-            // Retained result handles cannot hide errors from join.
-            assert_eq!(tasks.join(Ok(())).await, Err("second"));
-            drop((second, third));
-
-            let mut tasks = Tasks::<&str>::new();
-            let child = tasks.spawn(async { Err::<(), _>("child") });
-            while !tasks.failed() {
-                shuttle::future::yield_now().await;
-            }
-            assert_eq!(tasks.join(Err::<(), _>("body")).await, Err("body"));
-            drop(child);
-        }
-        let config = Config {
-            seed: 160,
-            iterations: 500,
-            max_steps: 20_000,
-            ..Config::default()
-        };
-        let replay = testing::check(config, scenario).unwrap();
-        assert_eq!(testing::check(config, scenario).unwrap(), replay);
-        assert_eq!(testing::replay(&replay, scenario).unwrap(), replay);
-    }
 }
