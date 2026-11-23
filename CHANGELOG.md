@@ -30,6 +30,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   pending notification and is safe to drop in `race` and `until`, and
   `notified_until` takes a `Cancellation` and a deadline. It works without
   Tokio.
+- `adamantium::Once` keeps a value that async work initializes once.
+  `get_or_init` and `get_or_try_init` run one initializer at a time, and
+  concurrent calls share its value. An initializer that fails, panics, or is
+  dropped leaves the cell empty, and one waiting call runs its own. `get`
+  reads without waiting, and `get_or_try_init_until` takes a `Cancellation`
+  and a deadline. It works without Tokio, and the deterministic harness
+  schedules it.
 
 ### Changed
 
@@ -60,6 +67,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   at `adamantium::Signal` for a coalescing wakeup, in place of a capacity-one
   `Channel` whose full `try_send` meant a pending signal, and links the new
   wakeup section of the migration guide.
+- `cargo-adamantium`: The strict tier reports `tokio::sync::OnceCell` and the
+  `OnceCell` and `Lazy` of `async_once_cell`, points at `adamantium::Once`,
+  and links the migration guide's section on a value initialized once.
 
 ### Fixed
 

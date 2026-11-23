@@ -4,6 +4,7 @@ mod modeled;
 
 use std::sync::mpsc::sync_channel as blocking_channel;
 use tokio::sync::Notify as Signal; // strict disallowed_types
+use tokio::sync::OnceCell as Lazy; // strict disallowed_types
 use tokio::sync::broadcast::Receiver as Subscription; // disallowed_types
 use tokio::sync::broadcast::channel as broadcast;
 use tokio::sync::mpsc::channel as bounded;
@@ -75,6 +76,13 @@ fn signals_and_limits(_notify: &Signal, // strict disallowed_types
     drop(Signal::const_new()); // strict disallowed_types
     drop(tokio::sync::Semaphore::new(2)); // strict disallowed_types
     drop(tokio::sync::Semaphore::const_new(2)); // strict disallowed_types
+}
+
+async fn cells(connection: &tokio::sync::OnceCell<u8>, // strict disallowed_types
+) -> (u8, u8) {
+    let keys: Lazy<u8> = Lazy::new(); // strict disallowed_types
+    let first = *connection.get_or_init(|| async { 1 }).await;
+    (first, *keys.get_or_init(|| async { 2 }).await)
 }
 
 fn blocking_boundary() {

@@ -17,7 +17,7 @@ const LISTS: [&str; 3] = [
 ];
 
 const ALL_FEATURES: &str = concat!(
-    "async-channel,async-std/unstable,crossbeam-channel,fastrand/std,flume,futures,parking_lot,",
+    "async-channel,async-once-cell,async-std/unstable,crossbeam-channel,fastrand/std,flume,futures,parking_lot,",
     "rand/thread_rng,rand/sys_rng,rand_08/std,rand_08/std_rng,rand_09/thread_rng,",
     "smol,tokio/full,tokio/tracing",
 );

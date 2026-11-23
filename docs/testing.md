@@ -975,8 +975,8 @@ harness has no scheduling point inside them. It never switches tasks inside a
 `tokio::sync::Mutex` lock or between a `Notify` and the wakeup, and it can't
 name them in a timeline or a deadlock report. Use the modeled types for state
 the tests should explore: `Actor` for a mutex, `Channel` for `mpsc`, `Watch`
-for `watch`, `Reply` for `oneshot`, `Topic` or `Fanout` for `broadcast`, and
-`Signal` for `Notify`.
+for `watch`, `Reply` for `oneshot`, `Topic` or `Fanout` for `broadcast`,
+`Signal` for `Notify`, and `Once` for `OnceCell`.
 The [migration guide](migrating.md) shows each rewrite, and
 `cargo adamantium check` reports Tokio's locks and its `oneshot`, `watch`,
 `broadcast` and unbounded `mpsc` channels.
@@ -1075,8 +1075,8 @@ other inputs.
 
 ### What the harness schedules
 
-`Actor`, `Channel`, `Fanout`, `Reply`, `Watch`, `SingleFlight`, `Tasks`, and
-`Cancellation` support deterministic scheduling. So do the
+`Actor`, `Channel`, `Fanout`, `Reply`, `Watch`, `SingleFlight`, `Once`,
+`Tasks`, and `Cancellation` support deterministic scheduling. So do the
 `testing::DuplexStream` ends and `testing::FaultInjector`.
 
 - The harness schedules synchronous `Actor` calls and ownership operations,
@@ -1097,6 +1097,14 @@ Channels and watches:
 
 - The harness schedules joining, leaving, the hand-off of the operation between callers, and the end of a flight. A call can arrive while the last caller of an earlier operation is still dropping it.
 - The operation's waker never switches tasks. It marks the operation woken and notifies the callers, which take turns polling it.
+
+`Once`:
+
+- The harness schedules reading the cell, taking the claim to initialize it,
+  waiting, filling it, and the hand-off to a waiting call after an
+  initializer fails, panics, or is dropped.
+- The initializer runs inside its call, so the harness schedules it as part
+  of the task that awaits the call.
 
 Tasks:
 

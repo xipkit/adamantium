@@ -13,6 +13,7 @@ use std::{
 
 use crate::runtime::{
     Guard, Lock, World,
+    polling::{Polling, polling_here},
     wait::{WaitQueue, Waiter},
 };
 #[cfg(feature = "tokio")]
@@ -522,62 +523,6 @@ it would wait for its own output, so call it from outside the operation";
 )]
 fn refuse_self_join() -> ! {
     std::panic::panic_any(SELF_JOIN)
-}
-
-thread_local! {
-    // Each entry lasts one poll, so task migration between polls is safe.
-    #[allow(clippy::disallowed_types, reason = "a per-thread list, never shared")]
-    static POLLING: std::cell::Cell<Vec<usize>> = const { std::cell::Cell::new(Vec::new()) };
-}
-
-#[cfg(feature = "deterministic")]
-shuttle::thread_local! {
-    #[allow(clippy::disallowed_types, reason = "the list belongs to a logical task, not its OS thread")]
-    static MODEL_POLLING: std::cell::Cell<Vec<usize>> = const { std::cell::Cell::new(Vec::new()) };
-}
-
-#[allow(
-    clippy::disallowed_methods,
-    clippy::disallowed_types,
-    reason = "the list is changed within one poll of the operation"
-)]
-fn with_polling<R>(f: impl FnOnce(&mut Vec<usize>) -> R) -> R {
-    let apply = |cell: &std::cell::Cell<Vec<usize>>| {
-        let mut flights = cell.take();
-        let result = f(&mut flights);
-        cell.set(flights);
-        result
-    };
-    #[cfg(feature = "deterministic")]
-    if crate::runtime::execution::current().is_some() {
-        return MODEL_POLLING.with(apply);
-    }
-    POLLING.with(apply)
-}
-
-fn address<T>(flight: &Arc<Flight<T>>) -> usize {
-    Arc::as_ptr(flight).addr()
-}
-
-fn polling_here<T>(flight: &Arc<Flight<T>>) -> bool {
-    let flight = address(flight);
-    with_polling(|flights| flights.contains(&flight))
-}
-
-struct Polling;
-
-impl Polling {
-    fn enter<T>(flight: &Arc<Flight<T>>) -> Self {
-        let flight = address(flight);
-        with_polling(|flights| flights.push(flight));
-        Self
-    }
-}
-
-impl Drop for Polling {
-    fn drop(&mut self) {
-        with_polling(|flights| flights.pop());
-    }
 }
 
 impl<K, T> Clone for SingleFlight<K, T> {

@@ -1,4 +1,4 @@
-use adamantium::{Cancellation, Channel, Limit, Reply, Topic, Watch, concurrently};
+use adamantium::{Cancellation, Channel, Limit, Once, Reply, Topic, Watch, concurrently};
 
 pub async fn queues_and_replies() -> Option<u8> {
     let (sender, receiver) = Channel::bounded(1).split();
@@ -31,4 +31,9 @@ pub async fn signals_and_limits() -> Result<Vec<()>, std::convert::Infallible> {
     let limit = Limit::new(2);
     limit.run(|| async {}).await;
     concurrently([()], 1, |()| async { Ok(()) }).await
+}
+
+pub async fn cells() -> u8 {
+    let connection = Once::new();
+    *connection.get_or_init(|| async { 1 }).await
 }

@@ -2,6 +2,8 @@
 
 #[cfg(feature = "async-channel")]
 use async_channel as _;
+#[cfg(feature = "async-once-cell")]
+use async_once_cell as _;
 #[cfg(feature = "async-std")]
 use async_std as _;
 #[cfg(feature = "crossbeam-channel")]
