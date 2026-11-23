@@ -17,7 +17,7 @@ use crate::runtime::{
 };
 use tokio::time::Instant;
 
-use crate::{Closed, Reply, ReplyReceiver, Watch, time};
+use crate::{Closed, FeedError, ReceiveError, Reply, ReplyReceiver, UntilError, Watch, time};
 
 mod stream;
 #[cfg(feature = "tracing")]
@@ -201,6 +201,50 @@ impl Shutdown {
             Self::DeadlineExceeded => ScopeError::DeadlineExceeded,
         }
     }
+
+    pub(crate) fn receive_error(self) -> ReceiveError {
+        match self {
+            Self::Cancelled => ReceiveError::Cancelled,
+            Self::DeadlineExceeded => ReceiveError::DeadlineExceeded,
+        }
+    }
+
+    pub(crate) fn feed_error(self) -> FeedError {
+        match self {
+            Self::Cancelled => FeedError::Cancelled,
+            Self::DeadlineExceeded => FeedError::DeadlineExceeded,
+        }
+    }
+
+    pub(crate) fn until_error(self) -> UntilError {
+        match self {
+            Self::Cancelled => UntilError::Cancelled,
+            Self::DeadlineExceeded => UntilError::DeadlineExceeded,
+        }
+    }
+}
+
+// Waits for `future` unless shutdown is requested first. A request present at
+// any poll wins over a ready future, which is then dropped unpolled.
+#[allow(
+    clippy::future_not_send,
+    reason = "the future is Send when the wrapped future is"
+)]
+pub(crate) async fn before_shutdown<Fut: Future>(
+    cancellation: &Cancellation,
+    deadline: Option<Instant>,
+    future: Fut,
+) -> Result<Fut::Output, Shutdown> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "shutdown is checked before the future is polled"
+    )]
+    let outcome = tokio::select! {
+        biased;
+        reason = shutdown(cancellation, deadline) => Err(reason),
+        output = future => Ok(output),
+    };
+    outcome
 }
 
 pub(crate) async fn shutdown(cancellation: &Cancellation, deadline: Option<Instant>) -> Shutdown {

@@ -11,7 +11,7 @@ use tokio::time::Instant;
 #[cfg(feature = "tokio")]
 use crate::ReceiveError;
 #[cfg(feature = "tokio")]
-use crate::tasks::{Cancellation, Shutdown, shutdown};
+use crate::tasks::{Cancellation, Shutdown, before_shutdown};
 use crate::{Closed, TryReceiveError};
 
 /// The sending half of a one-shot reply: a single value from one task to
@@ -162,19 +162,10 @@ impl<T> ReplyReceiver<T> {
         deadline: Option<Instant>,
     ) -> Result<T, ReceiveError> {
         crate::runtime::in_world(self.world, async move {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "receive_until checks shutdown before consuming the reply"
-            )]
-            let reason = tokio::select! {
-                biased;
-                reason = shutdown(cancellation, deadline) => reason,
-                received = self.inner.receive() => return received.ok_or(ReceiveError::Closed),
-            };
-            Err(match reason {
-                Shutdown::Cancelled => ReceiveError::Cancelled,
-                Shutdown::DeadlineExceeded => ReceiveError::DeadlineExceeded,
-            })
+            before_shutdown(cancellation, deadline, self.inner.receive())
+                .await
+                .map_err(Shutdown::receive_error)?
+                .ok_or(ReceiveError::Closed)
         })
         .await
     }

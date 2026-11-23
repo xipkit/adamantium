@@ -16,7 +16,7 @@ use futures_core::Stream;
 use tokio::time::Instant;
 
 #[cfg(feature = "tokio")]
-use crate::tasks::{Cancellation, Shutdown, shutdown};
+use crate::tasks::{Cancellation, Shutdown, before_shutdown};
 
 /// A bounded channel with any number of senders and receivers.
 ///
@@ -549,19 +549,10 @@ impl<T> Receiver<T> {
         deadline: Option<Instant>,
     ) -> Result<T, ReceiveError> {
         self.queue.world.check();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "receive_until checks shutdown before taking a queued value"
-        )]
-        let reason = tokio::select! {
-            biased;
-            reason = shutdown(cancellation, deadline) => reason,
-            received = self.receive() => return received.ok_or(ReceiveError::Closed),
-        };
-        Err(match reason {
-            Shutdown::Cancelled => ReceiveError::Cancelled,
-            Shutdown::DeadlineExceeded => ReceiveError::DeadlineExceeded,
-        })
+        before_shutdown(cancellation, deadline, self.receive())
+            .await
+            .map_err(Shutdown::receive_error)?
+            .ok_or(ReceiveError::Closed)
     }
 
     /// Appends up to `max` values to `batch` and returns the newly appended slice.

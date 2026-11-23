@@ -10,7 +10,7 @@ use std::{
 use tokio::time::Instant;
 
 #[cfg(feature = "tokio")]
-use crate::tasks::{Cancellation, Shutdown, shutdown};
+use crate::tasks::{Cancellation, shutdown};
 
 pub trait Race {
     type Output;
@@ -175,12 +175,7 @@ pub async fn until<Fut: Future>(
     future: Fut,
 ) -> Result<Fut::Output, UntilError> {
     race((
-        async {
-            Err(match shutdown(cancellation, deadline).await {
-                Shutdown::Cancelled => UntilError::Cancelled,
-                Shutdown::DeadlineExceeded => UntilError::DeadlineExceeded,
-            })
-        },
+        async { Err(shutdown(cancellation, deadline).await.until_error()) },
         async { Ok(future.await) },
     ))
     .await

@@ -4,7 +4,7 @@ use std::{collections::VecDeque, fmt, sync::Arc};
 use tokio::time::Instant;
 
 #[cfg(feature = "tokio")]
-use crate::tasks::{Cancellation, Shutdown, shutdown};
+use crate::tasks::{Cancellation, Shutdown, before_shutdown};
 use crate::{
     Closed,
     runtime::{Guard, Lock, World, wait::WaitQueue},
@@ -376,19 +376,10 @@ impl<T> Feed<T> {
         deadline: Option<Instant>,
     ) -> Result<T, FeedError> {
         crate::runtime::in_world(self.shared.world, async move {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "receive_until checks shutdown before taking a queued event"
-            )]
-            let reason = tokio::select! {
-                biased;
-                reason = shutdown(cancellation, deadline) => reason,
-                received = self.receive() => return received.map_err(FeedError::from),
-            };
-            Err(match reason {
-                Shutdown::Cancelled => FeedError::Cancelled,
-                Shutdown::DeadlineExceeded => FeedError::DeadlineExceeded,
-            })
+            before_shutdown(cancellation, deadline, self.receive())
+                .await
+                .map_err(Shutdown::feed_error)?
+                .map_err(FeedError::from)
         })
         .await
     }
