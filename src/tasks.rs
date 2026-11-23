@@ -417,6 +417,14 @@ fn release_work<E, W>(ledger: &Ledger<E>, retained: Shared<Option<W>>) {
     }
 }
 
+// Who submits work. The owner is never refused; a handle is, once the scope
+// has closed admission.
+#[derive(Clone, Copy)]
+enum Submitter {
+    Owner,
+    Handle,
+}
+
 struct Registering<'a> {
     set: &'a Shared<JoinSet>,
     admitted: bool,
@@ -580,7 +588,7 @@ impl<E: Send + 'static> Spawner<E> {
         T: Send + 'static,
         F: Future<Output = Result<T, E>> + Send + 'static,
     {
-        self.submit_future(true, future)
+        self.submit_future(Submitter::Handle, future)
     }
 
     /// Starts a named task as in [`Tasks::spawn_named`], with tracing spans
@@ -605,7 +613,7 @@ impl<E: Send + 'static> Spawner<E> {
         F: Future<Output = Result<(), X>> + Send + 'static,
         H: FnOnce(X) + Send + 'static,
     {
-        self.submit_handled(true, handled(future, on_error))
+        self.submit_handled(Submitter::Handle, handled(future, on_error))
     }
 
     /// Starts a named task whose error goes to the handler, as in [`Tasks::spawn_handled_named`].
@@ -620,7 +628,10 @@ impl<E: Send + 'static> Spawner<E> {
         F: Future<Output = Result<(), X>> + Send + 'static,
         H: FnOnce(X) + Send + 'static,
     {
-        self.submit_handled(true, self.name_future(name, handled(future, on_error)))
+        self.submit_handled(
+            Submitter::Handle,
+            self.name_future(name, handled(future, on_error)),
+        )
     }
 
     /// Registers blocking work as in [`Tasks::spawn_blocking`].
@@ -630,7 +641,7 @@ impl<E: Send + 'static> Spawner<E> {
         T: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
     {
-        self.submit_blocking(true, f)
+        self.submit_blocking(Submitter::Handle, f)
     }
 
     /// Registers named blocking work as in [`Tasks::spawn_blocking_named`].
@@ -648,7 +659,7 @@ impl<E: Send + 'static> Spawner<E> {
 
     fn register<W: Send + 'static>(
         &self,
-        require_open: bool,
+        submitter: Submitter,
         work: W,
         submit: impl FnOnce(&mut JoinSet, Shared<Option<W>>),
     ) -> Result<(), SpawnError> {
@@ -664,7 +675,7 @@ impl<E: Send + 'static> Spawner<E> {
             let mut set = lock(&self.set, "Tasks::submit");
             // The owner already reaped and may still submit after observing
             // a panic, so it can drain the new work before resuming the panic.
-            if require_open {
+            if matches!(submitter, Submitter::Handle) {
                 if !set.begin_spawn() {
                     return Err(SpawnError);
                 }
@@ -677,7 +688,7 @@ impl<E: Send + 'static> Spawner<E> {
         Ok(())
     }
 
-    fn submit_future<T, F>(&self, require_open: bool, future: F) -> Result<Task<T, E>, SpawnError>
+    fn submit_future<T, F>(&self, submitter: Submitter, future: F) -> Result<Task<T, E>, SpawnError>
     where
         T: Send + 'static,
         F: Future<Output = Result<T, E>> + Send + 'static,
@@ -685,7 +696,7 @@ impl<E: Send + 'static> Spawner<E> {
         self.world.check();
         let (tx, rx) = Reply::pair();
         let ledger = Arc::clone(&self.ledger);
-        self.submit_handled(require_open, async move {
+        self.submit_handled(submitter, async move {
             let result = future.await.map_err(|error| ledger.record(error));
             deliver(&ledger, tx, result);
         })?;
@@ -694,15 +705,15 @@ impl<E: Send + 'static> Spawner<E> {
 
     fn submit_handled(
         &self,
-        require_open: bool,
+        submitter: Submitter,
         future: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), SpawnError> {
-        self.register(require_open, future, |set, work| {
+        self.register(submitter, future, |set, work| {
             set.spawn(async move { take_work(work).await });
         })
     }
 
-    fn submit_blocking<T, F>(&self, require_open: bool, f: F) -> Result<Task<T, E>, SpawnError>
+    fn submit_blocking<T, F>(&self, submitter: Submitter, f: F) -> Result<Task<T, E>, SpawnError>
     where
         T: Send + 'static,
         F: FnOnce() -> Result<T, E> + Send + 'static,
@@ -711,7 +722,7 @@ impl<E: Send + 'static> Spawner<E> {
         let (tx, rx) = Reply::pair();
         let ledger = Arc::clone(&self.ledger);
         self.register(
-            require_open,
+            submitter,
             move || {
                 let result = f().map_err(|error| ledger.record(error));
                 deliver(&ledger, tx, result);
@@ -1109,7 +1120,7 @@ impl<E: Send + 'static> Tasks<E> {
     {
         self.spawner.world.check();
         self.reap();
-        owner_submission(self.spawner.submit_future(false, future))
+        owner_submission(self.spawner.submit_future(Submitter::Owner, future))
     }
 
     /// Starts a named task. With the `tracing` feature, its future is polled
@@ -1172,7 +1183,7 @@ impl<E: Send + 'static> Tasks<E> {
         self.reap();
         owner_submission(
             self.spawner
-                .submit_handled(false, handled(future, on_error)),
+                .submit_handled(Submitter::Owner, handled(future, on_error)),
         );
     }
 
@@ -1194,7 +1205,7 @@ impl<E: Send + 'static> Tasks<E> {
     {
         let future = self.spawner.name_future(name, handled(future, on_error));
         self.reap();
-        owner_submission(self.spawner.submit_handled(false, future));
+        owner_submission(self.spawner.submit_handled(Submitter::Owner, future));
     }
 
     /// Registers blocking work directly with this scope.
@@ -1211,7 +1222,7 @@ impl<E: Send + 'static> Tasks<E> {
     {
         self.spawner.world.check();
         self.reap();
-        owner_submission(self.spawner.submit_blocking(false, f))
+        owner_submission(self.spawner.submit_blocking(Submitter::Owner, f))
     }
 
     /// Registers named blocking work, with the same cleanup contract as
