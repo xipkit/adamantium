@@ -16,6 +16,7 @@ pub(crate) mod execution;
 pub(crate) mod trace;
 
 pub(crate) mod coop;
+pub(crate) mod polling;
 pub(crate) mod queue;
 #[cfg(feature = "tokio")]
 pub(crate) mod task;
