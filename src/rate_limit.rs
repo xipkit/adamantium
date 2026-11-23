@@ -70,13 +70,13 @@ impl RateLimit {
         Fut: Future<Output = Result<T, E>> + Send,
     {
         let mut stop = pin!(shutdown(cancellation, deadline));
-        let mut wake: Option<Option<Instant>> = None;
+        let mut wait: Option<Wait> = None;
         loop {
             let room = async {
-                match wake {
+                match wait {
                     None => {}
-                    Some(Some(wake)) => time::sleep_until(wake).await,
-                    Some(None) => std::future::pending().await,
+                    Some(Wait::Until(instant)) => time::sleep_until(instant).await,
+                    Some(Wait::Forever) => std::future::pending().await,
                 }
             };
             #[expect(
@@ -90,7 +90,7 @@ impl RateLimit {
             };
             match self.take() {
                 Ok(()) => break,
-                Err(leaves) => wake = Some(leaves),
+                Err(leaves) => wait = Some(leaves),
             }
         }
         #[expect(
@@ -107,7 +107,9 @@ impl RateLimit {
         result
     }
 
-    fn take(&self) -> Result<(), Option<Instant>> {
+    // Takes room under the limit, or says how long until the oldest start
+    // leaves the window.
+    fn take(&self) -> Result<(), Wait> {
         self.started.with(|started| {
             // Read the clock under the lock. Expiry checks the front and requires
             // starts to be recorded in admission order.
@@ -123,7 +125,15 @@ impl RateLimit {
             }
             Err(started
                 .front()
-                .and_then(|start| start.checked_add(self.per)))
+                .and_then(|start| start.checked_add(self.per))
+                .map_or(Wait::Forever, Wait::Until))
         })
     }
+}
+
+#[derive(Clone, Copy)]
+enum Wait {
+    Until(Instant),
+    // The end of the window is past the last representable instant.
+    Forever,
 }
