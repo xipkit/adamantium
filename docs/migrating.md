@@ -27,6 +27,7 @@ changes behavior in a way to check.
 | Two semaphore permits held at once | A `KeyedLimit` inside a `Limit`, or one after the other | No |
 | `Semaphore::acquire_many(n)` | `Limit::weighted(n)?.run(work)`, where a weight of zero takes one place | Mostly |
 | `tokio::sync::OnceCell` | `Once` | Mostly |
+| `tokio::sync::SetOnce` | A `Watch` that holds an `Option`, or `Reply::pair` when one task waits | Mostly |
 | `tokio::task::spawn_blocking(f).await.unwrap()` | `blocking(f).await` | Yes |
 | `std::thread::spawn` | `blocking` | Mostly |
 | `tokio::spawn` with the handle awaited in the same function | `Tasks::run` | Mostly |
@@ -567,8 +568,8 @@ stay the same. Check these differences:
 - A clone of a `Once` can move to another task only when the value is both
   `Send` and `Sync`.
 - `set`, `get_mut`, `take`, `into_inner` and `initialized` have no
-  counterpart. For a value that one task sets and others wait for, use a
-  `Watch` that holds an `Option`.
+  counterpart. For a value that one task sets and others wait for, see
+  [A value set once](#a-value-set-once).
 - An initializer that calls `get_or_init` on its own cell panics, where
   Tokio's waits forever.
 - `async_once_cell`'s `get_or_init` takes a future, so it becomes a closure
@@ -625,6 +626,98 @@ async fn main() {
     })
     .await;
     assert_eq!(counts, Ok(vec![3, 3, 3]));
+}
+```
+
+### A value set once
+
+The strict rules report Tokio's `SetOnce`. Use a `Watch` that holds an
+`Option` for a value that one task sets and other tasks wait for, such as
+the port a server bound at startup. The watch starts as `None`. The task
+that sets the value keeps the `Watch`, sends `Some(value)` and then closes
+it, so a later `send` hands its value back in `Closed`, as a second `set`
+fails with `SetOnceError`. Each task that waits gets a `Watcher` from
+`subscribe` and calls `wait_for(Option::is_some)`, which returns at once if
+the value is already there. Check these differences:
+
+- `wait_for` returns a copy of the `Option` inside another `Option`, where
+  `wait` returned a reference. Put a value that can't be cloned, or is
+  costly to clone, in an `Arc`. Each task that waits needs a `Watcher` of
+  its own, because `wait_for` takes it by `&mut`.
+- The task that sets the value can end without setting it. Tokio's `wait`
+  then never returns, since the cell can't tell that nothing will set it.
+  Here, dropping the last `Watch` closes the watch, and each wait ends with
+  `None`. A value sent before the watch closed is still returned. So give
+  the tasks that wait a `Watcher` and no `Watch`: while any task holds a
+  clone of the `Watch`, the watch stays open and the waits go on.
+- Until the watch is closed, a second `send` replaces the value, so tasks
+  that wait can return different values. Keep one task that sets it. When
+  each task that needs the value could make it, and the first one made
+  should be kept, use [`Once`](#a-value-initialized-once).
+- `get` returns a copy of the `Option`, and `initialized` becomes
+  `get().is_some()`. `into_inner` has no counterpart.
+- `Watch::new` isn't `const`, so a `static` cell becomes a field of the
+  state that the tasks share.
+
+When one task waits, `Reply::pair()` also works and needs no copy:
+`receive` moves the value to that task. `send` consumes the reply, so the
+value is sent at most once, and dropping the reply unsent ends the wait with
+`None`. The receiver takes the value, so a second `receive` returns `None`.
+`send` hands the value back in `Closed` when the receiver is gone, where
+`set` succeeds with nobody waiting.
+
+A `SetOnce<()>` that tells tasks to stop is a `Cancellation`.
+
+`fix` leaves these cells as they are.
+
+Before:
+
+```rust
+use std::sync::Arc;
+use tokio::sync::SetOnce;
+
+#[tokio::main]
+async fn main() {
+    let port = Arc::new(SetOnce::new());
+    let mut clients = Vec::new();
+    for _ in 0..3 {
+        let port = Arc::clone(&port);
+        clients.push(tokio::spawn(async move { *port.wait().await }));
+    }
+    port.set(8080).unwrap();
+    for client in clients {
+        assert_eq!(client.await.unwrap(), 8080);
+    }
+}
+```
+
+After:
+
+```rust
+use adamantium::{Tasks, Watch};
+
+#[tokio::main]
+async fn main() {
+    let port = Watch::new(None);
+    let ports = Tasks::<&str>::run(async |t| {
+        let mut clients = Vec::new();
+        for _ in 0..3 {
+            let mut port = port.subscribe();
+            clients.push(t.spawn(async move {
+                let bound = port.wait_for(Option::is_some).await.flatten();
+                bound.ok_or("the server stopped before it bound a port")
+            }));
+        }
+        port.send(Some(8080)).map_err(|_| "closed")?;
+        port.close();
+        let mut ports = Vec::new();
+        for client in clients {
+            ports.push(t.value(client).await?);
+        }
+        Ok(ports)
+    })
+    .await;
+    assert_eq!(ports, Ok(vec![8080; 3]));
 }
 ```
 

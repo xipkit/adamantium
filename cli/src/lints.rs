@@ -289,6 +289,7 @@ pub const DISALLOWED_TYPES: &[(&str, &[&str])] = &[
             "async_once_cell::Lazy",
         ],
     ),
+    ("a-value-set-once", &["tokio::sync::SetOnce"]),
     (
         "a-bounded-queue",
         &["tokio::sync::mpsc::Sender", "tokio::sync::mpsc::Receiver"],

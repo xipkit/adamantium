@@ -37,3 +37,11 @@ pub async fn cells() -> u8 {
     let connection = Once::new();
     *connection.get_or_init(|| async { 1 }).await
 }
+
+pub async fn published() -> Option<u16> {
+    let port = Watch::new(None);
+    let mut address = port.subscribe();
+    port.send(Some(8080)).ok()?;
+    port.close();
+    address.wait_for(Option::is_some).await.flatten()
+}

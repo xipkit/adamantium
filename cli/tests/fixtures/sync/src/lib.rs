@@ -5,6 +5,7 @@ mod modeled;
 use std::sync::mpsc::sync_channel as blocking_channel;
 use tokio::sync::Notify as Signal; // strict disallowed_types
 use tokio::sync::OnceCell as Lazy; // strict disallowed_types
+use tokio::sync::SetOnce as Published; // strict disallowed_types
 use tokio::sync::broadcast::Receiver as Subscription; // disallowed_types
 use tokio::sync::broadcast::channel as broadcast;
 use tokio::sync::mpsc::channel as bounded;
@@ -83,6 +84,14 @@ async fn cells(connection: &tokio::sync::OnceCell<u8>, // strict disallowed_type
     let keys: Lazy<u8> = Lazy::new(); // strict disallowed_types
     let first = *connection.get_or_init(|| async { 1 }).await;
     (first, *keys.get_or_init(|| async { 2 }).await)
+}
+
+static PORT: Published<u16> = Published::const_new(); // strict disallowed_types
+
+async fn published(address: &tokio::sync::SetOnce<u16>, // strict disallowed_types
+) -> u16 {
+    drop(PORT.set(8080));
+    *address.wait().await
 }
 
 fn blocking_boundary() {
