@@ -769,6 +769,7 @@ The initializer must not call `get_or_init` on its own cell, because that call w
 
 - `SingleFlight` shares an operation while it runs and keeps nothing after it ends, so the next call runs it again. Use it for a result that goes stale, such as a refreshed token. Use `Once` for a value that stays valid.
 - `std::sync::OnceLock` makes its value with a synchronous closure, and the rules allow it. Use it when making the value never awaits, such as parsing a configuration that is already in memory. Its `get_or_init` blocks every other thread that calls it until the closure returns, so keep the closure short and free of blocking I/O. Use `Once` when making the value awaits.
+- A `Watch` that holds an `Option` keeps a value that one task sets and other tasks wait for, with `Watcher::wait_for(Option::is_some)`. Use it when one task, such as a server that binds its port, makes the value, and the tasks that need it can only wait. Use `Once` when any task that needs the value can make it.
 
 ## Retries and rate limits
 
