@@ -20,6 +20,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   without waiting.
 - `adamantium::testing::Replay::steps` counts the scheduling steps in a
   recorded execution, which shows how large a scenario is.
+- `adamantium::Once` keeps a value that async work initializes once.
+  `get_or_init` and `get_or_try_init` run one initializer at a time, and
+  concurrent calls share its value. An initializer that fails, panics, or is
+  dropped leaves the cell empty, and one waiting call runs its own. `get`
+  reads without waiting, and `get_or_try_init_until` takes a `Cancellation`
+  and a deadline. It works without Tokio, and the deterministic harness
+  schedules it.
 
 ### Changed
 

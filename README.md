@@ -69,6 +69,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. `Tasks::run_with_grace` lets admitted work finish first. |
 | `retry`, `RateLimit`, `Limit`, `KeyedLimit` | Retry with backoff, cap the call rate or concurrency, or serialize calls for the same key. |
 | `SingleFlight` | Lets concurrent calls for the same key share one operation and its output. |
+| `Once` | A value that async work makes once and then keeps, such as a connection. Concurrent first calls share one initializer. |
 | `blocking` | Runs blocking code on the blocking pool. |
 | `random` | Random draws that the deterministic harness records and replays. |
 
@@ -84,7 +85,7 @@ The [library guide](docs/library.md) describes each type, and [`examples/server.
 | `tracing` | No | Named task spans, and a warning that lists unfinished tasks when a deadline expires |
 | `deterministic` | No | A test harness with random, PCT, and DFS scheduling, replay timelines, modeled duplex streams, and fault injection. See [Deterministic tests](docs/testing.md). |
 
-With `default-features = false`, the values, `Actor`, `BoundedMap`, `Channel`, `Topic`, `Fanout`, `Reply`, `Watch`, `Limit`, `KeyedLimit`, `SingleFlight`, and `race` work without Tokio.
+With `default-features = false`, the values, `Actor`, `BoundedMap`, `Channel`, `Topic`, `Fanout`, `Reply`, `Watch`, `Limit`, `KeyedLimit`, `SingleFlight`, `Once`, and `race` work without Tokio.
 
 ### WASI
 

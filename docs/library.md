@@ -695,6 +695,34 @@ async fn acknowledge(&self, commit: u64) -> Result<(), SyncError> {
 
 Operations for one key do not wait for each other to clean up. The last caller to leave drops the operation, and a call that arrives meanwhile starts a new one. Work that the dropped operation left running, such as the tasks of a scope it was running, can still be finishing. When separate operations must not overlap, or each caller needs an operation of its own, serialize them per key with [`KeyedLimit`](#per-key-exclusion) instead.
 
+## Once
+
+`Once<T>` holds a value that async work makes once and then keeps, such as a database connection or a fetched key set. Clones share the cell.
+
+```rust
+use adamantium::Once;
+
+let keys = Once::new();
+let key_set = keys.get_or_try_init(|| fetch_keys()).await?;
+```
+
+- `get_or_init(init)` returns the value. If the cell is empty, it calls `init` and awaits its future to make the value. A call that finds the value drops `init` without calling it.
+- One initializer runs at a time. Calls that arrive while it runs wait for it, and every call gets a reference to the same value.
+- `get_or_try_init(init)` takes an initializer that returns a `Result`. Its error goes only to the call whose initializer failed, and the cell stays empty.
+- When an initializer fails, panics, or its call is dropped, the cell stays empty and one waiting call runs its own initializer. The waiting calls never see the error.
+- The initializer runs inside the call, on the task that awaits it. It can borrow from the caller, and it doesn't have to be `Send` or `'static`.
+- `get()` returns the value if it is there, and `None` if it isn't. It never waits.
+- With Tokio, `get_or_try_init_until(&cancellation, deadline, init)` stops when `cancellation` is requested or `deadline` passes, and returns `ScopeError::Failed(error)`, `Cancelled`, or `DeadlineExceeded`. A call that stops while its initializer runs drops it, and a waiting call takes over. A request already present wins, even over a value already in the cell, so a cancelled call never calls `init`.
+
+The initializer must not call `get_or_init` on its own cell, because that call would wait for itself; it panics instead. The check sees only a call that the initializer makes itself.
+
+`Once` works with `default-features = false`.
+
+### Choosing a cell
+
+- `SingleFlight` shares an operation while it runs and keeps nothing after it ends, so the next call runs it again. Use it for a result that goes stale, such as a refreshed token. Use `Once` for a value that stays valid.
+- `std::sync::OnceLock` makes its value with a synchronous closure, and the rules allow it. Use it when making the value never awaits, such as parsing a configuration that is already in memory. Its `get_or_init` blocks every other thread that calls it until the closure returns, so keep the closure short and free of blocking I/O. Use `Once` when making the value awaits.
+
 ## Retries and rate limits
 
 ### `retry`

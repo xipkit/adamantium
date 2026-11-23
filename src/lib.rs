@@ -11,6 +11,7 @@ mod deque;
 mod fanout;
 mod limit;
 mod map;
+mod once;
 mod race;
 pub mod random;
 #[cfg(feature = "tokio")]
@@ -48,6 +49,7 @@ pub use fanout::FeedError;
 pub use fanout::{Ended, Fanout, Feed, Sent};
 pub use limit::{KeyedLimit, Limit};
 pub use map::{Entry, Map, OccupiedEntry, VacantEntry};
+pub use once::Once;
 pub use race::{Race, race};
 #[cfg(feature = "tokio")]
 pub use race::{UntilError, until};
