@@ -1583,15 +1583,19 @@ where
             }
         }
         tasks.join(Ok(())).await?;
-        let mut finished = std::mem::take(&mut *finished.lock("Tasks::take_finished"));
+        let finished = std::mem::take(&mut *finished.lock("Tasks::take_finished"));
         if finished.len() != started {
             no_result();
         }
-        finished.sort_unstable_by_key(|(index, _)| *index);
-        let mut values: Vec<T> = finished.into_iter().map(|(_, value)| value).collect();
+        let mut values = in_input_order(finished);
         values.shrink_to_fit();
         Ok(values)
     })
+}
+
+fn in_input_order<V>(mut indexed: Vec<(usize, V)>) -> Vec<V> {
+    indexed.sort_unstable_by_key(|(index, _)| *index);
+    indexed.into_iter().map(|(_, value)| value).collect()
 }
 
 struct Outcomes<T, E> {
@@ -1688,7 +1692,7 @@ where
         }
         tasks.abort();
         let Ok(()) = tasks.join(Ok(())).await;
-        let (winner, mut errors) = {
+        let (winner, errors) = {
             let mut outcomes = outcomes.lock("Tasks::race");
             (outcomes.winner.take(), std::mem::take(&mut outcomes.errors))
         };
@@ -1698,8 +1702,7 @@ where
         if errors.len() != started {
             no_result();
         }
-        errors.sort_unstable_by_key(|(index, _)| *index);
-        Err(errors.into_iter().map(|(_, error)| error).collect())
+        Err(in_input_order(errors))
     })
 }
 
