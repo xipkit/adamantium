@@ -355,6 +355,32 @@ impl FileReport {
     }
 }
 
+impl FileStatus {
+    /// Reads a status from its name in a report.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "planned" => Self::Planned,
+            "checked" => Self::Checked,
+            "incomplete" => Self::Incomplete,
+            "error" => Self::Error,
+            "not_checked" => Self::NotChecked,
+            _ => return None,
+        })
+    }
+}
+
+impl ReportStatus {
+    /// Reads a status from its name in a report.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "planned" => Self::Planned,
+            "incomplete" => Self::Incomplete,
+            "complete" => Self::Complete,
+            _ => return None,
+        })
+    }
+}
+
 impl fmt::Display for FileStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {

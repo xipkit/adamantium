@@ -7,7 +7,7 @@ use std::{
 use crate::sha256_hex;
 use crate::style::{
     provider::ProviderKind,
-    report::{FileReport, FileStatus, Report, ReviewKey, SCHEMA_VERSION},
+    report::{FileReport, FileStatus, Report, ReportStatus, ReviewKey, SCHEMA_VERSION},
     rules::{Pack, Question},
     scan::Scan,
 };
@@ -54,10 +54,7 @@ pub(crate) fn select_pending(
         "unsupported previous report schema"
     );
     ensure!(
-        matches!(
-            previous.status.as_str(),
-            "planned" | "incomplete" | "complete"
-        ),
+        ReportStatus::from_name(&previous.status).is_some(),
         "invalid previous report status"
     );
     ensure!(
@@ -89,12 +86,12 @@ pub(crate) fn select_pending(
             "previous report has a duplicate file: {}",
             file.path
         );
-        match file.status.as_str() {
-            "planned" | "error" | "not_checked" => {
+        match FileStatus::from_name(&file.status) {
+            Some(FileStatus::Planned | FileStatus::Error | FileStatus::NotChecked) => {
                 pending.insert(file.path);
             }
-            "checked" | "incomplete" => {}
-            _ => bail!(
+            Some(FileStatus::Checked | FileStatus::Incomplete) => {}
+            None => bail!(
                 "previous report has an invalid file status: {}",
                 file.status
             ),
