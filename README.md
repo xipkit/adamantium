@@ -62,13 +62,13 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `Actor` | Shared state. Each access is a synchronous closure, so no lock is held across an `await`. |
 | `BoundedMap` | A map that holds at most a fixed number of entries, evicts the least recently used one, and optionally expires entries by time to live. Use it for caches and session tables inside an `Actor`. |
 | `AsyncActor` | One worker that owns its state and handles one message at a time. Use it when the state must `await`. |
-| `Channel`, `Reply`, `Watch` | A bounded queue, a one-shot reply, and the latest value of some state. |
+| `Channel`, `Reply`, `Watch` | A bounded queue with single and batch receive, a one-shot reply, and the latest value of some state. |
 | `Signal` | A wakeup for a worker. A notification sent while one is pending merges into it. |
 | `Topic` | Sends each message to every subscriber. It waits for a slow subscriber and drops no message. |
 | `Fanout` | Sends each event to every subscriber without waiting. It disconnects a subscriber that falls behind, which can then resubscribe. |
 | `race` | Waits for the first of several futures and drops the others. Use it in place of `select!`. |
 | `Cancellation` | A shutdown signal. `Tasks::run_until` and the `_until` methods stop on the signal or at a deadline. `Tasks::run_with_grace` lets admitted work finish first. |
-| `retry`, `RateLimit`, `Limit`, `KeyedLimit` | Retry with backoff, cap the call rate or concurrency, or serialize calls for the same key. |
+| `retry`, `RateLimit`, `Limit`, `KeyedLimit` | Retry with backoff, cap the call rate, give each call one or more places in a concurrency budget, or serialize calls for the same key. |
 | `SingleFlight` | Lets concurrent calls for the same key share one operation and its output. |
 | `Once` | A value that async work makes once and then keeps, such as a connection. Concurrent first calls share one initializer. |
 | `blocking` | Runs blocking code on the blocking pool. |

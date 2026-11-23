@@ -20,10 +20,10 @@ Enable the `deterministic` feature for tests only:
 
 ```toml
 [dependencies]
-adamantium = "0.4"
+adamantium = "0.5"
 
 [dev-dependencies]
-adamantium = { version = "0.4", features = ["deterministic"] }
+adamantium = { version = "0.5", features = ["deterministic"] }
 ```
 
 The harness takes over only inside `testing::check` and the other `testing`
