@@ -11,6 +11,7 @@ disallowed-types = [
   { path = "tokio::sync::OnceCell", reason = "use adamantium::Once for a value that async work initializes once, or std::sync::OnceLock when initializing it never awaits", allow-invalid = true },
   { path = "async_once_cell::OnceCell", reason = "use adamantium::Once for a value that async work initializes once, or std::sync::OnceLock when initializing it never awaits", allow-invalid = true },
   { path = "async_once_cell::Lazy", reason = "use adamantium::Once, with the initializer passed to get_or_init at each use", allow-invalid = true },
+  { path = "tokio::sync::SetOnce", reason = "use adamantium::Watch holding an Option for a value that one task sets and others wait for with Watcher::wait_for(Option::is_some), or Reply::pair when one task waits", allow-invalid = true },
 ]
 
 disallowed-methods = [

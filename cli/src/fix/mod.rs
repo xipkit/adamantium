@@ -956,6 +956,11 @@ mod tests {
                 Hint::Guide("a-value-initialized-once"),
             ),
             (
+                "clippy::disallowed_types",
+                kind("tokio::sync::SetOnce"),
+                Hint::Guide("a-value-set-once"),
+            ),
+            (
                 "clippy::await_holding_lock",
                 "this `MutexGuard` is held across an await point".to_owned(),
                 Hint::Guide("a-lock-held-across-an-await"),
