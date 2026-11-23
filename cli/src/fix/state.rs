@@ -132,6 +132,15 @@ pub(super) const IMPORTS: &[&[&str]] = &[
 
 const UNLOCATED: Reason = Reason::Unfollowed("fix couldn't find its source text");
 
+const ATTRIBUTED: Reason = Reason::Unfollowed("a statement holding its guard has attributes");
+
+const NAME_TAKEN: Reason =
+    Reason::Unfollowed("a constant, static, struct or import in the file has its name");
+
+const IN_MACRO: Reason = Reason::Unfollowed("it is used in a macro");
+
+const OUTSIDE_STATEMENT: Reason = Reason::Unfollowed("a guard is outside any statement");
+
 const SHARED: Reason =
     Reason::Unfollowed("it holds the same state as a value fix leaves for review");
 
@@ -382,28 +391,21 @@ impl Draft {
         krate: &Crate,
         callbacks: &BTreeSet<String>,
     ) -> Option<Reason> {
-        match krate.hazard(reached) {
-            Some(Hazard::Trait) => {
-                return Some(Reason::Nested(
-                    "it is locked through a trait method, which might run inside an actor's callback",
-                ));
-            }
-            Some(Hazard::Public) => {
-                return Some(Reason::Nested(
-                    "it is locked through a public function, which another crate might call inside an actor's callback",
-                ));
-            }
-            Some(Hazard::Escapes) => {
-                return Some(Reason::Nested(
-                    "a function that locks it is used as a value, or in a closure, an async block or a macro, which might run inside an actor's callback",
-                ));
-            }
-            Some(Hazard::Callbacks) => {
-                return Some(Reason::Nested(
-                    "an actor callback in its package calls code that might lock it",
-                ));
-            }
-            None => {}
+        if let Some(hazard) = krate.hazard(reached) {
+            return Some(Reason::Nested(match hazard {
+                Hazard::Trait => {
+                    "it is locked through a trait method, which might run inside an actor's callback"
+                }
+                Hazard::Public => {
+                    "it is locked through a public function, which another crate might call inside an actor's callback"
+                }
+                Hazard::Escapes => {
+                    "a function that locks it is used as a value, or in a closure, an async block or a macro, which might run inside an actor's callback"
+                }
+                Hazard::Callbacks => {
+                    "an actor callback in its package calls code that might lock it"
+                }
+            }));
         }
         (!reached.is_disjoint(callbacks)).then_some(Reason::Nested(
             "a function that locks it is called in a statement that becomes an actor's callback",
@@ -1307,12 +1309,7 @@ impl<'a> Walker<'a> {
                     self.refuse(source, Reason::Unfollowed("a clone of it has attributes"));
                 }
                 if self.names.constants.contains(&name) {
-                    self.refuse(
-                        source,
-                        Reason::Unfollowed(
-                            "a constant, static, struct or import in the file has its name",
-                        ),
-                    );
+                    self.refuse(source, NAME_TAKEN);
                 }
                 let lock_ref = matches!(init, Expr::Path(_))
                     && self.vars.get(source).is_some_and(|var| var.lock_ref);
@@ -1369,9 +1366,7 @@ impl<'a> Walker<'a> {
             state.refuse(Reason::Unfollowed("its declaration has attributes"));
         }
         if self.names.constants.contains(&name) {
-            state.refuse(Reason::Unfollowed(
-                "a constant, static, struct or import in the file has its name",
-            ));
+            state.refuse(NAME_TAKEN);
         }
         self.groups.push(state);
         let var = self.declare(name, Some(group));
@@ -1578,7 +1573,7 @@ impl<'a> Walker<'a> {
     fn root(&self) -> Result<Root<'a>, Reason> {
         let mut index = self.stack.len().checked_sub(1).ok_or(UNLOCATED)?;
         let Some(Node::Expr(mut child)) = self.stack.get(index).copied() else {
-            return Err(Reason::Unfollowed("a guard is outside any statement"));
+            return Err(OUTSIDE_STATEMENT);
         };
         let mut from_block = false;
         while let Some(next) = index.checked_sub(1) {
@@ -1683,7 +1678,7 @@ impl<'a> Walker<'a> {
                 Node::Block(..) | Node::Macro(_) => {}
             }
         }
-        Err(Reason::Unfollowed("a guard is outside any statement"))
+        Err(OUTSIDE_STATEMENT)
     }
 
     fn plan(&self, guard: &'a Expr) -> Result<Plan<'a>, Reason> {
@@ -1856,9 +1851,7 @@ impl<'a> Walker<'a> {
                 };
                 let range = range.ok_or(UNLOCATED)?;
                 if attributed || self.statement_attributes() {
-                    return Err(Reason::Unfollowed(
-                        "a statement holding its guard has attributes",
-                    ));
+                    return Err(ATTRIBUTED);
                 }
                 if let Full::Expr(Expr::Assign(assign)) = full
                     && !self.text.of(&assign.left).is_some_and(|left| {
@@ -1882,9 +1875,7 @@ impl<'a> Walker<'a> {
                     return Err(Reason::AcrossStatements);
                 }
                 if !local.attrs.is_empty() {
-                    return Err(Reason::Unfollowed(
-                        "a statement holding its guard has attributes",
-                    ));
+                    return Err(ATTRIBUTED);
                 }
                 if let Some(group) = self.group_of(var) {
                     self.awaiting.push((group, local));
@@ -1895,9 +1886,7 @@ impl<'a> Walker<'a> {
             }
             Root::Value(expr) | Root::Condition(expr) => {
                 if self.text.attributed(expr) {
-                    return Err(Reason::Unfollowed(
-                        "a statement holding its guard has attributes",
-                    ));
+                    return Err(ATTRIBUTED);
                 }
                 if matches!(plan.root, Root::Condition(_)) && contains_let(expr) {
                     return Err(Reason::Unfollowed("a guard is in a `let` chain"));
@@ -2058,13 +2047,13 @@ impl<'a> Walker<'a> {
                 TokenTree::Group(group) => self.mentions(group.stream()),
                 TokenTree::Ident(ident) => {
                     let name = bare(&ident);
-                    self.mention(&name, Reason::Unfollowed("it is used in a macro"));
-                    self.mention_field(&name, Reason::Unfollowed("it is used in a macro"));
+                    self.mention(&name, IN_MACRO);
+                    self.mention_field(&name, IN_MACRO);
                 }
                 TokenTree::Literal(literal) => {
                     if let Some(string) = string_literal(&literal) {
                         for name in format_captures(&string) {
-                            self.mention(&name, Reason::Unfollowed("it is used in a macro"));
+                            self.mention(&name, IN_MACRO);
                         }
                     }
                 }
