@@ -28,7 +28,7 @@ use crate::paths;
 use super::{
     cfg::{Cfg, Truth},
     disallowed::{Disallowed, canonical},
-    rules::Rules,
+    rules::{Rules, is_punct},
 };
 
 /// The library to scan.
@@ -114,16 +114,14 @@ pub fn scan(crates: &[Crate], entry: usize, disallowed: &Disallowed) -> Scan {
     while !scanner.files.is_empty() {
         let files = mem::take(&mut scanner.files);
         for loaded in &files {
-            let mut visitor = FileVisitor {
-                scanner: &mut scanner,
-                file: loaded.rel.clone(),
-                module: loaded.module.clone(),
-                mod_dir: loaded.mod_dir.clone(),
-                path_dir: loaded.path_dir.clone(),
-                blocks: Vec::new(),
-                attributes: HashSet::new(),
-                hidden: HashSet::new(),
-            };
+            let mut visitor = FileVisitor::new(
+                &mut scanner,
+                loaded.rel.clone(),
+                loaded.module.clone(),
+                loaded.mod_dir.clone(),
+                loaded.path_dir.clone(),
+                HashSet::new(),
+            );
             for attr in &loaded.attrs {
                 visitor.visit_attribute(attr);
             }
@@ -147,16 +145,14 @@ pub fn scan(crates: &[Crate], entry: usize, disallowed: &Disallowed) -> Scan {
             let Some(deferred) = scanner.deferred.remove(&at) else {
                 continue;
             };
-            let mut visitor = FileVisitor {
-                scanner: &mut scanner,
-                file: at.file,
-                module: deferred.module,
-                mod_dir: deferred.mod_dir,
-                path_dir: deferred.path_dir,
-                blocks: Vec::new(),
-                attributes: HashSet::new(),
-                hidden: deferred.hidden,
-            };
+            let mut visitor = FileVisitor::new(
+                &mut scanner,
+                at.file,
+                deferred.module,
+                deferred.mod_dir,
+                deferred.path_dir,
+                deferred.hidden,
+            );
             visitor.tokens(deferred.tokens);
         }
     }
@@ -206,6 +202,14 @@ impl Binding {
     }
 }
 
+/// The single alternative, or `either` of them all when there isn't exactly one.
+fn only_or<T>(alternatives: Vec<T>, either: impl FnOnce(Vec<T>) -> T) -> T {
+    match <[T; 1]>::try_from(alternatives) {
+        Ok([only]) => only,
+        Err(alternatives) => either(alternatives),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Namespace {
     Types,
@@ -231,10 +235,7 @@ impl Bound {
                 alternatives.push(binding.clone());
             }
         }
-        self.binding = match <[Binding; 1]>::try_from(alternatives) {
-            Ok([only]) => only,
-            Err(alternatives) => Binding::Either(alternatives),
-        };
+        self.binding = only_or(alternatives, Binding::Either);
     }
 }
 
@@ -325,10 +326,7 @@ impl Scope {
                 alternatives.push(alternative.clone());
             }
         }
-        bound.binding = match <[Binding; 1]>::try_from(alternatives) {
-            Ok([only]) => only,
-            Err(alternatives) => Binding::Either(alternatives),
-        };
+        bound.binding = only_or(alternatives, Binding::Either);
     }
 
     fn merge(&mut self, other: Self) {
@@ -374,10 +372,7 @@ impl Resolved {
                 }
             }
         }
-        match <[Self; 1]>::try_from(flat) {
-            Ok([only]) => only,
-            Err(flat) => Self::Either(flat),
-        }
+        only_or(flat, Self::Either)
     }
 
     fn alternatives(&self) -> &[Self] {
@@ -654,6 +649,12 @@ struct Textual {
 }
 
 impl Textual {
+    fn condition_with(&self, attrs: &[Attribute]) -> Vec<TokenStream> {
+        let mut condition = self.conditions.clone();
+        condition.extend(cfg_predicates(attrs));
+        condition
+    }
+
     fn hides(&self, name: &str) -> bool {
         self.macros
             .iter()
@@ -1007,11 +1008,20 @@ impl<'a> Scanner<'a> {
     }
 
     fn macro_use(&self, attrs: &[Attribute]) -> Truth {
+        self.applies(
+            attrs,
+            |meta| matches!(meta, Meta::Path(path) if path.is_ident("macro_use")),
+        )
+    }
+
+    /// Whether some attribute that `is` of a kind applies, once `cfg_attr`
+    /// is expanded.
+    fn applies(&self, attrs: &[Attribute], is: impl Fn(&Meta) -> bool) -> Truth {
         self.krate
             .cfg
             .effective(attrs)
             .iter()
-            .filter(|(_, meta)| matches!(meta, Meta::Path(path) if path.is_ident("macro_use")))
+            .filter(|(_, meta)| is(meta))
             .fold(Truth::False, |truth, (applies, _)| truth.or(*applies))
     }
 
@@ -1035,8 +1045,7 @@ impl<'a> Scanner<'a> {
         scope: &mut Scope,
         textual: &mut Textual,
     ) {
-        let mut condition = textual.conditions.clone();
-        condition.extend(cfg_predicates(&item.attrs));
+        let condition = textual.condition_with(&item.attrs);
         let span = Span::call_site();
         let holds = self
             .krate
@@ -1144,8 +1153,7 @@ impl<'a> Scanner<'a> {
             Truth::Unknown => false,
             Truth::False => return,
         };
-        let mut condition = textual.conditions.clone();
-        condition.extend(cfg_predicates(&item.attrs));
+        let condition = textual.condition_with(&item.attrs);
         let mut names = Vec::new();
         bare_names(&item.tree, &mut names);
         for (name, binds) in names {
@@ -1192,8 +1200,7 @@ impl<'a> Scanner<'a> {
             let Item::ExternCrate(item) = item else {
                 continue;
             };
-            let mut condition = textual.conditions.clone();
-            condition.extend(cfg_predicates(&item.attrs));
+            let condition = textual.condition_with(&item.attrs);
             let holds = self
                 .krate
                 .cfg
@@ -1243,21 +1250,16 @@ impl<'a> Scanner<'a> {
     }
 
     fn imported(&self, attrs: &[Attribute], name: &str) -> Truth {
-        self.krate
-            .cfg
-            .effective(attrs)
-            .iter()
-            .filter(|(_, meta)| match meta {
-                Meta::Path(path) => path.is_ident("macro_use"),
-                Meta::List(list) => {
-                    list.path.is_ident("macro_use")
-                        && list
-                            .parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)
-                            .is_ok_and(|names| names.iter().any(|named| named.unraw() == name))
-                }
-                Meta::NameValue(_) => false,
-            })
-            .fold(Truth::False, |truth, (applies, _)| truth.or(*applies))
+        self.applies(attrs, |meta| match meta {
+            Meta::Path(path) => path.is_ident("macro_use"),
+            Meta::List(list) => {
+                list.path.is_ident("macro_use")
+                    && list
+                        .parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)
+                        .is_ok_and(|names| names.iter().any(|named| named.unraw() == name))
+            }
+            Meta::NameValue(_) => false,
+        })
     }
 
     fn library(&mut self, id: usize) -> Option<&Scanner<'a>> {
@@ -1608,11 +1610,7 @@ impl<'a> Scanner<'a> {
             let mut condition = call_condition.clone();
             condition.extend(candidate.condition.iter().cloned());
             if !later.is_empty() {
-                condition.push(cfg_call(
-                    "not",
-                    [cfg_call("any", later.clone(), span)],
-                    span,
-                ));
+                condition.push(cfg_none(later.clone(), span));
             }
             let hides = (candidate.defined == Truth::True)
                 .then(|| cfg_call("all", candidate.condition.to_vec(), span));
@@ -1641,11 +1639,7 @@ impl<'a> Scanner<'a> {
             if !condition.is_empty() {
                 let cfg = cfg_attribute(predicate, span);
                 for item in &mut items {
-                    if let Some(attrs) = item_attrs_mut(item) {
-                        let own = mem::take(attrs);
-                        attrs.push(cfg.clone());
-                        attrs.extend(own);
-                    }
+                    prepend_attrs(item, slice::from_ref(&cfg));
                 }
             }
             let at = DefinitionSite::new(candidate.rel.to_owned(), span);
@@ -1695,14 +1689,14 @@ impl<'a> Scanner<'a> {
                 continue;
             }
             let applies = cfg_call("all", conditions, span);
-            let none_later = cfg_call("not", [cfg_call("any", later.clone(), span)], span);
+            let none_later = cfg_none(later.clone(), span);
             places.push((
                 Some(lit.value()),
                 cfg_call("all", [applies.clone(), none_later], span),
             ));
             later.push(applies);
         }
-        places.push((None, cfg_call("not", [cfg_call("any", later, span)], span)));
+        places.push((None, cfg_none(later, span)));
         places.retain(|(_, selects)| self.krate.cfg.holds(selects.clone()) != Truth::False);
         let default = || {
             [
@@ -1861,6 +1855,15 @@ impl<'a> Scanner<'a> {
             return Some((id, lib.clone()));
         }
         SYSROOT.contains(&name).then(|| (None, name.to_owned()))
+    }
+
+    fn extern_path(&self, first: &str, rest: &[String]) -> Option<Resolved> {
+        let (krate, lib) = self.extern_crate(first)?;
+        let root = Resolved::Path {
+            krate,
+            path: vec![lib],
+        };
+        Some(root.join(rest))
     }
 
     fn dollar_crate(&self, ident: &Ident) -> Option<usize> {
@@ -2056,14 +2059,9 @@ impl<'s, 'a> Resolver<'s, 'a> {
             if scanner.krate.edition_2015 {
                 return self.root_path(path, namespace, 0);
             }
-            return match scanner.extern_crate(first) {
-                Some((krate, lib)) => Resolved::Path {
-                    krate,
-                    path: vec![lib],
-                }
-                .join(rest),
-                None => Resolved::Unknown,
-            };
+            return scanner
+                .extern_path(first, rest)
+                .unwrap_or(Resolved::Unknown);
         }
         let first_namespace = self::namespace(path, 0, namespace);
         if let Some((binding, scope)) =
@@ -2074,12 +2072,8 @@ impl<'s, 'a> Resolver<'s, 'a> {
                 .join(rest);
             return self.followed(resolved, namespace, 0);
         }
-        if let Some((krate, lib)) = scanner.extern_crate(first) {
-            return Resolved::Path {
-                krate,
-                path: vec![lib],
-            }
-            .join(rest);
+        if let Some(resolved) = scanner.extern_path(first, rest) {
+            return resolved;
         }
         let globs = self
             .blocks
@@ -2209,13 +2203,10 @@ impl<'s, 'a> Resolver<'s, 'a> {
         if scanner.krate.edition_2015 {
             return self.root_path(path, namespace, depth);
         }
-        let unbound = |_: &mut Self| match scanner.extern_crate(first) {
-            Some((krate, lib)) => Resolved::Path {
-                krate,
-                path: vec![lib],
-            }
-            .join(rest),
-            None => Resolved::Unknown,
+        let unbound = |_: &mut Self| {
+            scanner
+                .extern_path(first, rest)
+                .unwrap_or(Resolved::Unknown)
         };
         let first_namespace = self::namespace(path, 0, namespace);
         if !leading
@@ -2267,12 +2258,8 @@ impl<'s, 'a> Resolver<'s, 'a> {
         let scanner = self.scanner;
         let root = [scanner.krate.name.to_owned()];
         let unbound = |resolver: &mut Self| {
-            if let Some((krate, lib)) = scanner.extern_crate(first) {
-                return Resolved::Path {
-                    krate,
-                    path: vec![lib],
-                }
-                .join(rest);
+            if let Some(resolved) = scanner.extern_path(first, rest) {
+                return resolved;
             }
             let mut full = root.to_vec();
             full.extend(path.iter().cloned());
@@ -2547,11 +2534,7 @@ impl Expand {
                     let outer = item.attrs.clone();
                     expanded.push(Item::Macro(item));
                     for mut inner in inner {
-                        if let Some(attrs) = item_attrs_mut(&mut inner) {
-                            let own = mem::take(attrs);
-                            attrs.extend(outer.iter().cloned());
-                            attrs.extend(own);
-                        }
+                        prepend_attrs(&mut inner, &outer);
                         expanded.push(inner);
                     }
                 }
@@ -2671,24 +2654,17 @@ fn parse_cfg_if(input: ParseStream) -> syn::Result<Vec<Item>> {
             None => {
                 input.parse::<Token![if]>()?;
                 let (span, condition) = cfg_if_condition(input)?;
-                let none_earlier = cfg_call("not", [cfg_call("any", earlier.clone(), span)], span);
+                let none_earlier = cfg_none(earlier.clone(), span);
                 earlier.push(condition.clone());
                 (span, cfg_call("all", [condition, none_earlier], span))
             }
-            Some(span) => (
-                span,
-                cfg_call("not", [cfg_call("any", earlier.clone(), span)], span),
-            ),
+            Some(span) => (span, cfg_none(earlier.clone(), span)),
         };
         let body;
         braced!(body in input);
         let cfg = cfg_attribute(predicate, span);
         for mut item in parse_items(&body)? {
-            if let Some(attrs) = item_attrs_mut(&mut item) {
-                let own = mem::take(attrs);
-                attrs.push(cfg.clone());
-                attrs.extend(own);
-            }
+            prepend_attrs(&mut item, slice::from_ref(&cfg));
             items.push(item);
         }
         if otherwise.is_some() || input.is_empty() {
@@ -2721,7 +2697,7 @@ fn parse_cfg_select(input: ParseStream) -> syn::Result<Vec<Item>> {
     loop {
         let span = input.span();
         let otherwise = input.peek(Token![_]);
-        let none_earlier = cfg_call("not", [cfg_call("any", earlier.clone(), span)], span);
+        let none_earlier = cfg_none(earlier.clone(), span);
         let predicate = if otherwise {
             input.parse::<Token![_]>()?;
             none_earlier
@@ -2741,11 +2717,7 @@ fn parse_cfg_select(input: ParseStream) -> syn::Result<Vec<Item>> {
         braced!(body in input);
         let cfg = cfg_attribute(predicate, span);
         for mut item in parse_items(&body)? {
-            if let Some(attrs) = item_attrs_mut(&mut item) {
-                let own = mem::take(attrs);
-                attrs.push(cfg.clone());
-                attrs.extend(own);
-            }
+            prepend_attrs(&mut item, slice::from_ref(&cfg));
             items.push(item);
         }
         if input.peek(Token![,]) {
@@ -2771,6 +2743,11 @@ fn cfg_call(name: &str, args: impl IntoIterator<Item = TokenStream>, span: Span)
         TokenTree::Ident(Ident::new(name, span)),
         TokenTree::Group(group),
     ])
+}
+
+/// The predicate that holds when none of `conditions` does.
+fn cfg_none(conditions: Vec<TokenStream>, span: Span) -> TokenStream {
+    cfg_call("not", [cfg_call("any", conditions, span)], span)
 }
 
 fn cfg_attribute(predicate: TokenStream, span: Span) -> Attribute {
@@ -2851,6 +2828,14 @@ fn item_attrs_mut(item: &mut Item) -> Option<&mut Vec<Attribute>> {
     })
 }
 
+fn prepend_attrs(item: &mut Item, outer: &[Attribute]) {
+    if let Some(attrs) = item_attrs_mut(item) {
+        let own = mem::take(attrs);
+        attrs.extend(outer.iter().cloned());
+        attrs.extend(own);
+    }
+}
+
 fn expr_attrs(expr: &Expr) -> &[Attribute] {
     match expr {
         Expr::Array(expr) => &expr.attrs,
@@ -2925,7 +2910,27 @@ struct FileVisitor<'s, 'a> {
     hidden: HashSet<String>,
 }
 
-impl FileVisitor<'_, '_> {
+impl<'s, 'a> FileVisitor<'s, 'a> {
+    fn new(
+        scanner: &'s mut Scanner<'a>,
+        file: String,
+        module: Vec<String>,
+        mod_dir: PathBuf,
+        path_dir: PathBuf,
+        hidden: HashSet<String>,
+    ) -> Self {
+        Self {
+            scanner,
+            file,
+            module,
+            mod_dir,
+            path_dir,
+            blocks: Vec::new(),
+            attributes: HashSet::new(),
+            hidden,
+        }
+    }
+
     fn enabled(&self, attrs: &[Attribute]) -> bool {
         self.scanner.krate.cfg.enabled(attrs) != Truth::False
     }
@@ -3317,10 +3322,6 @@ fn split_commas(stream: TokenStream) -> Vec<TokenStream> {
     }
     parts.retain(|part| !part.is_empty());
     parts
-}
-
-fn is_punct(tree: Option<&TokenTree>, char: char) -> bool {
-    matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == char)
 }
 
 fn pattern_names<'p>(patterns: impl IntoIterator<Item = &'p Pat>) -> Vec<String> {
