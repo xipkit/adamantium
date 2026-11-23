@@ -22,6 +22,7 @@ mod restarts;
 mod retry;
 mod runtime;
 mod set;
+mod signal;
 mod single_flight;
 mod string;
 #[cfg(feature = "tokio")]
@@ -59,6 +60,7 @@ pub use restarts::Restarts;
 #[cfg(feature = "tokio")]
 pub use retry::{Backoff, retry, retry_if};
 pub use set::Set;
+pub use signal::Signal;
 pub use single_flight::SingleFlight;
 pub use string::Str;
 #[cfg(feature = "tokio")]

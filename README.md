@@ -63,6 +63,7 @@ let text = blocking(|| std::fs::read_to_string("notes.txt")).await?;
 | `BoundedMap` | A map that holds at most a fixed number of entries, evicts the least recently used one, and optionally expires entries by time to live. Use it for caches and session tables inside an `Actor`. |
 | `AsyncActor` | One worker that owns its state and handles one message at a time. Use it when the state must `await`. |
 | `Channel`, `Reply`, `Watch` | A bounded queue, a one-shot reply, and the latest value of some state. |
+| `Signal` | A wakeup for a worker. A notification sent while one is pending merges into it. |
 | `Topic` | Sends each message to every subscriber. It waits for a slow subscriber and drops no message. |
 | `Fanout` | Sends each event to every subscriber without waiting. It disconnects a subscriber that falls behind, which can then resubscribe. |
 | `race` | Waits for the first of several futures and drops the others. Use it in place of `select!`. |
@@ -84,7 +85,7 @@ The [library guide](docs/library.md) describes each type, and [`examples/server.
 | `tracing` | No | Named task spans, and a warning that lists unfinished tasks when a deadline expires |
 | `deterministic` | No | A test harness with random, PCT, and DFS scheduling, replay timelines, modeled duplex streams, and fault injection. See [Deterministic tests](docs/testing.md). |
 
-With `default-features = false`, the values, `Actor`, `BoundedMap`, `Channel`, `Topic`, `Fanout`, `Reply`, `Watch`, `Limit`, `KeyedLimit`, `SingleFlight`, and `race` work without Tokio.
+With `default-features = false`, the values, `Actor`, `BoundedMap`, `Channel`, `Topic`, `Fanout`, `Reply`, `Watch`, `Signal`, `Limit`, `KeyedLimit`, `SingleFlight`, and `race` work without Tokio.
 
 ### WASI
 

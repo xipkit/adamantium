@@ -25,6 +25,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   cost different amounts, such as bytes in flight. It replaces Tokio's
   `acquire_many`. A weight above the limit's total returns `Overweight`
   without waiting.
+- `adamantium::Signal` is a coalescing wakeup. `notify` never waits, and
+  notifications sent while one is pending merge into it. `notified` takes a
+  pending notification and is safe to drop in `race` and `until`, and
+  `notified_until` takes a `Cancellation` and a deadline. It works without
+  Tokio.
 
 ### Changed
 
@@ -51,6 +56,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   A draw in a `Duration` no longer needs a `u64` suffix or type argument.
 - `cargo-adamantium`: Default rules report `tokio::time::timeout_at`, which
   drops its future when the deadline passes, as `tokio::time::timeout` does.
+- `cargo-adamantium`: The strict tier's `tokio::sync::Notify` finding points
+  at `adamantium::Signal` for a coalescing wakeup, in place of a capacity-one
+  `Channel` whose full `try_send` meant a pending signal, and links the new
+  wakeup section of the migration guide.
 
 ### Fixed
 

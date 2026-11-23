@@ -975,7 +975,8 @@ harness has no scheduling point inside them. It never switches tasks inside a
 `tokio::sync::Mutex` lock or between a `Notify` and the wakeup, and it can't
 name them in a timeline or a deadlock report. Use the modeled types for state
 the tests should explore: `Actor` for a mutex, `Channel` for `mpsc`, `Watch`
-for `watch`, `Reply` for `oneshot`, and `Topic` or `Fanout` for `broadcast`.
+for `watch`, `Reply` for `oneshot`, `Topic` or `Fanout` for `broadcast`, and
+`Signal` for `Notify`.
 The [migration guide](migrating.md) shows each rewrite, and
 `cargo adamantium check` reports Tokio's locks and its `oneshot`, `watch`,
 `broadcast` and unbounded `mpsc` channels.
