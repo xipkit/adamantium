@@ -68,7 +68,7 @@ impl<T> Topic<T> {
                     senders: Vec::new(),
                     open: true,
                 })),
-                capacity,
+                capacity: capacity.max(1),
             },
         }
     }
@@ -208,7 +208,7 @@ impl<T> fmt::Debug for Topic<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Topic")
             .field("subscribers", &self.subscriber_count())
-            .field("capacity", &self.subscriptions.capacity.max(1))
+            .field("capacity", &self.subscriptions.capacity)
             .finish()
     }
 }
@@ -216,7 +216,7 @@ impl<T> fmt::Debug for Topic<T> {
 impl<T> fmt::Debug for Subscriptions<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Subscriptions")
-            .field("capacity", &self.capacity.max(1))
+            .field("capacity", &self.capacity)
             .finish_non_exhaustive()
     }
 }

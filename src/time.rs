@@ -89,9 +89,7 @@ struct Owner(crate::runtime::World);
 
 impl Drop for Owner {
     fn drop(&mut self) {
-        if !std::thread::panicking() {
-            self.0.check();
-        }
+        self.0.check_unless_panicking();
     }
 }
 

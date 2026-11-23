@@ -218,25 +218,30 @@ Use `Actor::with` for synchronous updates of shared state.
 
 ### `BoundedMap`
 
-A map inside an `Actor` that gains an entry for every session, token or query it sees grows for as long as the program runs. `BoundedMap<K, V>` holds at most the capacity it was made with, and it evicts the least recently used entry to make room for a new key.
+A map inside an `Actor` that gains an entry for every session, token or query it sees grows for as long as the program runs. `BoundedMap<K, V>` holds at most the capacity it was made with, evicts the least recently used entry to make room for a new key, and optionally expires entries by time to live.
 
 - `get`, `get_mut`, and every `insert` make the entry the most recently used. `peek`, `contains_key`, and `iter` do not change the order.
-- `insert` returns `Inserted::Added`, `Inserted::Replaced(old_value)`, or `Inserted::Evicted(key, value)` with the entry that left the map, so the caller can close or log it. Replacing a value never evicts.
+- `insert` returns `Inserted::Added`, `Inserted::Replaced(old_value)`, or `Inserted::Evicted(key, value)` with the live entry that left the map, so the caller can close or log it. Replacing a value never evicts.
 - A capacity of zero holds nothing: every insert returns its own key and value as evicted.
-- `pop_lru` removes the next entry to be evicted, for callers that shrink the map by their own measure, such as total bytes.
-- Every operation takes O(1) time. Storage grows as entries arrive and never reserves room past the capacity.
-- A `BoundedMap` is a plain owned value with no copy-on-write. It needs no Tokio.
+- `pop_lru` removes the next live entry to be evicted, for callers that shrink the map by their own measure, such as total bytes.
+- With the `tokio` feature, `BoundedMap::with_ttl(capacity, ttl)` sets a default time to live for `insert`, `insert_with_ttl(key, value, ttl)` sets a time to live for one entry, and `ttl()` returns the default. Expiry reads `time::now()`, so it follows Tokio's paused clock and the deterministic harness's virtual clock instead of the wall clock.
+- Time to live is measured from insertion (replacing a live key starts a new time to live); `get` and `get_mut` refresh recency without extending expiry.
+- `get`, `get_mut`, `peek`, `contains_key`, `iter`, `len`, `is_empty`, `is_full`, `remove`, and `pop_lru` never return or count expired entries. Expired entries are removed lazily on mutable access and before any live entry is evicted on insert. Call `remove_expired()` to sweep all expired entries at once, for example on a `time::Interval`.
+- Without expiring entries, every operation takes O(1) time, never reads the clock, and works without Tokio. Expiring entries maintain an expiry index, taking O(log n) time on insert and removal. Storage grows as entries arrive and never reserves room past the capacity.
+- A `BoundedMap` is a plain owned value with no copy-on-write.
 
 ```rust
+use std::time::Duration;
 use adamantium::{Actor, BoundedMap, Inserted};
 
 fn main() {
-    let keys = Actor::new(BoundedMap::new(1_000));
+    let keys = Actor::new(BoundedMap::with_ttl(1_000, Duration::from_secs(300)));
     match keys.with(|keys| keys.insert("kid-1", "key material")) {
         Inserted::Evicted(kid, _) => println!("forgot {kid}"),
         Inserted::Added | Inserted::Replaced(_) => {}
     }
     assert_eq!(keys.with(|keys| keys.get("kid-1").copied()), Some("key material"));
+    assert_eq!(keys.with(BoundedMap::remove_expired), 0);
 }
 ```
 

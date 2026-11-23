@@ -16,7 +16,7 @@ use futures_core::Stream;
 use tokio::time::Instant;
 
 #[cfg(feature = "tokio")]
-use crate::tasks::{Cancellation, Shutdown, shutdown};
+use crate::tasks::{Cancellation, Shutdown, before_shutdown};
 
 /// A bounded channel with any number of senders and receivers.
 ///
@@ -151,13 +151,14 @@ impl<T> Channel<T> {
     /// A channel that holds at most `capacity` messages. A capacity of zero
     /// is treated as one.
     pub fn bounded(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
         let queue = Arc::new(Queue {
             state: Lock::new(State {
                 senders: 1,
                 receivers: 1,
             }),
-            values: Bounded::new(capacity.max(1)),
-            capacity: capacity.max(1),
+            values: Bounded::new(capacity),
+            capacity,
             items: WaitQueue::named("channel.receive"),
             #[cfg(feature = "tokio")]
             streams: WaitQueue::named("channel.stream"),
@@ -310,11 +311,7 @@ impl<T> Clone for Channel<T> {
 
 impl<T> fmt::Debug for Channel<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Channel")
-            .field("len", &self.len())
-            .field("capacity", &self.capacity())
-            .field("closed", &self.is_closed())
-            .finish()
+        self.sender.queue.debug(f, "Channel")
     }
 }
 
@@ -447,12 +444,12 @@ impl<T> Sender<T> {
 
     /// Whether the channel is closed, possibly with messages still queued.
     pub fn is_closed(&self) -> bool {
-        self.queue.values.is_closed("Channel::is_closed")
+        self.queue.is_closed()
     }
 
     /// The number of messages waiting.
     pub fn len(&self) -> usize {
-        self.queue.values.len("Channel::len")
+        self.queue.len()
     }
 
     /// Whether no messages are waiting.
@@ -462,8 +459,7 @@ impl<T> Sender<T> {
 
     /// The most messages the channel holds.
     pub fn capacity(&self) -> usize {
-        self.queue.world.step("Channel::capacity");
-        self.queue.capacity
+        self.queue.capacity()
     }
 }
 
@@ -549,19 +545,10 @@ impl<T> Receiver<T> {
         deadline: Option<Instant>,
     ) -> Result<T, ReceiveError> {
         self.queue.world.check();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "receive_until checks shutdown before taking a queued value"
-        )]
-        let reason = tokio::select! {
-            biased;
-            reason = shutdown(cancellation, deadline) => reason,
-            received = self.receive() => return received.ok_or(ReceiveError::Closed),
-        };
-        Err(match reason {
-            Shutdown::Cancelled => ReceiveError::Cancelled,
-            Shutdown::DeadlineExceeded => ReceiveError::DeadlineExceeded,
-        })
+        before_shutdown(cancellation, deadline, self.receive())
+            .await
+            .map_err(Shutdown::receive_error)?
+            .ok_or(ReceiveError::Closed)
     }
 
     /// Appends up to `max` values to `batch` and returns the newly appended slice.
@@ -607,12 +594,12 @@ impl<T> Receiver<T> {
 
     /// Whether the channel is closed, possibly with messages still queued.
     pub fn is_closed(&self) -> bool {
-        self.queue.values.is_closed("Channel::is_closed")
+        self.queue.is_closed()
     }
 
     /// The number of messages waiting.
     pub fn len(&self) -> usize {
-        self.queue.values.len("Channel::len")
+        self.queue.len()
     }
 
     /// Whether no messages are waiting.
@@ -622,8 +609,7 @@ impl<T> Receiver<T> {
 
     /// The most messages the channel holds.
     pub fn capacity(&self) -> usize {
-        self.queue.world.step("Channel::capacity");
-        self.queue.capacity
+        self.queue.capacity()
     }
 }
 
@@ -683,21 +669,13 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> fmt::Debug for Sender<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Sender")
-            .field("len", &self.len())
-            .field("capacity", &self.capacity())
-            .field("closed", &self.is_closed())
-            .finish()
+        self.queue.debug(f, "Sender")
     }
 }
 
 impl<T> fmt::Debug for Receiver<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Receiver")
-            .field("len", &self.len())
-            .field("capacity", &self.capacity())
-            .field("closed", &self.is_closed())
-            .finish()
+        self.queue.debug(f, "Receiver")
     }
 }
 
@@ -755,7 +733,7 @@ impl std::error::Error for ReceiveError {}
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        self.queue.drop_endpoint(true, "Sender::drop");
+        self.queue.drop_endpoint(Endpoint::Sender, "Sender::drop");
     }
 }
 
@@ -777,10 +755,37 @@ struct State {
     receivers: usize,
 }
 
+#[derive(Clone, Copy)]
+enum Endpoint {
+    Sender,
+    Receiver,
+}
+
 impl<T> Queue<T> {
     fn lock(&self, operation: &'static str) -> Guard<'_, State> {
         self.world.step(operation);
         self.state.lock(operation)
+    }
+
+    fn is_closed(&self) -> bool {
+        self.values.is_closed("Channel::is_closed")
+    }
+
+    fn len(&self) -> usize {
+        self.values.len("Channel::len")
+    }
+
+    fn capacity(&self) -> usize {
+        self.world.step("Channel::capacity");
+        self.capacity
+    }
+
+    fn debug(&self, f: &mut fmt::Formatter<'_>, name: &str) -> fmt::Result {
+        f.debug_struct(name)
+            .field("len", &self.len())
+            .field("capacity", &self.capacity())
+            .field("closed", &self.is_closed())
+            .finish()
     }
 
     fn close(&self) -> bool {
@@ -798,17 +803,16 @@ impl<T> Queue<T> {
         self.space.notify_all();
     }
 
-    fn drop_endpoint(&self, sender: bool, operation: &'static str) {
+    fn drop_endpoint(&self, endpoint: Endpoint, operation: &'static str) {
         #[cfg(feature = "deterministic")]
         if std::thread::panicking() && self.world != World::current() {
             return;
         }
         self.world.step_unless_panicking(operation);
         let mut state = self.state.lock(operation);
-        let count = if sender {
-            &mut state.senders
-        } else {
-            &mut state.receivers
+        let count = match endpoint {
+            Endpoint::Sender => &mut state.senders,
+            Endpoint::Receiver => &mut state.receivers,
         };
         *count -= 1;
         let last = *count == 0;
@@ -819,7 +823,7 @@ impl<T> Queue<T> {
         if self.values.close(operation) {
             self.wake_closed();
         }
-        if !sender {
+        if matches!(endpoint, Endpoint::Receiver) {
             // Wake waiters before dropping messages outside the lock. A destructor
             // can use this channel and must see it closed without deadlocking.
             self.values.clear(operation);
@@ -829,6 +833,7 @@ impl<T> Queue<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.queue.drop_endpoint(false, "Receiver::drop");
+        self.queue
+            .drop_endpoint(Endpoint::Receiver, "Receiver::drop");
     }
 }

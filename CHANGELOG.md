@@ -10,6 +10,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `adamantium`: `BoundedMap` supports optional entry expiry behind the `tokio`
+  feature via `BoundedMap::with_ttl`, `BoundedMap::insert_with_ttl`,
+  `BoundedMap::ttl`, and `BoundedMap::remove_expired`. Expiry reads
+  `time::now()`, ignores expired entries on read, iteration, and `len`, and
+  removes them lazily on access and before evicting live entries on insert.
 - `adamantium::Channel` and `Receiver` have `receive_batch_until`, whose linger
   starts with the first value, and `try_receive_batch` for taking ready values
   without waiting.

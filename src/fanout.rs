@@ -4,7 +4,7 @@ use std::{collections::VecDeque, fmt, sync::Arc};
 use tokio::time::Instant;
 
 #[cfg(feature = "tokio")]
-use crate::tasks::{Cancellation, Shutdown, shutdown};
+use crate::tasks::{Cancellation, Shutdown, before_shutdown};
 use crate::{
     Closed,
     runtime::{Guard, Lock, World, wait::WaitQueue},
@@ -147,9 +147,7 @@ impl<T> Shared<T> {
     // deterministic harness is rejected, as in `Watch`. While unwinding the
     // check is skipped, so a destructor can still close the fanout.
     fn lock(&self, operation: &'static str) -> Guard<'_, State<T>> {
-        if !std::thread::panicking() {
-            self.world.check();
-        }
+        self.world.check_unless_panicking();
         self.state.lock(operation)
     }
 
@@ -378,19 +376,10 @@ impl<T> Feed<T> {
         deadline: Option<Instant>,
     ) -> Result<T, FeedError> {
         crate::runtime::in_world(self.shared.world, async move {
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "receive_until checks shutdown before taking a queued event"
-            )]
-            let reason = tokio::select! {
-                biased;
-                reason = shutdown(cancellation, deadline) => reason,
-                received = self.receive() => return received.map_err(FeedError::from),
-            };
-            Err(match reason {
-                Shutdown::Cancelled => FeedError::Cancelled,
-                Shutdown::DeadlineExceeded => FeedError::DeadlineExceeded,
-            })
+            before_shutdown(cancellation, deadline, self.receive())
+                .await
+                .map_err(Shutdown::feed_error)?
+                .map_err(FeedError::from)
         })
         .await
     }
@@ -404,9 +393,7 @@ impl<T> Feed<T> {
     }
 
     fn queue(&self, operation: &'static str) -> Guard<'_, Queue<T>> {
-        if !std::thread::panicking() {
-            self.shared.world.check();
-        }
+        self.shared.world.check_unless_panicking();
         self.inbox.queue.lock(operation)
     }
 }
@@ -424,10 +411,7 @@ impl<T> Clone for Fanout<T> {
 
 impl<T> Drop for Fanout<T> {
     fn drop(&mut self) {
-        if std::thread::panicking()
-            && self.shared.world.is_model()
-            && self.shared.world != World::current()
-        {
+        if self.shared.world.unwinding_in_foreign_world() {
             return;
         }
         let mut state = self.shared.lock("Fanout::drop");
@@ -440,10 +424,7 @@ impl<T> Drop for Fanout<T> {
 
 impl<T> Drop for Feed<T> {
     fn drop(&mut self) {
-        if std::thread::panicking()
-            && self.shared.world.is_model()
-            && self.shared.world != World::current()
-        {
+        if self.shared.world.unwinding_in_foreign_world() {
             return;
         }
         let mut state = self.shared.lock("Feed::drop");
